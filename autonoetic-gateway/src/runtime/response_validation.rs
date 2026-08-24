@@ -1413,7 +1413,7 @@ impl GatewayExecutionService {
                 .max_repair_attempts_ceiling as usize,
         );
 
-        let gateway_dir = self.config().agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(self.config().as_ref());
 
         let mut violations =
             validate_spawn_response(&result, output_schema, output_policy, Some(&gateway_dir));
@@ -2007,7 +2007,7 @@ impl GatewayExecutionService {
             raw_artifact_id.to_string()
         };
 
-        let gateway_dir = self.config().agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(self.config().as_ref());
         let promotion_violations = validate_promotion_record(
             Some(&gateway_dir),
             &promotion_artifact_id,

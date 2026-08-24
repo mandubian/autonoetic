@@ -135,7 +135,7 @@ autonoetic agent revision inspect agent-factory.default
 
 ### Warnings
 
-- **Never edit files in `.gateway/revisions/` directly**. Always use the CLI commands. The content-addressed store computes digests from file contents; editing files in place corrupts the digest chain.
+- **Never edit files in `runtime/revisions/` directly**. Always use the CLI commands. The content-addressed store computes digests from file contents; editing files in place corrupts the digest chain.
 - **Record the reason**. Always pass `--reason` to rollback/promote commands so the causal chain documents why the recovery happened.
 - **Test before trusting**. After recovery, run a simple task through the restored agent before resuming normal operations.
 - **Re-enable the protected-agent gate** after recovery if you disabled it.
@@ -144,8 +144,8 @@ autonoetic agent revision inspect agent-factory.default
 
 If the gateway itself cannot start:
 
-1. The agent data is in `<agents_dir>/.gateway/` — this directory is self-contained (SQLite store + revision files).
-2. Back up `.gateway/` before any manual intervention.
+1. The agent data is in `<runtime_dir>/` — this directory is self-contained (SQLite store + revision files).
+2. Back up `runtime/` before any manual intervention.
 3. Start the gateway with a minimal config pointing to the same `agents_dir`.
 4. Follow the procedure above.
 

@@ -574,7 +574,7 @@ MISC:
 ### Content Store (Filesystem) — Artifacts
 
 ```
-.gateway/
+runtime/
 ├── content/sha256/ab/c123...    # Immutable content blobs
 ├── sessions/<session_id>/
 │   ├── manifest.json            # name → handle mappings

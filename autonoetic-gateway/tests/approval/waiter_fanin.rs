@@ -21,6 +21,7 @@ fn store() -> (tempfile::TempDir, GatewayStore, autonoetic_types::config::Gatewa
     std::fs::create_dir_all(&gw).unwrap();
     let store = GatewayStore::open(&gw).unwrap();
     let cfg = autonoetic_types::config::GatewayConfig {
+        runtime_dir: dir.path().to_path_buf().join(".gateway"),
         agents_dir: dir.path().to_path_buf(),
         ..Default::default()
     };

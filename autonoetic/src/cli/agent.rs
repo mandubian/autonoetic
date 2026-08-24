@@ -450,6 +450,27 @@ pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {
 
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/config-template.yaml");
 
+/// Substitute one marker line in the config template, failing if the marker is
+/// absent.
+///
+/// The markers are *comments*, so rewording the template turns `str::replace`
+/// into a silent no-op — and because `GatewayConfig` defaults both directory
+/// fields, the resulting config still parses. It just relocates the whole
+/// gateway state to a CWD-relative path. That is exactly how this broke while
+/// the directory layout was being reworked, so the substitution now asserts.
+fn replace_config_marker(
+    template: &str,
+    marker: &str,
+    replacement: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        template.contains(marker),
+        "config-template.yaml is missing the marker line `{marker}` that \
+         `init-config` substitutes; restore it verbatim (or update this call)"
+    );
+    Ok(template.replace(marker, replacement))
+}
+
 pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Result<()> {
     let output_path = output.unwrap_or("config.yaml");
     let path = std::path::Path::new(output_path);
@@ -467,19 +488,30 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
         }
     }
 
-    // Resolve absolute path for agents_dir
+    // Absolute paths for both directory roots: the ingest dir the operator
+    // edits, and the runtime dir the gateway owns. Siblings, both written
+    // explicitly so nothing has to derive one from the other.
     let config_dir = path.parent().unwrap_or(std::path::Path::new("."));
     let agents_dir = config_dir.join("agents");
+    let runtime_dir = config_dir.join("runtime");
     let agents_dir_str = agents_dir.display().to_string();
+    let runtime_dir_str = runtime_dir.display().to_string();
 
-    let config_content = DEFAULT_CONFIG_TEMPLATE.replace(
+    let config_content = replace_config_marker(
+        DEFAULT_CONFIG_TEMPLATE,
         "# agents_dir is set to absolute path based on config location",
         &format!("agents_dir: \"{}\"", agents_dir_str),
-    );
+    )?;
+    let config_content = replace_config_marker(
+        &config_content,
+        "# runtime_dir is set to absolute path based on config location",
+        &format!("runtime_dir: \"{}\"", runtime_dir_str),
+    )?;
 
     std::fs::write(path, config_content)?;
     println!("Created config file at {}", path.display());
-    println!("  agents_dir: {}", agents_dir_str);
+    println!("  agents_dir:  {}", agents_dir_str);
+    println!("  runtime_dir: {}", runtime_dir_str);
     println!();
     println!("Next steps:");
     println!("  1. Edit the file to set your LLM provider and API keys");
@@ -1523,7 +1555,7 @@ pub async fn run_agent_with_runtime(
     super::common::apply_response_validation_override(&mut loaded_config, response_validation);
 
     if record_network {
-        let gateway_dir = loaded_config.agents_dir.join(".gateway");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&loaded_config);
         std::fs::create_dir_all(&gateway_dir)?;
         let store = Arc::new(
             autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
@@ -1683,7 +1715,7 @@ pub async fn run_agent_with_runtime_with_driver(
     );
     if let Some(cfg) = gateway_config.as_ref() {
         runtime = runtime
-            .with_gateway_dir(cfg.agents_dir.join(".gateway"))
+            .with_gateway_dir(autonoetic_gateway::execution::gateway_root_dir(&cfg))
             .with_config(cfg.clone());
     }
     if let Some(budget) = session_budget {
@@ -2915,11 +2947,13 @@ Use tools when needed.
 
         let config_path = temp.path().join("config.yaml");
         let agents_dir = temp.path().join("runtime_agents");
+        let runtime_dir = temp.path().join("runtime");
         std::fs::write(
             &config_path,
             format!(
-                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
-                agents_dir.display()
+                "agents_dir: \"{}\"\nruntime_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display(),
+                runtime_dir.display()
             ),
         )
         .expect("config should write");
@@ -2941,14 +2975,14 @@ Use tools when needed.
             "top-level digest bundle should be installed by bootstrap"
         );
 
-        let constitution_root = agents_dir.join(".gateway").join("constitution");
+        let constitution_root = runtime_dir.join("constitution");
         assert!(
             constitution_root.join("CURRENT").exists(),
-            "bootstrap should materialize .gateway/constitution/CURRENT"
+            "bootstrap should materialize <runtime_dir>/constitution/CURRENT"
         );
         assert!(
             constitution_root.join("ACTIVE.json").exists(),
-            "bootstrap should materialize .gateway/constitution/ACTIVE.json"
+            "bootstrap should materialize <runtime_dir>/constitution/ACTIVE.json"
         );
         let active: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(constitution_root.join("ACTIVE.json"))
@@ -2965,16 +2999,20 @@ Use tools when needed.
         let lock_path = active["lock_path"]
             .as_str()
             .expect("lock_path should be present");
+        // `ACTIVE.json` records these relative to the directory holding the
+        // snapshot, which is the runtime dir now rather than `agents_dir`.
         assert!(
-            agents_dir.join(source_path).exists(),
-            "bootstrapped constitution source should exist under .gateway"
+            runtime_dir.join(source_path).exists(),
+            "bootstrapped constitution source should exist under the runtime dir \
+             (source_path={source_path})"
         );
         assert!(
-            agents_dir.join(lock_path).exists(),
-            "bootstrapped constitution lock should exist under .gateway"
+            runtime_dir.join(lock_path).exists(),
+            "bootstrapped constitution lock should exist under the runtime dir \
+             (lock_path={lock_path})"
         );
         let lock_value: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(agents_dir.join(lock_path))
+            &std::fs::read_to_string(runtime_dir.join(lock_path))
                 .expect("bootstrapped lock should be readable"),
         )
         .expect("bootstrapped lock should decode");
@@ -2999,8 +3037,7 @@ Use tools when needed.
             &lock_struct,
         )
         .expect("signature payload should serialize");
-        let public_key_path = agents_dir
-            .join(".gateway")
+        let public_key_path = runtime_dir
             .join(autonoetic_gateway::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
         let pub_bytes = std::fs::read(&public_key_path).expect("gateway public key should exist");
         assert_eq!(pub_bytes.len(), 32, "gateway public key must be 32 bytes");
@@ -3041,6 +3078,7 @@ Use tools when needed.
         let mut config = autonoetic_gateway::config::load_config(&temp.path().join("nope.yaml"))
             .expect("default config should load");
         config.agents_dir = agents_dir.clone();
+        config.runtime_dir = config.agents_dir.join(".gateway");
 
         let install = install_reference_agents(
             &config,

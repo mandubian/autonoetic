@@ -1,3 +1,6 @@
 
 # Test artifacts
 agents/
+# Stray gateway state from tests that use a default config (runtime_dir
+# defaults to "./runtime", resolved against the crate dir under `cargo test`).
+/runtime/

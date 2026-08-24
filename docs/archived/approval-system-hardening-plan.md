@@ -50,7 +50,7 @@ The current approval system is described in `docs/approval-system.md`. The revie
 
 ### 1.1 HMAC-sign continuation files
 
-**Problem.** When an approval is pending, the gateway writes a signed `SessionCheckpoint` to `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json` (see `autonoetic-gateway/src/runtime/checkpoint.rs`). On resume, the gateway loads the checkpoint, verifies its HMAC and the equality of the checkpoint's `ScheduledAction` against the approval row, injects `approval_ref` into the suspended tool call, and resumes the reasoning loop so the agent re-issues the tool call with `approval_ref`. The checkpoint is HMAC-SHA256 signed, so local filesystem tampering is detected before execution. `validate_approval_ref_context` (`sandbox.rs:395`) checks agent/session identity and must still re-verify that the pending action matches the approved action.
+**Problem.** When an approval is pending, the gateway writes a signed `SessionCheckpoint` to `runtime/checkpoints/<session_id>/<turn_id>.checkpoint.json` (see `autonoetic-gateway/src/runtime/checkpoint.rs`). On resume, the gateway loads the checkpoint, verifies its HMAC and the equality of the checkpoint's `ScheduledAction` against the approval row, injects `approval_ref` into the suspended tool call, and resumes the reasoning loop so the agent re-issues the tool call with `approval_ref`. The checkpoint is HMAC-SHA256 signed, so local filesystem tampering is detected before execution. `validate_approval_ref_context` (`sandbox.rs:395`) checks agent/session identity and must still re-verify that the pending action matches the approved action.
 
 **Change.**
 - Signed `SessionCheckpoint` files are already HMAC-SHA256 signed with a per-gateway key derived from `GatewayConfig::continuation_key`.

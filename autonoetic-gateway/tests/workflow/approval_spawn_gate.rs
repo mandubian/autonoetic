@@ -39,6 +39,7 @@ fn agent_spawn_blocked_while_workflow_task_awaiting_approval() -> anyhow::Result
     std::fs::create_dir_all(&child_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -156,6 +157,7 @@ fn cancelling_awaiting_approval_task_withdraws_pending_approval() -> anyhow::Res
     std::fs::create_dir_all(agents_dir.join("planner.default"))?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };

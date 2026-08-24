@@ -104,8 +104,8 @@ fn test_bootstrap_creates_agents_and_aliases() {
     let agents_dir = tmp.join("agents");
     assert!(agents_dir.exists(), "agents dir should exist");
 
-    let gateway_dir = agents_dir.join(".gateway");
-    assert!(gateway_dir.exists(), ".gateway dir should exist");
+    let gateway_dir = tmp.join("runtime");
+    assert!(gateway_dir.exists(), "runtime dir should exist");
 
     let out = autonoetic(
         &[
@@ -175,7 +175,7 @@ fn test_bootstrap_creates_revisions_in_gateway_store() {
         &[],
     );
 
-    let gateway_db = tmp.join("agents").join(".gateway").join("gateway.db");
+    let gateway_db = tmp.join("runtime").join("gateway.db");
     assert!(gateway_db.exists(), "gateway.db should exist");
 
     let conn = rusqlite::Connection::open_with_flags(
@@ -261,7 +261,7 @@ fn test_bootstrap_idempotent_on_second_run() {
     );
 
     let conn = rusqlite::Connection::open_with_flags(
-        &tmp.join("agents").join(".gateway").join("gateway.db"),
+        &tmp.join("runtime").join("gateway.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("should open gateway.db");

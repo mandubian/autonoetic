@@ -119,6 +119,7 @@ fn plan_anchor_loads_from_store_with_expected_summary() {
     let dir = tempdir().unwrap();
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.path().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let gateway_dir = dir.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
@@ -153,6 +154,7 @@ fn plan_anchor_missing_when_workflow_has_no_plan() {
     let dir = tempdir().unwrap();
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.path().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let gateway_dir = dir.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
@@ -187,6 +189,7 @@ fn plan_anchor_awaiting_approval_is_loaded() {
     let dir = tempdir().unwrap();
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.path().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let gateway_dir = dir.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());

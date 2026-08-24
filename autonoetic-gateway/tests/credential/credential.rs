@@ -1685,6 +1685,9 @@ fn test_credential_setup_user_prompt_multi_field_stores_combined_blob() {
     let mut approve_config = autonoetic_types::config::GatewayConfig::default();
     approve_config.approval_dwell_multiplier = 0.0;
     approve_config.agents_dir = temp.path().to_path_buf();
+    // The store above was opened at `temp.path()`, so that *is* this fixture's
+    // gateway dir; `gateway_root_dir(config)` returns `runtime_dir` verbatim.
+    approve_config.runtime_dir = temp.path().to_path_buf();
     let confirm_phrase = format!("register photos {}", credential_id);
     autonoetic_gateway::scheduler::approve_request_with_options(
         &approve_config,

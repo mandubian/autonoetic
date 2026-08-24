@@ -1040,8 +1040,25 @@ impl Default for StuckTaskNoEvidenceAction {
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// Directory containing agent subdirectories, each with a SKILL.md.
+    ///
+    /// This is the **ingest** directory: what an operator edits, and what
+    /// bootstrap reads (and rewrites in place — it materializes the
+    /// `runtime.lock` sha256). It is not what executes. See
+    /// [`Self::runtime_dir`].
     #[serde(default = "default_agents_dir")]
     pub agents_dir: PathBuf,
+
+    /// Directory holding everything the gateway owns: the promoted agent
+    /// revision store (`revisions/agents/<id>/<rev>/` — what actually runs),
+    /// the SQLite store, the credential vault, sessions, artifacts, logs.
+    ///
+    /// A sibling of [`Self::agents_dir`], not a child, and **never derived from
+    /// it**. Both are read from config so no code has to hop between them: a
+    /// `.parent()` walk from one to the other is what made the sandbox secret
+    /// mask emit nothing (#1145) and what would have split the credential vault
+    /// in two. `gateway_root_dir(config)` returns this field verbatim.
+    #[serde(default = "default_runtime_dir")]
+    pub runtime_dir: PathBuf,
 
     /// Port for the local JSON-RPC IPC listener.
     #[serde(default = "default_port")]
@@ -2927,6 +2944,10 @@ fn default_agents_dir() -> PathBuf {
     PathBuf::from("./agents")
 }
 
+fn default_runtime_dir() -> PathBuf {
+    PathBuf::from("./runtime")
+}
+
 fn default_default_orchestrator() -> String {
     "planner.default".to_string()
 }
@@ -3635,6 +3656,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             agents_dir: default_agents_dir(),
+            runtime_dir: default_runtime_dir(),
             port: default_port(),
             http_port: default_http_port(),
             ofp_port: default_ofp_port(),

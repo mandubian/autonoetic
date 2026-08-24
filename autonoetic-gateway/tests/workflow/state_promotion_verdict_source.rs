@@ -152,6 +152,7 @@ fn workflow_state_reuses_promotion_store_not_artifact_presence() -> anyhow::Resu
 
     let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path());
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -363,6 +364,7 @@ fn workflow_state_declares_federation_complete_when_all_verdicts_recorded() -> a
 
     let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path());
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -547,6 +549,7 @@ fn workflow_state_decision_predicate_strict_when_promotion_record_missing() -> a
 
     let (_artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path());
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

@@ -24,9 +24,15 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Where the credential vault lives. The gateway dir *is* the vault dir — the
+/// vault helpers take it directly now, so this no longer hops up a level to
+/// undo a `.gateway` suffix the helpers used to re-append.
+///
+/// The `agent_dir` fallback only applies when no gateway dir was threaded in
+/// (shape/presence probes on paths that never had one).
 fn vault_dir(gateway_dir: Option<&Path>, agent_dir: &Path) -> PathBuf {
     gateway_dir
-        .and_then(|gd| gd.parent().map(|p| p.to_path_buf()))
+        .map(|gd| gd.to_path_buf())
         .unwrap_or_else(|| agent_dir.to_path_buf())
 }
 

@@ -446,7 +446,7 @@ pub fn handle_trace_digest(
         "session_id must not be empty"
     );
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let base = autonoetic_gateway::runtime::live_digest::base_session_id(session_id.trim());
     let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
     let name =
@@ -494,7 +494,7 @@ pub fn handle_trace_contract_health(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
     let health = store.contract_health(since)?;
     let dead = autonoetic_gateway::enforcement_register::dead_clauses(&health);
@@ -674,7 +674,7 @@ pub fn handle_trace_civic_health(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
     let health = store.civic_health(since)?;
 
@@ -791,7 +791,7 @@ pub fn load_traces_from_db(
     limit: i64,
 ) -> anyhow::Result<Vec<CausalEventRecord>> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
 
     store.search_causal_events(session_id, agent_id, limit)
@@ -1284,7 +1284,7 @@ pub fn handle_trace_rebuild(
     skip_checks: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
 
     let mut all_events: Vec<super::common::TraceEntry> = Vec::new();
 
@@ -1452,7 +1452,7 @@ pub async fn handle_trace_follow(
     use tokio::time::{interval, Duration};
 
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let agents_dir = &config.agents_dir;
 
     let mut seen_log_ids: HashSet<String> = HashSet::new();
@@ -1758,7 +1758,7 @@ pub async fn handle_trace_fork(
     // so a CLI fork is indistinguishable from an RPC fork: its parent
     // artifact refs resolve and it shows up in `trace fork-tree` (#814). Best
     // effort — the fork itself already succeeded (checkpoint written).
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
         // Attribution fallback: the agent the source checkpoint was running
         // (a session id is not an agent, so never fall back to that).
@@ -1909,7 +1909,7 @@ pub fn handle_trace_fork_tree(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
 
     let root_id =
@@ -2005,7 +2005,7 @@ pub fn handle_trace_history(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
 
     // Try to load history from session

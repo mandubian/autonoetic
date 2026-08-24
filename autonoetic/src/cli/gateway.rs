@@ -2400,7 +2400,7 @@ pub async fn handle_gateway_system_agents(
     command: &super::common::SystemAgentCommands,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = std::sync::Arc::new(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
     );
@@ -2708,7 +2708,7 @@ pub async fn handle_gateway_constitution(
     // touch the DB or run migrations, so it works on a read-only/permissionless
     // filesystem.
     let open_store = || -> anyhow::Result<_> {
-        let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
     };
 

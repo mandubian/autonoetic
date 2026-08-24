@@ -30,7 +30,7 @@ This design adds **operator comments anchored to a live content file**, delivere
 owning agent at its next turn. It deliberately stays **comment-only**: the operator
 *proposes* an observation; the agent decides what to do. Operators who want to **edit**
 already have the workbench projection + reconcile flow (`artifact_project` →
-`.gateway/workbenches/*/source/` → `workbench_reconcile`); this feature is the
+`runtime/workbenches/*/source/` → `workbench_reconcile`); this feature is the
 lighter-weight oversight loop, not a co-editing surface.
 
 ## Goals
@@ -199,7 +199,7 @@ have written a newer version in the meantime). We handle this deterministically:
 The original motivation included opening live files in an editor like VS Code. That is a
 **read** concern and is orthogonal to comments: a `content.project --live` (or a room
 action) that materializes the current session drafts into a real directory
-(`.gateway/sessions/<id>/live/`) the operator opens with `code <dir>`, refreshed on
+(`runtime/sessions/<id>/live/`) the operator opens with `code <dir>`, refreshed on
 change. It reuses the content store and the existing workbench-projection pattern. Tracked
 as a separate, optional issue; **not required** for the comment loop, which works fully
 from the TUI viewer.

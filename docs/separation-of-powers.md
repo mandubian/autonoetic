@@ -396,7 +396,7 @@ On resume:
 |----------|-------------|
 | **Malicious agent**: LLM attempting to bypass approval gates, tamper with continuation files, or escalate privileges | **Local filesystem attacker with vault key**: an attacker who has compromised the host and obtained the `continuation_key` or vault master key can forge continuations or decrypt secrets |
 | **Agent retry attacks**: re-submitting near-identical approval requests (detected by similarity scoring) | **Kernel-level compromise**: root-level access to the host |
-| **Continuation tampering**: modifying `.gateway/continuations/<task_id>.json` on disk (detected by HMAC) | **Supply-chain attacks on LLM providers** |
+| **Continuation tampering**: modifying `runtime/continuations/<task_id>.json` on disk (detected by HMAC) | **Supply-chain attacks on LLM providers** |
 | **Approval fatigue**: operator approving without review (mitigated by similarity annotations, stats, and diff surface) | |
 | **Subtle capability misuse**: an agent using declared capabilities in unexpected ways (detected by auditor/evaluator agents during promotion, not by the gateway alone) | |
 

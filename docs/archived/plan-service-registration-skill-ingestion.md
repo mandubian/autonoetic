@@ -120,9 +120,9 @@ pub fn default_vault_path(agents_dir: &Path) -> PathBuf
 
 `ensure_default_key`: if neither `AUTONOETIC_VAULT_KEY` nor `AUTONOETIC_VAULT_KEY_PATH` is
 set, generates a random 32-byte key → hex-encodes → writes to
-`{agents_dir}/.gateway/vault.key` → sets `AUTONOETIC_VAULT_KEY_PATH` in env.
+`{runtime_dir}/vault.key` → sets `AUTONOETIC_VAULT_KEY_PATH` in env.
 
-`default_vault_path`: returns `{agents_dir}/.gateway/vault.enc.json`.
+`default_vault_path`: returns `{runtime_dir}/vault.enc.json`.
 
 ### 2. Vault auto-init in `credential_setup` and `credential_request` (`tools/credential.rs`)
 
@@ -345,7 +345,7 @@ possible without architectural changes.
 1. `cargo build -p autonoetic-gateway` — no errors
 2. `cargo test -p autonoetic-gateway` — existing tests pass
 3. `bash examples/moltbook_registration/run.sh` (no vault env vars)
-   - Gateway auto-creates `.gateway/vault.key` and `.gateway/vault.enc.json`
+   - Gateway auto-creates `runtime/vault.key` and `runtime/vault.enc.json`
    - Agent calls `credential_setup(skill_url)` → suspends → `user_ask` → resumes twice
    - Session log: no `sk_molt_...` secret ever appears in LLM messages
    - `curl http://localhost:8765/status` → agent verified

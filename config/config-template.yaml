@@ -2,7 +2,21 @@
 # See docs/ARCHITECTURE.md and docs/AGENTS.md for full documentation
 # Full reference: docs/config-reference.md
 
+# Directory layout. Two sibling directories, both resolved from config —
+# neither is derived from the other:
+#
+#   <project>/
+#   ├── agents/     ingest bundles: what you edit (agents_dir)
+#   └── runtime/    what the gateway owns (runtime_dir):
+#       ├── revisions/agents/<id>/<rev>/   the promoted revision that RUNS
+#       ├── gateway.db, vault.key, vault.enc.json
+#       └── sessions/ artifacts/ logs/ checkpoints/ ...
+#
+# Both are written as absolute paths by `agent init-config`. The two marker
+# lines below are REPLACED by that command — keep them verbatim; the injection
+# asserts they were found rather than emitting a config missing the key.
 # agents_dir is set to absolute path based on config location
+# runtime_dir is set to absolute path based on config location
 port: 4000
 ofp_port: 4200
 tls: false
@@ -30,11 +44,11 @@ node_name: "gateway"
 # `version` is mutually exclusive with explicit `source_path`/`lock_path`, and
 # digest + signature verification still gate whatever it resolves to.
 # Gateway startup and `agent bootstrap` also materialize a local snapshot under
-#   <agents_dir>/.gateway/constitution/
+#   <runtime_dir>/constitution/
 # which you can point at for fully runtime-local enforcement:
 # constitution:
-#   source_path: ".gateway/constitution/versions/<VERSION>/constitution.md"
-#   lock_path:   ".gateway/constitution/versions/<VERSION>/gateway-constitution.lock.json"
+#   source_path: "runtime/constitution/versions/<VERSION>/constitution.md"
+#   lock_path:   "runtime/constitution/versions/<VERSION>/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -560,7 +574,7 @@ retention:
 #   llm_preset: agentic
 
 # ── Session Report ────────────────────────────────────────────────────
-# Structured live views under `.gateway/sessions/<id>/`.
+# Structured live views under `<runtime_dir>/sessions/<id>/`.
 # `live_html_on_update: false` (default) writes HTML only on session close.
 #session_report:
 #  live_html_on_update: false

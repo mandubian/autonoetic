@@ -26,7 +26,7 @@ conversation history, the turn counter, loop-guard state, budgets, and
 reproducibility metadata, and is stored at:
 
 ```
-.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json
+runtime/checkpoints/<session_id>/<turn_id>.checkpoint.json
 ```
 
 Turn ids are zero-padded to a fixed width — `turn-000003` — via the single

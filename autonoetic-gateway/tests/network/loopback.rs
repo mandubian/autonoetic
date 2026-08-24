@@ -151,6 +151,7 @@ async fn test_loopback_content_audit_and_negatives_body() -> anyhow::Result<()> 
     let config = autonoetic_types::config::GatewayConfig {
         port: 0,
         ofp_port: 0,
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         max_pending_spawns_per_agent: 1, // Only 1 concurrent execution per agent
         max_concurrent_spawns: 5,

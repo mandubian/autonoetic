@@ -278,6 +278,7 @@ fn test_session_snapshot_fork() {
 
     let workspace = TestWorkspace::new().unwrap();
     let config = GatewayConfig {
+        runtime_dir: workspace.path().to_path_buf().join(".gateway"),
         agents_dir: workspace.path().to_path_buf(),
         ..Default::default()
     };

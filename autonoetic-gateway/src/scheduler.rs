@@ -859,7 +859,7 @@ async fn check_approval_timeouts(
                         _ => None,
                     };
                     if let Some(ref rid) = approval_request_id {
-                        let gateway_dir = config.agents_dir.join(".gateway");
+                        let gateway_dir = crate::execution::gateway_root_dir(&config);
                         if let Ok(mut report) =
                             crate::runtime::session_report::SessionReportWriter::open(
                                 &gateway_dir,
@@ -3615,6 +3615,7 @@ mod child_reply_spill_tests {
 
     fn cfg(agents_dir: &std::path::Path) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         }
@@ -3893,7 +3894,7 @@ mod stuck_task_tests {
     use tempfile::tempdir;
 
     async fn run_approval_timeout_sweeper(config: &GatewayConfig) {
-        let gateway_dir = config.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store =
             Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
@@ -3906,6 +3907,7 @@ mod stuck_task_tests {
 
     fn test_config(agents_dir: &Path) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         }
@@ -3980,7 +3982,7 @@ mod stuck_task_tests {
     }
 
     async fn run_sweeper(config: &GatewayConfig) {
-        let gateway_dir = config.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store =
             Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
@@ -4307,6 +4309,7 @@ mod adjudication_sla_tests {
 
     fn test_config(agents_dir: &Path, sla_secs: u64) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             decider_obligations: DeciderObligationsConfig {
                 enabled: true,
@@ -4363,7 +4366,7 @@ mod adjudication_sla_tests {
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = test_config(&agents, 100);
 
-        let gateway_dir = cfg.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store =
             std::sync::Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
@@ -4448,7 +4451,7 @@ mod adjudication_sla_tests {
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = test_config(&agents, 100);
 
-        let gateway_dir = cfg.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store =
             std::sync::Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
@@ -4482,6 +4485,7 @@ mod adjudication_sla_tests {
         window_secs: u64,
     ) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             amendment_invitations: autonoetic_types::config::AmendmentInvitationConfig {
                 enabled: true,
@@ -4526,7 +4530,7 @@ mod adjudication_sla_tests {
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = invitation_test_config(&agents, 3, 604800);
 
-        let gateway_dir = cfg.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = std::sync::Arc::new(
             crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
@@ -4620,7 +4624,7 @@ mod adjudication_sla_tests {
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = invitation_test_config(&agents, 3, 604800);
 
-        let gateway_dir = cfg.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = std::sync::Arc::new(
             crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
@@ -4666,7 +4670,7 @@ mod adjudication_sla_tests {
         // Tiny window so the first invitation expires between ticks.
         let cfg = invitation_test_config(&agents, 1, 1);
 
-        let gateway_dir = cfg.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = std::sync::Arc::new(
             crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),

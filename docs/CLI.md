@@ -801,7 +801,7 @@ autonoetic capsule export <agent_id> \
   [--json]
 ```
 
-Replay mode bundles the latest `SessionCheckpoint` for `--session-id`; Headless mode bundles all scheduled jobs under `--root-session-id`. Importers recreate jobs with prefixed IDs and lay the checkpoint into the receiving gateway's `.gateway/checkpoints/` so the scheduler resume path can pick it up.
+Replay mode bundles the latest `SessionCheckpoint` for `--session-id`; Headless mode bundles all scheduled jobs under `--root-session-id`. Importers recreate jobs with prefixed IDs and lay the checkpoint into the receiving gateway's `runtime/checkpoints/` so the scheduler resume path can pick it up.
 
 ### `autonoetic capsule import`
 

@@ -7,7 +7,7 @@
 
 ## Problem Statement
 
-The wiki system (`wiki_list` / `wiki_get`) provides a curated, read-only documentation corpus bootstrapped from `docs/wiki/` into `.gateway/wiki/` at startup. This gives every agent access to platform knowledge — SDK reference, architecture overview, tool guide, approval system, promotion lifecycle, etc.
+The wiki system (`wiki_list` / `wiki_get`) provides a curated, read-only documentation corpus bootstrapped from `docs/wiki/` into `runtime/wiki/` at startup. This gives every agent access to platform knowledge — SDK reference, architecture overview, tool guide, approval system, promotion lifecycle, etc.
 
 But the corpus is **only authored at build time** by developers. Agents that discover patterns, write runbooks, or develop reusable guidance during a session have no way to contribute that knowledge back to the wiki. The existing `knowledge_store` tool provides durable fact storage, but those facts are:
 - **Session-scoped** by default — they don't survive across root sessions unless explicitly tagged `global`
@@ -111,7 +111,7 @@ The `content_sha256` is computed by the gateway and stored in the gate payload. 
 
 When the operator approves the gate (via existing `approvals.approve`), the resolution handler materializes the page:
 
-1. Write `{id}.md` to `.gateway/wiki/` (atomic: write-to-temp → rename)
+1. Write `{id}.md` to `runtime/wiki/` (atomic: write-to-temp → rename)
 2. Update `index.toml`: add new entry or update existing entry for the ID
 3. Emit `wiki.promoted` causal event with `content_sha256`
 4. Reload the wiki index in-memory so `wiki_list` / `wiki_get` see the new page immediately
@@ -137,9 +137,9 @@ Wiki proposals live in the existing gate store — no new SQLite table. The gate
 
 ### Bootstrapping
 
-The bootstrap snapshot (`bootstrap_wiki_snapshot()`) copies `docs/wiki/` into `.gateway/wiki/` at startup — but only for pages that don't already exist in `.gateway/wiki/`. Promoted pages survive restarts because the materialized files are in the live directory, not the source tree.
+The bootstrap snapshot (`bootstrap_wiki_snapshot()`) copies `docs/wiki/` into `runtime/wiki/` at startup — but only for pages that don't already exist in `runtime/wiki/`. Promoted pages survive restarts because the materialized files are in the live directory, not the source tree.
 
-The authoritative wiki directory is `.gateway/wiki/`. The source tree `docs/wiki/` is a seed, not an override.
+The authoritative wiki directory is `runtime/wiki/`. The source tree `docs/wiki/` is a seed, not an override.
 
 ---
 

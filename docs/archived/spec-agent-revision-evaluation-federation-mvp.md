@@ -273,7 +273,7 @@ prom-<12 lowercase hex>
 The gateway runtime filesystem layout becomes:
 
 ```text
-.gateway/
+runtime/
   revisions/
     agents/
       planner.default/

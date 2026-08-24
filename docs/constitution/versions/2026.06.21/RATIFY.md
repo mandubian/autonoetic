@@ -50,7 +50,7 @@ Signer is unchanged (`autonoetic:constitution:v1`) — no signer rotation, so
    - `autonoetic-types/src/config.rs` — `default_constitution_source_path()` /
      `default_constitution_lock_path()` → `2026.06.21/…`
    - `config/config-template.yaml` — `constitution.source_path` / `lock_path`
-     (both the active block and the commented `.gateway/...` variant) → `2026.06.21/…`
+     (both the active block and the commented `runtime/...` variant) → `2026.06.21/…`
    - `docs/config-reference.md` — the two `constitution.*` default cells → `2026.06.21/…`
 
 5. **Validate:**

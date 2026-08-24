@@ -269,7 +269,7 @@ The only exception is the operator CLI, which may accept raw `artifact_id` for d
 
 `artifact_id` remains as a gateway-internal locator for:
 
-- artifact store filesystem layout: `.gateway/artifacts/<artifact_id>/manifest.json`
+- artifact store filesystem layout: `runtime/artifacts/<artifact_id>/manifest.json`
 - `ArtifactStore::inspect(artifact_id)` and `resolve_files(artifact_id)`
 - SQLite joins: promotion records, agent revision records, artifact_refs rows
 - operator CLI: `autonoetic artifact inspect <artifact_id>`

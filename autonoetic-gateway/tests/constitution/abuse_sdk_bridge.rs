@@ -225,15 +225,16 @@ fn handle_sdk_in_test(
     gateway_dir: &Path,
     rate_limiter: &SdkBridgeRateLimiter,
 ) -> anyhow::Result<()> {
-    use autonoetic_gateway::sandbox::{gateway_dir_from_agent_dir, validate_sdk_relative_path};
+    use autonoetic_gateway::sandbox::validate_sdk_relative_path;
     use std::fs;
     use std::io::{BufReader, Write};
 
-    let gw_dir = if gateway_dir.exists() {
-        gateway_dir.to_path_buf()
-    } else {
-        gateway_dir_from_agent_dir(agent_dir)?
-    };
+    // The gateway dir is supplied, never derived from `agent_dir`. The old
+    // fallback (`gateway_dir_from_agent_dir`) hopped to `agent_dir.parent()` and
+    // appended `.gateway`, which from a revision dir pointed the SDK bridge's
+    // memory handlers at a stray directory it also created. That helper is gone.
+    let gw_dir = gateway_dir.to_path_buf();
+    fs::create_dir_all(&gw_dir)?;
 
     let mut line = String::new();
     {

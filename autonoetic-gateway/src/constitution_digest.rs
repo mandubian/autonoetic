@@ -94,7 +94,7 @@ impl ConstitutionRuntime {
         let mut hasher = Sha256::new();
         hasher.update(payload.as_bytes());
         let digest = hex::encode(hasher.finalize());
-        let gateway_dir = config.agents_dir.join(".gateway");
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
         let text = Arc::<str>::from(text);
         let digest = Arc::<str>::from(digest);
         let lock = Arc::new(lock);
@@ -613,6 +613,9 @@ fn resolve_constitution_artifact_paths(
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
 
     let mut bases: Vec<PathBuf> = Vec::new();
+    // The runtime dir first: `bootstrap_constitution_snapshot` writes the local
+    // snapshot there and records `ACTIVE.json` paths relative to it.
+    bases.push(crate::execution::gateway_root_dir(config));
     bases.push(config.agents_dir.clone());
     bases.push(
         config
@@ -643,7 +646,7 @@ fn resolve_constitution_artifact_paths(
 
     anyhow::bail!(
         "constitution source_path and lock_path must exist together under the same search root \
-         (agents_dir, agents_dir parent, current working directory, or workspace). \
+         (runtime_dir, agents_dir, agents_dir parent, current working directory, or workspace). \
          Configured source='{}', lock='{}'. Tried:\n{}",
         source_configured.display(),
         lock_configured.display(),
@@ -798,6 +801,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = agents_dir;
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         let (source_path, lock_path) =
             resolve_constitution_artifact_paths(&cfg).expect("paired resolution");
         assert_eq!(

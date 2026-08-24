@@ -409,6 +409,7 @@ fn test_web_fetch_cross_domain_redirect_requires_approval() {
 
     let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -566,6 +567,7 @@ fn test_web_fetch_denied_by_netconnect_mints_approval_and_grant_allows_retry() {
 
     let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -732,6 +734,7 @@ fn test_web_call_denied_by_netconnect_mints_approval_when_store_config_present()
 
     let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -788,6 +791,7 @@ fn test_web_search_denied_by_netconnect_mints_approval_when_store_config_present
 
     let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -1294,6 +1298,7 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
         std::sync::Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -1428,6 +1433,7 @@ fn test_agent_spawn_coalesces_duplicate_durable_operation() {
     std::fs::create_dir_all(&child_dir).expect("child dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -1518,6 +1524,7 @@ fn test_agent_spawn_injects_default_retry_policy() {
     std::fs::create_dir_all(&child_dir).expect("child dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -1603,6 +1610,7 @@ fn test_agent_spawn_preserves_explicit_retry_policy() {
     std::fs::create_dir_all(&child_dir).expect("child dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };

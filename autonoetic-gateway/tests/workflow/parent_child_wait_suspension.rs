@@ -32,6 +32,7 @@ fn setup() -> anyhow::Result<(tempfile::TempDir, GatewayConfig, Arc<GatewayStore
     let parent_dir = agents_dir.join("planner.default");
     std::fs::create_dir_all(&parent_dir)?;
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         ..GatewayConfig::default()
     };

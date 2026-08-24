@@ -18,7 +18,7 @@ Session Execution
 persist_history_to_content_store()
        │
        ├──→ Content Store (SHA-256 blob)
-       │         └── .gateway/content/sha256/ab/c123...
+       │         └── runtime/content/sha256/ab/c123...
        │
        └──→ GatewayStore (SQLite)
                  ├── session_transcripts (structured metadata + excerpt)

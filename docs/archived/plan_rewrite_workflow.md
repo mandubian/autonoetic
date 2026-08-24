@@ -120,7 +120,7 @@ pub struct LoopGuardState {
 }
 ```
 
-**Storage:** `.gateway/continuations/{task_id}.json` (one file per suspended task).
+**Storage:** `runtime/continuations/{task_id}.json` (one file per suspended task).
 
 **Functions:**
 ```rust

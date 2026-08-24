@@ -33,6 +33,7 @@ fn setup() -> (
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         ..GatewayConfig::default()
     };

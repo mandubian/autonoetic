@@ -91,6 +91,7 @@ fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<()> {
 async fn test_agent_spawn_message_object_coerced_to_string_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = autonoetic_types::config::GatewayConfig {
+        runtime_dir: workspace.agents_dir.join(".gateway"),
         agents_dir: workspace.agents_dir.clone(),
         ..workspace.gateway_config()
     };
@@ -152,6 +153,7 @@ fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
 async fn test_agent_spawn_async_string_bool_coerced_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = autonoetic_types::config::GatewayConfig {
+        runtime_dir: workspace.agents_dir.join(".gateway"),
         agents_dir: workspace.agents_dir.clone(),
         ..workspace.gateway_config()
     };

@@ -7245,6 +7245,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let router = JsonRpcRouter::new(
             GatewayConfig {
+                runtime_dir: temp.path().join("agents").join(".gateway"),
                 agents_dir: temp.path().join("agents"),
                 ..GatewayConfig::default()
             },
@@ -7367,6 +7368,7 @@ mod tests {
         );
         let router = JsonRpcRouter::new(
             GatewayConfig {
+                runtime_dir: agents_dir.join(".gateway"),
                 agents_dir,
                 ..GatewayConfig::default()
             },
@@ -8003,6 +8005,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let router = JsonRpcRouter::new(
             GatewayConfig {
+                runtime_dir: temp.path().join("agents").join(".gateway"),
                 agents_dir: temp.path().join("agents"),
                 max_concurrent_spawns: 2,
                 max_pending_spawns_per_agent: 2,
@@ -8039,6 +8042,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let router = JsonRpcRouter::new(
             GatewayConfig {
+                runtime_dir: temp.path().join("agents").join(".gateway"),
                 agents_dir: temp.path().join("agents"),
                 max_concurrent_spawns: 1,
                 max_pending_spawns_per_agent: 2,

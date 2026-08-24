@@ -287,7 +287,7 @@ async fn run_watchdog_fast(
 ) -> anyhow::Result<WatchdogRun> {
     let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_config = Arc::new(loaded_config);
-    let gateway_dir = gateway_config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&gateway_config);
     let store = Arc::new(
         GatewayStore::open(&gateway_dir)
             .context("Failed to open GatewayStore — gateway must be initialised")?,
@@ -372,7 +372,7 @@ pub async fn handle_sentinel_experiment(
     }
 
     let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = loaded_config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&loaded_config);
     let store = Arc::new(
         GatewayStore::open(&gateway_dir)
             .context("Failed to open GatewayStore — the gateway must have been initialised at this path")?,

@@ -156,7 +156,7 @@ The `autonoetic_sdk` package (Python/TypeScript) provides the agent's view of th
 Agent: content_write("main.py", script_content)
   ↓
 Gateway: 1. Compute SHA-256 hash
-         2. Store blob at .gateway/content/sha256/ab/c123...
+         2. Store blob at runtime/content/sha256/ab/c123...
          3. Update session manifest: {"main.py": "sha256:abc123"}
          4. Return handle to agent
 
@@ -195,7 +195,7 @@ Gateway: 1. Resolve name → handle from session manifest
 2. Gateway captures directory as layer:
    - LayerStore.create_from_dir() → compresses venv/ as tar.zst
    - Computes SHA-256 digest
-   - Stores at .gateway/layers/layer_{digest}/
+   - Stores at runtime/layers/layer_{digest}/
    - Returns captured_layer with layer_id, name, mount_path, digest
 
 3. Packager builds layered artifact:
@@ -305,7 +305,7 @@ allow-set), the gateway masks gateway-internal secrets inside every bubblewrap
 sandbox (`sandbox/driver/bubblewrap.rs::bwrap_deny_path_flags`), layered over
 the ro-bind of `/`:
 
-| Masked path (under `<agents_dir>/.gateway`) | Mechanism | Why |
+| Masked path (under `<runtime_dir>`) | Mechanism | Why |
 |---|---|---|
 | `vault.key`, `vault.enc.json` | `/dev/null` overlay | credential vault master key + encrypted blob |
 | `gateway.db`, `gateway.db-shm`, `gateway.db-wal` | `/dev/null` overlay | session/approval/causal SQLite DB |
@@ -325,7 +325,7 @@ masked.
 
 This closes the worst read paths today, but it is a **deny-list**, not an
 allow-list — #1002 is the durable fix (curated mount allow-set + declared custom
-mounts). New secrets added under `.gateway` must be added to
+mounts). New secrets added under the runtime dir must be added to
 `BWRAP_GATEWAY_SENSITIVE_FILES`/`_DIRS` or they will be reachable until #1002
 lands.
 
@@ -577,7 +577,7 @@ If the eval run's subject revision does not match the promote target, the promot
 Content-addressable storage that works locally and remotely:
 
 ```
-.gateway/
+runtime/
 ├── content/sha256/ab/c123...   # Immutable content blobs
 ├── sessions/<session_id>/
 │   ├── manifest.json            # name → handle mappings
@@ -624,7 +624,7 @@ metadata:
 All actions are logged to an append-only JSONL audit trail:
 
 ```
-.gateway/history/causal_chain.jsonl
+runtime/history/causal_chain.jsonl
 agent_dir/history/causal_chain.jsonl
 ```
 
@@ -678,8 +678,8 @@ Three interrelated mechanisms enable restarting sessions from a given step:
 
 | Mechanism | Purpose | Storage |
 |-----------|---------|---------|
-| **Checkpoint** | Universal snapshot at every yield point | `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json` |
-| **Turn Continuation** | Suspend/resume at approval boundaries | `.gateway/continuations/{task_id}.json` |
+| **Checkpoint** | Universal snapshot at every yield point | `runtime/checkpoints/{session_id}/{turn_id}.checkpoint.json` |
+| **Turn Continuation** | Suspend/resume at approval boundaries | `runtime/continuations/{task_id}.json` |
 | **Session Fork** | Branch a new session from any checkpoint | Copies checkpoint history to a new session |
 
 ### Checkpoints
@@ -733,7 +733,7 @@ Universal execution snapshots saved at every yield point for crash recovery and 
 autonoetic trace checkpoints <session_id>
 
 # View checkpoint details (via the JSON-RPC API or inspecting files)
-ls .gateway/checkpoints/<session_id>/
+ls runtime/checkpoints/<session_id>/
 ```
 
 Checkpoints are pruned automatically (default: keep last N per session).
@@ -752,7 +752,7 @@ When a tool call requires operator approval, the turn is **suspended to a signed
 
 #### Checkpoint Structure
 
-Approval suspension is stored as a `SessionCheckpoint` under `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json`. The checkpoint is HMAC-SHA256 signed and includes the full conversation history, the pending tool call, remaining tool calls in the batch, and loop-guard state.
+Approval suspension is stored as a `SessionCheckpoint` under `runtime/checkpoints/<session_id>/<turn_id>.checkpoint.json`. The checkpoint is HMAC-SHA256 signed and includes the full conversation history, the pending tool call, remaining tool calls in the batch, and loop-guard state.
 
 #### Resume Flow
 
@@ -939,7 +939,7 @@ Real-time session narrative replacing the flat timeline.md.
 ### Storage
 
 ```
-.gateway/sessions/{session_id}/digest.md
+runtime/sessions/{session_id}/digest.md
 ```
 
 ### Structure
@@ -1118,7 +1118,7 @@ The spawned run uses a dedicated session id (`hook-spawn-…`) under the same **
 All transactional state in a single SQLite database:
 
 ```
-.gateway/gateway.db
+runtime/gateway.db
 ├── schema_migrations      # Ordered schema version tracking
 │
 │   ── Revision & Activation ──

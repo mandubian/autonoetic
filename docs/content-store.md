@@ -9,10 +9,10 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 ## Architecture
 
 ```
-.gateway/content/sha256/     ← Immutable content blobs (shared)
+runtime/content/sha256/     ← Immutable content blobs (shared)
 └── ab/c123...               ← Content indexed by hash
 
-.gateway/sessions/
+runtime/sessions/
 ├── demo-session/            ← Root session manifest + reports
 │   ├── manifest.json
 │   ├── session_report.json  ← Structured session report (JSON)
@@ -21,7 +21,7 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 └── demo-session/coder-abc123/  ← Child session manifest
     └── manifest.json
 
-.gateway/artifacts/          ← Immutable artifact bundles
+runtime/artifacts/          ← Immutable artifact bundles
 ├── index.json
 └── art_a1b2c3d4/            ← Gateway-internal storage dir (not agent-facing)
     └── manifest.json
@@ -250,7 +250,7 @@ This closed-boundary rule applies equally to Python, shell, Node, generated scri
 When an artifact is built, the gateway also materializes a read-only projection under:
 
 ```text
-.gateway/sessions/<root-session-id>/artifacts/<artifact_id>/
+runtime/sessions/<root-session-id>/artifacts/<artifact_id>/
 ```
 
 (where `<artifact_id>` is the gateway-internal locator derived from the canonical digest; the agent-facing handle is always `artifact_ref`.)

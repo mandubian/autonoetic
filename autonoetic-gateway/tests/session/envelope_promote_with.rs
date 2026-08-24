@@ -153,6 +153,11 @@ fn invoke_promote(h: &PromoteHarness, args_json: &str) -> serde_json::Value {
             .parent()
             .expect("agent dir parent")
             .to_path_buf(),
+        // Must match the gateway dir handed to the tool below: the
+        // capability-delta check resolves the outgoing revision through
+        // `gateway_root_dir(config)`, so a mismatch silently finds no outgoing
+        // revision and reports no delta.
+        runtime_dir: h.gateway_dir.clone(),
         ..GatewayConfig::default()
     };
     let session_id = format!("{}/promoter", h.root_session);

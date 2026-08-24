@@ -19,7 +19,7 @@ pub fn handle_eval_sealed(
     _timeout: u64,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let rpc = GatewayRpc::from_config(&config)?;
 
     // 1. Look up the FixtureSet.

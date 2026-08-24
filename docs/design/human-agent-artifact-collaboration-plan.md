@@ -185,7 +185,7 @@ that unpack their source into the same workbench model.
 Example path:
 
 ```text
-.gateway/workbenches/wb-a1b2c3/
+runtime/workbenches/wb-a1b2c3/
 ├── WORKBENCH.md
 ├── planframe.json
 ├── source/
@@ -223,10 +223,10 @@ When an artifact is projected, the gateway can tell the user:
 
 ```text
 Artifact projected to:
-  .gateway/workbenches/wb-a1b2c3/source
+  runtime/workbenches/wb-a1b2c3/source
 
 Open it with:
-  code .gateway/workbenches/wb-a1b2c3/source
+  code runtime/workbenches/wb-a1b2c3/source
 ```
 
 The CLI may optionally offer `--open`, but the core gateway should only create
@@ -479,7 +479,7 @@ like lightweight project state.
 Store PlanFrames under workflow state first:
 
 ```text
-.gateway/scheduler/workflows/<workflow_id>/plans/<plan_id>.json
+runtime/scheduler/workflows/<workflow_id>/plans/<plan_id>.json
 ```
 
 `WorkflowRun` stores only `active_plan_ref: Option<PlanRef>`. The active plan
@@ -490,7 +490,7 @@ approval.
 Later, support project-scoped PlanFrames:
 
 ```text
-.gateway/projects/<project_id>/plans/<plan_id>.json
+runtime/projects/<project_id>/plans/<plan_id>.json
 ```
 
 Workflow scope is enough for the first implementation. Project scope is the path
@@ -569,10 +569,10 @@ When an artifact is projected into a workbench:
 
 ```text
 Workbench ready:
-  .gateway/workbenches/wb-a1b2c3/source
+  runtime/workbenches/wb-a1b2c3/source
 
 Suggested next move:
-  code .gateway/workbenches/wb-a1b2c3/source
+  code runtime/workbenches/wb-a1b2c3/source
 
 After editing:
   autonoetic workbench reconcile wb-a1b2c3
@@ -871,7 +871,7 @@ Acceptance criteria:
 ### Phase 2 — Workbench projection
 
 - Add `artifact.project` to project an artifact into
-  `.gateway/workbenches/<id>/source`.
+  `runtime/workbenches/<id>/source`.
 - Write projection metadata under `.autonoetic/`.
 - Add `workbench.status`, `workbench.diff`, `workbench.checkpoint`,
   `workbench.checkpoints`, and `workbench.checkout`.
@@ -1182,8 +1182,8 @@ That is the desired posture: proactive, practical, and still accountable.
    Project-scoped PlanFrames need a project identity model.
 2. **How should operator edits be detected?** File diff is enough for MVP.
    Later, editor integration could mark intentional edits more precisely.
-3. **Should workbenches be inside `.gateway/` or user-visible project dirs?**
-   `.gateway/workbenches` is safer and easier to clean. User-visible dirs are
+3. **Should workbenches be inside `runtime/` or user-visible project dirs?**
+   `runtime/workbenches` is safer and easier to clean. User-visible dirs are
    nicer for IDE ergonomics.
 4. **How long do workbenches live?** Decision before Phase 2: reconciled
    workbenches may follow workflow-retention cleanup, but unreconciled workbenches
@@ -1218,7 +1218,7 @@ Build the smallest useful loop:
 
 1. Planner proposes a PlanFrame and asks for approval.
 2. Coder produces an artifact.
-3. Gateway projects artifact to `.gateway/workbenches/<id>/source`.
+3. Gateway projects artifact to `runtime/workbenches/<id>/source`.
 4. Operator edits in their IDE.
 5. Gateway reconciles edits into a new artifact revision.
 6. Operator waives unit tests with a reason.

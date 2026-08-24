@@ -354,6 +354,7 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), skill_md, main_py);
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         // This suite hardens the audit/eval/identity promotion gates; isolate it
         // from the new-agent first-admission human gate (its own tests).
@@ -636,6 +637,7 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         // This suite hardens the audit/eval/identity promotion gates; isolate it
         // from the new-agent first-admission human gate (its own tests).
@@ -759,6 +761,7 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         // This suite hardens the audit/eval/identity promotion gates; isolate it
         // from the new-agent first-admission human gate (its own tests).

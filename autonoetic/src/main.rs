@@ -46,7 +46,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     if is_gateway_start {
         let config = autonoetic_gateway::config::load_config(&config_path)?;
-        let log_dir = config.agents_dir.join(".gateway").join("logs");
+        let log_dir = autonoetic_gateway::execution::gateway_root_dir(&config).join("logs");
         std::fs::create_dir_all(&log_dir)?;
         let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -77,13 +77,14 @@ async fn async_main() -> anyhow::Result<()> {
         // the file exists. Match that layout when the config file is absent.
         let log_dir = if config_path.exists() {
             let config = autonoetic_gateway::config::load_config(&config_path)?;
-            config.agents_dir.join(".gateway").join("logs")
+            autonoetic_gateway::execution::gateway_root_dir(&config).join("logs")
         } else {
+            // No config file yet: mirror `default_runtime_dir()` ("./runtime")
+            // anchored at the config dir, the same anchoring `load_config` does.
             config_path
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
-                .join("agents")
-                .join(".gateway")
+                .join("runtime")
                 .join("logs")
         };
         std::fs::create_dir_all(&log_dir)?;
@@ -578,7 +579,7 @@ async fn async_main() -> anyhow::Result<()> {
             cli::common::ReviewCommands::Status { agent, json } => {
                 // Simple inline handler
                 let config = autonoetic_gateway::config::load_config(&config_path)?;
-                let gateway_dir = config.agents_dir.join(".gateway");
+                let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
                 let store = std::sync::Arc::new(
                     autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
                 );
@@ -619,7 +620,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
             cli::common::ReviewCommands::Inspect { review_id, json } => {
                 let config = autonoetic_gateway::config::load_config(&config_path)?;
-                let gateway_dir = config.agents_dir.join(".gateway");
+                let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
                 let store = std::sync::Arc::new(
                     autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
                 );
@@ -653,7 +654,7 @@ async fn async_main() -> anyhow::Result<()> {
                 json,
             } => {
                 let config = autonoetic_gateway::config::load_config(&config_path)?;
-                let gateway_dir = config.agents_dir.join(".gateway");
+                let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
                 let store = std::sync::Arc::new(
                     autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
                 );

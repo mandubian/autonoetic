@@ -188,6 +188,7 @@ async fn test_generated_skill_approval_and_execution() {
     let config = autonoetic_types::config::GatewayConfig {
         port: 0,
         ofp_port: 0,
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         max_concurrent_spawns: 4,
         max_pending_spawns_per_agent: 10,

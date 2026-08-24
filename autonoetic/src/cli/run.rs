@@ -663,7 +663,7 @@ pub async fn handle_run(
         eprintln!("  Mode: collaborative (planner.collaborative — PlanFrame, workbench, /wb, /return)");
     }
 
-    let log_dir = gateway_config.agents_dir.join(".gateway").join("logs");
+    let log_dir = autonoetic_gateway::execution::gateway_root_dir(&gateway_config).join("logs");
     eprintln!(
         "  Tracing output: {0} — run `tail -f {0}/*.log` in another terminal for live gateway logs.",
         log_dir.display()

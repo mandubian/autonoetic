@@ -98,6 +98,13 @@ impl SandboxDriverKind {
 pub struct SpawnSpec<'a> {
     /// Host directory bound in as the sandbox workspace.
     pub agent_dir: &'a str,
+    /// The gateway's own directory, as the execution engine resolved it.
+    ///
+    /// Threaded rather than derived: agents execute from *inside* the revision
+    /// store, so `agent_dir.parent()` is `<gateway_dir>/revisions/agents/<id>`,
+    /// not the agents root. Deriving the gateway dir that way is what made the
+    /// secret mask emit zero flags (#1145).
+    pub gateway_dir: &'a Path,
     /// Shell line to run inside the sandbox, already dependency-composed.
     pub entrypoint: &'a str,
     /// Bind mounts to expose inside the sandbox: session content plus whatever

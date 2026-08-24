@@ -64,6 +64,7 @@ async fn event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
     let _api_key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
 
     let config = autonoetic_types::config::GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..workspace.gateway_config()
     };

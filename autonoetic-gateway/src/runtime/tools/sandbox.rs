@@ -20,6 +20,17 @@ use autonoetic_types::tool_error::tagged;
 use secrecy::ExposeSecret;
 use std::path::Path;
 
+/// The bubblewrap driver builds its gateway-secret mask from this path, so an
+/// absent gateway dir would mean an unmasked sandbox. Fail closed rather than
+/// deriving one from the agent dir — that derivation is #1145.
+fn require_gateway_dir(gateway_dir: Option<&Path>) -> anyhow::Result<&Path> {
+    gateway_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "gateway_dir is required to spawn a sandbox: the secret mask is built from it"
+        )
+    })
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(SandboxExecTool));
 }
@@ -2417,9 +2428,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
         if let Some(credential_mappings) = &args.credential_env {
             if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {
-                let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
-                crate::vault::ensure_default_key(vault_dir)?;
-                let vault_path = crate::vault::default_vault_path(vault_dir);
+                crate::vault::ensure_default_key(gw_dir)?;
+                let vault_path = crate::vault::default_vault_path(gw_dir);
                 let vault = match crate::vault::Vault::load_from_file(&vault_path) {
                     Ok(v) => v,
                     Err(e) => {
@@ -2502,6 +2512,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             SandboxRunner::spawn_with_driver_and_dependencies_and_env(
                 driver,
                 agent_dir_str,
+                require_gateway_dir(gateway_dir)?,
                 &exec_kind,
                 dep_plan.as_ref(),
                 Some(&overrides),
@@ -2517,6 +2528,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             SandboxRunner::spawn_with_session_content_and_env(
                 driver,
                 agent_dir_str,
+                require_gateway_dir(gateway_dir)?,
                 &exec_kind,
                 dep_plan.as_ref(),
                 all_mounts,

@@ -17,7 +17,7 @@ status (✅ shipped, ◐ in progress, empty = pending).
   agent roles; it should enforce what manifests declare. This RFC is shaped
   by that constraint.
 - Session that motivated this:
-  `~/.autonoetic/agents/.gateway/sessions/latest/` (2026-05-12 10:07–10:21).
+  `~/.autonoetic/runtime/sessions/latest/` (2026-05-12 10:07–10:21).
 
 ---
 

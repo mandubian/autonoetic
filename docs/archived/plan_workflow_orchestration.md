@@ -529,7 +529,7 @@ The new workflow layer should sit above them:
 | ID | Done | Description |
 |----|------|-------------|
 | **P1.1** | [x] | Shared types: `WorkflowRun`, `TaskRun`, `WorkflowEventRecord`, status enums (`autonoetic-types::workflow`) |
-| **P1.2** | [x] | Durable store under `.gateway/scheduler/workflows/` (root index → `workflow_id`, `runs/<id>/workflow.json`, `tasks/`, `events.jsonl`) |
+| **P1.2** | [x] | Durable store under `runtime/scheduler/workflows/` (root index → `workflow_id`, `runs/<id>/workflow.json`, `tasks/`, `events.jsonl`) |
 | **P1.3** | [x] | Wire `agent_spawn` to ensure workflow per root session and return `workflow_id` + `task_id` |
 | **P1.4** | [x] | Emit `task.spawned` / `task.completed` (and related) from the spawn path _(sync spawn: success → `task.completed`; error → `task.failed` via store)_ |
 | **P1.5** | [x] | Mirror key workflow/task transitions into the gateway **causal chain** (`workflow_causal` + `log_gateway_causal_event`) per § Relationship To Causal Chain |

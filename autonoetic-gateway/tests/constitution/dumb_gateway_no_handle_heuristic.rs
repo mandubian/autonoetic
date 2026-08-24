@@ -39,6 +39,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
 fn run_sandbox_exec(command: &str) -> anyhow::Result<serde_json::Value> {
     let temp = tempdir()?;
     let cfg = GatewayConfig {
+        runtime_dir: temp.path().join("agents").join(".gateway"),
         agents_dir: temp.path().join("agents"),
         ..GatewayConfig::default()
     };

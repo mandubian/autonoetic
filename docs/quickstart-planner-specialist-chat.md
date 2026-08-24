@@ -449,12 +449,12 @@ For multi-step tasks that benefit from explicit textual state, prefer these conv
 
 **Where to look:**
 
-- **Gateway causal chain** — `agents/.gateway/history/causal_chain.jsonl` — records every ingress (top-level `event.ingest` when you chat) and every **delegation** (each `agent_spawn` from planner → researcher, coder, etc.). One place to see the full delegation tree for a session.
+- **Gateway causal chain** — `runtime/history/causal_chain.jsonl` — records every ingress (top-level `event.ingest` when you chat) and every **delegation** (each `agent_spawn` from planner → researcher, coder, etc.). One place to see the full delegation tree for a session.
 - **Per-agent causal chains** — `agents/<agent_id>/history/causal_chain.jsonl` — record that agent's lifecycle, LLM calls, and tool invocations (including `agent_spawn` requests and results as seen by that agent).
 
 ```bash
 # Gateway log (all delegations for the session)
-cat /tmp/autonoetic-demo/agents/.gateway/history/causal_chain.jsonl
+cat /tmp/autonoetic-demo/runtime/history/causal_chain.jsonl
 
 # Per-agent traces
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace sessions --agent planner.default
@@ -471,9 +471,9 @@ You should see:
 
 **Human-readable session views:**
 
-- `agents/.gateway/sessions/<session_id>/timeline.md` — progressive Markdown timeline for the whole session (includes mirrored `workflow.*` gateway rows when delegation uses the durable workflow store).
-- `agents/.gateway/sessions/<session_id>/workflow_graph.md` — rewritten whenever a workflow event appends: current `workflow_id`, task list, and recent workflow store events (open beside `timeline.md` for a live orchestration snapshot).
-- `agents/.gateway/sessions/<session_id>/artifacts/<artifact_id>/` — named projection of built artifact files so you can open generated code directly without resolving SHA handles by hand.
+- `runtime/sessions/<session_id>/timeline.md` — progressive Markdown timeline for the whole session (includes mirrored `workflow.*` gateway rows when delegation uses the durable workflow store).
+- `runtime/sessions/<session_id>/workflow_graph.md` — rewritten whenever a workflow event appends: current `workflow_id`, task list, and recent workflow store events (open beside `timeline.md` for a live orchestration snapshot).
+- `runtime/sessions/<session_id>/artifacts/<artifact_id>/` — named projection of built artifact files so you can open generated code directly without resolving SHA handles by hand.
 - failed or approval-blocked tool runs now attach an `evidence_ref` in the timeline/causal entry, pointing to the full redacted result payload (useful for test stdout/stderr and approval details).
 
 **Additional trace commands:**
@@ -502,7 +502,7 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace diges
 Tool results in the causal chain are intentionally limited to 256 characters so log lines stay readable and bounded. The payload still has `result_len` and `result_sha256`. By default, the gateway now captures full redacted evidence and adds an `evidence_ref` for traced events under the agent's `history/evidence/<session_id>/`. If you want to reduce evidence volume, set `AUTONOETIC_EVIDENCE_MODE=off`; failed and approval-blocked tool runs will still preserve an `evidence_ref` so the full error/test payload remains inspectable.
 
 **Does `causal_chain.jsonl` rotate?**  
-Not yet. Current logs append to a single file per history location (`agents/.gateway/history/causal_chain.jsonl` and `agents/<agent_id>/history/causal_chain.jsonl`). Rotation/segmentation is planned.
+Not yet. Current logs append to a single file per history location (`runtime/history/causal_chain.jsonl` and `agents/<agent_id>/history/causal_chain.jsonl`). Rotation/segmentation is planned.
 
 ## Adapter specialist docs
 

@@ -60,7 +60,7 @@ Backward compatibility is **not** a goal for this plan.
 This plan explicitly allows the following breaking changes:
 
 - **Remove `execution_search`** entirely — replaced by `observability_search`
-- Make `.gateway/sessions/...` report files projections instead of the canonical source of truth
+- Make `runtime/sessions/...` report files projections instead of the canonical source of truth
 - Replace filename-based `payload_ref` references with content-backed identifiers
 - Change the shape of `session_report.json` to use `event_id` as node keys
 - Remove hardcoded report publishing from the session close path (replaced by hooks)

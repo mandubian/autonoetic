@@ -108,6 +108,7 @@ async fn r_6_14_dispatch_path_refuses_emergency_stop_checkpoint() -> anyhow::Res
     crate::support::agents::install_content_agent(&agents_dir.join(agent_id), agent_id)?;
 
     let config = autonoetic_types::config::GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

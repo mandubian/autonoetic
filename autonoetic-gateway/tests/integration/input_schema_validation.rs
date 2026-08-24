@@ -83,6 +83,7 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
     let _api_key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
 
     let config = autonoetic_types::config::GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

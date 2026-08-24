@@ -33,6 +33,7 @@ pub fn env() -> &'static Env {
         // tolerated by the init path used in tests).
         let mut config = GatewayConfig::default();
         config.agents_dir = tmp.path().to_path_buf();
+        config.runtime_dir = config.agents_dir.join(".gateway");
         let store = Arc::new(GatewayStore::open(tmp.path()).expect("store open"));
         let router = JsonRpcRouter::new(config, Some(store.clone()));
         Env {

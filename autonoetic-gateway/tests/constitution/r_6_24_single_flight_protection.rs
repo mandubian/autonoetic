@@ -41,6 +41,7 @@ fn duplicate_durable_spawns_coalesce_to_one_active_task() {
     std::fs::create_dir_all(&child_dir).expect("child dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };

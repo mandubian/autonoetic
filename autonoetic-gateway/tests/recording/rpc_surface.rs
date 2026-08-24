@@ -17,6 +17,7 @@ fn service() -> &'static GatewayExecutionService {
     SERVICE.get_or_init(|| {
         let ws = tempfile::tempdir().expect("tempdir");
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: ws.path().join("agents").join(".gateway"),
             agents_dir: ws.path().join("agents"),
             ..autonoetic_types::config::GatewayConfig::default()
         };

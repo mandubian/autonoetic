@@ -16,3 +16,14 @@ htmlcov/
 .venv-constitution/
 .venv-lock/
 .claude/
+
+# Gateway runtime state (runtime_dir): revision store, gateway.db, vault,
+# sessions, artifacts, logs. Was the hidden `agents/.gateway/`.
+#
+# Listed per-location rather than as a bare `runtime/` — that pattern would also
+# swallow the `src/runtime/` source tree.
+/runtime/
+/autonoetic-gateway/runtime/
+/autonoetic/runtime/
+/examples/**/runtime/
+**/.gateway/

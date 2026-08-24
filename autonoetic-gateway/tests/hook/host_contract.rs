@@ -347,6 +347,7 @@ fn grant_drift_emits_causal_event_for_host_outside_contract() {
         .unwrap();
 
     let cfg = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         ..Default::default()
     };

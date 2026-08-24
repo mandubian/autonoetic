@@ -218,7 +218,7 @@ pub fn export_session(
     opts: &ExportOptions,
 ) -> Result<SessionExport> {
     let root_session_id = root_session_id(session_id).to_string();
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = crate::execution::gateway_root_dir(&config);
     let sessions_dir = gateway_dir.join("sessions").join(&root_session_id);
 
     let export_generated_at = chrono::Utc::now().to_rfc3339();
@@ -1230,6 +1230,7 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = GatewayStore::open(&gateway_dir).unwrap();
         let config = GatewayConfig {
+            runtime_dir: dir.path().to_path_buf().join(".gateway"),
             agents_dir: dir.path().to_path_buf(),
             ..GatewayConfig::default()
         };

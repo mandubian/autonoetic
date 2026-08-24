@@ -37,6 +37,7 @@ fn test_artifact_build_mints_session_scoped_ref() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -97,6 +98,7 @@ fn test_artifact_build_scopes_to_root_session_for_child_without_workflow() -> an
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -171,6 +173,7 @@ fn test_artifact_build_mints_workflow_scoped_ref_when_indexed() -> anyhow::Resul
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -225,6 +228,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -308,7 +312,11 @@ fn test_resolve_artifact_metadata_and_files() -> anyhow::Result<()> {
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
-    let config = GatewayConfig { agents_dir: agents_dir.clone(), ..GatewayConfig::default() };
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        runtime_dir: gateway_dir.clone(),
+        ..GatewayConfig::default()
+    };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let writer = writer_manifest();
     let writer_policy = PolicyEngine::new(writer.clone());
@@ -366,7 +374,11 @@ fn test_resolve_artifact_file_via_file_param() -> anyhow::Result<()> {
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
-    let config = GatewayConfig { agents_dir: agents_dir.clone(), ..GatewayConfig::default() };
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        runtime_dir: gateway_dir.clone(),
+        ..GatewayConfig::default()
+    };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let writer = writer_manifest();
     let writer_policy = PolicyEngine::new(writer.clone());
@@ -434,7 +446,11 @@ fn test_resolve_artifact_missing_returns_not_found() -> anyhow::Result<()> {
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
-    let config = GatewayConfig { agents_dir: agents_dir.clone(), ..GatewayConfig::default() };
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        runtime_dir: gateway_dir.clone(),
+        ..GatewayConfig::default()
+    };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let reader = reader_manifest();
     let reader_policy = PolicyEngine::new(reader.clone());
@@ -460,7 +476,11 @@ fn test_resolve_content_metadata_and_content() -> anyhow::Result<()> {
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
-    let config = GatewayConfig { agents_dir: agents_dir.clone(), ..GatewayConfig::default() };
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        runtime_dir: gateway_dir.clone(),
+        ..GatewayConfig::default()
+    };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let reader = reader_manifest();
     let reader_policy = PolicyEngine::new(reader.clone());

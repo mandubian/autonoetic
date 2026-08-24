@@ -37,7 +37,7 @@ not change.
    - `autonoetic-types/src/config.rs` — `default_constitution_source_path()` /
      `default_constitution_lock_path()` → `2026.06.08/…`
    - `config/config-template.yaml` — `constitution.source_path` / `lock_path`
-     (both the active block and the commented `.gateway/...` variant) → `2026.06.08/…`
+     (both the active block and the commented `runtime/...` variant) → `2026.06.08/…`
    - `docs/config-reference.md` — the two `constitution.*` default cells → `2026.06.08/…`
 
 4. **Map P-2.26 in the enforcement register** (code):

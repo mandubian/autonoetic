@@ -17,6 +17,7 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         ..GatewayConfig::default()

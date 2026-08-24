@@ -96,6 +96,7 @@ async fn test_coder_content_write_via_tool_calls_body() -> anyhow::Result<()> {
     let config = autonoetic_types::config::GatewayConfig {
         port: 0,
         ofp_port: 0,
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         max_pending_spawns_per_agent: 1,
         max_concurrent_spawns: 5,
@@ -287,6 +288,7 @@ async fn test_coder_multiple_tool_calls_single_turn_body() -> anyhow::Result<()>
     let config = autonoetic_types::config::GatewayConfig {
         port: 0,
         ofp_port: 0,
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         max_pending_spawns_per_agent: 1,
         max_concurrent_spawns: 5,

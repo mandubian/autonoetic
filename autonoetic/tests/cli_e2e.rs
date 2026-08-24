@@ -730,7 +730,7 @@ fn test_terminal_chat_routes_through_gateway_ingress_and_preserves_session() {
 
     // Content is now stored in the content-addressable store, not in state/ directory
     // Check that the content was stored in the gateway's content store
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let content_store_dir = gateway_dir.join("content");
     assert!(
         content_store_dir.exists(),
@@ -749,10 +749,7 @@ fn test_terminal_chat_routes_through_gateway_ingress_and_preserves_session() {
     );
 
     let gateway_log = std::fs::read_to_string(
-        agents_dir
-            .join(".gateway")
-            .join("history")
-            .join("causal_chain.jsonl"),
+        gateway_dir.join("history").join("causal_chain.jsonl"),
     )
     .expect("gateway causal log should exist");
     assert!(gateway_log.contains(session_id));
@@ -1087,7 +1084,7 @@ fn trace_digest_prints_post_session_narrative() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4011, 4211, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let cs =
         autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir).expect("store");
     let root = "cli-trace-digest-root";
@@ -1134,7 +1131,7 @@ fn gateway_pending_lists_unified_queue() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4013, 4213, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
         .expect("store opens");
 
@@ -1230,7 +1227,7 @@ fn agent_revision_list_filters_by_status_and_reports_truncation() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4017, 4217, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
         .expect("store opens");
 

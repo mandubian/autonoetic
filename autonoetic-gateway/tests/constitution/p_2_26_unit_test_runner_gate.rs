@@ -254,6 +254,7 @@ fn promotion_blocked_when_unit_test_runner_failed() {
 
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         require_operator_approval_for_new_agents: false,
         ..Default::default()
@@ -359,6 +360,7 @@ fn promotion_succeeds_when_no_unit_test_runner_ran() {
 
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         require_operator_approval_for_new_agents: false,
         ..Default::default()
