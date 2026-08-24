@@ -393,6 +393,12 @@ autonoetic chat researcher.default --session-id my-session
 
 Inspect causal chain traces for debugging and audit.
 
+> **Requires a running gateway (#1119):** `trace contract-health`, `trace
+> civic-health`, the DB-backed `trace show` path, `trace fork`, `trace
+> fork-tree`, and workflow interaction polls speak JSON-RPC
+> (`trace.*` / `session.fork`). Checkpoint-file reads (`trace event`,
+> `trace history`, `trace sessions`) stay local.
+
 ### `autonoetic trace sessions`
 
 List known sessions across agent traces.

@@ -20,14 +20,11 @@ use std::path::PathBuf;
 /// Files that still read/write gateway.db where an RPC should exist.
 /// Every entry must be removed in the PR that migrates it.
 const PENDING_MIGRATION: &[&str] = &[
-    // Interactive approval/gate loop + grants + pending-interaction answers.
-    // Many calls already have RPCs (approvals.*, gate.*, grants.*,
-    // interaction.answer); the `gateway start` embedding stays regardless —
-    // when migrating, split the read paths out of the start path.
+    // Interactive approval/gate loop + headless approvals + stats.
+    // The `gateway start` embedding stays regardless — when migrating,
+    // split the read paths out of the start path. Needs a global
+    // pending-approvals RPC (approvals.inspect is per-request).
     "gateway.rs",
-    // Display commands over causal events / contract & civic health / forks.
-    // Largest remaining read surface; needs trace.* RPCs.
-    "trace.rs",
 ];
 
 /// Files that run gateway machinery in-process and therefore hold a store

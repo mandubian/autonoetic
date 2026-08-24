@@ -23,4 +23,5 @@ mod stream_fallback;
 mod report;
 mod residency;
 mod trace;
+mod trace_rpc_surface;
 mod timeline_jsonrpc;

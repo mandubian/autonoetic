@@ -3523,6 +3523,13 @@ impl JsonRpcRouter {
             "recording.cancel" => handle_recording_cancel_rpc(&self.execution, req),
             "recording.fixture_set" => handle_recording_fixture_set_rpc(&self.execution, req),
 
+            // `autonoetic trace …` operator surface over RPC (#1119 tranche 6).
+            "trace.contract_health" => handle_trace_contract_health_rpc(&self.execution, req),
+            "trace.civic_health" => handle_trace_civic_health_rpc(&self.execution, req),
+            "trace.causal_search" => handle_trace_causal_search_rpc(&self.execution, req),
+            "trace.user_interactions" => handle_trace_user_interactions_rpc(&self.execution, req),
+            "trace.fork_tree" => handle_trace_fork_tree_rpc(&self.execution, req),
+
             // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
             // proposed rule set from known tool catalogs + the MCP server list.
             // Pure and deterministic — the proposal has no effect until the
@@ -6634,6 +6641,130 @@ fn handle_recording_list_rpc(
             // silent success(null) (#1139 review).
             Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
         },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.contract_health` — constitution enforcement tallies (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_contract_health_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        since: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.contract_health", e),
+    };
+    match execution.contract_health(params.since.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.civic_health` — per-agent governance tallies (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_civic_health_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        since: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.civic_health", e),
+    };
+    match execution.civic_health(params.since.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.causal_search` — causal-event search (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_causal_search_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default = "default_trace_causal_limit")]
+        limit: i64,
+    }
+    fn default_trace_causal_limit() -> i64 {
+        200
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.causal_search", e),
+    };
+    match execution.causal_search(params.session_id.as_deref(), params.agent_id.as_deref(), params.limit) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.user_interactions` — interaction listing (session- or workflow-scoped)
+/// (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_user_interactions_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        workflow_id: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.user_interactions", e),
+    };
+    match execution.user_interactions(params.session_id.as_deref(), params.workflow_id.as_deref()) {
+        Ok(list) => match serde_json::to_value(list) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.fork_tree` — ancestor chain + descendant tree (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_fork_tree_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.fork_tree", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for trace.fork_tree: session_id must not be empty",
+        );
+    }
+    match execution.fork_tree(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
