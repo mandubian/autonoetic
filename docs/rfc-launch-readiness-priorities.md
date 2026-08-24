@@ -55,7 +55,10 @@ Ordered by urgency.
 1. **#1145** — bwrap gateway-secret mask emits zero flags in production
    (`agent_dir.parent()` vs revision dir). Gateway secrets are readable from inside
    sandboxes today. This is the single worst open defect: it silently voids the
-   deny-list stopgap documented in AGENTS.md.
+   deny-list stopgap documented in AGENTS.md. *(resolved 2026-08-24: fixed on
+   origin/main by `b1f1330d`, #1150 — `runtime_dir` layout makes the gateway dir a
+   config-sourced root threaded via `SpawnSpec.gateway_dir`; mask verified emitting
+   flags in production shape. #1002 (item 2) is now the worst open defect.)*
 2. **#1002** — whole-host `/` ro-bind; replace with explicit mount allow-set.
    The deny-list masking (#1145's mechanism) is acknowledged stopgap for exactly this.
    Fixing both together removes an entire class of "new secret file forgotten in the list".
@@ -70,7 +73,8 @@ Ordered by urgency.
    any federation.
 5. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
    one careless match arm away from reintroducing the create→promote loop already
-   killed once. Remove the variant. *(fix staged on branch tier0/security-fixes)*
+   killed once. Remove the variant. *(resolved 2026-08-24: merged as `84afe3fc`,
+   PR #1159 — variant removed, row parser fails loud on unknown statuses.)*
 6. **#808** — `create_from_intent` drops/mismatches `artifact_id`. *(resolved
    2026-08-24: fixed on origin/main by `be15f0b7`, #1144/#1147 — dropped from the
    launch list.)*
@@ -109,7 +113,7 @@ Ship-blockers only in the sense that launching with them visibly degrades reliab
 
 Grouped so owners can be assigned per theme rather than per issue:
 
-- **Modularity**: #1116, #1118, #1119, #1127, #1039, #2.
+- **Modularity**: #1116, #1118, #1119, #1127, #1039. *(#2 shipped in #1150.)*
 - **Egress completion** (§9 introspection, authoring aid, room legibility,
   declassification): #993, #994, #967, #978, #979, #971, #948, #903 umbrella with
   remaining phases #905, #907, #910.
