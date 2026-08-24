@@ -205,11 +205,15 @@ fn try_promote(
     store: Arc<GatewayStore>,
     agent_id: &str,
     revision_id: &str,
+    smoke_test_workflow_id: &str,
+    smoke_test_task_id: &str,
 ) -> Result<serde_json::Value, String> {
     let args = serde_json::json!({
         "agent_id": agent_id,
         "revision_id": revision_id,
         "reason": "integration test",
+        "smoke_test_workflow_id": smoke_test_workflow_id,
+        "smoke_test_task_id": smoke_test_task_id,
     });
     match registry.execute(
         "agent_revision_promote",
@@ -306,6 +310,12 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         "session-audit",
     );
 
+    let (smoke_wf, smoke_task) = crate::support::promotion_trace::seed_smoke_test_task(
+        &config,
+        &store,
+        agent_id,
+        &revision_id,
+    );
     let result = try_promote(
         &registry,
         &builder,
@@ -316,6 +326,8 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         store,
         agent_id,
         &revision_id,
+        &smoke_wf,
+        &smoke_task,
     );
 
     assert!(
@@ -404,6 +416,12 @@ fn distinct_identities_allowed() {
         "session-audit",
     );
 
+    let (smoke_wf, smoke_task) = crate::support::promotion_trace::seed_smoke_test_task(
+        &config,
+        &store,
+        agent_id,
+        &revision_id,
+    );
     let result = try_promote(
         &registry,
         &builder,
@@ -414,6 +432,8 @@ fn distinct_identities_allowed() {
         store,
         agent_id,
         &revision_id,
+        &smoke_wf,
+        &smoke_task,
     );
 
     assert!(
