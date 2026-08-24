@@ -2526,8 +2526,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 ));
             }
             if entries.len() > MOUNT_SET_CAP {
-                let overflow = entries.len() - MOUNT_SET_CAP;
-                entries.truncate(MOUNT_SET_CAP);
+                // Reserve a slot for the marker so the capped list, marker
+                // included, never exceeds MOUNT_SET_CAP entries.
+                let overflow = entries.len() - (MOUNT_SET_CAP - 1);
+                entries.truncate(MOUNT_SET_CAP - 1);
                 entries.push(format!("truncated:+{overflow}"));
             }
             entries

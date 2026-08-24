@@ -138,6 +138,14 @@ fn strip_gemma_token_artifacts(s: &str) -> String {
     out
 }
 
+/// Tools whose results may carry a `mount_set` into the durable execution
+/// trace (#1002 slice 1). Gateway-owned sandbox executors only: the field is
+/// documented as *gateway-asserted*, so lifting it from any other source —
+/// especially MCP-served remote tools — would pollute the audit record with
+/// untrusted data. A tool joins this list when the gateway itself composes its
+/// mounts (artifact_exec reports one once slice 1 covers it).
+const MOUNT_SET_REPORTING_TOOLS: &[&str] = &["sandbox_exec"];
+
 pub(crate) fn canonical_tool_name(name: &str) -> &str {
     match name {
         "spawn" => "agent_spawn",
@@ -656,17 +664,24 @@ impl<'a> ToolCallProcessor<'a> {
 
         // #1002 slice 1: sandbox tools report the gateway-asserted set of host
         // paths the execution could see; the durable trace makes "what could
-        // this exec see?" answerable after the fact.
-        let mount_set = parsed_result.as_ref().and_then(|v| {
-            v.get("mount_set")
-                .and_then(|v| v.as_array())
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .map(|e| e.as_str().map(str::to_string))
-                        .collect::<Option<Vec<String>>>()
-                })
-        });
+        // this exec see?" answerable after the fact. The key is lifted ONLY
+        // from gateway-owned sandbox tools — accepting it from arbitrary
+        // results (MCP tools included) would let untrusted sources forge the
+        // audit record.
+        let mount_set = if MOUNT_SET_REPORTING_TOOLS.contains(&canonical_tool_name.as_str()) {
+            parsed_result.as_ref().and_then(|v| {
+                v.get("mount_set")
+                    .and_then(|v| v.as_array())
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .map(|e| e.as_str().map(str::to_string))
+                            .collect::<Option<Vec<String>>>()
+                    })
+            })
+        } else {
+            None
+        };
 
         let trace = ExecutionTraceRecord {
             trace_id,
@@ -1729,12 +1744,67 @@ mod tests {
 
     /// Returns a sandbox-style payload carrying a mount set (#1002 slice 1):
     /// sandbox tools report the host paths the gateway asserted as visible,
-    /// and the processor must lift that key into the durable trace.
+    /// and the processor must lift that key into the durable trace. Registered
+    /// under the canonical `sandbox_exec` name — the allowlisted reporter.
     struct TraceMountSetTool;
+
+    /// Same payload, registered under a non-sandbox name: a `mount_set` key
+    /// from anything outside the gateway-owned sandbox executors must NOT
+    /// reach the durable trace — the field is documented gateway-asserted, so
+    /// lifting from arbitrary tools (MCP included) would forge the audit
+    /// record (#1160 review).
+    struct TraceMountSetSpoofTool;
 
     impl NativeTool for TraceMountSetTool {
         fn name(&self) -> &'static str {
-            "test.trace.mount_set"
+            "sandbox_exec"
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "Returns sandbox payload with mount_set".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }),
+            }
+        }
+
+        fn is_available(&self, _manifest: &AgentManifest) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _manifest: &AgentManifest,
+            _policy: &PolicyEngine,
+            _agent_dir: &Path,
+            _gateway_dir: Option<&Path>,
+            _arguments_json: &str,
+            _session_id: Option<&str>,
+            _turn_id: Option<&str>,
+            _config: Option<&autonoetic_types::config::GatewayConfig>,
+            _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            Ok(serde_json::json!({
+                "ok": true,
+                "exit_code": 0,
+                "stdout": "ran",
+                "stderr": "",
+                "mount_set": ["ro:host_root", "rw:/tmp/agent", "ro:/tmp/agent/.gateway/sessions/x/notes.md"],
+            })
+            .to_string())
+        }
+    }
+
+    impl NativeTool for TraceMountSetSpoofTool {
+        fn name(&self) -> &'static str {
+            "test.trace.mount_set_spoof"
         }
 
         fn definition(&self) -> ToolDefinition {
@@ -2104,8 +2174,10 @@ mod tests {
 
         let tool_calls = vec![ToolCall {
             id: "tc1".to_string(),
-            name: "test.trace.mount_set".to_string(),
-            arguments: r#"{"command":"cat notes.md"}"#.to_string(),
+            name: "sandbox_exec".to_string(),
+            // sandbox_exec is intent-gated (tool_requires_intent); without a
+            // short intent the call errors before the tool body runs.
+            arguments: r#"{"command":"cat notes.md","intent":"read the session notes"}"#.to_string(),
         }];
 
         let _ = processor
@@ -2131,7 +2203,7 @@ mod tests {
             .unwrap();
         let trace = traces
             .iter()
-            .find(|t| t.tool_name == "test.trace.mount_set")
+            .find(|t| t.tool_name == "sandbox_exec")
             .expect("mount_set trace should exist");
         assert_eq!(
             trace.mount_set,
@@ -2141,6 +2213,76 @@ mod tests {
                 "ro:/tmp/agent/.gateway/sessions/x/notes.md".to_string(),
             ]),
             "the gateway-asserted mount set must persist verbatim"
+        );
+    }
+
+    /// #1160 review: `mount_set` from a non-allowlisted tool is dropped —
+    /// only gateway-owned sandbox executors may assert visibility into the
+    /// durable trace.
+    #[tokio::test]
+    async fn test_process_tool_calls_drops_mount_set_from_non_sandbox_tools() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceMountSetSpoofTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(
+            Some("trace-mount-set-spoof-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "test.trace.mount_set_spoof".to_string(),
+            arguments: r#"{"command":"cat notes.md"}"#.to_string(),
+        }];
+
+        let _ = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let traces = store
+            .search_execution_traces(
+                None,
+                None,
+                None,
+                None,
+                Some("test-agent"),
+                Some("trace-mount-set-spoof-session"),
+                10,
+            )
+            .unwrap();
+        let trace = traces
+            .iter()
+            .find(|t| t.tool_name == "test.trace.mount_set_spoof")
+            .expect("spoof trace should exist");
+        assert_eq!(
+            trace.mount_set, None,
+            "a non-sandbox tool's mount_set must never reach the durable trace"
         );
     }
 
