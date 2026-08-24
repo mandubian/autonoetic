@@ -159,6 +159,7 @@ fn reject_reaps_bound_checkpoint() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
     let store = GatewayStore::open(&gateway_dir)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     };
@@ -190,6 +191,7 @@ fn cancel_reaps_bound_checkpoint() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
     let store = GatewayStore::open(&gateway_dir)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     };
@@ -220,6 +222,7 @@ fn approved_keeps_checkpoint_for_resume() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
     let store = GatewayStore::open(&gateway_dir)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     };
@@ -250,6 +253,7 @@ fn startup_reaper_clears_orphans_but_keeps_active() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
     let store = GatewayStore::open(&gateway_dir)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     };

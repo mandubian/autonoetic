@@ -58,6 +58,7 @@ fn no_plan_frame_manifest() -> AgentManifest {
 fn make_config(dir: &std::path::Path) -> GatewayConfig {
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config
 }
 
@@ -1724,6 +1725,7 @@ fn promote_test_skill(
     // so hand it the parent of the gateway dir these tests actually opened.
     let mut config = GatewayConfig::default();
     config.agents_dir = gateway_dir.parent().unwrap().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     crate::support::seed_agent_revision(store, &config, agent_id, &agents_dir.join(agent_id))
         .unwrap();
 }
@@ -1789,6 +1791,7 @@ fn planframe_propose_surfaces_capability_preflight_warnings_for_uncovered_steps(
 
     let mut config = make_config(&agents_dir);
     config.agents_dir = agents_dir.clone();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let registry = default_registry();
     let manifest = plan_frame_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -1892,6 +1895,7 @@ fn planframe_propose_preflight_clean_when_all_capabilities_covered() {
 
     let mut config = make_config(&agents_dir);
     config.agents_dir = agents_dir.clone();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let registry = default_registry();
     let manifest = plan_frame_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());

@@ -169,7 +169,7 @@ multi-file drafts you'll want a real editor. Press **`O`** (from the content tre
 or a draft) to **project the session's current drafts to a real folder** and open
 it:
 
-- The gateway writes the live drafts to `…/.gateway/sessions/<id>/live/` — a
+- The gateway writes the live drafts to `…/runtime/sessions/<id>/live/` — a
   **read-only snapshot**, rebuilt each time you press `O` so it reflects the
   current versions (renamed/deleted drafts drop out).
 - The room then best-effort launches a GUI editor (`$VISUAL`, else `code` /

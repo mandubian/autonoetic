@@ -38,7 +38,7 @@ If the request is not workflow-bound:
 
 ## Storage Model
 
-All approval state is stored in `.gateway/gateway.db`:
+All approval state is stored in `runtime/gateway.db`:
 
 - `approvals`: request metadata + decision status (`pending`/`approved`/`rejected`)
 - `notifications`: durable queued notifications for non-workflow delivery

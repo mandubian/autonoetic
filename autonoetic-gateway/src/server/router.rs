@@ -43,7 +43,12 @@ impl MessageRouter {
             shared_secret,
             federation_constitution,
             gateway_store: None,
-            gateway_dir: PathBuf::from(".gateway"),
+            // Overwritten by `with_gateway_dir` at every real construction
+            // site. Kept as an obviously-invalid sentinel rather than a
+            // plausible relative path: `".gateway"` resolved against whatever
+            // CWD the process happened to have, so a missed `with_gateway_dir`
+            // silently opened a *different* gateway dir instead of failing.
+            gateway_dir: PathBuf::from("/nonexistent/gateway-dir-not-configured"),
         }
     }
 

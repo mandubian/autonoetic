@@ -338,6 +338,7 @@ mod tests {
 
     fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: temp.path().to_path_buf().join(".gateway"),
             agents_dir: temp.path().to_path_buf(),
             ..Default::default()
         }

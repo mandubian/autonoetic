@@ -1,0 +1,4 @@
+# Test artifacts: CLI e2e/unit tests bootstrap reference bundles and gateway
+# state into the crate dir when they run with a default/relative config.
+agents/
+runtime/

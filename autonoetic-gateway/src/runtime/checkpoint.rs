@@ -391,9 +391,9 @@ struct SignedCheckpoint {
 // Storage helpers
 // ---------------------------------------------------------------------------
 
-/// Root directory for checkpoint files: `.gateway/checkpoints/`.
+/// Root directory for checkpoint files: `<runtime_dir>/checkpoints/`.
 pub fn checkpoints_dir(config: &GatewayConfig) -> PathBuf {
-    config.agents_dir.join(".gateway").join("checkpoints")
+    crate::execution::gateway_root_dir(&config).join("checkpoints")
 }
 
 /// Canonical turn-id string for a turn number. This is the single source of
@@ -1023,7 +1023,7 @@ impl SessionFork {
         new_session_id: Option<&str>,
         branch_message: Option<&str>,
     ) -> anyhow::Result<Self> {
-        let gw_dir = config.agents_dir.join(".gateway");
+        let gw_dir = crate::execution::gateway_root_dir(&config);
         let store = crate::runtime::content_store::ContentStore::new(&gw_dir)?;
 
         let new_session_id = new_session_id
@@ -1095,6 +1095,7 @@ mod tests {
 
     fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: temp.path().to_path_buf().join(".gateway"),
             agents_dir: temp.path().to_path_buf(),
             ..Default::default()
         }

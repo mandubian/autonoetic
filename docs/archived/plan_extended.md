@@ -48,7 +48,7 @@ These features were implemented after the simplification plan was written. They 
 | **Deterministic execution** | `execution_mode: script` agents bypass LLM lifecycle entirely. Gateway runs script directly in sandbox. Ultimate "dumb pipe" for procedural agents. | `autonoetic-types/src/agent.rs` (`ExecutionMode`), `autonoetic-gateway/src/execution.rs` |
 | **Pre-install discovery** | `agent_exists` and `agent_discover` tools for reuse-first behavior. Complements simplification by reducing unnecessary installs. | `autonoetic-gateway/src/runtime/tools.rs` |
 | **Agent-adapter.default** | Schema-driven wrapper generation via `middleware` (`pre_process`/`post_process`). Replaces overlay-based adaptation. | `autonoetic/agents/evolution/agent-adapter.default/` |
-| **Session observability** | `trace session rebuild` / `trace session follow` with session index manifest. Gateway primitive for unified timeline reconstruction. | CLI `trace.rs`, gateway session index at `.gateway/sessions/<id>/index.json` |
+| **Session observability** | `trace session rebuild` / `trace session follow` with session index manifest. Gateway primitive for unified timeline reconstruction. | CLI `trace.rs`, gateway session index at `runtime/sessions/<id>/index.json` |
 | **Causal chain rotation** | Log segmentation by date/size with hash-chain continuity across segments. Retention/compression policy. | `autonoetic-gateway/src/causal_chain/rotation.rs` |
 
 ### New primitives inspired by external systems (Hermes-Agent comparison)
@@ -366,7 +366,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 
 - **File**: `autonoetic-gateway/src/runtime/tools.rs`
 - **Action**: Add two new native tools:
-  - `skill.store.publish(name, description, script, metadata?)` — stores a skill bundle in `agents/.gateway/skills/<name>/` with status `pending_approval`. Returns the skill ID.
+  - `skill.store.publish(name, description, script, metadata?)` — stores a skill bundle in `runtime/skills/<name>/` with status `pending_approval`. Returns the skill ID.
   - `skill.store.approve(skill_id, approved, reason?)` — updates skill status to `approved` or `rejected`.
   - `skill.store.list()` — returns all approved skills with name + description
   - `skill.store.describe(name)` — returns full skill documentation (already exists as `skill.describe` or similar)
@@ -701,7 +701,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
   - `trajectory.record(step)` — records a learning step (state, action, reward, next_state) to the session's trajectory log. Lightweight; stored as JSONL alongside causal chain.
   - `trajectory.export(session_id, format?)` — exports the full trajectory for a session. Formats: `jsonl` (default), `csv`, `openai_chat` (for fine-tuning).
   - `trajectory.list(agent_id?, limit?)` — lists available trajectory files.
-- **Storage**: `.gateway/trajectories/<session_id>.jsonl`
+- **Storage**: `runtime/trajectories/<session_id>.jsonl`
 - **Capability**: `TrajectoryExport` in `autonoetic-types/src/capability.rs`
 
 **12.2 Add learning hook registration (SKILL.md)**

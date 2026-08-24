@@ -99,6 +99,7 @@ fn agent_list_with_active_wake_hint_returns_blocking_error() {
 
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.path().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let config_arc = Arc::new(config);
 
     let result = registry
@@ -141,6 +142,7 @@ async fn wake_hint_registration_and_active_lookup() {
     let dir = tempdir().unwrap();
     let mut config = autonoetic_types::config::GatewayConfig::default();
     config.agents_dir = dir.path().to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     let store = std::sync::Arc::new(
         GatewayStore::open(&dir.path().join(".gateway")).unwrap(),
     );

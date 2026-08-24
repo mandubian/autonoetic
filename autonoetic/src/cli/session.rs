@@ -339,7 +339,7 @@ fn handle_export(
             "session_id": session_id,
             "exported_at": export.export_generated_at,
             "archive_format_version": "2",
-            "gateway_dir": config.agents_dir.join(".gateway").display().to_string(),
+            "gateway_dir": autonoetic_gateway::execution::gateway_root_dir(&config).display().to_string(),
             "constitution_lock": read_constitution_lock(config),
             "files": [
                 serde_json::json!({ "kind": "json", "path": json_path.file_name().and_then(|n| n.to_str()).unwrap_or("") }),
@@ -413,7 +413,7 @@ struct ConstitutionLockInfo {
 fn read_constitution_lock(
     config: &autonoetic_types::config::GatewayConfig,
 ) -> ConstitutionLockInfo {
-    let active_path = config.agents_dir.join(".gateway").join("constitution").join("ACTIVE.json");
+    let active_path = autonoetic_gateway::execution::gateway_root_dir(&config).join("constitution").join("ACTIVE.json");
     let text = match std::fs::read_to_string(&active_path) {
         Ok(t) => t,
         Err(_) => {

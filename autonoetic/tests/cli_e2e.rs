@@ -178,6 +178,17 @@ fn wait_for_port(addr: SocketAddr, timeout: Duration) {
     }
 }
 
+/// Where `write_config` puts the gateway's runtime dir: a sibling of
+/// `agents_dir`, matching the real layout. Tests that open the store directly
+/// must use this, not `agents_dir.join(".gateway")` — the CLI reads
+/// `config.runtime_dir` and would otherwise be talking to a different store.
+fn test_gateway_dir(agents_dir: &Path) -> std::path::PathBuf {
+    agents_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("runtime")
+}
+
 fn write_config(
     config_path: &Path,
     agents_dir: &Path,
@@ -185,8 +196,12 @@ fn write_config(
     ofp_port: u16,
     max_pending_spawns_per_agent: usize,
 ) {
+    // Declared explicitly rather than left to the default: these tests open the
+    // store directly and must agree with the CLI about where it is. See
+    // `test_gateway_dir` for the matching accessor.
     let yaml = format!(
         "agents_dir: \"{}\"\n\
+         runtime_dir: \"{}\"\n\
          port: {}\n\
          ofp_port: {}\n\
          http_port: 0\n\
@@ -202,6 +217,7 @@ fn write_config(
              model: \"test-model\"\n    \
              temperature: 0.2\n",
         agents_dir.display(),
+        test_gateway_dir(agents_dir).display(),
         port,
         ofp_port,
         max_pending_spawns_per_agent
@@ -778,7 +794,7 @@ fn test_terminal_chat_routes_through_gateway_ingress_and_preserves_session() {
 
     // Content is now stored in the content-addressable store, not in state/ directory
     // Check that the content was stored in the gateway's content store
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let content_store_dir = gateway_dir.join("content");
     assert!(
         content_store_dir.exists(),
@@ -797,10 +813,7 @@ fn test_terminal_chat_routes_through_gateway_ingress_and_preserves_session() {
     );
 
     let gateway_log = std::fs::read_to_string(
-        agents_dir
-            .join(".gateway")
-            .join("history")
-            .join("causal_chain.jsonl"),
+        gateway_dir.join("history").join("causal_chain.jsonl"),
     )
     .expect("gateway causal log should exist");
     assert!(gateway_log.contains(session_id));
@@ -1135,7 +1148,7 @@ fn trace_digest_prints_post_session_narrative() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4011, 4211, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let cs =
         autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir).expect("store");
     let root = "cli-trace-digest-root";
@@ -1182,7 +1195,7 @@ fn gateway_pending_lists_unified_queue() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4013, 4213, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
         .expect("store opens");
 
@@ -1282,7 +1295,7 @@ fn agent_revision_list_filters_by_status_and_reports_truncation() {
     let config_path = temp.path().join("config.yaml");
     write_config(&config_path, &agents_dir, 4017, 4217, 4);
 
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
         .expect("store opens");
 
@@ -1463,7 +1476,7 @@ fn test_egress_declassify_intake_file_then_approve() {
     // The pending request shows up in the unified pending view (served over
     // JSON-RPC since #1119 — spawn a gateway on this port over the store the
     // CLI just wrote).
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = test_gateway_dir(&agents_dir);
     let store = Arc::new(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
             .expect("store opens"),

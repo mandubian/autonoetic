@@ -163,6 +163,7 @@ fn setup() -> Fixture {
         build_intent_only_artifact(temp.path(), AGENT_ID, &high_risk_skill_md(AGENT_ID));
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         require_operator_approval_for_new_agents: false,
         ..Default::default()

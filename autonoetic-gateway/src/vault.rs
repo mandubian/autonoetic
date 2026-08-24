@@ -189,18 +189,22 @@ impl Default for Vault {
 
 /// Auto-generate and persist a vault encryption key if none is configured.
 ///
-/// Writes a random 32-byte hex key to `{agents_dir}/.gateway/vault.key` and sets
+/// Writes a random 32-byte hex key to `{gateway_dir}/vault.key` and sets
 /// `AUTONOETIC_VAULT_KEY_PATH` in the process environment so subsequent vault
 /// operations pick it up without further configuration.
 ///
 /// Returns immediately (no-op) if `AUTONOETIC_VAULT_KEY` or
 /// `AUTONOETIC_VAULT_KEY_PATH` is already set.
-pub fn ensure_default_key(agents_dir: &Path) -> anyhow::Result<()> {
+///
+/// Takes the gateway dir directly. It used to take `agents_dir` and append
+/// `.gateway` itself, which forced callers holding a gateway dir to hop *up*
+/// one level so this function could hop back down — two cancelling derivations
+/// that only agreed while the gateway dir was literally `<agents_dir>/.gateway`.
+pub fn ensure_default_key(gateway_dir: &Path) -> anyhow::Result<()> {
     if std::env::var(VAULT_KEY_ENV).is_ok() || std::env::var(VAULT_KEY_PATH_ENV).is_ok() {
         return Ok(());
     }
-    let gateway_dir = agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
+    std::fs::create_dir_all(gateway_dir)?;
     let key_path = gateway_dir.join("vault.key");
     if !key_path.exists() {
         let mut key_bytes = [0u8; 32];
@@ -219,8 +223,8 @@ pub fn ensure_default_key(agents_dir: &Path) -> anyhow::Result<()> {
 /// Unlike [`ensure_default_key`], this function is read-only and has no side effects.
 ///
 /// Checks in order: `AUTONOETIC_VAULT_KEY` env var, `AUTONOETIC_VAULT_KEY_PATH` env var,
-/// then the auto-generated default at `{agents_dir}/.gateway/vault.key`.
-pub fn probe_master_key(agents_dir: &Path) -> KeyProbeResult {
+/// then the auto-generated default at `{gateway_dir}/vault.key`.
+pub fn probe_master_key(gateway_dir: &Path) -> KeyProbeResult {
     if let Ok(key_hex) = std::env::var(VAULT_KEY_ENV) {
         if hex_to_key(&key_hex).is_some() {
             return KeyProbeResult::Present {
@@ -262,7 +266,7 @@ pub fn probe_master_key(agents_dir: &Path) -> KeyProbeResult {
             }
         }
     }
-    let default_key_path = agents_dir.join(".gateway").join("vault.key");
+    let default_key_path = gateway_dir.join("vault.key");
     if default_key_path.exists() {
         match std::fs::read_to_string(&default_key_path) {
             Ok(key_hex) if hex_to_key(key_hex.trim()).is_some() => {
@@ -309,9 +313,12 @@ impl KeyProbeResult {
     }
 }
 
-/// Return the default vault file path: `{agents_dir}/.gateway/vault.enc.json`.
-pub fn default_vault_path(agents_dir: &Path) -> PathBuf {
-    agents_dir.join(".gateway").join("vault.enc.json")
+/// Return the default vault file path: `{gateway_dir}/vault.enc.json`.
+///
+/// Takes the gateway dir directly; see [`ensure_default_key`] for why it no
+/// longer appends `.gateway` itself.
+pub fn default_vault_path(gateway_dir: &Path) -> PathBuf {
+    gateway_dir.join("vault.enc.json")
 }
 
 #[cfg(test)]

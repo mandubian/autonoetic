@@ -150,6 +150,7 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         ..GatewayConfig::default()
@@ -198,6 +199,7 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         ..GatewayConfig::default()
@@ -278,6 +280,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         ..GatewayConfig::default()

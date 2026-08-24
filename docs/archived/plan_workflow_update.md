@@ -24,15 +24,15 @@ This plan addresses the fragility discovered during the code review and aligns w
 
 ### What moves to SQLite
 
-A single `gateway.db` file at `.gateway/gateway.db` replaces:
+A single `gateway.db` file at `runtime/gateway.db` replaces:
 
 | Current file-based system | SQLite table |
 |--------------------------|-------------|
-| `.gateway/scheduler/approvals/pending/*.json` | `approvals` table |
-| `.gateway/scheduler/approvals/approved/*.json` | `approvals` table (status column) |
-| `.gateway/scheduler/approvals/rejected/*.json` | `approvals` table (status column) |
-| `.gateway/signal/{session_id}/*.json` | `notifications` table |
-| `.gateway/signal/{session_id}/*.delivered` | `notifications` table (status column) |
+| `runtime/scheduler/approvals/pending/*.json` | `approvals` table |
+| `runtime/scheduler/approvals/approved/*.json` | `approvals` table (status column) |
+| `runtime/scheduler/approvals/rejected/*.json` | `approvals` table (status column) |
+| `runtime/signal/{session_id}/*.json` | `notifications` table |
+| `runtime/signal/{session_id}/*.delivered` | `notifications` table (status column) |
 | `runs/{wf_id}/events.jsonl` | `workflow_events` table |
 
 ### What stays as files
@@ -41,7 +41,7 @@ A single `gateway.db` file at `.gateway/gateway.db` replaces:
 - `runs/{wf_id}/tasks/*.json` — per-task state, isolated access
 - `runs/{wf_id}/checkpoints/` — per-workflow/task checkpoints
 - `runs/{wf_id}/queue/*.json` — queued task records (could migrate later)
-- `.gateway/scheduler/approvals/pending/*_payload.json` — large install payloads (blob, not queried)
+- `runtime/scheduler/approvals/pending/*_payload.json` — large install payloads (blob, not queried)
 
 ---
 
@@ -631,7 +631,7 @@ After implementing W1–W4:
 5. **Verify**: Chat displays the approval resolution notification (no duplicate)
 6. **Verify**: Agent is installed (`agents/` directory)
 7. **Verify**: `autonoetic trace graph` shows correct task status transitions
-    8. **Verify**: `.gateway/gateway.db` exists and contains the approval/notification records (can check with `sqlite3 .gateway/gateway.db "SELECT * FROM approvals;"`)
+    8. **Verify**: `runtime/gateway.db` exists and contains the approval/notification records (can check with `sqlite3 runtime/gateway.db "SELECT * FROM approvals;"`)
 
 ---
 

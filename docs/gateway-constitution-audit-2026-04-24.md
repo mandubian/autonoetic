@@ -154,7 +154,7 @@ of three independent conditions (`runtime/guard.rs:66`).
 
 ### 8. Audit & Traceability
 
-Hash-chained JSONL in `.gateway/history/causal_chain.jsonl`
+Hash-chained JSONL in `runtime/history/causal_chain.jsonl`
 (`causal_chain.rs:65`), mirrored to SQLite (`causal_events` table),
 execution traces separately (`execution_traces` table). Runtime lock
 includes source and binary SHA (`runtime_lock.rs`, `build.rs`).

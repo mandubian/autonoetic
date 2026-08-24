@@ -1421,7 +1421,7 @@ fn hydrate_session_history(
     config: &autonoetic_types::config::GatewayConfig,
     session_id: &str,
 ) -> anyhow::Result<usize> {
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
     let handle = match store.resolve_name_with_root(session_id, "session_history") {
         Ok(handle) => handle,

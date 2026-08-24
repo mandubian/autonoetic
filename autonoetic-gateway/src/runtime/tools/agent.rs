@@ -277,6 +277,7 @@ the single join already does that."
             // contract the child will execute against.
             let target_agent_path = spawn_target_skill_path(
                 agents_dir,
+                &crate::execution::gateway_root_dir(config.expect("checked above")),
                 &args.agent_id,
                 args.revision_id.as_deref(),
             )
@@ -384,11 +385,11 @@ the single join already does that."
             .map(|c| &c.agents_dir)
             .ok_or_else(|| anyhow::anyhow!("config is required for agent.spawn"))?;
 
-        let fallback_gateway_config = GatewayConfig {
-            agents_dir: agents_dir.clone(),
-            ..GatewayConfig::default()
-        };
-        let gw_config = config.unwrap_or(&fallback_gateway_config);
+        // `config` is proven `Some` by the `ok_or_else` above. The old code
+        // built a fallback `GatewayConfig` here anyway, deriving its paths from
+        // `agents_dir` — unreachable, and unspellable now that the gateway dir
+        // is a configured field rather than a derivable suffix.
+        let gw_config = config.expect("config presence checked above");
 
         let root_for_approval_check =
             crate::runtime::content_store::root_session_id(&resolved_session_id);
@@ -566,8 +567,17 @@ the single join already does that."
         // travels in every spawn result so the session room can mark the spawn
         // row with the bundle's own output restriction. None ⇒ the bundle is
         // unrestricted or its manifest couldn't be read.
-        let target_output_label =
-            resolve_target_output_label(agents_dir, &target_agent_id, args.revision_id.as_deref());
+        // A missing gateway_dir means the revision store is unreachable, so a
+        // revision-pinned spawn has no manifest to read. The floor is advisory,
+        // so degrade to "unrestricted" rather than deriving a path.
+        let target_output_label = gateway_dir.and_then(|gw| {
+            resolve_target_output_label(
+                agents_dir,
+                gw,
+                &target_agent_id,
+                args.revision_id.as_deref(),
+            )
+        });
 
         let durable_operation = crate::scheduler::single_flight::durable_operation_for_spawn(
             &workflow_id,
@@ -690,12 +700,14 @@ the single join already does that."
             .map_err(Into::into);
         }
 
-        let execution_config = GatewayConfig {
-            agents_dir: agents_dir.to_path_buf(),
-            ..GatewayConfig::default()
-        };
-        let execution =
-            crate::execution::GatewayExecutionService::new(execution_config, gateway_store.clone());
+        // Run on the operator's actual config. This used to fabricate one from
+        // `agents_dir`, which silently gave the spawned execution a different
+        // gateway dir (and so a different store, vault and revision root) than
+        // the engine that created it.
+        let execution = crate::execution::GatewayExecutionService::new(
+            gw_config.clone(),
+            gateway_store.clone(),
+        );
 
         let kickoff_message = match (&args.context, &args.metadata) {
             (Some(ctx), Some(meta)) => {
@@ -1792,6 +1804,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// helper touches the filesystem directly and must fail closed.
 pub(crate) fn spawn_target_skill_path(
     agents_dir: &std::path::Path,
+    gateway_dir: &std::path::Path,
     agent_id: &str,
     revision_id: Option<&str>,
 ) -> Option<std::path::PathBuf> {
@@ -1803,10 +1816,7 @@ pub(crate) fn spawn_target_skill_path(
                 && !rev_id.contains('/')
                 && !rev_id.contains('\\') =>
         {
-            Some(
-                crate::agent::agent_revision_dir(&agents_dir.join(".gateway"), agent_id, rev_id)
-                    .join("SKILL.md"),
-            )
+            Some(crate::agent::agent_revision_dir(gateway_dir, agent_id, rev_id).join("SKILL.md"))
         }
         Some(_) => None,
         None => Some(agents_dir.join(agent_id).join("SKILL.md")),
@@ -1823,10 +1833,11 @@ pub(crate) fn spawn_target_skill_path(
 /// rather than erroring.
 pub(crate) fn resolve_target_output_label(
     agents_dir: &std::path::Path,
+    gateway_dir: &std::path::Path,
     agent_id: &str,
     revision_id: Option<&str>,
 ) -> Option<autonoetic_types::egress::NamedEgressLabel> {
-    let path = spawn_target_skill_path(agents_dir, agent_id, revision_id)?;
+    let path = spawn_target_skill_path(agents_dir, gateway_dir, agent_id, revision_id)?;
     let content = std::fs::read_to_string(&path).ok()?;
     let (manifest, _body) = crate::runtime::parser::SkillParser::parse(&content).ok()?;
     manifest.egress.and_then(|e| e.output_label)
@@ -2119,6 +2130,7 @@ mod spawn_schema_tests {
     fn skill_path_for_alias_spawn_reads_live_agent_dir() {
         let path = spawn_target_skill_path(
             std::path::Path::new("/data/agents"),
+            std::path::Path::new("/data/runtime"),
             "weather-forecast",
             None,
         )
@@ -2133,14 +2145,17 @@ mod spawn_schema_tests {
     fn skill_path_for_revision_spawn_reads_pinned_revision_dir() {
         let path = spawn_target_skill_path(
             std::path::Path::new("/data/agents"),
+            std::path::Path::new("/data/runtime"),
             "weather-forecast",
             Some("rev_sha256:abc123"),
         )
         .expect("revision spawn path");
+        // Resolved under the configured runtime dir, not under `agents_dir` —
+        // the two are siblings and neither is derived from the other.
         assert_eq!(
             path,
             std::path::Path::new(
-                "/data/agents/.gateway/revisions/agents/weather-forecast/rev_sha256:abc123/SKILL.md"
+                "/data/runtime/revisions/agents/weather-forecast/rev_sha256:abc123/SKILL.md"
             )
         );
     }
@@ -2149,15 +2164,25 @@ mod spawn_schema_tests {
     fn skill_path_rejects_revision_id_path_traversal() {
         for evil in ["..", ".", "../escape", "rev/../../escape", "/abs/path", "rev\\..\\win"] {
             assert!(
-                spawn_target_skill_path(std::path::Path::new("/data/agents"), "a", Some(evil))
-                    .is_none(),
+                spawn_target_skill_path(
+                    std::path::Path::new("/data/agents"),
+                    std::path::Path::new("/data/runtime"),
+                    "a",
+                    Some(evil)
+                )
+                .is_none(),
                 "revision_id {evil:?} must be rejected"
             );
         }
         // `..` as a substring of an ordinary single component is not traversal.
         assert!(
-            spawn_target_skill_path(std::path::Path::new("/data/agents"), "a", Some("rev_.._x"))
-                .is_some()
+            spawn_target_skill_path(
+                std::path::Path::new("/data/agents"),
+                std::path::Path::new("/data/runtime"),
+                "a",
+                Some("rev_.._x")
+            )
+            .is_some()
         );
     }
 
@@ -2165,6 +2190,7 @@ mod spawn_schema_tests {
     fn resolve_target_output_label_reads_the_declared_floor() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let agents_dir = tmp.path();
+        let gateway_dir = tmp.path().join("runtime");
         let agent_dir = agents_dir.join("email.reader");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
@@ -2194,7 +2220,7 @@ metadata:
         )
         .unwrap();
         assert_eq!(
-            resolve_target_output_label(agents_dir, "email.reader", None),
+            resolve_target_output_label(agents_dir, &gateway_dir, "email.reader", None),
             Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
             "the declared local_only floor resolves for the spawn-row marker (#971)"
         );
@@ -2204,9 +2230,10 @@ metadata:
     fn resolve_target_output_label_none_when_no_floor_or_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let agents_dir = tmp.path();
+        let gateway_dir = tmp.path().join("runtime");
         // No SKILL.md at all ⇒ None (advisory legibility, not an error).
         assert_eq!(
-            resolve_target_output_label(agents_dir, "ghost.agent", None),
+            resolve_target_output_label(agents_dir, &gateway_dir, "ghost.agent", None),
             None
         );
         let agent_dir = agents_dir.join("plain.agent");
@@ -2227,7 +2254,7 @@ metadata:
         )
         .unwrap();
         assert_eq!(
-            resolve_target_output_label(agents_dir, "plain.agent", None),
+            resolve_target_output_label(agents_dir, &gateway_dir, "plain.agent", None),
             None,
             "a bundle declaring no floor is unrestricted ⇒ None"
         );

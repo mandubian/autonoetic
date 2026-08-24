@@ -4005,6 +4005,7 @@ mod tests {
 
     fn test_config(agents_dir: &Path) -> GatewayConfig {
         GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         }

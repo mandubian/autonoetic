@@ -300,7 +300,7 @@ autonoetic gateway approvals approve <request_id>
 ```
 .autonoetic/
 ├── gateway.toml                    # Gateway configuration
-├── .gateway/
+├── runtime/
 │   ├── content/sha256/ab/...       # Content-addressable store
 │   ├── sessions/<session_id>/
 │   │   ├── manifest.json           # Name → handle mappings

@@ -106,6 +106,7 @@ async fn test_promotion_evaluator_fail_rejected() {
     );
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -246,6 +247,7 @@ async fn test_promotion_auditor_fail_rejected() {
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -404,6 +406,7 @@ fn test_promotion_record_rejects_agent_supplied_content_digest() {
     std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

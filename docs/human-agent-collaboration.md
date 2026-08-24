@@ -440,7 +440,7 @@ Design: `docs/design/operator-activity-feed-plan.md`.
 A projected workbench creates this structure:
 
 ```
-.gateway/
+runtime/
   workbenches/
     <workbench_id>/
       .autonoetic/

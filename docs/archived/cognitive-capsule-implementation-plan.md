@@ -143,7 +143,7 @@ Wired into `autonoetic-gateway/src/lib.rs` (`pub mod capsule;`).
 6. Walk `agent/` and dedup blobs into `ContentStore`; track
    `dedup_savings_bytes`.
 7. Materialise the revision directory at
-   `.gateway/revisions/agents/<agent>/<rev>/`.
+   `runtime/revisions/agents/<agent>/<rev>/`.
 8. Insert `AgentRevisionRecord` with `source_kind = "capsule_import"` and
    `source_ref = capsule_id`.
 9. If `--activate`: upsert the agent alias to point at the new revision.
@@ -280,7 +280,7 @@ Both `#[serde(default)]`, so older capsules still parse.
   `SessionCheckpoint` via `load_latest_checkpoint`, writing it to
   `checkpoint/checkpoint.json` and setting `checkpoint_handle`.
 - Import deserialises the checkpoint and calls `save_checkpoint`, laying
-  the file into the receiver's `.gateway/checkpoints/<session>/` tree.
+  the file into the receiver's `runtime/checkpoints/<session>/` tree.
   The scheduler's existing resume path picks it up on the next tick;
   no new JSON-RPC verb is needed.
 

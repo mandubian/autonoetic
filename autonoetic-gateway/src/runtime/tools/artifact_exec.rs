@@ -1013,9 +1013,8 @@ impl NativeTool for ArtifactExecTool {
 
         if let Some(credential_mappings) = &args.credential_env {
             if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {
-                let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
-                crate::vault::ensure_default_key(vault_dir)?;
-                let vault_path = crate::vault::default_vault_path(vault_dir);
+                crate::vault::ensure_default_key(gw_dir)?;
+                let vault_path = crate::vault::default_vault_path(gw_dir);
                 let vault = match crate::vault::Vault::load_from_file(&vault_path) {
                     Ok(v) => v,
                     Err(e) => {
@@ -1084,6 +1083,7 @@ impl NativeTool for ArtifactExecTool {
         let runner = SandboxRunner::spawn_with_session_content_and_env(
             driver,
             agent_dir_str,
+            gw_dir,
             &exec_kind,
             None,
             mounts,
@@ -1411,9 +1411,8 @@ fn execute_with_ticket(
         let store = gateway_store.as_ref().ok_or_else(|| {
             anyhow::anyhow!("deployment_ticket with credentials requires GatewayStore")
         })?;
-        let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
-        crate::vault::ensure_default_key(vault_dir)?;
-        let vault_path = crate::vault::default_vault_path(vault_dir);
+        crate::vault::ensure_default_key(gw_dir)?;
+        let vault_path = crate::vault::default_vault_path(gw_dir);
         let vault = crate::vault::Vault::load_from_file(&vault_path)?;
         for mapping in &ticket.credential_env {
             crate::runtime::tools::ensure_safe_credential_id_reference(&mapping.credential_id)?;
@@ -1460,6 +1459,7 @@ fn execute_with_ticket(
     let runner = SandboxRunner::spawn_with_session_content_and_env(
         driver,
         agent_dir_str,
+        gw_dir,
         &exec_kind,
         None,
         mounts,

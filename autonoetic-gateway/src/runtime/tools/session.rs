@@ -99,19 +99,18 @@ impl NativeTool for SessionEscalateTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
+        // Without a config there is no store to resolve against, so this
+        // degrades to "unknown" exactly as a failed lookup does. It used to
+        // fabricate a config from `agent_dir.parent()` instead — which is the
+        // revision store, not the agents root, so the lookup was against the
+        // wrong gateway dir rather than skipped.
         let workflow_id = session_id
-            .map(|sid| {
+            .zip(config)
+            .and_then(|(sid, gw_config)| {
                 let root = crate::runtime::content_store::root_session_id(sid);
-                let agents_dir = agent_dir.parent().unwrap_or(agent_dir);
-                let fallback_config = GatewayConfig {
-                    agents_dir: agents_dir.to_path_buf(),
-                    ..GatewayConfig::default()
-                };
-                let gw_config = config.unwrap_or(&fallback_config);
                 crate::scheduler::resolve_workflow_id_for_root_session(gw_config, &root)
                     .ok()
                     .flatten()
-                    .unwrap_or_else(|| "unknown".to_string())
             })
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -168,11 +167,14 @@ impl NativeTool for SessionEscalateTool {
                     payload: None,
                     kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
                 };
-                let fallback_config = GatewayConfig {
-                    agents_dir: agent_dir.parent().unwrap_or(agent_dir).to_path_buf(),
-                    ..GatewayConfig::default()
+                // Same reasoning as the workflow lookup above, but this arm
+                // feeds an approval request, so a wrong gateway dir would file
+                // the escalation against the wrong store. Fail loudly instead.
+                let Some(gw_config) = config else {
+                    return Err(anyhow::anyhow!(
+                        "config is required for human escalation approval"
+                    ));
                 };
-                let gw_config = config.unwrap_or(&fallback_config);
                 let wf_id = crate::scheduler::resolve_workflow_id_for_root_session(
                     gw_config,
                     &root_session_id,

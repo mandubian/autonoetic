@@ -24,7 +24,7 @@ use std::path::Path;
 ///
 /// Returns `true` if this invocation created a new key file.
 pub fn ensure_vault_key_for_bootstrap_workspace(config: &GatewayConfig) -> Result<bool> {
-    let key_path = config.agents_dir.join(".gateway").join("vault.key");
+    let key_path = crate::execution::gateway_root_dir(&config).join("vault.key");
     let had_file_before = key_path.exists();
     if std::env::var("AUTONOETIC_VAULT_KEY").is_ok()
         || std::env::var("AUTONOETIC_VAULT_KEY_PATH").is_ok()
@@ -562,9 +562,13 @@ pub fn bootstrap_constitution_snapshot(config: &GatewayConfig, gateway_dir: &Pat
 
     let version = crate::constitution_digest::constitution_version().to_string();
     let digest = crate::constitution_digest::constitution_digest().to_string();
-    let source_rel = format!(".gateway/constitution/versions/{version}/constitution.md");
-    let lock_rel =
-        format!(".gateway/constitution/versions/{version}/gateway-constitution.lock.json");
+    // Relative to the gateway dir — which is where they are written, two lines
+    // down. They used to carry a hardcoded `.gateway/` prefix, i.e. relative to
+    // `agents_dir` on the assumption that the gateway dir was a child of it.
+    // With `runtime_dir` a sibling that prefix names nothing;
+    // `resolve_constitution_paths` searches the runtime dir first.
+    let source_rel = format!("constitution/versions/{version}/constitution.md");
+    let lock_rel = format!("constitution/versions/{version}/gateway-constitution.lock.json");
 
     let constitution_root = gateway_dir.join("constitution");
     let version_dir = constitution_root.join("versions").join(&version);
@@ -1072,6 +1076,7 @@ mod tests {
     fn minimal_config(agents_dir: &std::path::Path) -> autonoetic_types::config::GatewayConfig {
         let mut config = autonoetic_types::config::GatewayConfig::default();
         config.agents_dir = agents_dir.to_path_buf();
+        config.runtime_dir = agents_dir.join(".gateway");
         config
     }
 

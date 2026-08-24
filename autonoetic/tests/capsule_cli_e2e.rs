@@ -89,12 +89,13 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
 fn cli_export_inspect_verify_dryrun_import_roundtrip() {
     let tmp = tmp_dir();
     let agents_dir = tmp.join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = tmp.join("runtime");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let config_path = tmp.join("config.yaml");
     let yaml = format!(
-        "agents_dir: \"{}\"\nllm_presets:\n  default:\n    provider: openai\n    model: gpt-4o\nllm_preset_mapping:\n  default: default\n",
-        agents_dir.display()
+        "agents_dir: \"{}\"\nruntime_dir: \"{}\"\nllm_presets:\n  default:\n    provider: openai\n    model: gpt-4o\nllm_preset_mapping:\n  default: default\n",
+        agents_dir.display(),
+        gateway_dir.display()
     );
     std::fs::write(&config_path, yaml).unwrap();
 
@@ -147,10 +148,14 @@ fn cli_export_inspect_verify_dryrun_import_roundtrip() {
     // Import --dry-run on a fresh gateway dir.
     let other = tmp_dir();
     let other_agents = other.join("agents");
-    let other_gateway = other_agents.join(".gateway");
+    let other_gateway = other.join("runtime");
     std::fs::create_dir_all(&other_gateway).unwrap();
     let other_cfg = other.join("config.yaml");
-    let yaml = format!("agents_dir: \"{}\"\n", other_agents.display());
+    let yaml = format!(
+        "agents_dir: \"{}\"\nruntime_dir: \"{}\"\n",
+        other_agents.display(),
+        other_gateway.display()
+    );
     std::fs::write(&other_cfg, yaml).unwrap();
     let out = run_cli(
         other_cfg.to_str().unwrap(),
@@ -182,10 +187,14 @@ fn cli_verify_exits_nonzero_for_untrusted_signed_capsule() {
     // non-zero so CI/scripts treat verification as failed.
     let tmp = tmp_dir();
     let agents_dir = tmp.join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
+    let gateway_dir = tmp.join("runtime");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let config_path = tmp.join("config.yaml");
-    let yaml = format!("agents_dir: \"{}\"\n", agents_dir.display());
+    let yaml = format!(
+        "agents_dir: \"{}\"\nruntime_dir: \"{}\"\n",
+        agents_dir.display(),
+        gateway_dir.display()
+    );
     std::fs::write(&config_path, yaml).unwrap();
     seed_revision(&gateway_dir, "demo.agent", "rev_sha256:cap-cli-verify-002");
     let archive = tmp.join("demo.signed.capsule.tar.zst");
@@ -208,10 +217,14 @@ fn cli_verify_exits_nonzero_for_untrusted_signed_capsule() {
     // Fresh receiver — no trusted_signers configured.
     let other = tmp_dir();
     let other_agents = other.join("agents");
-    let other_gateway = other_agents.join(".gateway");
+    let other_gateway = other.join("runtime");
     std::fs::create_dir_all(&other_gateway).unwrap();
     let other_cfg = other.join("config.yaml");
-    let yaml = format!("agents_dir: \"{}\"\n", other_agents.display());
+    let yaml = format!(
+        "agents_dir: \"{}\"\nruntime_dir: \"{}\"\n",
+        other_agents.display(),
+        other_gateway.display()
+    );
     std::fs::write(&other_cfg, yaml).unwrap();
 
     let out = run_cli(

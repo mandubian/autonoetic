@@ -625,6 +625,7 @@ async fn test_existing_binding_does_not_contaminate_other_agent_lock() -> anyhow
 
     let execution = GatewayExecutionService::new(
         autonoetic_types::config::GatewayConfig {
+            runtime_dir: workspace.agents_dir.join(".gateway"),
             agents_dir: workspace.agents_dir.clone(),
             max_pending_spawns_per_agent: 1,
             ..Default::default()

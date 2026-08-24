@@ -22,7 +22,7 @@ The gateway enforces whichever source/lock paths are configured in
 - `constitution.lock_path`
 
 At runtime, the gateway also bootstraps a local constitution snapshot under
-`<agents_dir>/.gateway/constitution/` with:
+`<runtime_dir>/constitution/` with:
 
 - `CURRENT`
 - `ACTIVE.json`
@@ -33,9 +33,9 @@ Lock signatures:
 
 - release locks are signed by trusted signer IDs from
   `constitution.trusted_signers` (for example `autonoetic:constitution:v1`),
-- bootstrapped `.gateway` locks are re-signed by the local gateway identity
+- bootstrapped runtime-dir locks are re-signed by the local gateway identity
   (`gateway:<fingerprint>`), and verified against
-  `<agents_dir>/.gateway/state_attestation.ed25519.pub`.
+  `<runtime_dir>/state_attestation.ed25519.pub`.
 
 Precise signature payload and verification rules are specified in:
 

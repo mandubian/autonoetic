@@ -29,6 +29,7 @@ async fn signal_to_terminal_workflow_is_suppressed_and_consumed() -> anyhow::Res
     let port = listener.local_addr()?.port();
 
     let config = Arc::new(GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         port,

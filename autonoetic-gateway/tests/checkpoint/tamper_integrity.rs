@@ -127,6 +127,7 @@ fn hmac_tamper_on_resume_emits_event_and_revokes_approval() -> anyhow::Result<()
     // A pending approval bound to the session, plus a signed checkpoint.
     make_pending_approval(&store, "apr-tamper", session_id)?;
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     };

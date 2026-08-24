@@ -83,6 +83,7 @@ fn fixture(agent_id: &str, revision_id: &str) -> Fixture {
     store.upsert_agent_alias(&alias).unwrap();
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -102,6 +103,7 @@ fn fresh_fixture() -> Fixture {
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

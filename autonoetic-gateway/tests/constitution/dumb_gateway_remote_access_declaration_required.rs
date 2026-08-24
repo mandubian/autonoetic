@@ -33,6 +33,7 @@ fn run_sandbox_exec(manifest: &AgentManifest, command: &str) -> anyhow::Result<s
     let agents_dir = temp.path().join("agents");
     std::fs::create_dir_all(&agents_dir)?;
     let cfg = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         ..GatewayConfig::default()
     };

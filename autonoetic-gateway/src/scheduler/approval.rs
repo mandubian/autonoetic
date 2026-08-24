@@ -2275,6 +2275,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -2387,6 +2388,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -2512,6 +2514,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -2599,6 +2602,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -2848,6 +2852,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -3062,6 +3067,7 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -3151,6 +3157,7 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -3251,6 +3258,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -3309,6 +3317,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -3365,6 +3374,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -3446,6 +3456,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };
@@ -3520,6 +3531,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..Default::default()
         };

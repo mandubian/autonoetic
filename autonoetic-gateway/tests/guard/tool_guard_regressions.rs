@@ -32,6 +32,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     std::fs::create_dir_all(&agents_dir)?;
 
     let cfg = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         ..GatewayConfig::default()
     };

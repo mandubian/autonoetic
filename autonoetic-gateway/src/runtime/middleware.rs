@@ -184,9 +184,16 @@ impl AgentExecutor {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid active_agent_dir"))?;
 
+        let gateway_dir = self.gateway_dir.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "gateway_dir is required to run a middleware script: the sandbox \
+                 secret mask is built from it"
+            )
+        })?;
         let mut runner = SandboxRunner::spawn_with_driver_and_dependencies(
             driver,
             agent_dir_str,
+            gateway_dir,
             command,
             None,
             None,

@@ -39,7 +39,8 @@ drifted from the code and must be updated.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agents_dir` | string (path) | `"./agents"` | **Required.** Directory containing agent subdirectories, each with a `SKILL.md`. Set to absolute path by `init-config`. |
+| `agents_dir` | string (path) | `"./agents"` | **Required.** The **ingest** directory: agent subdirectories, each with a `SKILL.md`. What an operator edits, and what bootstrap reads (and rewrites in place, materializing the `runtime.lock` sha256). Not what executes — see `runtime_dir`. Set to absolute path by `init-config`. |
+| `runtime_dir` | string (path) | `"./runtime"` | Everything the gateway owns: the promoted revision store (`revisions/agents/<id>/<rev>/` — the manifests that actually execute), `gateway.db`, the credential vault, `sessions/`, `artifacts/`, `logs/`. A **sibling** of `agents_dir`, never derived from it: `gateway_root_dir(config)` returns this field verbatim, and no code reconstructs it by walking up from an agent directory. Relative values resolve against the config file's directory, not the process CWD. |
 | `port` | u16 | `4000` | Port for the local JSON-RPC IPC listener (Unix socket on Linux, TCP fallback). |
 | `http_port` | u16 | `4100` | HTTP ingress bind (`0.0.0.0:http_port`) for `/api/*` routes (`event.ingest`, SSE, content API). Set `0` to disable HTTP while keeping localhost JSON-RPC on `port`. |
 | `ofp_port` | u16 | `4200` | Open Fang Protocol federation port for gateway-to-gateway communication. |
@@ -96,7 +97,7 @@ Controls which constitutional release the gateway enforces.
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trust store for constitution lock signatures. Keys are signer IDs, values are base64 Ed25519 public keys (32 bytes). |
 
 On startup (and during `autonoetic agent bootstrap`), the gateway also
-materializes a local immutable snapshot under `<agents_dir>/.gateway/constitution/`:
+materializes a local immutable snapshot under `<runtime_dir>/constitution/`:
 
 - `CURRENT`
 - `ACTIVE.json`
@@ -109,8 +110,8 @@ materializes a local immutable snapshot under `<agents_dir>/.gateway/constitutio
   `docs/constitution/versions/<version>/gateway-constitution.lock.json`
   points to
   `docs/constitution/versions/<version>/constitution.md`
-- bootstrapped runtime lock in `.gateway` points to:
-  `.gateway/constitution/versions/<version>/constitution.md`
+- bootstrapped runtime lock in the runtime dir points to:
+  `runtime/constitution/versions/<version>/constitution.md`
 
 This rewrite is intentional; the gateway verifies each lock against the
 configured path context.
@@ -118,7 +119,7 @@ configured path context.
 Signature trust rules:
 
 - `signer_id` starting with `gateway:` is verified against
-  `<agents_dir>/.gateway/state_attestation.ed25519.pub` and must match
+  `<runtime_dir>/state_attestation.ed25519.pub` and must match
   the signer fingerprint suffix.
 - other `signer_id` values are resolved through
   `constitution.trusted_signers`.
@@ -141,8 +142,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: ".gateway/constitution/versions/2026.07.30/constitution.md"
-  lock_path: ".gateway/constitution/versions/2026.07.30/gateway-constitution.lock.json"
+  source_path: "runtime/constitution/versions/2026.07.30/constitution.md"
+  lock_path: "runtime/constitution/versions/2026.07.30/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="

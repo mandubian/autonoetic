@@ -414,6 +414,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
     let policy = PolicyEngine::new(manifest.clone());
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -590,6 +591,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
     let policy = PolicyEngine::new(manifest.clone());
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -672,6 +674,7 @@ fn test_sandbox_exec_import_plus_url_caches() {
     let policy = PolicyEngine::new(manifest.clone());
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

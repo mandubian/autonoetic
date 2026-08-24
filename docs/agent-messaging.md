@@ -80,7 +80,7 @@ and queues nothing:
 
 Existence is resolved through the **alias registry first**, then the agents
 directory. A promoted revision is installed as an `agent_aliases` row pointing at
-`.gateway/revisions/<rev>` and has no directory under `agents_dir`, so a
+`runtime/revisions/<rev>` and has no directory under `agents_dir`, so a
 filesystem-only lookup reports a fully installed, `agent_inspect`-able agent as
 missing. `agent_message` must answer the existence question the same way
 `agent_list` does.

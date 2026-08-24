@@ -72,6 +72,7 @@ fn test_schema_enforcement_hook_in_place() -> anyhow::Result<()> {
 async fn test_schema_enforcement_hook_in_place_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = GatewayConfig {
+        runtime_dir: workspace.agents_dir.join(".gateway"),
         agents_dir: workspace.agents_dir.clone(),
         ..workspace.gateway_config()
     };
@@ -134,6 +135,7 @@ fn test_schema_enforcement_with_disabled_mode() -> anyhow::Result<()> {
 async fn test_schema_enforcement_with_disabled_mode_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = GatewayConfig {
+        runtime_dir: workspace.agents_dir.join(".gateway"),
         agents_dir: workspace.agents_dir.clone(),
         ..workspace.gateway_config()
     };

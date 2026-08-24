@@ -78,11 +78,14 @@ fn r_plus_8_probe_key_present_via_auto_generated() {
     clear_vault_env();
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     let temp = tempfile::tempdir().unwrap();
-    let gateway_dir = temp.path().join(".gateway");
+    let gateway_dir = temp.path().join("runtime");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     std::fs::write(gateway_dir.join("vault.key"), key_hex).unwrap();
 
-    let result = probe_master_key(temp.path());
+    // `probe_master_key` takes the gateway dir itself. It used to take
+    // `agents_dir` and append `.gateway` internally, which meant every caller
+    // holding a gateway dir had to hop up a level for it to hop back down.
+    let result = probe_master_key(&gateway_dir);
     assert!(result.is_present());
     assert!(matches!(
         result,
@@ -175,7 +178,7 @@ fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
 
-    let result = probe_master_key(tempdir.path());
+    let result = probe_master_key(&gateway_dir);
     store.emit_vault_key_probe_event(&result);
 
     let events = store.search_causal_events(None, None, 50)?;
@@ -206,7 +209,7 @@ fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
 
-    let result = probe_master_key(tempdir.path());
+    let result = probe_master_key(&gateway_dir);
     store.emit_vault_key_probe_event(&result);
 
     let events = store.search_causal_events(None, None, 50)?;
@@ -237,7 +240,7 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
 
-    let result = probe_master_key(tempdir.path());
+    let result = probe_master_key(&gateway_dir);
     store.emit_vault_key_probe_event(&result);
 
     let events = store.search_causal_events(None, None, 50)?;
@@ -277,6 +280,10 @@ async fn r_plus_8_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Res
 
     let mut config = autonoetic_types::config::GatewayConfig::default();
     config.agents_dir = agents_dir.clone();
+    // The server writes its store here; the assertion below opens the same
+    // path. Leaving it defaulted would point the server at `./runtime` relative
+    // to the test process CWD.
+    config.runtime_dir = gateway_dir.clone();
     config.port = 0;
     config.ofp_port = 0;
 

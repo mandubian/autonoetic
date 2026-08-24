@@ -26,6 +26,7 @@ fn setup() -> (tempfile::TempDir, GatewayConfig, Arc<GatewayStore>) {
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

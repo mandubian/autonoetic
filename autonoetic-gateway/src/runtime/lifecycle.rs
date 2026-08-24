@@ -6408,6 +6408,7 @@ mod tests {
             .expect("agent dir should create");
 
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
             agents_dir: agents_dir.clone(),
             ..autonoetic_types::config::GatewayConfig::default()
         };
@@ -6521,6 +6522,7 @@ mod tests {
             .expect("agent dir should create");
 
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
             agents_dir,
             ..autonoetic_types::config::GatewayConfig::default()
         };
@@ -7045,6 +7047,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.max_session_turns = 1;
 
         let mut runtime = AgentExecutor::new(
@@ -7108,6 +7111,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.max_session_turns = 1;
 
         let mut runtime = AgentExecutor::new(
@@ -7178,6 +7182,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.max_session_turns = 1;
         cfg.max_session_turns_hard = Some(1);
 
@@ -7250,6 +7255,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.max_session_turns = 1;
         cfg.max_session_turns_hard = Some(2);
 
@@ -7347,6 +7353,7 @@ mod tests {
 
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.max_session_turns = 1;
         // Raise the system ceiling so the per-agent hard override below is not
         // clamped down — we need a generous hard cap to reach a 2nd window.
@@ -7646,6 +7653,7 @@ mod tests {
         );
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.llm_presets = presets
             .iter()
             .map(|(name, class)| egress_preset(name, *class))
@@ -7838,6 +7846,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let mut cfg = GatewayConfig::default();
         cfg.agents_dir = temp.path().to_path_buf();
+        cfg.runtime_dir = cfg.agents_dir.join(".gateway");
         cfg.llm_presets = [
             egress_preset("remote", EgressClass::Remote),
             egress_preset("local", EgressClass::Local),
@@ -8076,6 +8085,7 @@ mod divergence_robustness_tests {
         std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
 
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
             agents_dir: agents_dir.clone(),
             ..autonoetic_types::config::GatewayConfig::default()
         };
@@ -8169,6 +8179,7 @@ mod divergence_robustness_tests {
         std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
 
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
             agents_dir: agents_dir.clone(),
             ..autonoetic_types::config::GatewayConfig::default()
         };
@@ -8265,6 +8276,7 @@ mod divergence_robustness_tests {
         std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
 
         let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
             agents_dir: agents_dir.clone(),
             ..autonoetic_types::config::GatewayConfig::default()
         };

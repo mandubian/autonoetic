@@ -94,7 +94,7 @@ suspended_at       RFC3339 timestamp used for timeout enforcement
 loop_guard_state   Guard counters restored on resume
 ```
 
-Storage: `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json` (HMAC-signed).
+Storage: `runtime/checkpoints/<session_id>/<turn_id>.checkpoint.json` (HMAC-signed).
 
 ## Execution Semantics
 
@@ -233,7 +233,7 @@ The chat pane shows a compact workflow summary at turn end:
 
 ## Workflow Store
 
-All orchestration state lives under `.gateway/scheduler/workflows/`:
+All orchestration state lives under `runtime/scheduler/workflows/`:
 
 ```
 workflows/
@@ -248,7 +248,7 @@ workflows/
                 └── <task_id>.json  # TaskCheckpoint (latest)
 ```
 
-**Note:** `WorkflowEventRecord` streams are stored in the Gateway's embedded SQLite database (`.gateway/gateway.db`) rather than as `events.jsonl` file appends, ensuring high concurrency and reliability.
+**Note:** `WorkflowEventRecord` streams are stored in the Gateway's embedded SQLite database (`runtime/gateway.db`) rather than as `events.jsonl` file appends, ensuring high concurrency and reliability.
 
 ## Workflow Event Types
 

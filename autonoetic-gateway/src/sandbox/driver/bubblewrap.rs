@@ -27,7 +27,8 @@ const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
 /// #1002: the host `/` is ro-bind-mounted, so without masking a sandboxed
 /// process can read gateway-internal files. The gateway directory's sensitive
 /// contents (vault key, session DB, identity key, sessions/, …) are ALWAYS
-/// masked — derived per-spawn from the agent dir (see [`bwrap_deny_path_flags`]).
+/// masked, using the gateway dir the engine threads in (see
+/// [`bwrap_deny_path_flags`]).
 /// This list is for the operator config file and any other paths the operator
 /// chooses to add. Populated once at startup via
 /// [`crate::sandbox::init_sandbox_host_deny_paths`].
@@ -121,6 +122,7 @@ impl SandboxDriver for BubblewrapDriver {
     fn build_command(&self, spec: &SpawnSpec<'_>) -> anyhow::Result<(String, Vec<String>)> {
         bubblewrap_shell_command(
             spec.agent_dir,
+            spec.gateway_dir,
             spec.entrypoint,
             spec.mounts,
             spec.overrides,
@@ -154,6 +156,7 @@ impl SandboxDriver for BubblewrapDriver {
 /// Direct-exec form: run `entrypoint` split into program + args, without a shell.
 fn bubblewrap_command(
     agent_dir: &str,
+    gateway_dir: &Path,
     entrypoint: &str,
     overrides: Option<&BwrapIsolationOverrides>,
 ) -> anyhow::Result<(String, Vec<String>)> {
@@ -164,7 +167,7 @@ fn bubblewrap_command(
     // the host `/` is ro-bind-mounted above). Must come after the ro-bind of
     // `/` so the destinations resolve, and before any explicit re-expose
     // mounts so they can layer back on top.
-    argv.extend(bwrap_deny_path_flags(agent_dir));
+    argv.extend(bwrap_deny_path_flags(gateway_dir));
     argv.push("--".to_string());
     argv.push(program);
     argv.extend(args);
@@ -174,6 +177,7 @@ fn bubblewrap_command(
 /// Shell form: run `shell_command` under `sh -c`, with extra bind mounts.
 fn bubblewrap_shell_command(
     agent_dir: &str,
+    gateway_dir: &Path,
     shell_command: &str,
     extra_mounts: &[SandboxMount],
     overrides: Option<&BwrapIsolationOverrides>,
@@ -188,7 +192,7 @@ fn bubblewrap_shell_command(
     // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
     // the host `/` is ro-bind-mounted above) BEFORE explicit content/SDK
     // mounts so those can layer back on top of the masked paths when needed.
-    argv.extend(bwrap_deny_path_flags(agent_dir));
+    argv.extend(bwrap_deny_path_flags(gateway_dir));
 
     // Add extra bind mounts for session content
     for mount in extra_mounts {
@@ -368,13 +372,18 @@ const BWRAP_GATEWAY_SENSITIVE_FILES: &[&str] = &[
 /// Sensitive subdirectories inside the gateway directory that a sandboxed
 /// process has no legitimate reason to read directly — the agent reaches all
 /// of these through tools, not the filesystem. Masked with an empty tmpfs.
+/// The revision store's top-level directory name inside the gateway dir. Named
+/// here so the mask assertion below can reference the same constant the mask
+/// itself uses, instead of re-spelling the layout.
+pub(crate) const REVISIONS_DIR_NAME: &str = "revisions";
+
 const BWRAP_GATEWAY_SENSITIVE_DIRS: &[&str] = &[
     "sessions",
     "scheduler",
     "checkpoints",
     "history",
     "logs",
-    "revisions",
+    REVISIONS_DIR_NAME,
 ];
 
 /// Push a bubblewrap flag that shadows a single host FILE with `/dev/null`
@@ -401,24 +410,28 @@ fn push_deny_dir(flags: &mut Vec<String>, p: &Path) {
 
 /// Build the bubblewrap argv slice that masks gateway-internal secrets and any
 /// operator-registered deny paths, so a sandboxed process cannot read them
-/// through the ro-mounted host `/` (stopgap for #1002). The gateway directory
-/// is derived from the agent dir as its sibling `.gateway`; its `sdk/` subtree
-/// is intentionally left accessible (the sandbox reads its PYTHONPATH from that
+/// through the ro-mounted host `/` (stopgap for #1002). Its `sdk/` subtree is
+/// intentionally left accessible (the sandbox reads its PYTHONPATH from that
 /// host path). Operator paths come from
 /// [`crate::sandbox::init_sandbox_host_deny_paths`].
-fn bwrap_deny_path_flags(agent_dir: &str) -> Vec<String> {
+///
+/// `gateway_dir` is the authoritative one the execution engine resolved, passed
+/// down via [`SpawnSpec`]. It used to be derived here as
+/// `agent_dir.parent().join(".gateway")`, which assumed `agent_dir` was an
+/// ingest-dir child. In production it is the *revision* dir
+/// (`<gateway_dir>/revisions/agents/<id>/<rev>/`), so the derivation resolved to
+/// a path that does not exist — and since [`push_deny_file`]/[`push_deny_dir`]
+/// skip non-existent paths, the whole mask silently emitted **zero flags**,
+/// leaving `vault.key`, `vault.enc.json`, `gateway.db`, the Ed25519 identity key
+/// and every session transcript readable from inside the sandbox (#1145).
+fn bwrap_deny_path_flags(gateway_dir: &Path) -> Vec<String> {
     let mut flags = Vec::new();
 
-    if let Some(gateway_dir) = Path::new(agent_dir)
-        .parent()
-        .map(|agents_root| agents_root.join(".gateway"))
-    {
-        for name in BWRAP_GATEWAY_SENSITIVE_FILES {
-            push_deny_file(&mut flags, &gateway_dir.join(name));
-        }
-        for name in BWRAP_GATEWAY_SENSITIVE_DIRS {
-            push_deny_dir(&mut flags, &gateway_dir.join(name));
-        }
+    for name in BWRAP_GATEWAY_SENSITIVE_FILES {
+        push_deny_file(&mut flags, &gateway_dir.join(name));
+    }
+    for name in BWRAP_GATEWAY_SENSITIVE_DIRS {
+        push_deny_dir(&mut flags, &gateway_dir.join(name));
     }
 
     if let Some(extra) = SANDBOX_HOST_DENY_PATHS.get() {
@@ -440,14 +453,14 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_command_shape() {
-        // Use an isolated tempdir so the deny-path masking (derived from the
-        // agent dir's sibling `.gateway`) has nothing to mask — keeps the
-        // fixed argv positions stable regardless of the host's /tmp state.
+        // Empty gateway dir: nothing exists to mask, so the fixed argv
+        // positions stay stable regardless of the host's /tmp state.
         let tmp = tempfile::tempdir().expect("tempdir");
         let agent_dir = tmp.path().join("agent");
+        let gateway_dir = tmp.path().join("runtime");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_command(&agent_dir_str, "python main.py", None)
+        let (_bin, argv) = bubblewrap_command(&agent_dir_str, &gateway_dir, "python main.py", None)
             .expect("bubblewrap command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
@@ -463,13 +476,13 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_shell_command_shape() {
-        // Isolated tempdir: no `.gateway` secrets to mask, so argv positions
-        // are stable.
+        // Empty gateway dir: no secrets to mask, so argv positions are stable.
         let tmp = tempfile::tempdir().expect("tempdir");
         let agent_dir = tmp.path().join("agent");
+        let gateway_dir = tmp.path().join("runtime");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, "echo hi", &[], None)
+        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None)
             .expect("shell command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
@@ -490,12 +503,14 @@ mod tests {
     fn driver_build_command_matches_shell_builder() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let agent_dir = tmp.path().join("agent");
+        let gateway_dir = tmp.path().join("runtime");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
         let wiring = SdkBridgeWiring::default();
         let (program, argv) = BubblewrapDriver
             .build_command(&SpawnSpec {
                 agent_dir: &agent_dir_str,
+                gateway_dir: &gateway_dir,
                 entrypoint: "echo hi",
                 mounts: &[],
                 overrides: None,
@@ -504,7 +519,8 @@ mod tests {
             })
             .expect("driver should build the command");
         let (expected_program, expected_argv) =
-            bubblewrap_shell_command(&agent_dir_str, "echo hi", &[], None).expect("shell command");
+            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None)
+                .expect("shell command");
         assert_eq!(program, expected_program);
         assert_eq!(argv, expected_argv);
     }
@@ -513,21 +529,36 @@ mod tests {
     /// (vault key, session DB, identity key, sessions/, …) so a sandboxed
     /// process cannot read them through the ro-mounted host `/`. The SDK
     /// subtree (`sdk/`) must stay visible because PYTHONPATH points there.
+    ///
+    /// The fixture puts `agent_dir` where production puts it — *inside* the
+    /// revision store — because that is what broke this mask for real (#1145).
+    /// The pre-fix code derived the gateway dir as `agent_dir.parent()/.gateway`,
+    /// which from a revision dir resolves to nothing and silently produced an
+    /// empty flag list. The old version of this test passed a
+    /// `<agents_root>/demo.agent` path instead, so it asserted the mask worked
+    /// in a layout the runtime never supplies.
     #[test]
     fn bwrap_deny_flags_mask_gateway_secrets_but_not_sdk() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let agents_root = tmp.path();
-        let gateway_dir = agents_root.join(".gateway");
-        let agent_dir = agents_root.join("demo.agent");
+        let gateway_dir = tmp.path().join("runtime");
+        let agent_dir =
+            crate::agent::agent_revision_dir(&gateway_dir, "demo.agent", "rev-abc123");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(gateway_dir.join("sdk")).unwrap();
         std::fs::create_dir_all(gateway_dir.join("sessions")).unwrap();
         std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
+        std::fs::write(gateway_dir.join("vault.enc.json"), "blob").unwrap();
         std::fs::write(gateway_dir.join("gateway.db"), "db").unwrap();
         std::fs::write(gateway_dir.join("state_attestation.ed25519"), "k").unwrap();
 
-        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
+        let flags = bwrap_deny_path_flags(&gateway_dir);
         let joined = flags.join(" ");
+
+        // The regression this test exists for: a non-empty mask.
+        assert!(
+            !flags.is_empty(),
+            "the mask must emit flags for a revision-shaped agent_dir (#1145)"
+        );
 
         // Sensitive files are shadowed with /dev/null.
         assert!(
@@ -551,10 +582,27 @@ mod tests {
             )),
             "identity key must be masked, got: {joined}"
         );
+        assert!(
+            joined.contains(&format!(
+                "--ro-bind /dev/null {}",
+                gateway_dir.join("vault.enc.json").display()
+            )),
+            "the encrypted vault blob must be masked, got: {joined}"
+        );
         // Sensitive dirs are shadowed with an empty tmpfs.
         assert!(
             joined.contains(&format!("--tmpfs {}", gateway_dir.join("sessions").display())),
             "sessions/ must be masked, got: {joined}"
+        );
+        // The revision store: an agent runs from its own revision (bound in as
+        // the workspace before these flags apply) but must not be able to browse
+        // every other agent's promoted code on the host path.
+        assert!(
+            joined.contains(&format!(
+                "--tmpfs {}",
+                gateway_dir.join(REVISIONS_DIR_NAME).display()
+            )),
+            "revisions/ must be masked, got: {joined}"
         );
         // The SDK subtree and constitution must NOT be masked — the sandbox
         // reads its PYTHONPATH from `<gateway_dir>/sdk` and the constitution
@@ -570,10 +618,10 @@ mod tests {
     #[test]
     fn bwrap_deny_flags_skip_nonexistent_paths() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        // No .gateway at all → nothing to mask.
-        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
+        // A gateway dir that exists but holds none of the sensitive entries.
+        let gateway_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let flags = bwrap_deny_path_flags(&gateway_dir);
         assert!(flags.is_empty(), "expected no deny flags, got: {flags:?}");
     }
 
@@ -583,15 +631,20 @@ mod tests {
     #[test]
     fn bubblewrap_shell_command_includes_deny_slice() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let gateway_dir = tmp.path().join(".gateway");
+        let gateway_dir = tmp.path().join("runtime");
         let agent_dir = tmp.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&gateway_dir).unwrap();
         std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
 
-        let (_bin, argv) =
-            bubblewrap_shell_command(agent_dir.to_str().unwrap(), "echo hi", &[], None)
-                .expect("shell command should build");
+        let (_bin, argv) = bubblewrap_shell_command(
+            agent_dir.to_str().unwrap(),
+            &gateway_dir,
+            "echo hi",
+            &[],
+            None,
+        )
+        .expect("shell command should build");
         let unshare = argv.iter().position(|a| a == "--unshare-all").unwrap();
         let sep = argv.iter().position(|a| a == "--").unwrap();
         // The deny slice sits between isolation flags and the separator.

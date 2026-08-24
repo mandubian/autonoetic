@@ -186,7 +186,7 @@ Design decisions:
 - Added grouped reference bundle layout under `agents/` (`lead/`, `specialists/`, `evolution/`) with initial `lead/planner.default/`.
 - Added `planner` scaffold support in CLI templates and dotted `agent_id` support for `agent.install` (for IDs like `planner.default`).
 - Implemented implicit ingress routing in gateway router: `event.ingest` can omit `target_agent_id`, resolves via session lead binding, then `default_lead_agent_id`.
-- Added gateway config field `default_lead_agent_id` (default `planner.default`) and persisted session lead affinity under `.gateway/sessions/lead_bindings/`.
+- Added gateway config field `default_lead_agent_id` (default `planner.default`) and persisted session lead affinity under `runtime/sessions/lead_bindings/`.
 - Added router tests for default lead resolution and session-affinity reuse across follow-up ingress calls.
 - Added reference specialist bundles: `researcher.default`, `coder.default`, `evaluator.default`, and `auditor.default`.
 - Added reference evolution bundles: `specialized_builder.default`, `evolution-steward.default`, and `memory-curator.default`.
@@ -211,7 +211,7 @@ Design decisions:
 - Gateway now boots both OFP and JSON-RPC listeners concurrently.
 - `agent_spawn` loads agent manifest/instructions from disk and executes one runtime turn via the same lifecycle engine used by CLI, including causal/session tracing.
 - `event.ingest` converts incoming event payload into a kickoff prompt and dispatches to the target agent.
-- Gateway JSON-RPC dispatch now writes its own causal entries (`*.requested` / `*.completed` / `*.failed`) to `agents/.gateway/history/causal_chain.jsonl` with shared session IDs for cross-layer trace correlation.
+- Gateway JSON-RPC dispatch now writes its own causal entries (`*.requested` / `*.completed` / `*.failed`) to `runtime/history/causal_chain.jsonl` with shared session IDs for cross-layer trace correlation.
 - Added a hermetic live-ingress test in `autonoetic-gateway/tests/gateway_ingress_integration.rs` that hits the TCP JSON-RPC listener, runs a real `event.ingest` session through a local OpenAI-compatible stub, and verifies both gateway and agent causal traces share the same session ID.
 - Gateway ingress now enforces configurable reliability controls via `max_concurrent_spawns` and `max_pending_spawns_per_agent`, with per-agent serialization and explicit backpressure errors when either the global execution budget or an agent queue is full.
 - Added router unit coverage for delegated spawn limits, per-agent queue overflow, and global concurrent execution backpressure.
@@ -240,7 +240,7 @@ Design decisions:
 - The first implementation should prefer deterministic wake predicates and approved direct-capability triggers before enabling broader open-ended background reasoning.
 - Added `background` manifest policy, `BackgroundReevaluation` capability, gateway scheduler guardrails, and durable scheduler state/approval types.
 - Gateway now starts a background scheduler alongside OFP and JSON-RPC listeners; background wakes reuse the shared execution path and existing ingress admission/backpressure controls.
-- Added durable `.gateway/scheduler/` storage for agent state, inbox/task-board inputs, and pending/approved/rejected approval decisions, plus CLI commands for `gateway approvals list|approve|reject`.
+- Added durable `runtime/scheduler/` storage for agent state, inbox/task-board inputs, and pending/approved/rejected approval decisions, plus CLI commands for `gateway approvals list|approve|reject`.
 - Added deterministic direct actions for approved `write_file` and existing `sandbox_exec`, and persisted `state/reevaluation.json` markers (`retry_not_before`, `stale_goal_at`, `last_outcome`, `pending_scheduled_action`, `open_approval_request_ids`).
 - Added scheduler coverage for idle timer cadence, wake-on-new-work, rapid-tick dedup, paused-on-approval, due-agent throttling, and approval-to-approved-artifact evolution flow.
 
@@ -873,7 +873,7 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 - Press Ctrl+C to stop following
 
 **Implementation notes (2026-03-13):**
-- Added session index at `.gateway/sessions/<session_id>/index.json` updated on every gateway causal log write
+- Added session index at `runtime/sessions/<session_id>/index.json` updated on every gateway causal log write
 - Added `trace session rebuild` CLI command that combines gateway + agent causal logs into unified timeline
 - Integrity checks include event_seq gaps per agent
 - Added `session_trace_integration.rs` with 2 integration tests:
@@ -1352,13 +1352,13 @@ Fork operation:
 
 ```
 Gateway Storage (content-addressed, works local + remote):
-├── .gateway/content/              ← SHA-256 blob store
+├── runtime/content/              ← SHA-256 blob store
 │   └── sha256/ab/c123...         ← immutable content blobs
-├── .gateway/sessions/
+├── runtime/sessions/
 │   └── <session_id>/
 │       ├── manifest.json          ← maps content names → handles
 │       └── artifacts.json         ← artifact metadata
-└── .gateway/knowledge.db          ← Tier 2 facts (renamed from memory.db)
+└── runtime/knowledge.db          ← Tier 2 facts (renamed from memory.db)
 
 Gateway API (all agents use this, local or remote):
 ├── content_write(name, content) → handle
@@ -1470,7 +1470,7 @@ Gateway decides based on agent manifest capabilities and config.
 ```
 Agent: content_write("main.py", script)
 Gateway: 1. Compute SHA-256
-         2. Store at .gateway/content/sha256/ab/c123...
+         2. Store at runtime/content/sha256/ab/c123...
          3. Update session manifest: {"main.py": "sha256:abc123"}
          4. Return handle to agent
 ```
@@ -1538,7 +1538,7 @@ Future sessions can discover and reuse via agent_discover
 #### 1. Content-addressable storage infrastructure
 
 - [x] Create `ContentStore` struct in gateway:
-  - Storage path: `.gateway/content/sha256/ab/c123...`
+  - Storage path: `runtime/content/sha256/ab/c123...`
   - `write(name, content) -> Handle` - compute SHA-256, store, return handle
   - `read(handle) -> Content` - fetch from store by hash
   - `read_by_name(session_id, name) -> Content` - resolve name → handle → content
@@ -1549,7 +1549,7 @@ Future sessions can discover and reuse via agent_discover
   - `content.persist(handle)` - marks content for cross-session persistence
   - All tools work via gateway API (local socket or HTTP for remote)
 - [x] Session manifest management:
-  - `.gateway/sessions/<session_id>/manifest.json` - maps names → handles
+  - `runtime/sessions/<session_id>/manifest.json` - maps names → handles
   - Updated on every content_write
   - Gateway manages automatically
 
@@ -1682,8 +1682,8 @@ Future sessions can discover and reuse via agent_discover
 **Core Implementation Complete:**
 
 - Created `ContentStore` struct in `autonoetic-gateway/src/runtime/content_store.rs`:
-  - SHA-256 content-addressable storage at `.gateway/content/sha256/`
-  - Session manifest management at `.gateway/sessions/<session_id>/manifest.json`
+  - SHA-256 content-addressable storage at `runtime/content/sha256/`
+  - Session manifest management at `runtime/sessions/<session_id>/manifest.json`
   - Full test coverage (9 unit tests)
 - Added native tools in `autonoetic-gateway/src/runtime/tools.rs`:
   - `content_write(name, content)` → returns content handle

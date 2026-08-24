@@ -13,6 +13,7 @@ use autonoetic_types::config::GatewayConfig;
 /// Helper to create a test config with temp directory.
 fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
     GatewayConfig {
+        runtime_dir: temp.path().to_path_buf().join(".gateway"),
         agents_dir: temp.path().to_path_buf(),
         ..Default::default()
     }

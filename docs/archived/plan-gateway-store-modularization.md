@@ -193,7 +193,7 @@ This order starts with low-risk infrastructure and small domains, then moves tow
 
 - [x] `cargo test -p autonoetic-gateway --lib` (401 tests pass)
 - [x] `cargo test -p autonoetic-gateway` (all tests pass)
-- [x] Spot-check schema initialization on a fresh `.gateway/gateway.db`
+- [x] Spot-check schema initialization on a fresh `runtime/gateway.db`
 - [x] Spot-check opening an existing gateway DB to ensure migrations/backfills still run
 - [x] Spot-check one method from each extracted module after its move
 

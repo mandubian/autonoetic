@@ -34,9 +34,9 @@ Approvals are created by runtime tools when a gated action requires operator aut
 - `agent.install` creates a pending `ApprovalRequest`
 - `sandbox_exec` creates a pending `ApprovalRequest` for remote access
 - pending approvals are stored under:
-  - `.gateway/scheduler/approvals/pending/<request_id>.json`
+  - `runtime/scheduler/approvals/pending/<request_id>.json`
 - install payloads are also stored for deterministic retry:
-  - `.gateway/scheduler/approvals/pending/<request_id>_payload.json`
+  - `runtime/scheduler/approvals/pending/<request_id>_payload.json`
 
 Important detail:
 
@@ -50,7 +50,7 @@ When the operator runs the CLI approval command:
 - `autonoetic/src/cli/gateway.rs` calls `autonoetic_gateway::scheduler::approve_request()`
 - `approve_request()` delegates to `decide_request()`
 - the decision is written under:
-  - `.gateway/scheduler/approvals/approved/<request_id>.json`
+  - `runtime/scheduler/approvals/approved/<request_id>.json`
 - pending approval files are removed or transitioned out of `pending`
 
 ### 3. Direct execution after approval
@@ -69,7 +69,7 @@ It currently does three things:
 1. Builds a structured synthetic message:
    - JSON string with `type: "approval_resolved"`
 2. Writes a signal file:
-   - `.gateway/signal/<session_id>/<request_id>.json`
+   - `runtime/signal/<session_id>/<request_id>.json`
 3. Spawns a thread that connects back to the gateway JSON-RPC server and sends a synthetic `event.ingest`
 
 For `agent.install`:
@@ -97,7 +97,7 @@ This means approval resume depends on the correct session-to-lead-agent binding 
 `autonoetic/src/cli/chat.rs` has two relevant behaviors:
 
 - it renders JSON-RPC responses that match request IDs it sent itself
-- it separately polls `.gateway/signal/<session_id>/` every few seconds
+- it separately polls `runtime/signal/<session_id>/` every few seconds
 
 When a signal is found:
 
@@ -358,7 +358,7 @@ This model keeps behavior simple while being robust to process lifetimes, races,
 
 ### A) Approval decision remains source of truth
 
-- Keep `ApprovalDecision` in `.gateway/scheduler/approvals/{approved|rejected}/`.
+- Keep `ApprovalDecision` in `runtime/scheduler/approvals/{approved|rejected}/`.
 - Treat this as canonical state.
 - Do not rely on transient CLI process execution for actual wake delivery guarantees.
 

@@ -164,6 +164,19 @@ async fn test_generated_wrapper_executes_with_io_transformation() {
         return;
     }
     let temp = tempfile::tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    // Threading a gateway dir puts the turn on the full reply path, which reads
+    // the constitution version for the state-attestation tail (P-6.23). A
+    // config-mismatch error only means a neighbor test initialized first.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize: {e}"
+        );
+    }
     let target_spec = serde_json::json!({
         "accepts": {
             "type": "object",
@@ -212,6 +225,10 @@ async fn test_generated_wrapper_executes_with_io_transformation() {
         None,
     )
     .with_middleware(middleware)
+    // Middleware runs in a sandbox, and the sandbox's gateway-secret mask is
+    // built from this path — running without it now fails closed rather than
+    // spawning unmasked (#1145).
+    .with_gateway_dir(gateway_dir.clone())
     .with_session_id("session-wrapper-io");
 
     let mut history = vec![Message::user(r#"{"task":"demo"}"#)];
@@ -355,6 +372,19 @@ async fn test_generated_wrapper_executes_with_multiple_io_transformations() {
         return;
     }
     let temp = tempfile::tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    // Threading a gateway dir puts the turn on the full reply path, which reads
+    // the constitution version for the state-attestation tail (P-6.23). A
+    // config-mismatch error only means a neighbor test initialized first.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize: {e}"
+        );
+    }
     let target_spec = serde_json::json!({
         "accepts": {
             "type": "object",
@@ -399,6 +429,10 @@ async fn test_generated_wrapper_executes_with_multiple_io_transformations() {
         None,
     )
     .with_middleware(middleware)
+    // Middleware runs in a sandbox, and the sandbox's gateway-secret mask is
+    // built from this path — running without it now fails closed rather than
+    // spawning unmasked (#1145).
+    .with_gateway_dir(gateway_dir.clone())
     .with_session_id("session-wrapper-io-multi");
 
     let mut history = vec![Message::user(r#"{"task":"demo","topic":"ops"}"#)];

@@ -90,8 +90,8 @@ changes.
 The signing key is the same `GatewayIdentityKey` used for turn-boundary state attestations
 (P-6.23):
 
-- **Private**: `.gateway/state_attestation.ed25519` (mode `0o600`, auto-generated on first load)
-- **Public**: `.gateway/state_attestation.ed25519.pub` (32 bytes, Ed25519 verifying key)
+- **Private**: `runtime/state_attestation.ed25519` (mode `0o600`, auto-generated on first load)
+- **Public**: `runtime/state_attestation.ed25519.pub` (32 bytes, Ed25519 verifying key)
 
 ## Configuration
 

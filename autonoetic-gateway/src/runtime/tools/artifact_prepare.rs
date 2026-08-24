@@ -172,9 +172,8 @@ impl NativeTool for ArtifactPrepareTool {
 
         let mut resolved_credential_env: Vec<CredentialEnvMapping> = Vec::new();
         if let Some(required) = &args.required_credentials {
-            let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
-            crate::vault::ensure_default_key(vault_dir)?;
-            let vault_path = crate::vault::default_vault_path(vault_dir);
+            crate::vault::ensure_default_key(gw_dir)?;
+            let vault_path = crate::vault::default_vault_path(gw_dir);
             let vault = crate::vault::Vault::load_from_file(&vault_path)?;
 
             for rc in required {

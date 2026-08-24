@@ -283,6 +283,7 @@ impl SandboxRunner {
     pub fn run_to_output(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
@@ -302,6 +303,7 @@ impl SandboxRunner {
         let mut runner = Self::spawn_with_driver_and_dependencies_and_env(
             driver,
             agent_dir,
+            gateway_dir,
             request,
             dependencies,
             overrides,
@@ -324,27 +326,41 @@ impl SandboxRunner {
     }
 
     /// Spawn with the default bubblewrap driver.
-    pub fn spawn(agent_dir: &str, entrypoint: &str) -> anyhow::Result<Self> {
-        Self::spawn_with_driver(SandboxDriverKind::Bubblewrap, agent_dir, entrypoint)
+    pub fn spawn(agent_dir: &str, gateway_dir: &Path, entrypoint: &str) -> anyhow::Result<Self> {
+        Self::spawn_with_driver(
+            SandboxDriverKind::Bubblewrap,
+            agent_dir,
+            gateway_dir,
+            entrypoint,
+        )
     }
 
     /// Spawn using the manifest-declared driver name.
     pub fn spawn_for_driver(
         driver_name: &str,
         agent_dir: &str,
+        gateway_dir: &Path,
         entrypoint: &str,
     ) -> anyhow::Result<Self> {
         let driver = SandboxDriverKind::parse(driver_name)?;
-        Self::spawn_with_driver(driver, agent_dir, entrypoint)
+        Self::spawn_with_driver(driver, agent_dir, gateway_dir, entrypoint)
     }
 
     /// Spawn using the selected driver and optional dependency install plan.
     pub fn spawn_with_driver(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         entrypoint: &str,
     ) -> anyhow::Result<Self> {
-        Self::spawn_with_driver_and_dependencies(driver, agent_dir, entrypoint, None, None)
+        Self::spawn_with_driver_and_dependencies(
+            driver,
+            agent_dir,
+            gateway_dir,
+            entrypoint,
+            None,
+            None,
+        )
     }
 
     /// Spawn with optional dependency management.
@@ -353,6 +369,7 @@ impl SandboxRunner {
     pub fn spawn_with_driver_and_dependencies(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         entrypoint: &str,
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
@@ -360,6 +377,7 @@ impl SandboxRunner {
         Self::spawn_with_driver_and_dependencies_and_env(
             driver,
             agent_dir,
+            gateway_dir,
             &ExecutionKind::shell(entrypoint),
             dependencies,
             overrides,
@@ -371,6 +389,7 @@ impl SandboxRunner {
     pub fn spawn_with_driver_and_dependencies_and_env(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
@@ -380,6 +399,7 @@ impl SandboxRunner {
         Self::spawn_process(
             driver,
             agent_dir,
+            gateway_dir,
             request,
             dependencies,
             Vec::new(),
@@ -394,6 +414,7 @@ impl SandboxRunner {
     pub fn spawn_with_session_content(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         entrypoint: &str,
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
@@ -402,6 +423,7 @@ impl SandboxRunner {
         Self::spawn_with_session_content_and_env(
             driver,
             agent_dir,
+            gateway_dir,
             &ExecutionKind::shell(entrypoint),
             dependencies,
             session_content_mounts,
@@ -414,6 +436,7 @@ impl SandboxRunner {
     pub fn spawn_with_session_content_and_env(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
@@ -424,6 +447,7 @@ impl SandboxRunner {
         Self::spawn_process(
             driver,
             agent_dir,
+            gateway_dir,
             request,
             dependencies,
             session_content_mounts,
@@ -440,6 +464,7 @@ impl SandboxRunner {
     fn spawn_process(
         driver: SandboxDriverKind,
         agent_dir: &str,
+        gateway_dir: &Path,
         request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
@@ -466,13 +491,14 @@ impl SandboxRunner {
 
         // Wire the SDK socket transport once; the driver contributes its own
         // plumbing (bubblewrap bind mount vs docker `-v`/`-e`).
-        let wiring = wire_sdk_bridge(backend.as_ref(), agent_dir, root_session_id)?;
+        let wiring = wire_sdk_bridge(backend.as_ref(), agent_dir, gateway_dir, root_session_id)?;
         let mut mounts = session_content_mounts;
         mounts.extend(wiring.mounts.iter().cloned());
 
         let composed_entrypoint = compose_entrypoint(&entrypoint, dependencies)?;
         let (program, args) = backend.build_command(&SpawnSpec {
             agent_dir,
+            gateway_dir,
             entrypoint: &composed_entrypoint,
             mounts: &mounts,
             overrides,
@@ -512,6 +538,7 @@ struct StartedSdkBridge {
 
 fn start_sdk_bridge(
     agent_dir: &str,
+    gateway_dir: &Path,
     root_session_id: Option<String>,
 ) -> anyhow::Result<StartedSdkBridge> {
     let key = SdkBridgeCacheKey {
@@ -565,7 +592,16 @@ fn start_sdk_bridge(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
     let agent_dir_buf = PathBuf::from(agent_dir);
-    let gateway_dir_buf = gateway_dir_from_agent_dir(&agent_dir_buf)?;
+    // The authoritative gateway dir, threaded from the execution engine. This
+    // used to be `gateway_dir_from_agent_dir(agent_dir)` — `agent_dir.parent()`
+    // plus `.gateway` — which in production resolved to a nonexistent path
+    // *inside* the agent's own revision directory (and created it). The SDK
+    // bridge's `memory_remember` / `memory_recall` / `memory_search` handlers
+    // resolve against this path, so the hop pointed agent memory at a stray
+    // per-revision directory instead of the real gateway store. Same defect
+    // class as #1145.
+    let gateway_dir_buf = gateway_dir.to_path_buf();
+    fs::create_dir_all(&gateway_dir_buf)?;
     let root_session_id_for_bridge = root_session_id;
     let rate_limiter = Arc::new(SdkBridgeRateLimiter::new(
         SDK_BRIDGE_RATE_LIMIT_PER_SEC,
@@ -647,6 +683,7 @@ fn spawn_driver_process(command: &mut Command, program: &str) -> anyhow::Result<
 fn wire_sdk_bridge(
     driver: &dyn SandboxDriver,
     agent_dir: &str,
+    gateway_dir: &Path,
     root_session_id: Option<&str>,
 ) -> anyhow::Result<SdkBridgeWiring> {
     let mut wiring = SdkBridgeWiring::default();
@@ -654,7 +691,7 @@ fn wire_sdk_bridge(
         return Ok(wiring);
     }
 
-    let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
+    let bridge = start_sdk_bridge(agent_dir, gateway_dir, root_session_id.map(|s| s.to_string()))?;
     let host_socket = bridge.guard.shared.socket_path_host.clone();
     let sandbox_socket = driver
         .sdk_socket_path(&bridge.socket_name)
@@ -817,15 +854,6 @@ pub fn validate_sdk_relative_path(path: &str) -> anyhow::Result<()> {
         "path traversal is not allowed"
     );
     Ok(())
-}
-
-pub fn gateway_dir_from_agent_dir(agent_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
-    let agents_root = agent_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("agent directory is missing agents-root parent"))?;
-    let gateway_dir = agents_root.join(".gateway");
-    fs::create_dir_all(&gateway_dir)?;
-    Ok(gateway_dir)
 }
 
 fn agent_id_from_agent_dir(agent_dir: &std::path::Path) -> anyhow::Result<String> {
@@ -1301,7 +1329,12 @@ mod tests {
     fn wasm_uses_run_to_output_not_the_process_spawn_path() {
         // The process spawn path is for bwrap/docker/microvm; wasm runs in-process
         // via run_to_output, so spawn_for_driver("wasm") bails with that guidance.
-        let result = SandboxRunner::spawn_for_driver("wasm", "/tmp/agent", "python main.py");
+        let result = SandboxRunner::spawn_for_driver(
+            "wasm",
+            "/tmp/agent",
+            Path::new("/tmp/runtime"),
+            "python main.py",
+        );
         assert!(result.is_err(), "wasm must not use the process spawn path");
         let err = result.err().unwrap().to_string();
         assert!(err.contains("run_to_output"), "got: {err}");

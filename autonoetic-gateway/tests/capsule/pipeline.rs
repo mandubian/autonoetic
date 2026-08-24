@@ -83,6 +83,7 @@ fn make_fixture(agent_id: &str, revision_id: &str) -> Fixture {
     store.upsert_agent_alias(&alias).unwrap();
 
     let mut config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -142,6 +143,7 @@ fn export_then_import_creates_revision_with_capsule_import_source_kind() {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
         let mut config = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -240,6 +242,7 @@ fn import_dry_run_does_not_persist_revision() {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
         let config = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -316,6 +319,7 @@ fn tampered_archive_fails_verify_signature() {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
         let mut config = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };
@@ -438,6 +442,7 @@ fn second_import_is_dedup_noop_for_existing_revision() {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
         let config = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
             agents_dir,
             ..Default::default()
         };

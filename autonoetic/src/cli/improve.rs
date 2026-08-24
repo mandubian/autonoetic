@@ -101,7 +101,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
             let no_prompt = args.no_prompt;
             let propose_code_fix = args.propose_code_fix;
             let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
-            let gateway_dir = loaded_config.agents_dir.join(".gateway");
+            let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&loaded_config);
             let store = Arc::new(GatewayStore::open(&gateway_dir).context(
                 "Failed to open GatewayStore — has the gateway run at this path?",
             )?);

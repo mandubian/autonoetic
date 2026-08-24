@@ -8,7 +8,7 @@ The signature applies to:
 
 - release lock files in `docs/constitution/versions/<version>/gateway-constitution.lock.json`,
 - bootstrapped runtime lock files in
-  `<agents_dir>/.gateway/constitution/versions/<version>/gateway-constitution.lock.json`.
+  `<runtime_dir>/constitution/versions/<version>/gateway-constitution.lock.json`.
 
 It does **not** sign `constitution.md` directly. The lock signs the digest and
 canonicalization metadata that already bind `constitution.md` content.
@@ -78,7 +78,7 @@ Signature checks:
 
 1. `gateway:<fingerprint>`
    - public key source:
-     `<agents_dir>/.gateway/state_attestation.ed25519.pub`
+     `<runtime_dir>/state_attestation.ed25519.pub`
    - fingerprint check:
      `<fingerprint>` must equal hex(first 8 bytes of public key)
 2. any other signer ID
@@ -94,19 +94,19 @@ The canonical repo lock uses a repo-relative source path, for example:
 - `docs/constitution/versions/2026.06.02/constitution.md`
 
 During bootstrap (`agent bootstrap` and gateway startup), the runtime lock is
-materialized under `.gateway` and rewritten to:
+materialized under the runtime dir and rewritten to:
 
-- `.gateway/constitution/versions/<version>/constitution.md`
+- `runtime/constitution/versions/<version>/constitution.md`
 
 So repo and runtime locks intentionally differ in `constitution_source`, but
 each remains self-consistent and verifiable in its own context.
 
 ## Bootstrap Re-signing
 
-When the gateway bootstraps constitution artifacts to `.gateway`:
+When the gateway bootstraps constitution artifacts to the runtime dir:
 
 - it copies `constitution.md`,
-- rewrites lock `constitution_source` to `.gateway/...`,
+- rewrites lock `constitution_source` to `runtime/...`,
 - re-signs that rewritten lock with the local gateway identity key,
 - writes `ACTIVE.json` with `lock_signer_id`.
 

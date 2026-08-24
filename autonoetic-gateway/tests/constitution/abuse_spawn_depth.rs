@@ -96,11 +96,13 @@ fn seed_revision(
 /// Build a GatewayExecutionService with a low max_spawn_depth for testing.
 fn make_config(agents_dir: &std::path::Path, max_spawn_depth: u32) -> GatewayConfig {
     let mut config = GatewayConfig {
+        runtime_dir: agents_dir.to_path_buf().join(".gateway"),
         agents_dir: agents_dir.to_path_buf(),
         max_spawn_depth,
         ..GatewayConfig::default()
     };
     config.agents_dir = agents_dir.to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config
 }
 

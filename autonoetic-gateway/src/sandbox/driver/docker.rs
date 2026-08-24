@@ -247,6 +247,7 @@ mod tests {
         let (_program, argv) = DockerDriver
             .build_command(&SpawnSpec {
                 agent_dir: "/tmp/agent",
+                gateway_dir: std::path::Path::new("/tmp/runtime"),
                 entrypoint: "python main.py",
                 mounts: &[],
                 overrides: None,

@@ -9,15 +9,15 @@ Current systems:
 | System | Location | Purpose | Issue |
 |--------|----------|---------|-------|
 | Conversation history | Content store (`session_history`) | LLM context reconstruction | Only persisted at hibernation; lost on crash |
-| Turn continuation | `.gateway/continuations/{task_id}.json` | Approval gate suspension only | Narrow: only covers approval gates |
+| Turn continuation | `runtime/continuations/{task_id}.json` | Approval gate suspension only | Narrow: only covers approval gates |
 | Causal chain (agent) | `{agent}/history/causal_chain.jsonl` | Tamper-evident audit trail | JSONL-only, not queryable by agents |
-| Causal chain (gateway) | `.gateway/history/causal_chain.jsonl` | Gateway-level audit | Mirrors workflow events already in SQLite |
+| Causal chain (gateway) | `runtime/history/causal_chain.jsonl` | Gateway-level audit | Mirrors workflow events already in SQLite |
 | Evidence files | `{agent}/history/evidence/{session}/` | Full tool/LLM payloads | Only written on errors; never read programmatically |
-| Session timeline | `.gateway/sessions/{session}/timeline.md` | Human-readable progress | Flat table, no reasoning, no error context |
+| Session timeline | `runtime/sessions/{session}/timeline.md` | Human-readable progress | Flat table, no reasoning, no error context |
 | Session snapshot | Content store + metadata | Session forking | Rarely used; duplicates history persistence |
 | Workflow events | `gateway.db` SQLite | Task orchestration queries | Mirrored to gateway causal chain AND timeline |
 | Tier 1 memory | `{agent}/state/` files | Agent working state | Simple, no overlap |
-| Tier 2 memory | `.gateway/memory.db` SQLite | Cross-agent durable memory | Separate DB; search is LIKE-only, tags unused in queries |
+| Tier 2 memory | `runtime/memory.db` SQLite | Cross-agent durable memory | Separate DB; search is LIKE-only, tags unused in queries |
 
 **Core issues:**
 1. No general checkpoint — agent can only respawn from approval gates, not from hibernation, crash, or budget exhaustion.
@@ -41,7 +41,7 @@ Current systems:
 ### Storage Model
 
 ```
-.gateway/
+runtime/
 ├── gateway.db                          # SQLite: ALL queryable state
 │   ├── [table] workflow_runs
 │   ├── [table] task_runs
@@ -256,7 +256,7 @@ pub enum YieldReason {
 }
 ```
 
-**Storage:** `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`
+**Storage:** `runtime/checkpoints/{session_id}/{turn_id}.checkpoint.json`
 
 **Lifecycle:**
 1. Written at each yield point during `execute_with_history`
@@ -711,7 +711,7 @@ impl NativeTool for DigestAnnotateTool {
 }
 ```
 
-**Storage:** `.gateway/sessions/{session_id}/digest.md`
+**Storage:** `runtime/sessions/{session_id}/digest.md`
 
 **Who reads it:**
 - Humans: tail during session, review after
@@ -936,7 +936,7 @@ Agent Learning (cross-session):
 
 | System | Action | Reason |
 |--------|--------|--------|
-| Gateway causal chain (`.gateway/history/`) | **Delete** | All data now in agent chains + gateway.db. This was a redundant JSONL copy of SQLite data. |
+| Gateway causal chain (`runtime/history/`) | **Delete** | All data now in agent chains + gateway.db. This was a redundant JSONL copy of SQLite data. |
 | Session timeline (`timeline.md`) | **Replace** with Live Digest | Same trigger points, richer content |
 | Session snapshot system | **Subsume** into checkpoint | Checkpoint is a superset; forking reads from checkpoint |
 | `memory.db` | **Merge** into `gateway.db` | One DB, one connection pool |
@@ -959,7 +959,7 @@ Make causal chain data and execution results queryable. This is foundation for a
 - [x] **1.3** Dual-write in `SessionTracer`: every `log_event()` call writes to BOTH the JSONL causal chain AND inserts into `causal_events` table. Pass `GatewayStore` reference to `SessionTracer`.
 - [x] **1.4** Write execution traces in `tool_call_processor.rs`: after every tool execution (not just errors), insert into `execution_traces`. For `sandbox_exec`, parse result JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store full result. Classify `error_type` from `ToolError` categories (compilation, runtime, permission, timeout, validation, resource).
 - [x] **1.5** Implement `execution_search` native tool in `tools.rs`. Arguments: `{ tool_name, success, error_type, command_pattern, agent_id, limit }`. Queries `execution_traces` table. Returns structured results. Available to all agents (no capability gate — agents should learn from all visible executions).
-- [x] **1.6** Remove gateway causal chain (`.gateway/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
+- [x] **1.6** Remove gateway causal chain (`runtime/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
 - [x] **1.7** Update `trace session` CLI to query `causal_events` table instead of reading JSONL files. Add `--agent` filter. Show evidence_ref when available.
 - [x] **1.8** Make evidence mode a config option (not just env var). Support `full`/`errors`/`off`. Default: `full` in dev, recommend `errors` in production.
 - [x] **1.9** Unit test: dual-write produces identical event data in JSONL and causal_events table.
@@ -1063,7 +1063,7 @@ If we need a faster path than scoped refs:
 Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield points.
 
 - [x] **2.1** Define `SessionCheckpoint`, `YieldReason`, `LlmConfigSnapshot` structs in a new `autonoetic-gateway/src/runtime/checkpoint.rs`. Include all fields needed for exact respawn.
-- [x] **2.2** Add `save_checkpoint()` and `load_latest_checkpoint()` functions. Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`. Include pruning logic (keep last N, default 3).
+- [x] **2.2** Add `save_checkpoint()` and `load_latest_checkpoint()` functions. Storage: `runtime/checkpoints/{session_id}/{turn_id}.checkpoint.json`. Include pruning logic (keep last N, default 3).
 - [x] **2.3** Write checkpoint at hibernation yield points in `lifecycle.rs`. After `StopReason::EndTurn` / `StopReason::StopSequence` handling, call `save_checkpoint()` with `YieldReason::Hibernation`.
 - [x] **2.4** Write checkpoint at budget exhaustion. Add `save_checkpoint()` with `YieldReason::BudgetExhausted` before returning.
 - [x] **2.5** Write checkpoint at max turns (loop guard). Add `save_checkpoint()` with `YieldReason::MaxTurnsReached`.

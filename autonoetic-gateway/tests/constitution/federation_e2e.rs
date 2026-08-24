@@ -323,6 +323,7 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), skill_md, main_py);
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         // Federation tests exercise the escalation/jury/identity gates; isolate
         // them from the new-agent first-admission human gate (its own tests).
@@ -441,6 +442,7 @@ fn setup_test_with_manual_revision(
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), skill_md, main_py);
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         // Federation tests exercise the escalation/jury/identity gates; isolate
         // them from the new-agent first-admission human gate (its own tests).
@@ -2040,6 +2042,7 @@ fn setup_test_unseeded(skill_md: &str) -> (TestSetup, String, Arc<GatewayStore>)
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), skill_md, main_py);
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         // Keep the new-agent gate ON so the capability delta is computed and
         // load_artifact_capabilities (the unseeded fallback) is exercised.

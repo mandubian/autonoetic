@@ -183,6 +183,9 @@ fn invoke_promote_with_config(h: &PromoteHarness, args_json: &str) -> serde_json
             .parent()
             .expect("agent dir should have parent")
             .to_path_buf(),
+        // Same-store requirement as the sibling promote suite: the delta check
+        // resolves the outgoing revision via `gateway_root_dir(config)`.
+        runtime_dir: h.gateway_dir.clone(),
         // This suite exercises capability-delta gating vs an outgoing revision;
         // isolate it from the new-agent first-admission gate (covered by its own
         // test) so the first-revision setup promote isn't treated as a new agent.
@@ -702,6 +705,7 @@ fn new_agent_first_promotion_requires_operator_approval_by_default() {
 
     // Default cursor (require_operator_approval_for_new_agents = true).
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -764,6 +768,7 @@ fn new_agent_cursor_off_lifts_human_gate_but_completeness_still_fails_closed() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         require_operator_approval_for_new_agents: false,
         ..GatewayConfig::default()

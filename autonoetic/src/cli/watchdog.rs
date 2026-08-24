@@ -40,7 +40,7 @@ pub async fn run_watchdog(
     let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_config = Arc::new(loaded_config);
 
-    let gateway_dir = gateway_config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&gateway_config);
     let store = Arc::new(
         GatewayStore::open(&gateway_dir)
             .context("Failed to open GatewayStore — is the gateway running and configured?")?,

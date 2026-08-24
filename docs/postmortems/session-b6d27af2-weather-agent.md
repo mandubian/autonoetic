@@ -222,9 +222,9 @@ flowchart LR
 
 ## References
 
-- Session digest: `~/.autonoetic/agents/.gateway/sessions/session-b6d27af2/digest.md`
-- Installed revision: `~/.autonoetic/agents/.gateway/revisions/agents/weather-agent/`
-- Gateway log: `~/.autonoetic/agents/.gateway/logs/run.2026-06-21.log` (13:09–13:14)
+- Session digest: `~/.autonoetic/runtime/sessions/session-b6d27af2/digest.md`
+- Installed revision: `~/.autonoetic/runtime/revisions/agents/weather-agent/`
+- Gateway log: `~/.autonoetic/runtime/logs/run.2026-06-21.log` (13:09–13:14)
 - Relevant agent prompts:
   - `agents/evolution/specialized_builder.default/SKILL.md` (capabilities, script install)
   - `agents/evolution/agent-factory.default/SKILL.md` (pipeline, smoke test, script mode)

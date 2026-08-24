@@ -36,6 +36,7 @@ async fn test_agent_install_is_unavailable() {
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

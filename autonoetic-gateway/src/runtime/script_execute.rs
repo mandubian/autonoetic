@@ -93,6 +93,19 @@ pub(crate) fn normalize_script_input_payload(
     input_payload.to_string()
 }
 
+/// The sandbox spawn path needs a real gateway dir: the bubblewrap driver builds
+/// its secret mask from it, so an absent one would mean an unmasked sandbox.
+/// Fail closed rather than substituting a derived or default path — deriving it
+/// is exactly what emitted an empty mask in #1145.
+fn require_gateway_dir(gateway_dir: Option<&Path>) -> anyhow::Result<&Path> {
+    gateway_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "gateway_dir is required to execute a script agent: the sandbox \
+             secret mask is built from it"
+        )
+    })
+}
+
 fn prepare_runtime_lock_layer_mounts(
     agent_dir: &Path,
     runtime_lock_rel_path: &str,
@@ -265,6 +278,7 @@ pub(crate) async fn execute_script_in_sandbox(
         let result = crate::sandbox::SandboxRunner::run_to_output(
             driver,
             &agent_dir.to_string_lossy(),
+            require_gateway_dir(gateway_dir)?,
             &wasm_request,
             None,
             Some(&overrides),
@@ -292,6 +306,7 @@ pub(crate) async fn execute_script_in_sandbox(
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_session_content_and_env(
         driver,
         &agent_dir.to_string_lossy(),
+        require_gateway_dir(gateway_dir)?,
         &exec_kind,
         None,
         runtime_lock_mounts,
@@ -730,12 +745,11 @@ pub(crate) fn resolve_credential_env_with_bindings(
         result
     };
 
-    let vault_dir = gateway_dir.parent().unwrap_or(gateway_dir);
-    if crate::vault::ensure_default_key(vault_dir).is_err() {
+    if crate::vault::ensure_default_key(gateway_dir).is_err() {
         tracing::warn!(target: "script_execute", "Failed to ensure vault key; skipping credential resolution");
         return Ok(vec![]);
     }
-    let vault_path = crate::vault::default_vault_path(vault_dir);
+    let vault_path = crate::vault::default_vault_path(gateway_dir);
     let vault = match crate::vault::Vault::load_from_file(&vault_path) {
         Ok(v) => v,
         Err(e) => {
@@ -952,7 +966,7 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
 
         // Vault at the path resolve_credential_env derives
-        // (<vault_dir>/.gateway/vault.enc.json where vault_dir = parent of gateway_dir).
+        // (<gateway_dir>/vault.enc.json).
         let mut vault = crate::vault::Vault::new();
         for (name, value) in secrets {
             vault.set_secret(name, value.to_string());

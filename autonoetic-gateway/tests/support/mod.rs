@@ -76,17 +76,29 @@ impl Drop for EnvGuard {
 
 pub struct TestWorkspace {
     tempdir: TempDir,
+    /// Ingest bundles — what an operator edits.
     pub agents_dir: PathBuf,
+    /// Everything the gateway owns (revision store, SQLite, vault, sessions).
+    ///
+    /// Production puts this beside `agents_dir` and reads it from
+    /// `config.runtime_dir`; this fixture keeps it nested so tests that build
+    /// their own `<agents_dir>/.gateway` fixtures still agree with the config.
+    /// Either way nothing *derives* it — `gateway_root_dir(config)` returns the
+    /// configured field, and this is what gets configured.
+    pub runtime_dir: PathBuf,
 }
 
 impl TestWorkspace {
     pub fn new() -> anyhow::Result<Self> {
         let tempdir = tempfile::tempdir()?;
         let agents_dir = tempdir.path().join("agents");
+        let runtime_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&agents_dir)?;
+        std::fs::create_dir_all(&runtime_dir)?;
         Ok(Self {
             tempdir,
             agents_dir,
+            runtime_dir,
         })
     }
 
@@ -97,6 +109,7 @@ impl TestWorkspace {
     pub fn gateway_config(&self) -> GatewayConfig {
         GatewayConfig {
             agents_dir: self.agents_dir.clone(),
+            runtime_dir: self.runtime_dir.clone(),
             ..GatewayConfig::default()
         }
     }
@@ -243,7 +256,7 @@ pub async fn spawn_gateway_server(
     drop(listener);
     config.port = addr.port();
 
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
 
@@ -265,7 +278,7 @@ pub async fn spawn_gateway_server_with_store(
     drop(listener);
     config.port = addr.port();
 
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
 
@@ -295,7 +308,7 @@ pub fn seed_agent_revision(
     agent_id: &str,
     agent_dir: &Path,
 ) -> anyhow::Result<String> {
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let revision_id = format!("rev_{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let rev_dir = gateway_dir
         .join("revisions")

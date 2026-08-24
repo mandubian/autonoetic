@@ -228,6 +228,7 @@ fn setup_harness(executable: bool, with_credentials: bool, existing_alias: bool)
 
     let mut config = GatewayConfig::default();
     config.agents_dir = agents_dir.clone();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config.sentinel.enabled = false;
     config.require_operator_approval_for_new_agents = false;
 

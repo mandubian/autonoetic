@@ -67,6 +67,7 @@ fn setup() -> anyhow::Result<(tempfile::TempDir, GatewayConfig, Arc<GatewayStore
     write_singleton_skill(&agents_dir.join("singleton.test"))?;
 
     let config = GatewayConfig {
+        runtime_dir: agents_dir.join(".gateway"),
         agents_dir,
         default_workflow_wait_secs: 10,
         ..GatewayConfig::default()

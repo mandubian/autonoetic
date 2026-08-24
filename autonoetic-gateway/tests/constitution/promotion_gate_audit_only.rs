@@ -354,6 +354,7 @@ fn setup(agent_id: &str, skill_md: &str, capabilities: serde_json::Value) -> Fix
     let (artifact_id, gateway_dir) = build_intent_only_artifact(temp.path(), agent_id, skill_md);
 
     let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         // Isolate the audit/eval completeness gate from the new-agent
         // first-admission human gate (covered by its own test).

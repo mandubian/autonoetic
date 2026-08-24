@@ -47,6 +47,7 @@ fn plan_frame_manifest() -> AgentManifest {
 fn make_config(dir: &std::path::Path) -> GatewayConfig {
     let mut config = GatewayConfig::default();
     config.agents_dir = dir.to_path_buf();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config
 }
 

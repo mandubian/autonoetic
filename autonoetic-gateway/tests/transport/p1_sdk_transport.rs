@@ -73,9 +73,14 @@ sys.stdout.flush()
     std::fs::write(dir.path().join("p1_probe.py"), probe).expect("write probe");
     let agent_dir = dir.path().to_str().expect("utf8 path");
 
-    let runner =
-        SandboxRunner::spawn_for_driver("docker", agent_dir, "python3 /workspace/p1_probe.py")
-            .expect("spawn docker sandbox");
+    let gateway_dir = dir.path().join("runtime");
+    let runner = SandboxRunner::spawn_for_driver(
+        "docker",
+        agent_dir,
+        &gateway_dir,
+        "python3 /workspace/p1_probe.py",
+    )
+    .expect("spawn docker sandbox");
     // `wait_with_output` drains BOTH stdout and stderr — reading only stdout
     // could deadlock if the child fills the stderr pipe. The bridge guard stays
     // alive in `runner` (SandboxRunner has no Drop) until end of scope.

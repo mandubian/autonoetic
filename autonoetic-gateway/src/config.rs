@@ -16,6 +16,12 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
             .agents_dir
             .canonicalize()
             .unwrap_or_else(|_| config.agents_dir.clone());
+        // `runtime_dir` normally does not exist on a first run, so `canonicalize`
+        // would fail and leave it relative — resolved against the *process* CWD,
+        // which differs between the daemon and each CLI invocation. Anchor it to
+        // the config file's directory first (like `load_persona` does), then
+        // canonicalize opportunistically once it exists.
+        config.runtime_dir = absolutize_against_config_dir(&config.runtime_dir, path);
         apply_role_mapping_fallbacks(&mut config);
         let derived_soft_budget = config.apply_profile_defaults();
         if let Some(value) = derived_soft_budget {
@@ -40,6 +46,31 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
         apply_llm_ttfb_timeout(&config);
         Ok(config)
     }
+}
+
+/// Anchor a possibly-relative config path to the directory holding the config
+/// file, then canonicalize if the target already exists.
+///
+/// Relative-to-CWD resolution is not usable for `runtime_dir`: the daemon, each
+/// CLI command, and the test harness all run from different working
+/// directories, so the same config would name different gateway state
+/// depending on who loaded it.
+fn absolutize_against_config_dir(dir: &Path, config_path: &Path) -> std::path::PathBuf {
+    if dir.is_absolute() {
+        return dir.to_path_buf();
+    }
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    // Canonicalize the *config directory*, never the joined result. The config
+    // file exists by construction here, so this is stable; `runtime_dir` itself
+    // usually does not exist on a first run, and canonicalizing it would then
+    // silently fall back to the non-canonical form. Two invocations — one before
+    // the directory exists, one after — would resolve the same config to two
+    // different absolute paths whenever any component is a symlink, and so open
+    // two different gateway stores.
+    let base = config_dir
+        .canonicalize()
+        .unwrap_or_else(|_| config_dir.to_path_buf());
+    base.join(dir)
 }
 
 /// Resolve `constitution.version` into `source_path`/`lock_path` (#1123).

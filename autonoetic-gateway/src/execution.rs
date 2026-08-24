@@ -2709,7 +2709,7 @@ impl GatewayExecutionService {
             suspended_for_child_wait,
         } = close_flags;
         let digest_turn_count = runtime.turn_counter;
-        let gw_dir = self.config.agents_dir.join(".gateway");
+        let gw_dir = crate::execution::gateway_root_dir(&self.config);
 
         // Cross-agent egress taint (RFC data-envelopes §5.5): record what this
         // session touched (intersection of its label sidecar) so a parent that
@@ -3145,7 +3145,7 @@ impl GatewayExecutionService {
                         approval_request_id = %rid,
                         "Resuming session from approval-required checkpoint"
                     );
-                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                    let gateway_dir = crate::execution::gateway_root_dir(&self.config);
                     if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
                         &gateway_dir,
                         session_id,
@@ -3427,7 +3427,7 @@ impl GatewayExecutionService {
                         escalation_request_id = %esc_rid,
                         "Resuming session from human escalation checkpoint"
                     );
-                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                    let gateway_dir = crate::execution::gateway_root_dir(&self.config);
                     if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
                         &gateway_dir,
                         session_id,
@@ -3936,7 +3936,7 @@ impl GatewayExecutionService {
                 // Open session report for this script agent so it appears in
                 // session_overview.md and causal_events — the LLM fast path skips the
                 // full SessionTracer, so we wire it up manually here.
-                let gateway_dir = self.config.agents_dir.join(".gateway");
+                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
                 let mut report = SessionReportWriter::open_with_options(
                     &gateway_dir,
                     session_id,
@@ -4165,19 +4165,19 @@ impl GatewayExecutionService {
 
                 // Extract artifacts from content store
                 let artifacts = extract_artifacts_from_content_store(
-                    &self.config.agents_dir.join(".gateway"),
+                    &crate::execution::gateway_root_dir(&self.config),
                     session_id,
                 ).unwrap_or_default();
 
                 // Collect all named content written by the child agent
                 let files = collect_named_content(
-                    &self.config.agents_dir.join(".gateway"),
+                    &crate::execution::gateway_root_dir(&self.config),
                     session_id,
                 );
 
                 // Collect shared knowledge (for script mode, typically empty)
                 let shared_knowledge = collect_shared_knowledge(
-                    &self.config.agents_dir.join(".gateway"),
+                    &crate::execution::gateway_root_dir(&self.config),
                     source_agent_id.unwrap_or(agent_id),
                     agent_id,
                     Some(session_id),
@@ -4225,7 +4225,7 @@ impl GatewayExecutionService {
                 self.gateway_store.clone(),
             )
             .with_resolved_inference(inference)
-            .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+            .with_gateway_dir(crate::execution::gateway_root_dir(&self.config))
             .with_config(self.config.clone())
             .with_session_budget(Some(self.session_budget.clone()))
             .with_root_session_budget(Some(self.root_session_budget.clone()))
@@ -4927,7 +4927,7 @@ impl GatewayExecutionService {
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
-        .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+        .with_gateway_dir(crate::execution::gateway_root_dir(&self.config))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
@@ -5093,7 +5093,7 @@ impl GatewayExecutionService {
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
-        .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+        .with_gateway_dir(crate::execution::gateway_root_dir(&self.config))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
@@ -5250,7 +5250,7 @@ impl GatewayExecutionService {
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
-        .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+        .with_gateway_dir(crate::execution::gateway_root_dir(&self.config))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
@@ -5583,8 +5583,15 @@ pub fn record_checkpoint_integrity_violation(
     );
 }
 
+/// The gateway's own directory: `config.runtime_dir`, verbatim.
+///
+/// This used to be `config.agents_dir.join(".gateway")`, and 52 sites re-derived
+/// that expression inline instead of calling this function — which is how four
+/// distinct `.parent()`-hop bugs accumulated (#1145 and the vault/SDK-bridge
+/// hops). There is nothing left to derive: the gateway dir is a config field and
+/// this function is the single place that names it.
 pub fn gateway_root_dir(config: &GatewayConfig) -> std::path::PathBuf {
-    config.agents_dir.join(".gateway")
+    config.runtime_dir.clone()
 }
 
 pub fn gateway_causal_path(config: &GatewayConfig) -> std::path::PathBuf {
@@ -6900,6 +6907,7 @@ mod tests {
     fn test_config(temp: &tempfile::TempDir) -> autonoetic_types::config::GatewayConfig {
         autonoetic_types::config::GatewayConfig {
             agents_dir: temp.path().join("agents"),
+            runtime_dir: temp.path().join("runtime"),
             ..autonoetic_types::config::GatewayConfig::default()
         }
     }

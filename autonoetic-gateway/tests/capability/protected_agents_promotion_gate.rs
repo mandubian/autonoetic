@@ -162,6 +162,7 @@ fn setup_harness(agent_id: &str) -> PromoteHarness {
 
     let mut config = GatewayConfig::default();
     config.agents_dir = agents_dir.clone();
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config.sentinel.enabled = false;
     config.protected_agents = ProtectedAgentsConfig {
         enabled: true,
@@ -270,6 +271,7 @@ fn non_protected_agent_not_gated() {
     let h = setup_harness(OTHER_AGENT_ID);
     let mut config = GatewayConfig::default();
     config.agents_dir = h._temp.path().join("agents");
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config.sentinel.enabled = false;
     config.protected_agents = ProtectedAgentsConfig {
         enabled: true,
@@ -291,6 +293,7 @@ fn gate_disabled_allows_promotion_without_eval() {
     let h = setup_harness(AGENT_ID);
     let mut config = GatewayConfig::default();
     config.agents_dir = h._temp.path().join("agents");
+    config.runtime_dir = config.agents_dir.join(".gateway");
     config.sentinel.enabled = false;
     config.protected_agents = ProtectedAgentsConfig {
         enabled: false,

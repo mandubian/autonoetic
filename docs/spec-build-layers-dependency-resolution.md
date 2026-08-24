@@ -67,7 +67,7 @@ Artifacts gain an optional `layers` field referencing zero or more layers. When 
 ### 2.2 Storage Layout
 
 ```
-.gateway/
+runtime/
 ├── content/sha256/...          # existing content blobs (source files)
 ├── artifacts/                  # existing artifact manifests
 │   └── art_1756ca5a/
@@ -159,7 +159,7 @@ Returns:
 1. Run the sandbox command normally
 2. After completion, for each `capture_path`, tar+compress the directory inside the sandbox workspace
 3. Compute SHA-256 digest
-4. Store as `.gateway/layers/layer_<hash>/contents.tar.zst`
+4. Store as `runtime/layers/layer_<hash>/contents.tar.zst`
 5. Dedup: if layer with same digest exists, reuse it
 6. Return layer metadata in the response
 

@@ -242,7 +242,7 @@ The current overlay system (`agent.adapt` + composition + pre/post hooks) adds ~
 
 ### 5.6 Remove overlay storage directory
 
-**Directory: `agents/.gateway/adaptations/`**
+**Directory: `runtime/adaptations/`**
 - [x] Delete entire directory tree
 
 ### 5.7 Delete overlay test files

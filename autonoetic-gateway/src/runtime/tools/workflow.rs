@@ -497,15 +497,13 @@ impl NativeTool for WorkflowWaitTool {
 
         let _ = args.max_wait_secs;
 
-        let agents_dir = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
-
-        let fallback_config = GatewayConfig {
-            agents_dir: agents_dir.to_path_buf(),
-            ..GatewayConfig::default()
-        };
-        let gw_config = config.unwrap_or(&fallback_config);
+        // The engine always threads its config in. The old fallback rebuilt one
+        // from `agent_dir.parent()`, which is not the agents root — agents run
+        // from `<gateway_dir>/revisions/agents/<id>/<rev>/`, so that walked to
+        // the revision store instead. Unreachable, and wrong if reached.
+        let gw_config = config.ok_or_else(|| {
+            anyhow::anyhow!("config is required to resolve the workflow for this session")
+        })?;
 
         let workflow_id = match args.workflow_id {
             Some(id) => id,
@@ -678,15 +676,11 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let agents_dir = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
-
-        let fallback_config = GatewayConfig {
-            agents_dir: agents_dir.to_path_buf(),
-            ..GatewayConfig::default()
-        };
-        let gw_config = config.unwrap_or(&fallback_config);
+        // See the sibling tool above: the engine always passes its config, and
+        // `agent_dir.parent()` is the revision store, not the agents root.
+        let gw_config = config.ok_or_else(|| {
+            anyhow::anyhow!("config is required to resolve the workflow for this session")
+        })?;
 
         let workflow_id = match args.workflow_id {
             Some(id) => id,
@@ -788,7 +782,7 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                     let spilled_reply = crate::scheduler::workflow_store::full_result_ref(task)
                         .and_then(|cnt_ref| {
                             crate::runtime::content_store::ContentStore::new(
-                                &agents_dir.join(".gateway"),
+                                &crate::execution::gateway_root_dir(gw_config),
                             )
                             .ok()?
                             .read_by_name_or_handle(&task.session_id, cnt_ref)
@@ -800,7 +794,7 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                         &task.session_id,
                         session_id.unwrap_or_else(|| task.parent_session_id.as_str()),
                         &task.agent_id,
-                        &agents_dir.join(".gateway"),
+                        &crate::execution::gateway_root_dir(gw_config),
                         gateway_store.as_deref(),
                         Some(gw_config),
                     );
@@ -1469,6 +1463,7 @@ mod stale_terminal_tests {
 
     fn config_in(agents_dir: &std::path::Path) -> autonoetic_types::config::GatewayConfig {
         autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.to_path_buf().join(".gateway"),
             agents_dir: agents_dir.to_path_buf(),
             ..Default::default()
         }

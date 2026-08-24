@@ -446,7 +446,7 @@ pub fn handle_trace_digest(
         "session_id must not be empty"
     );
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let base = autonoetic_gateway::runtime::live_digest::base_session_id(session_id.trim());
     let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
     let name =
@@ -1310,7 +1310,7 @@ pub fn handle_trace_rebuild(
     skip_checks: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
 
     let mut all_events: Vec<super::common::TraceEntry> = Vec::new();
 
@@ -1478,7 +1478,7 @@ pub async fn handle_trace_follow(
     use tokio::time::{interval, Duration};
 
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let agents_dir = &config.agents_dir;
 
     let mut seen_log_ids: HashSet<String> = HashSet::new();
@@ -1931,7 +1931,7 @@ pub fn handle_trace_history(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
 
     // Try to load history from session
