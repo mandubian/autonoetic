@@ -6531,7 +6531,7 @@ mod capability_lenient_deser_tests {
             .unwrap();
 
         let config = GatewayConfig {
-            runtime_dir: agents_dir.join(".gateway"),
+            runtime_dir: gateway_dir.clone(),
             agents_dir: agents_dir.clone(),
             ..GatewayConfig::default()
         };

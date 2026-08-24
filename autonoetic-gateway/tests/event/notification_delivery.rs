@@ -21,7 +21,7 @@ async fn test_store_only_notification_delivery_is_ordered_and_marked_delivered(
     let port = listener.local_addr()?.port();
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         port,
@@ -139,7 +139,7 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid() -
     let port = listener.local_addr()?.port();
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         port,
@@ -273,7 +273,7 @@ async fn test_pending_notifications_with_same_timestamp_are_ordered_by_notificat
     let port = listener.local_addr()?.port();
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         port,
@@ -387,7 +387,7 @@ async fn test_pending_notification_delivery_retries_then_marks_failed() -> anyho
     drop(reserved);
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         port,

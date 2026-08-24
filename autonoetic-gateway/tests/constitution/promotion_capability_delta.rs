@@ -705,7 +705,7 @@ fn new_agent_first_promotion_requires_operator_approval_by_default() {
 
     // Default cursor (require_operator_approval_for_new_agents = true).
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -768,7 +768,7 @@ fn new_agent_cursor_off_lifts_human_gate_but_completeness_still_fails_closed() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         require_operator_approval_for_new_agents: false,
         ..GatewayConfig::default()

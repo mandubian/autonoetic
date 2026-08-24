@@ -37,7 +37,7 @@ fn test_artifact_build_mints_session_scoped_ref() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -98,7 +98,7 @@ fn test_artifact_build_scopes_to_root_session_for_child_without_workflow() -> an
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -173,7 +173,7 @@ fn test_artifact_build_mints_workflow_scoped_ref_when_indexed() -> anyhow::Resul
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
@@ -228,7 +228,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };

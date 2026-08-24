@@ -298,7 +298,7 @@ fn test_eval_run_persists_with_real_revision() {
 
     let agents_dir = tmp.path().join("agents");
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -621,7 +621,7 @@ fn test_eval_compare_builds_completed_comparison_report() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: tmp.path().join("agents").join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: tmp.path().join("agents"),
         ..Default::default()
     };
@@ -822,7 +822,7 @@ fn test_eval_compare_with_session_outcomes_produces_stats() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: tmp.path().join("agents").join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: tmp.path().join("agents"),
         ..Default::default()
     };
@@ -910,7 +910,7 @@ You are a test agent.
     std::fs::write(rev_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
 
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -1056,7 +1056,7 @@ fn test_eval_run_validates_revision_belongs_to_agent() {
 
     let agents_dir = tmp.path().join("agents");
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -2057,7 +2057,7 @@ layers: []
     );
 
     let config = autonoetic_types::config::GatewayConfig {
-        runtime_dir: tmp.path().join("agents").join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: tmp.path().join("agents"),
         ..Default::default()
     };

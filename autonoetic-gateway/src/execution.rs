@@ -5318,7 +5318,7 @@ pub fn record_checkpoint_integrity_violation(
 
 /// The gateway's own directory: `config.runtime_dir`, verbatim.
 ///
-/// This used to be `crate::execution::gateway_root_dir(&config)`, and 51 sites re-derived
+/// This used to be `config.agents_dir.join(".gateway")`, and 52 sites re-derived
 /// that expression inline instead of calling this function — which is how four
 /// distinct `.parent()`-hop bugs accumulated (#1145 and the vault/SDK-bridge
 /// hops). There is nothing left to derive: the gateway dir is a config field and

@@ -38,7 +38,7 @@ async fn test_agent_install_no_longer_uses_install_approval_flow() {
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

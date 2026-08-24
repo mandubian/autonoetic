@@ -459,7 +459,7 @@ fn acceptance_capsule_export_withholds_by_destination() -> anyhow::Result<()> {
 
     let out_path = tmp.path().join("acc.capsule.tar.zst");
     let mut config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

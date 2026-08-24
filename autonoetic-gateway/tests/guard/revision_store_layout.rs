@@ -11,10 +11,11 @@
 //! All of them now go through `agent::revision_paths`. This test fails if a new
 //! one open-codes the layout again.
 //!
-//! If you are here because this test failed: call
-//! `crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id)` (or
-//! `agent_revisions_dir` / `agent_revisions_root` for the shallower forms)
-//! instead of joining the components yourself.
+//! If you are here because this test failed: call `agent_revision_dir(...)`
+//! (or `agent_revisions_dir` / `agent_revisions_root` for the shallower forms)
+//! instead of joining the components yourself. Inside `autonoetic-gateway` that
+//! is `crate::agent::agent_revision_dir`; from the CLI and other crates it is
+//! the re-export, `autonoetic_gateway::agent::agent_revision_dir`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -100,8 +101,10 @@ fn revision_store_layout_is_centralized() {
     );
     assert!(
         violations.is_empty(),
-        "the revision store layout must only be spelled out in {}; \
-         call agent::revision_paths::agent_revision_dir(...) instead.\n{}",
+        "the revision store layout must only be spelled out in {}; call \
+         `crate::agent::agent_revision_dir(..)` (inside autonoetic-gateway) or \
+         `autonoetic_gateway::agent::agent_revision_dir(..)` (elsewhere) \
+         instead.\n{}",
         LAYOUT_OWNER,
         violations.join("\n")
     );

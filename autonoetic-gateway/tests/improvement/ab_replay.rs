@@ -99,7 +99,7 @@ fn setup_env(tmp: &TempDir) -> (Arc<GatewayStore>, GatewayConfig) {
     seed_alias(&store, TARGET_AGENT, REV_B_ID).unwrap();
 
     let config = GatewayConfig {
-        runtime_dir: tmp.path().join("agents").join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: tmp.path().join("agents"),
         ..Default::default()
     };

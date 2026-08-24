@@ -251,7 +251,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
 
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         // Isolate the distinct-identity completeness gate from the new-agent
         // first-admission human gate (covered by its own test).
@@ -349,7 +349,7 @@ fn distinct_identities_allowed() {
 
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         // Isolate the distinct-identity completeness gate from the new-agent
         // first-admission human gate (covered by its own test).

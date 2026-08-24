@@ -156,7 +156,7 @@ async fn test_promotion_record_full_pass_flow() {
     let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path(), script_content);
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -326,7 +326,7 @@ async fn test_promotion_record_with_artifact_ref() {
     let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path(), script_content);
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -586,7 +586,7 @@ script_entry: main.py
 
     // Record a passing promotion via the tool.
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

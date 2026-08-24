@@ -203,7 +203,7 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -265,7 +265,7 @@ fn agent_without_gate_decider_cannot_approve() -> anyhow::Result<()> {
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -319,7 +319,7 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -379,7 +379,7 @@ fn agent_decider_cannot_spoof_session_id_to_bypass_r_10_7() -> anyhow::Result<()
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -440,7 +440,7 @@ fn agent_decider_without_session_id_is_rejected_r_10_7() -> anyhow::Result<()> {
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -494,7 +494,7 @@ fn agent_decider_can_reject_with_capability() -> anyhow::Result<()> {
     );
 
     let cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -544,7 +544,7 @@ fn agent_decider_escalates_to_human_when_uncertain() -> anyhow::Result<()> {
     );
 
     let _cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
@@ -624,7 +624,7 @@ fn escalation_without_gate_decider_capability_fails() -> anyhow::Result<()> {
     );
 
     let _cfg = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };

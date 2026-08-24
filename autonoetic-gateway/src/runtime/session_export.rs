@@ -1230,7 +1230,7 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = GatewayStore::open(&gateway_dir).unwrap();
         let config = GatewayConfig {
-            runtime_dir: dir.path().to_path_buf().join(".gateway"),
+            runtime_dir: gateway_dir.clone(),
             agents_dir: dir.path().to_path_buf(),
             ..GatewayConfig::default()
         };

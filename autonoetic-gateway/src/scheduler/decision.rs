@@ -161,7 +161,7 @@ mod tests {
         let gateway_dir = temp.path().join("agents").join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let config = GatewayConfig {
-            runtime_dir: temp.path().join("agents").join(".gateway"),
+            runtime_dir: gateway_dir.clone(),
             agents_dir: temp.path().join("agents"),
             ..GatewayConfig::default()
         };

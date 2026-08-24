@@ -391,7 +391,7 @@ struct SignedCheckpoint {
 // Storage helpers
 // ---------------------------------------------------------------------------
 
-/// Root directory for checkpoint files: `.gateway/checkpoints/`.
+/// Root directory for checkpoint files: `<runtime_dir>/checkpoints/`.
 pub fn checkpoints_dir(config: &GatewayConfig) -> PathBuf {
     crate::execution::gateway_root_dir(&config).join("checkpoints")
 }

@@ -114,7 +114,7 @@ layers: []
     std::fs::create_dir_all(&builder_dir).unwrap();
 
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -189,7 +189,7 @@ fn metadata_only_without_source() {
     let caller_dir = agents_dir.join("caller");
     std::fs::create_dir_all(&caller_dir).unwrap();
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -240,7 +240,7 @@ fn includes_source_when_requested_for_local_agent() {
     let caller_dir = agents_dir.join("caller");
     std::fs::create_dir_all(&caller_dir).unwrap();
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -293,7 +293,7 @@ fn returns_error_for_unknown_agent() {
     let caller_dir = agents_dir.join("caller");
     std::fs::create_dir_all(&caller_dir).unwrap();
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

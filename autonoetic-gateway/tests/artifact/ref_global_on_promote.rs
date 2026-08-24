@@ -115,7 +115,7 @@ fn promotion_upgrades_artifact_ref_to_global_scope() {
 
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };

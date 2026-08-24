@@ -106,7 +106,7 @@ fn capsule_export_withholds_local_only_memory_for_partner_destination() -> anyho
 
     let out_path = tmp.path().join("out.capsule.tar.zst");
     let mut config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -182,7 +182,7 @@ fn capsule_export_includes_local_only_memory_for_local_destination() -> anyhow::
 
     let out_path = tmp.path().join("local.capsule.tar.zst");
     let mut config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
@@ -251,7 +251,7 @@ fn capsule_export_legacy_unlabeled_memory_respects_config() -> anyhow::Result<()
 
     let out_path = tmp.path().join("legacy.capsule.tar.zst");
     let mut config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         egress: autonoetic_types::egress::EgressConfig {
             legacy_unlabeled: NamedEgressLabel::NoRemoteModel,
@@ -365,7 +365,7 @@ fn replay_fixture() -> anyhow::Result<ReplayFixture> {
     let revision_id = "rev_capsule_replay".to_string();
     seed_capsule_fixture(&gateway_dir, &store, &agent_id, &revision_id);
     let mut config = GatewayConfig {
-        runtime_dir: agents_dir.join(".gateway"),
+        runtime_dir: gateway_dir.clone(),
         agents_dir,
         ..Default::default()
     };
