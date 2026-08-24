@@ -68,9 +68,10 @@ fn setup_store_and_seed(
 #[serial_test::serial]
 #[tokio::test]
 async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<()> {
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    autonoetic_gateway::constitution_digest::initialize_constitution(
         &autonoetic_types::config::GatewayConfig::default(),
-    );
+    )
+    .expect("constitution init must succeed with the default config — a failure here means the constitution artifacts are broken, not this test");
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -137,9 +138,10 @@ fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
 }
 
 async fn repair_opt_in_runs_bounded_repair_turn_body() -> anyhow::Result<()> {
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    autonoetic_gateway::constitution_digest::initialize_constitution(
         &autonoetic_types::config::GatewayConfig::default(),
-    );
+    )
+    .expect("constitution init must succeed with the default config — a failure here means the constitution artifacts are broken, not this test");
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -210,9 +212,10 @@ fn repair_attempts_are_capped_by_system_ceiling() -> anyhow::Result<()> {
 }
 
 async fn repair_attempts_are_capped_by_system_ceiling_body() -> anyhow::Result<()> {
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    autonoetic_gateway::constitution_digest::initialize_constitution(
         &autonoetic_types::config::GatewayConfig::default(),
-    );
+    )
+    .expect("constitution init must succeed with the default config — a failure here means the constitution artifacts are broken, not this test");
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
