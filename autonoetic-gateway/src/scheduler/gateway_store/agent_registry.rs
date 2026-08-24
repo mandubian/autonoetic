@@ -23,12 +23,21 @@ const AGENT_REVISION_SELECT: &str = "SELECT revision_id, agent_id, base_revision
 
 fn map_agent_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRevisionRecord> {
     let status_str: String = row.get(14)?;
+    // Fail loud on anything but the three live states (#649): defaulting an
+    // unknown/legacy status to `Candidate` would silently make a rejected or
+    // corrupt revision promotable again.
     let status = match status_str.as_str() {
         "Candidate" => AgentRevisionStatus::Candidate,
         "Ready" => AgentRevisionStatus::Ready,
         "Archived" => AgentRevisionStatus::Archived,
-        "Rejected" => AgentRevisionStatus::Rejected,
-        _ => AgentRevisionStatus::Candidate,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Text,
+                format!("unknown agent revision status '{other}' ('Rejected' was removed by #649)")
+                    .into(),
+            ));
+        }
     };
     let metadata_json: String = row.get(15)?;
     let metadata_json = serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);

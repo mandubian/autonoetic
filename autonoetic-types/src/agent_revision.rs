@@ -123,6 +123,14 @@ impl AgentRef {
 }
 
 /// Lifecycle status of an agent revision.
+///
+/// Deliberately three states. A `Rejected` state existed here until #649:
+/// it was never constructed by any code path, and an unhandled status that
+/// round-trips through the store is one careless match arm away from making a
+/// failed-evaluation revision promotable again — the exact create→promote loop
+/// the Archived-resurrect fix killed. Failed evaluations simply leave the
+/// revision `Candidate` (or delete the record); rejection lives in the
+/// promotion-attempt ledger, not on the revision itself.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRevisionStatus {
@@ -132,8 +140,6 @@ pub enum AgentRevisionStatus {
     Ready,
     /// Revision has been superseded and is no longer active.
     Archived,
-    /// Revision was rejected (e.g., failed evaluation).
-    Rejected,
 }
 
 /// Durable record of an immutable agent revision.
