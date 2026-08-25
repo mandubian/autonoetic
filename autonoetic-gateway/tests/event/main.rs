@@ -8,6 +8,7 @@ mod notification_delivery;
 mod observability;
 mod phase3_eval;
 mod recording;
+mod allow_set;
 mod sandbox_capture;
 mod steward_amendment_drafting;
 mod terminal_workflow_signal_suppress;

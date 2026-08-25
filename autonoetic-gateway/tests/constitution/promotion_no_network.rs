@@ -71,6 +71,7 @@ fn force_network_off_wins_over_share_net_in_flags() {
     let overrides = BwrapIsolationOverrides {
         share_net: true,
         force_network_off: true,
+        host_fs_allow_set: false,
     };
     let mut argv = vec!["--unshare-all".to_string()];
 
@@ -87,6 +88,7 @@ fn normal_overrides_add_share_net() {
     let overrides = BwrapIsolationOverrides {
         share_net: true,
         force_network_off: false,
+        host_fs_allow_set: false,
     };
     let mut argv = vec!["--unshare-all".to_string()];
 

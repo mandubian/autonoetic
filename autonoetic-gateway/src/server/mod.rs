@@ -21,6 +21,32 @@ pub struct GatewayServer {
 
 impl GatewayServer {
     pub fn new(config: GatewayConfig) -> Self {
+        // #1002 slice 4: legacy host-fs ro-binds the whole host `/` into every
+        // bubblewrap sandbox. It stays the default until after launch (RFC
+        // sandbox-mount-allow-set.md DP-1) but the deprecation warning makes
+        // the migration visible from day one.
+        match config.sandbox.host_fs.as_str() {
+            "allow_set" => {
+                tracing::info!(
+                    target: "sandbox",
+                    "sandbox.host_fs: allow_set — bubblewrap sandboxes mount only the \
+                     gateway-asserted set"
+                );
+            }
+            other => {
+                // Unknown values fall back to legacy behaviour (matching the
+                // sandbox dev_mode precedent), but the message must name what
+                // actually happened, never hard-code the value (#1174 review).
+                tracing::warn!(
+                    target: "sandbox",
+                    host_fs = %other,
+                    "sandbox.host_fs is '{other}', not 'allow_set': bubblewrap sandboxes \
+                     keep the legacy whole-host ro-bind. Set sandbox.host_fs: allow_set to \
+                     mount only the gateway-asserted set (RFC \
+                     docs/rfc/sandbox-mount-allow-set.md); the default flips after launch."
+                );
+            }
+        }
         Self {
             config: Arc::new(config),
             registry: PeerRegistry::new(),

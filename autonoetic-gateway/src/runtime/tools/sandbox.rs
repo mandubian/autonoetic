@@ -2390,9 +2390,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 force_network_off: has_evaluation_cap,
             },
         );
+        // #1002 slice 4: `sandbox.host_fs: allow_set` switches the bubblewrap
+        // tier to the gateway-asserted mount set (no blanket `--ro-bind / /`).
         let mut overrides = crate::sandbox::BwrapIsolationOverrides {
             share_net: network_decision.share_net,
             force_network_off: has_evaluation_cap,
+            host_fs_allow_set: config
+                .map(|c| c.sandbox.host_fs == "allow_set")
+                .unwrap_or(false),
         };
         if network_decision.capability_ceiling_unused {
             tracing::info!(
@@ -2583,7 +2588,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // intentionally not listed — it is a gateway-internal socket, not host
         // filesystem reach). Bubblewrap ro-binds the whole host `/` today
         // (legacy mode); docker/microvm/wasm do not.
-        let mount_set = crate::sandbox::compose_mount_set(driver, agent_dir_str, &all_mounts);
+        let mount_set = crate::sandbox::compose_mount_set(
+            driver,
+            agent_dir_str,
+            &all_mounts,
+            !overrides.host_fs_allow_set,
+        );
 
         // sandbox.exec is free-form shell on the native tier.
         let exec_kind = crate::exec_request::ExecutionKind::shell(effective_command.clone());

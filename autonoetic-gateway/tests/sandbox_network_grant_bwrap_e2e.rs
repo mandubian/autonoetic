@@ -90,6 +90,7 @@ fn ungranted_network_capable_exec_cannot_open_a_connection() {
     let overrides = BwrapIsolationOverrides {
         share_net: decision.share_net,
         force_network_off: false,
+        host_fs_allow_set: false,
     };
     let stdout = probe_under_bwrap(&overrides);
     assert!(
@@ -117,6 +118,7 @@ fn granted_exec_can_open_a_connection() {
     let overrides = BwrapIsolationOverrides {
         share_net: decision.share_net,
         force_network_off: false,
+        host_fs_allow_set: false,
     };
     let stdout = probe_under_bwrap(&overrides);
     assert!(

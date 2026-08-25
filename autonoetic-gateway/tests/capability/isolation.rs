@@ -81,6 +81,7 @@ fn test_append_bwrap_isolation_flags_with_override_share_net() {
     let overrides = BwrapIsolationOverrides {
         share_net: true,
         force_network_off: false,
+        host_fs_allow_set: false,
     };
     let mut argv = vec![];
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
@@ -99,6 +100,7 @@ fn test_append_bwrap_isolation_flags_with_override_no_share_net() {
     let overrides = BwrapIsolationOverrides {
         share_net: false,
         force_network_off: false,
+        host_fs_allow_set: false,
     };
     let mut argv = vec![];
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
