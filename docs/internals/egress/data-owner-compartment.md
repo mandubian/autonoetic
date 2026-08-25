@@ -91,4 +91,4 @@ autonoetic gateway egress audit <root-session-id>
 
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — egress localization overview
 - [`separation-of-powers.md`](../../concepts/separation-of-powers.md) — gateway-only label plane
-- [`plan-egress-phase4-909.md`](../../proposals/egress-phase4.md) — implementation slices
+- [`egress-phase4.md`](../../proposals/egress-phase4.md) — implementation slices

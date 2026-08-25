@@ -59,7 +59,7 @@ If that test fails, a change added weight paid on every turn. The fix is
 normally to gate the addition, not to raise the ceiling.
 
 **Before adding doctrine, apply these three tests in order**
-(evidence and worked examples in [`prompt-burden-study.md`](burden-study.md)):
+(evidence and worked examples in [`burden-study.md`](burden-study.md)):
 
 1. **Ownership.** Does the agent holding this tool have the full capability set
    for the flow it belongs to? If it has to bounce to another agent mid-flow —

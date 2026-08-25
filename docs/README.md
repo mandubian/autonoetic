@@ -66,4 +66,4 @@ Two directories have paths the runtime depends on and must not be moved:
 digest-signed), and `wiki/**` with its `index.toml` (read at bootstrap).
 
 The reorganization this layout came from, including what is still to merge, is
-[`design/docs-reorganization-plan.md`](proposals/docs-reorganization.md).
+[`docs-reorganization.md`](proposals/docs-reorganization.md).

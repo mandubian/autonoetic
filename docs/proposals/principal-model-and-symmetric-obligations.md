@@ -4,9 +4,9 @@
 > Parts A–B are concrete near-term work; Parts C–D are direction-setting and
 > deliberately phased. Nothing here amends the constitution; constitution text
 > and lock signing remain the authoritative entity's to ratify
-> (see [`../constitution-signing.md`](../constitution/signing.md) and the
+> (see [`signing.md`](../constitution/signing.md) and the
 > "actors-as-citizens" framing in
-> [`../autonoetic-concepts-for-beginners.md`](../start/concepts.md)).
+> [`concepts.md`](../start/concepts.md)).
 
 ---
 
@@ -346,7 +346,7 @@ concentration of power the constitution otherwise guards against.
 
 When the security sentinel
 ([`../security-sentinel.md`](../internals/security-sentinel.md),
-[`divergence-sentinel-design.md`](divergence-sentinel.md)) detects an agent
+[`divergence-sentinel.md`](divergence-sentinel.md)) detects an agent
 doing bad things, *who decides it is degraded or banished?* The Lawful-Executor
 shape gives a clean separation that we should leave room for:
 
@@ -433,7 +433,7 @@ auditable commitment. The design principle the maintainer named —
 **common freedom without too much bureaucracy** — becomes a concrete test for
 every clause here: *does this add freedom-preserving structure, or just
 process?* If the latter, it doesn't belong (same bar as
-[`constitutional-evolution-reflections.md`](../concepts/constitutional-evolution.md)).
+[`constitutional-evolution.md`](../concepts/constitutional-evolution.md)).
 
 ---
 
@@ -531,17 +531,17 @@ mechanism or breaking the wire.
   stable reference for the three orthogonal axes this RFC's `Principal`
   (Part A) and authority-as-role (Part D) assume: principal-kind vs seat vs
   capability, and why `GateDecider` is a capability rather than a role.
-- [`../constitution-signing.md`](../constitution/signing.md) — authoritative lock
+- [`signing.md`](../constitution/signing.md) — authoritative lock
   signing (unchanged by this RFC).
 - [`../revision-signing.md`](../reference/revision-signing.md) — revision keys, candidate
   basis for AI contributor attestation (Part C / OQ-3).
-- [`constitutional-evolution-reflections.md`](../concepts/constitutional-evolution.md)
+- [`constitutional-evolution.md`](../concepts/constitutional-evolution.md)
   — the "would the system break without it?" bar this RFC's clauses must clear.
 - [`constitution-gate-amendments.md`](../archived/constitution-gate-amendments.md) —
   agent-as-decider work that O-5 (duty to escalate) builds on.
 - [`../security-sentinel.md`](../internals/security-sentinel.md) /
-  [`divergence-sentinel-design.md`](divergence-sentinel.md) — the detector
+  [`divergence-sentinel.md`](divergence-sentinel.md) — the detector
   whose findings the (future) judicial authority would adjudicate (D.3): sentinel
   proposes, authority sentences, gateway enforces.
-- [`../autonoetic-concepts-for-beginners.md`](../start/concepts.md)
+- [`concepts.md`](../start/concepts.md)
   — the actors-as-citizens framing this RFC operationalizes.

@@ -10,7 +10,7 @@
 > P5 [#250](https://github.com/mandubian/autonoetic/issues/250),
 > P6 [#251](https://github.com/mandubian/autonoetic/issues/251),
 > P7 [#252](https://github.com/mandubian/autonoetic/issues/252).
-> Related: [`divergence-sentinel-design.md`](./divergence-sentinel.md) (in-session
+> Related: [`divergence-sentinel.md`](./divergence-sentinel.md) (in-session
 > divergence detection; this doc is its post-session counterpart).
 
 ## 1. Problem Statement

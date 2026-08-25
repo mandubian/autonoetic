@@ -141,7 +141,7 @@ must be merged, not picked.
 | 6 | `ARCHITECTURE.md` **split** | keep overview; move session/storage chapters to `internals/` | 1,608 lines; a pasted Live Digest sample leaks `## Turn 1 — {timestamp}` headings into the document outline |
 | 7 | `agent-features.md` | `AGENTS.md`, then archived | `README.md` has called it "partially superseded" since May — finish the merge (middleware / disclosure / background scheduling are the unique parts) |
 | 8 | `agent-skill-frontmatter.md` + `AGENTS.md` SKILL section | `reference/skill-manifest.md` | Three descriptions of one manifest (+ the `wiki/skill-manifest.md` digest). 0 inbound refs on the top-level file |
-| 9 | `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/security-sentinel.md` (+ open P4 items to `proposals/`) | Shipped behaviour described in a `design/` doc; overview doc untouched since May |
+| 9 ❌ | ~~`security-sentinel.md` + `divergence-sentinel-design.md`~~ | — | **Withdrawn (§5.4).** Two unrelated subsystems share the word "sentinel"; there was nothing to merge. Divergence detection got the live doc it lacked: `internals/divergence-detection.md` |
 | 10 | `session-room.md` / `session-room-architecture.md` / `rfc/session-room-channel-agnostic-timeline.md` / `design/session-room-conversational-input.md` | `guide/session-room.md` + `internals/session/room.md`; RFC + input plan archived | User guide vs architecture split is *good* — keep it, drop the two shipped design docs |
 | 11 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (spec archived) | April spec, 97 lines, 23 inbound refs → sweep required |
 | 12 | `plan-egress-phase2-907.md`, `plan-egress-phase3-908.md` | archived; live model → `internals/egress/` | Phases merged. Phase 4 (#909) stays a proposal while slices are open |
@@ -241,7 +241,7 @@ Preliminary pass (full audit is PR 4 — these are candidates, not verdicts):
 |---|---|---|
 | `design/task-robustness.md` | `expected_outputs` mentioned in `ARCHITECTURE.md`/`AGENTS.md`/`config-reference.md`; cross-provider failover described **nowhere**; Part E.1 covered by `context-compression.md` | **Split → promote** the failure taxonomy + failover + preflight |
 | `rfc/sandbox-mount-allow-set.md` | only `config-reference.md` names `mount_set`; declared mounts + operator allowlist + tier guard undescribed (shipped #1002 this week) | **Promote** into `internals/sandbox/drivers.md` |
-| `rfc/unit-test-runner-divergence-loop.md` | one passing mention in the beginners guide | **Promote** into `internals/security-sentinel.md` |
+| `rfc/unit-test-runner-divergence-loop.md` | one passing mention in the beginners guide | **Promoted** into `internals/divergence-detection.md` (new — the security sentinel doc was the wrong target, §5.4) |
 | `rfc/credential-egress-host-authorization.md` | `credential-management.md` documents `allowed_hosts` | Archive — **verify** it covers routing-input-not-bypass semantics |
 | `rfc/llm-preset-inference-profiles.md` | `config-reference.md` + `wiki/gateway-config.md` cover presets as config | Archive — **verify** the inference-profile concept is covered |
 | `design/promotion-completeness-invariant.md` | severity gating in `AGENTS.md`/`CLAUDE.md`/`agent-prompt-guidance.md` | Archive — **verify** the invariant itself is stated |
@@ -338,7 +338,7 @@ strings and in `agents/**/SKILL.md` are updated in that same PR by necessity.
 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (merge #11) |
 | `egress-data-owner-compartment.md` | `internals/egress/data-owner-compartment.md` |
 | *(new)* | `internals/egress/README.md` — the current label plane, distilled from the RFC + shipped phases |
-| `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/security-sentinel.md` (merge #9) |
+| `security-sentinel.md` | `internals/security-sentinel.md` (merge #9 withdrawn — §5.4) |
 | `federation-carry-forward.md` | `internals/federation-carry-forward.md` |
 | `code-analysis.md` | `internals/code-analysis.md` |
 | `observability-redaction.md` | `internals/observability-redaction.md` |

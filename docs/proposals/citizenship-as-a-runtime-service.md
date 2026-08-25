@@ -142,7 +142,7 @@ delivered, not reconstructed; the agent is not asked to call
 extraction from write-only archaeology into actual learning, and is the
 single highest-leverage item in this RFC. (This is also the "closed learning
 loop" gap named honestly in
-[`../comparison-hermes-agent.md`](../reports/2026-07-19-comparison-hermes-agent.md).)
+[`2026-07-19-comparison-hermes-agent.md`](../reports/2026-07-19-comparison-hermes-agent.md).)
 
 Advisory first (invariant 5): the block is injected with provenance
 ("distilled from sessions X, Y"), and Part E measures whether injected
@@ -300,7 +300,7 @@ is unit-testable without the full promotion pipeline.
 
 The procedure for proving stability (and the parallel C.2 strict-readiness
 measurement) lives in
-[`../civic-eval-measurement-runbook.md`](../guide/runbooks/civic-eval-measurement.md) —
+[`civic-eval-measurement.md`](../guide/runbooks/civic-eval-measurement.md) —
 run it before flipping either default.
 
 ## Part F — Offices, not universal virtue — **SHIPPED**

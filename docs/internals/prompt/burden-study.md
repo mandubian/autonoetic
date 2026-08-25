@@ -20,7 +20,7 @@ need to change how gating works rather than use it. §10–§11 are status and
 history.
 
 Day-to-day authoring guidance lives in
-[`agent-prompt-guidance.md`](composition.md); this document is the
+[`composition.md`](composition.md); this document is the
 evidence behind it.
 
 ---
