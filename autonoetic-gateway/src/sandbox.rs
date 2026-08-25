@@ -1417,6 +1417,43 @@ fn expand_tilde(p: &str, home: &Option<PathBuf>) -> Option<PathBuf> {
     Some(PathBuf::from(p))
 }
 
+/// Compose the gateway-asserted mount-set record for one sandbox execution
+/// (#1002): the paths the gateway itself decided this exec can see — the
+/// blanket ro-bound host root while bubblewrap legacy mode is in effect, the
+/// writable workspace, and every explicit mount. Capped at [`MOUNT_SET_CAP`]
+/// entries with an explicit `truncated:+N` marker. Tools report this in their
+/// result; the processor persists it on the execution trace.
+pub fn compose_mount_set(
+    driver: driver::SandboxDriverKind,
+    agent_dir: &str,
+    mounts: &[SandboxMount],
+) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::with_capacity(2 + mounts.len());
+    if driver == driver::SandboxDriverKind::Bubblewrap {
+        entries.push("ro:host_root".to_string());
+    }
+    entries.push(format!("rw:{agent_dir}"));
+    for mount in mounts {
+        entries.push(format!(
+            "{}:{}",
+            if mount.readonly { "ro" } else { "rw" },
+            mount.source.display()
+        ));
+    }
+    if entries.len() > MOUNT_SET_CAP {
+        // Reserve a slot for the marker so the capped list, marker included,
+        // never exceeds the stated cap.
+        let overflow = entries.len() - (MOUNT_SET_CAP - 1);
+        entries.truncate(MOUNT_SET_CAP - 1);
+        entries.push(format!("truncated:+{overflow}"));
+    }
+    entries
+}
+
+/// Upper bound on persisted mount-set entries — one row per exec must stay a
+/// row, not a directory listing.
+pub const MOUNT_SET_CAP: usize = 64;
+
 pub(crate) fn sandbox_env_overrides_allowed() -> bool {
     parse_env_bool(
         std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV)
@@ -1496,6 +1533,92 @@ fn validate_dependency_package(pkg: &str) -> anyhow::Result<()> {
     });
     anyhow::ensure!(allowed, "invalid dependency token '{}'", pkg);
     Ok(())
+}
+
+/// #1002: the shared mount-set composer — what every sandbox executor
+/// reports and what the durable trace persists.
+#[cfg(test)]
+mod compose_mount_set_tests {
+    use super::*;
+
+    fn mount(src: &str, ro: bool) -> SandboxMount {
+        SandboxMount {
+            source: std::path::PathBuf::from(src),
+            dest: format!("/tmp/{src}"),
+            readonly: ro,
+        }
+    }
+
+    /// Bubblewrap legacy mode ro-binds the whole host `/` — the record must
+    /// say so explicitly, or the set understates visibility.
+    #[test]
+    fn bubblewrap_includes_host_root_marker() {
+        let set = compose_mount_set(
+            driver::SandboxDriverKind::Bubblewrap,
+            "/agents/coder",
+            &[mount("notes.md", true)],
+        );
+        assert_eq!(set[0], "ro:host_root");
+        assert!(set.contains(&"rw:/agents/coder".to_string()));
+        assert!(set.contains(&"ro:notes.md".to_string()));
+    }
+
+    /// Only bubblewrap ro-binds `/`; the other process tiers must not claim
+    /// host-root visibility they don't have.
+    #[test]
+    fn non_bubblewrap_tiers_omit_host_root_marker() {
+        for kind in [
+            driver::SandboxDriverKind::Docker,
+            driver::SandboxDriverKind::MicroVm,
+        ] {
+            let set = compose_mount_set(kind, "/agents/coder", &[]);
+            assert!(
+                !set.contains(&"ro:host_root".to_string()),
+                "{kind:?} must not claim the host root"
+            );
+        }
+    }
+
+    /// The cap reserves a slot for the marker: the capped list, marker
+    /// included, never exceeds MOUNT_SET_CAP, and the marker counts what was
+    /// dropped (the off-by-one #1160's review caught — now pinned).
+    #[test]
+    fn cap_includes_the_marker_in_the_budget() {
+        let mounts: Vec<SandboxMount> = (0..MOUNT_SET_CAP + 10)
+            .map(|i| mount(&format!("m{i}"), true))
+            .collect();
+        let set = compose_mount_set(
+            driver::SandboxDriverKind::Bubblewrap,
+            "/agents/coder",
+            &mounts,
+        );
+        assert_eq!(
+            set.len(),
+            MOUNT_SET_CAP,
+            "capped list + marker must not exceed the cap"
+        );
+        let marker = set.last().unwrap();
+        assert!(
+            marker.starts_with("truncated:+"),
+            "last entry must be the overflow marker: {marker}"
+        );
+        // 74 mounts + 2 header entries = 76; 63 kept (incl. headers) → 13 dropped.
+        assert_eq!(marker, "truncated:+13");
+    }
+
+    /// Under the cap: no marker, entries verbatim.
+    #[test]
+    fn under_cap_has_no_marker() {
+        let set = compose_mount_set(
+            driver::SandboxDriverKind::Bubblewrap,
+            "/a",
+            &[mount("x", false), mount("y", true)],
+        );
+        assert_eq!(set.len(), 4);
+        assert!(set.iter().all(|e| !e.starts_with("truncated:")));
+        assert!(set.contains(&"rw:x".to_string()));
+        assert!(set.contains(&"ro:y".to_string()));
+    }
 }
 
 #[cfg(test)]

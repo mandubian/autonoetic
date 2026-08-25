@@ -142,9 +142,10 @@ fn strip_gemma_token_artifacts(s: &str) -> String {
 /// trace (#1002 slice 1). Gateway-owned sandbox executors only: the field is
 /// documented as *gateway-asserted*, so lifting it from any other source —
 /// especially MCP-served remote tools — would pollute the audit record with
-/// untrusted data. A tool joins this list when the gateway itself composes its
-/// mounts (artifact_exec reports one once slice 1 covers it).
-const MOUNT_SET_REPORTING_TOOLS: &[&str] = &["sandbox_exec"];
+/// untrusted data. A tool joins this list exactly when the gateway itself
+/// composes its mounts: sandbox_exec and artifact_exec both do (their
+/// composition lives in `crate::sandbox::compose_mount_set`).
+const MOUNT_SET_REPORTING_TOOLS: &[&str] = &["sandbox_exec", "artifact_exec"];
 
 pub(crate) fn canonical_tool_name(name: &str) -> &str {
     match name {
@@ -2285,6 +2286,21 @@ mod tests {
             trace.mount_set, None,
             "a non-sandbox tool's mount_set must never reach the durable trace"
         );
+    }
+
+    /// The allowlist is exactly the gateway-owned sandbox executors — pinned
+    /// so a new tool cannot silently gain audit-record authority by renaming.
+    #[test]
+    fn mount_set_reporting_tools_are_exactly_the_sandbox_executors() {
+        assert_eq!(
+            MOUNT_SET_REPORTING_TOOLS,
+            &["sandbox_exec", "artifact_exec"],
+            "tools whose results may carry mount_set into durable traces"
+        );
+        // And both are canonical names canonical_tool_name can produce.
+        assert!(MOUNT_SET_REPORTING_TOOLS
+            .iter()
+            .all(|t| *t == canonical_tool_name(t)));
     }
 
     #[tokio::test]
