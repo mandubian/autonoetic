@@ -50,9 +50,8 @@ pub struct SentinelExperimentArgs {
     /// Path to the labeled corpus YAML (see `docs/design/divergence-sentinel-validation.md`).
     #[arg(long)]
     pub corpus: PathBuf,
-    /// Path to write the markdown report. Defaults to
-    /// `docs/design/divergence-sentinel-validation.md.results.md` next
-    /// to the corpus.
+    /// Path to write the markdown report. Defaults to the corpus path with a
+    /// `.results.md` extension, written next to the corpus.
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Skip the watchdog runs (use the cached fields in the corpus if

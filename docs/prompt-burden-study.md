@@ -2,8 +2,8 @@
 
 **Status:** Complete for the levers listed here — 2026-08-14 → 2026-08-17.
 Shipped across six PRs (§11). Tracking: [#1087]. This document absorbs the
-former `docs/rfc/prompt-burden-phase-gated-guidance.md`: the design it proposed
-is implemented, so the proposal and its results are now one record.
+former phase-gated-guidance RFC (removed from `docs/rfc/`): the design it
+proposed is implemented, so the proposal and its results are now one record.
 
 **Origin:** an operator observation that Autonoetic agents carry far larger
 system prompts than comparable agent stacks, attributed to "all the rules we

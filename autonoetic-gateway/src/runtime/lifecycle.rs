@@ -699,7 +699,7 @@ impl AgentExecutor {
     /// Set the session's purpose state at creation. Use
     /// `SessionState::Clarification` for ask-agent child spawns so the tool
     /// tier is clamped read-only from the first turn — see
-    /// `docs/design/human-gate-unification-plan.md` §Phase 5.
+    /// `docs/archived/human-gate-unification-plan.md` §Phase 5.
     pub fn with_initial_session_state(
         mut self,
         state: autonoetic_types::agent::SessionState,

@@ -1,6 +1,6 @@
 # Agent Learning
 
-> Planned next step: a published-report-first observability URI surface is proposed in `docs/plan-session-observability-uri-surface.md`. That plan tightens cross-session access and defines canonical URIs for reports, causal events, traces, and narratives.
+> Planned next step: a published-report-first observability URI surface was proposed in `docs/archived/plan-session-observability-uri-surface.md` (archived plan). That plan tightens cross-session access and defines canonical URIs for reports, causal events, traces, and narratives.
 
 Autonoetic agents can learn from past sessions using three query tools that access the unified gateway database.
 

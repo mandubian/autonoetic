@@ -13,6 +13,10 @@ pub mod config;
 pub mod constitution_digest;
 pub mod constitution_glossary;
 pub mod denial_affordances;
+/// Repo-hygiene guard: every `docs/…` path cited by a live doc, an agent
+/// bundle, or production code must resolve. Test-only — no runtime surface.
+#[cfg(test)]
+mod docs_link_guard;
 pub mod egress_audit;
 pub mod egress_lineage;
 pub mod enforcement_register;

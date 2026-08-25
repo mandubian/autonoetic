@@ -4,7 +4,7 @@
 
 The constitution is a set of mechanically enforced rules that govern all agent behavior. These rules **cannot be overridden** — not by agents, not by planners, not by parameters.
 
-The active constitution is `docs/constitution/versions/CURRENT/constitution.md` (currently `2026.07.08`).
+The active constitution version is recorded in the pointer file `docs/constitution/CURRENT`; the text for a version `V` is `docs/constitution/versions/` + `V` + `/constitution.md`. This page deliberately does not name the version — a hardcoded one here drifts silently on the next amendment (it said `2026.07.08` while `2026.07.30` was active). The active version is also stated in your own constitution prompt block.
 
 ## Agent Rights (Bill of Rights)
 
