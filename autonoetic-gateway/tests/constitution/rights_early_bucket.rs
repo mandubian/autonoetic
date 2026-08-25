@@ -185,6 +185,16 @@ impl LlmDriver for EndTurnDriver {
     }
 }
 
+/// The executor binds the constitution version/digest into the per-turn
+/// state attestation tail (P-6.23) whenever a gateway_dir is set; the ri_0_7
+/// tests build executors directly rather than through gateway bootstrap
+/// (which normally calls initialize_constitution). Best-effort, idempotent.
+fn ensure_constitution_runtime() {
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &GatewayConfig::default(),
+    );
+}
+
 fn ri_0_7_manifest() -> AgentManifest {
     AgentManifest {
         agent: AgentIdentity {
@@ -216,6 +226,7 @@ fn ri_0_7_manifest() -> AgentManifest {
 
 #[tokio::test]
 async fn ri_0_7_session_close_commits_causal_event() {
+    ensure_constitution_runtime();
     let temp = tempdir().unwrap();
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join("ri07.tester");
@@ -287,6 +298,7 @@ async fn ri_0_7_session_close_commits_causal_event() {
 
 #[tokio::test]
 async fn ri_0_7_session_close_cannot_be_refused() {
+    ensure_constitution_runtime();
     let temp = tempdir().unwrap();
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join("ri07.tester");

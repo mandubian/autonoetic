@@ -39,6 +39,9 @@ fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {
     let tmpdir = tempfile::tempdir().unwrap();
     let agent_dir = tmpdir.path().join("test-agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(tmpdir.path()).unwrap(),
+    );
 
     let args = serde_json::json!({ "command": command });
     let result = registry
@@ -47,12 +50,12 @@ fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {
             manifest,
             &policy,
             &agent_dir,
-            None::<&std::path::Path>,
+            Some(tmpdir.path()),
             &serde_json::to_string(&args).unwrap(),
             Some("test-session"),
             None,
             None::<&autonoetic_types::config::GatewayConfig>,
-            None,
+            Some(store),
             None,
         )
         .unwrap();
@@ -102,6 +105,9 @@ fn exec_sandbox_with_artifact(
     let tmpdir = tempfile::tempdir().unwrap();
     let agent_dir = tmpdir.path().join("test-agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(tmpdir.path()).unwrap(),
+    );
 
     let args = serde_json::json!({
         "command": command,
@@ -118,7 +124,7 @@ fn exec_sandbox_with_artifact(
             Some("test-session"),
             None,
             None::<&autonoetic_types::config::GatewayConfig>,
-            None,
+            Some(store),
             None,
         )
         .unwrap();
