@@ -320,6 +320,26 @@ fn base_argv(agent_dir: &str, mode: HostFsMode) -> Vec<String> {
                 argv.push(source.to_string_lossy().to_string());
                 argv.push(candidate.to_string());
             }
+            // The Python SDK tree (PYTHONPATH source, resolved by
+            // `resolve_python_sdk_path` and injected in `apply_child_env`) —
+            // bound AT its path, never the whole gateway dir, so secrets stay
+            // out (#1174 review: without this, `import autonoetic_sdk` fails
+            // under allow_set — the legacy ro-bind of `/` used to supply it).
+            if let Some(sdk_path) = resolve_python_sdk_path() {
+                let p = PathBuf::from(&sdk_path);
+                if p.exists() {
+                    let source = std::fs::canonicalize(&p).unwrap_or(p.clone());
+                    argv.push("--ro-bind".to_string());
+                    argv.push(source.to_string_lossy().to_string());
+                    argv.push(sdk_path.clone());
+                } else {
+                    tracing::warn!(
+                        target: "sandbox",
+                        sdk_path = %sdk_path,
+                        "PYTHONPATH SDK path does not exist on the host;                          `import autonoetic_sdk` may fail inside allow_set sandboxes"
+                    );
+                }
+            }
         }
     }
     argv.push("--bind".to_string());

@@ -74,10 +74,18 @@ fn allow_set_exec_sees_only_the_asserted_set() {
     // operator's home (the sandbox inherits the env's HOME but not the dir).
     let (code, out) = probe(&argv, "ls \"$HOME\" 2>&1").unwrap();
     assert_ne!(code, 0, "host home must not resolve under allow_set: {out}");
+    // The gateway dir's *secrets* must be absent — the SDK tree may be bound
+    // (it is the PYTHONPATH source), so probe the vault key, not the dir.
     let (code, _) = probe(
         &argv,
-        &format!("ls {} 2>&1", gw.to_str().unwrap()),
+        &format!("cat {}/vault.key 2>&1", gw.to_str().unwrap()),
     )
     .unwrap();
-    assert_ne!(code, 0, "the gateway dir must not resolve under allow_set");
+    assert_ne!(code, 0, "gateway secrets must not resolve under allow_set");
+    let (code, _) = probe(
+        &argv,
+        &format!("cat {}/gateway.db 2>&1", gw.to_str().unwrap()),
+    )
+    .unwrap();
+    assert_ne!(code, 0, "gateway.db must not resolve under allow_set");
 }

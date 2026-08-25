@@ -124,7 +124,7 @@ fn network_capable_agent_without_a_grant_gets_no_share_net() {
     let overrides = BwrapIsolationOverrides {
         share_net: decision.share_net,
         force_network_off: false,
-host_fs_allow_set: false,
+        host_fs_allow_set: false,
     };
     let mut argv: Vec<String> = Vec::new();
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
@@ -159,7 +159,7 @@ fn approved_exec_still_reaches_the_network() {
     let overrides = BwrapIsolationOverrides {
         share_net: decision.share_net,
         force_network_off: false,
-host_fs_allow_set: false,
+        host_fs_allow_set: false,
     };
     let mut argv: Vec<String> = Vec::new();
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
