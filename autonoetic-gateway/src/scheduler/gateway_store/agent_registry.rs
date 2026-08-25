@@ -86,7 +86,17 @@ impl GatewayStore {
         Ok(())
     }
 
-    pub fn insert_agent_revision_transactional(&self, rev: &AgentRevisionRecord) -> Result<String> {
+    /// Insert a revision, idempotently (#651): `revision_id` is
+    /// content-addressed, so a concurrent duplicate create of the same
+    /// content is the *same* revision. The insert uses
+    /// `ON CONFLICT(revision_id) DO NOTHING`; `Ok(None)` means the row
+    /// already won a race and the caller should take its `already_exists`
+    /// path (re-reading for the short id) instead of surfacing a
+    /// UNIQUE-constraint error and burning a retry.
+    pub fn insert_agent_revision_transactional(
+        &self,
+        rev: &AgentRevisionRecord,
+    ) -> Result<Option<String>> {
         let metadata_json = serde_json::to_string(&rev.metadata_json)?;
         let detected_network_hosts = rev
             .detected_network_hosts
@@ -113,14 +123,15 @@ impl GatewayStore {
             rev.short_id.clone()
         };
 
-        tx.execute(
+        let inserted = tx.execute(
                 "INSERT INTO agent_revisions (
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
                     short_id, signature, signer_id, detected_network_hosts,
                     requested_by_type, requested_by_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                ON CONFLICT(revision_id) DO NOTHING",
                 params![
                     &rev.revision_id,
                     &rev.agent_id,
@@ -146,6 +157,20 @@ impl GatewayStore {
                     rev.requested_by_id,
                 ],
             )?;
+        if inserted == 0 {
+            // Lost a concurrent create of the same content-addressed id:
+            // the row is identical by construction. Leave its short_id_index
+            // entry alone and hand back the winner's short id so callers can
+            // build the same `already_exists` response the get-first path
+            // produces.
+            let existing_short: String = tx.query_row(
+                "SELECT short_id FROM agent_revisions WHERE revision_id = ?1",
+                params![&rev.revision_id],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            return Ok(None);
+        }
         let now = chrono::Utc::now().to_rfc3339();
         tx.execute(
             "INSERT OR IGNORE INTO short_id_index (short_id, revision_id, created_at)
@@ -154,7 +179,7 @@ impl GatewayStore {
         )?;
         tx.commit()?;
 
-        Ok(short)
+        Ok(Some(short))
     }
 
     pub fn get_agent_revision(&self, revision_id: &str) -> Result<Option<AgentRevisionRecord>> {
@@ -1147,6 +1172,57 @@ mod tests {
             signature: None,
             signer_id: None,
         }
+    }
+
+    /// #651 — concurrent duplicate creates of the same content-addressed
+    /// revision are idempotent: the second insert returns `Ok(None)` (lost
+    /// the race) instead of a UNIQUE-constraint error, and the winner's short
+    /// id is what callers read back.
+    #[test]
+    fn duplicate_revision_insert_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let winner = store
+            .insert_agent_revision_transactional(&revision("rev-dup"))
+            .unwrap()
+            .expect("first insert must win and mint a short id");
+
+        // Same content-addressed id again — the TOCTOU loser's insert.
+        let loser = store
+            .insert_agent_revision_transactional(&revision("rev-dup"))
+            .unwrap();
+        assert!(
+            loser.is_none(),
+            "duplicate insert must return Ok(None), got {loser:?}"
+        );
+
+        let read = store
+            .get_agent_revision("rev-dup")
+            .unwrap()
+            .expect("row must exist exactly once");
+        assert_eq!(
+            read.short_id, winner,
+            "the winner's short id survives; no second row was minted"
+        );
+    }
+
+    /// #651 — a *different* revision id still inserts normally (the conflict
+    /// clause is keyed on revision_id only).
+    #[test]
+    fn distinct_revision_ids_both_insert() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let a = store
+            .insert_agent_revision_transactional(&revision("rev-a"))
+            .unwrap()
+            .expect("first insert");
+        let b = store
+            .insert_agent_revision_transactional(&revision("rev-b"))
+            .unwrap()
+            .expect("second insert with a different id");
+        assert_ne!(a, b, "distinct revisions mint distinct short ids");
     }
 
     /// #803 — requested_by_* lineage survives an insert/select roundtrip.

@@ -1042,7 +1042,49 @@ fn create_revision_from_files(
             promo_store.reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
     }
 
-    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
+    // Idempotent create (#651): a concurrent duplicate of the same
+    // content-addressed revision lost the insert race — respond exactly as
+    // the get-first branch above would have, including the Archived
+    // resurrect, so no caller can tell the two paths apart (and no retry is
+    // burned on a UNIQUE-constraint error).
+    let short_id = match gateway_store.insert_agent_revision_transactional(&rev)? {
+        Some(short) => short,
+        None => {
+            let existing = gateway_store
+                .get_agent_revision(&revision_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "revision {revision_id} conflicted on insert but cannot be re-read"
+                    )
+                })?;
+            let status_label = if matches!(
+                existing.status,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+            ) {
+                let _ = gateway_store.update_agent_revision_status(
+                    &revision_id,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+                );
+                "reactivated"
+            } else {
+                "already_exists"
+            };
+            return Ok(PersistedRevisionResult {
+                response: serde_json::json!({
+                    "ok": true,
+                    "status": status_label,
+                    "revision_id": revision_id,
+                    "content_digest": existing.content_digest,
+                    "agent_id": common.agent_id,
+                    "artifact_id": existing.artifact_id,
+                    "artifact_ref": common.source_ref,
+                    "agent_ref": format!("{}@{}", common.agent_id, revision_id),
+                    "short_ref": format!("{}@rev_{}", common.agent_id, existing.short_id),
+                }),
+                normalized_lock,
+            });
+        }
+    };
 
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
