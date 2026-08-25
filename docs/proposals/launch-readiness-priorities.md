@@ -73,9 +73,9 @@ Ordered by urgency.
    that turn out not to exist yet: the outbound `MessageRouter` is dead code, the
    listener defaults off, and there is no live federation egress (see #1154).
    The durable residue is an **acceptance criterion on #1154**: when the outbound
-    wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
-    label, not session taint alone — plus #988 above, which is real today without
-    any federation.
+   wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
+   label, not session taint alone — plus #988 above, which is real today without
+   any federation.
 5. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
    one careless match arm away from reintroducing the create→promote loop already
    killed once. Remove the variant. *(resolved 2026-08-24: merged as `84afe3fc`,
