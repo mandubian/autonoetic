@@ -4889,7 +4889,7 @@ impl JsonRpcRouter {
             // Attach an operator comment to a live content file (file-level +
             // optional line hint), record it on the timeline, and deliver it to
             // the owning agent at its next turn. Comment-only — never mutates
-            // agent state. See `docs/design/operator-live-comments.md`.
+            // agent state. See `docs/archived/operator-live-comments.md`.
             "content.comment" => {
                 #[derive(Deserialize)]
                 struct ContentCommentParams {

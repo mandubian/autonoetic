@@ -296,7 +296,7 @@ Visibility (above) controls *who may read*; **egress labels** control *where
 content may flow afterward* — to a remote model, a peer gateway, the network.
 The label plane is a clean separation-of-powers instance: agents produce and
 reason over content; **the gateway alone labels it, withholds it, and routes
-around it**. (Full design: `docs/rfc/data-envelopes-egress-localization.md`.)
+around it**. (Full design: `docs/proposals/data-envelopes-egress-localization.md`.)
 
 **Agent proposes** content (tool results, replies, messages) and may declare a
 *floor* in its own bundle (`metadata.autonoetic.egress.output_label`) — it can

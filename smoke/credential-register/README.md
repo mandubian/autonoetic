@@ -1,7 +1,7 @@
 # credential-register smoke — classic case 5 of the validation study
 
 End-to-end exercise of the credential lifecycle under the study protocol
-(`docs/rfc/classic-harness-usecase-validation.md` §3.5):
+(`docs/proposals/classic-harness-usecase-validation.md` §3.5):
 
 1. A **mock weather service** (`mock_service.py`) runs on 127.0.0.1 and
    answers `GET /weather?city=X` only when the `X-Api-Key` header matches a

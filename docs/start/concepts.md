@@ -510,7 +510,7 @@ report channel that needs no permission, decider obligations that bind humans
 and agents alike, and offices that prove a seat can be defined before its
 occupant. The intent is for the community to grow into its own governance —
 progressively, by the same lawful process it uses for everything else. (See
-`docs/design/citizenship-as-a-runtime-service.md` for the full program.)
+`docs/proposals/citizenship-as-a-runtime-service.md` for the full program.)
 
 ---
 
@@ -1227,7 +1227,7 @@ chain in §14, are far more concrete once you have seen them in a real run.
 - `docs/concepts/philosophy.md` — the conceptions behind the design (functional autonoesis, the social contract, correctability, the democratic trajectory) and their intellectual lineage.
 - `docs/concepts/separation-of-powers.md` — the core authority boundary.
 - `docs/guide/human-agent-collaboration.md` — PlanFrame, workbench, reconciliation, and the `/return` handoff.
-- `docs/design/citizenship-as-a-runtime-service.md` — how rights become exercised: denial affordances, anomaly reporting, civic evals, institutional offices.
+- `docs/proposals/citizenship-as-a-runtime-service.md` — how rights become exercised: denial affordances, anomaly reporting, civic evals, institutional offices.
 - `docs/constitution/versions/2026.07.08/constitution.md` — current signed constitutional frame: Bill of Rights, principles, obligations, and amendment process.
 - `docs/constitution/enforcement-register.md` — generated map from constitutional clauses to code, tests, and config.
 - `docs/archived/architecture-summary.md` — compact architecture overview.

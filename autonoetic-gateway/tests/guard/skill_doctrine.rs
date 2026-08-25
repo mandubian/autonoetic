@@ -62,7 +62,7 @@ fn skill_md_does_not_reintroduce_migrated_doctrine() {
                 violations.push(format!(
                     "  agents/{}: re-introduces migrated doctrine \"{}\"\n    \
                      → this now lives in the {} block; delete the prose. \
-                     See docs/design/agent-prompt-factorization.md.",
+                     See docs/archived/agent-prompt-factorization.md.",
                     rel.display(),
                     fingerprint,
                     owner

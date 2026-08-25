@@ -1189,7 +1189,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub capability_delta_gate_mode: CapabilityDeltaGateMode,
 
-    /// Promotion-completeness "cursor" (see docs/design/promotion-completeness-invariant.md).
+    /// Promotion-completeness "cursor" (see docs/archived/promotion-completeness-invariant.md).
     /// When `true` (default), a revision that declares **zero capabilities** may be
     /// promoted directly — it cannot invoke any privileged tool, so its blast radius
     /// is bounded by runtime capability enforcement regardless of provenance. Set to
@@ -1478,7 +1478,7 @@ pub struct GatewayConfig {
     pub chat: ChatConfig,
 
     /// Operator activity feed settings (rate limiting). See the operator
-    /// activity feed design (`docs/design/operator-activity-feed-plan.md`).
+    /// activity feed design (`docs/proposals/operator-activity-feed.md`).
     #[serde(default)]
     pub operator_activity: OperatorActivityConfig,
 
@@ -3308,7 +3308,7 @@ impl Default for PromptBudgetConfig {
 /// The monitor recomputes a `TrajectoryHealth` verdict every turn and
 /// emits `divergence.*` causal events on level transitions only —
 /// healthy sessions produce no events. Thresholds below carry the
-/// design-doc defaults (`docs/design/divergence-sentinel-design.md` §4).
+/// design-doc defaults (`docs/proposals/divergence-sentinel.md` §4).
 ///
 /// Per-signal toggles let operators silence noisy signals without
 /// disabling the monitor outright.

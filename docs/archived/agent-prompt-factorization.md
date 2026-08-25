@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`burden-study.md`](../internals/prompt/burden-study.md). Kept as the design record; not source of truth.
+
 # Agent-prompt factorization: where to cut, compress, and de-entangle
 
 Status: proposal / roadmap. Builds on the guidance-block mechanism

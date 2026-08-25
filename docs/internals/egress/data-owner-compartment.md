@@ -1,6 +1,6 @@
 # Data-owner compartment pattern (egress Phase 4)
 
-**RFC:** [`data-envelopes-egress-localization.md`](../../rfc/data-envelopes-egress-localization.md) §5.5  
+**RFC:** [`data-envelopes-egress-localization.md`](../../proposals/data-envelopes-egress-localization.md) §5.5  
 **Tracking:** [#909](https://github.com/mandubian/autonoetic/issues/909) slice 7
 
 ## Problem

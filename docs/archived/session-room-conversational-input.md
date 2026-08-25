@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`session-room.md`](../guide/session-room.md). Kept as the design record; not source of truth.
+
 # Session Room — Full Conversational Input (operator messages)
 
 Status: **proposed** (2026-06-04) · Part of the Session Room program (#363) ·

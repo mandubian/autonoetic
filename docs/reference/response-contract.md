@@ -90,7 +90,7 @@ For **reasoning** agents that declare an object-shaped `io.returns` schema, the 
 
 A manifest that already declares its own `anomalies` property is left untouched (no overwrite, no duplicate `required` entry). Script agents are excluded — deterministic outputs cannot meaningfully witness or report. The rendered Output Contract (see `docs/internals/prompt/composition.md`) gains one line naming this a standing witness contract; the agent returns `"anomalies": []` when it observed nothing.
 
-Because reasoning agents default to **Advisory** `io.returns` enforcement (see CLI Overrides below), a reply missing `anomalies` never blocks — it logs and emits an `io.returns.advisory` causal event with `"anomalies_missing": true` in its payload, a greppable marker for future civic-health tallies (see the citizenship RFC, `docs/design/citizenship-as-a-runtime-service.md`, Part C.2/E.2).
+Because reasoning agents default to **Advisory** `io.returns` enforcement (see CLI Overrides below), a reply missing `anomalies` never blocks — it logs and emits an `io.returns.advisory` causal event with `"anomalies_missing": true` in its payload, a greppable marker for future civic-health tallies (see the citizenship RFC, `docs/proposals/citizenship-as-a-runtime-service.md`, Part C.2/E.2).
 
 ## Repair Semantics
 

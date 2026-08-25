@@ -1,7 +1,7 @@
 //! Sentinel P4 — divergence-watchdog validation experiment harness.
 //!
 //! Implements the protocol described in
-//! `docs/design/divergence-sentinel-validation.md`. Takes a labeled
+//! `docs/proposals/divergence-sentinel-validation.md`. Takes a labeled
 //! corpus of archived sessions, gathers Layer 1's verdict per session
 //! from the causal-events table, runs the watchdog blind per session,
 //! and computes confusion matrices for both judges. Outputs a markdown
@@ -47,7 +47,7 @@ use crate::cli::watchdog::{run_watchdog, WatchdogRun};
 /// CLI args for `autonoetic sentinel-experiment`.
 #[derive(Args)]
 pub struct SentinelExperimentArgs {
-    /// Path to the labeled corpus YAML (see `docs/design/divergence-sentinel-validation.md`).
+    /// Path to the labeled corpus YAML (see `docs/proposals/divergence-sentinel-validation.md`).
     #[arg(long)]
     pub corpus: PathBuf,
     /// Path to write the markdown report. Defaults to the corpus path with a
@@ -200,7 +200,7 @@ impl Confusion {
     }
 }
 
-/// Decision rule per `docs/design/divergence-sentinel-design.md` §6
+/// Decision rule per `docs/proposals/divergence-sentinel.md` §6
 /// "Success criteria for proceeding to P3".
 fn decision_rule(layer1: &Confusion, watchdog: &Confusion) -> Decision {
     let tpr_delta = watchdog.tpr() - layer1.tpr();
@@ -624,7 +624,7 @@ fn render_report(
         if sessions_with_interactions.is_empty() { "(none)".to_string() } else { sessions_with_interactions.join(", ") });
     let _ = writeln!(out);
     if total_new_msgs > 0 || total_new_interactions > 0 {
-        let _ = writeln!(out, "See `docs/design/divergence-sentinel-validation.md` §2.4 for the SQL cleanup snippet.\n");
+        let _ = writeln!(out, "See `docs/proposals/divergence-sentinel-validation.md` §2.4 for the SQL cleanup snippet.\n");
     } else {
         let _ = writeln!(out, "No new side-effect rows recorded — the watchdog did not flag any session loudly. (Note: deltas use `fetch_undelivered_messages` + `get_pending_interactions_for_session`, so messages consumed by an active planner or interactions answered between snapshots will not be counted.)\n");
     }

@@ -414,6 +414,44 @@ mod tests {
         );
     }
 
+    /// Every proposal is listed in `docs/proposals/README.md`.
+    ///
+    /// The index that preceded this one silently missed 11 of 27 docs, and the
+    /// sibling `rfc/` folder had no index at all — so "is anyone still working
+    /// on this?" had no answer you could trust. An unlisted proposal is an
+    /// invisible one.
+    #[test]
+    fn every_proposal_is_listed_in_the_index() {
+        let root = workspace_root();
+        let dir = root.join("docs/proposals");
+        let index_path = dir.join("README.md");
+        let index = std::fs::read_to_string(&index_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", index_path.display()));
+
+        let mut unlisted: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("docs/proposals must exist").flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "README.md" || !name.ends_with(".md") {
+                continue;
+            }
+            // Listed means linked, not merely mentioned in prose.
+            if !index.contains(&format!("({name})")) {
+                unlisted.push(name);
+            }
+        }
+        unlisted.sort();
+
+        assert!(
+            unlisted.is_empty(),
+            "{} proposal(s) not linked from docs/proposals/README.md: {}.\n\
+             Add a row with its status. A proposal nobody can find is a \
+             proposal nobody will finish — which is how the previous index \
+             came to miss 11 of 27 docs.",
+            unlisted.len(),
+            unlisted.join(", ")
+        );
+    }
+
     #[test]
     fn scanner_ignores_test_fixture_paths_but_reads_production_strings() {
         let src = r#"

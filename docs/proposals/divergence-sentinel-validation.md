@@ -3,11 +3,11 @@
 > Status: **Protocol ready (2026-05-20)** — harness implemented, awaiting
 > operator-curated corpus run.
 > Tracking: [#243](https://github.com/mandubian/autonoetic/issues/243).
-> Sister design: [`divergence-sentinel-design.md`](./divergence-sentinel-design.md) §6.
+> Sister design: [`divergence-sentinel-design.md`](./divergence-sentinel.md) §6.
 
 ## 1. Purpose
 
-The Sentinel design (`docs/design/divergence-sentinel-design.md`) proposes
+The Sentinel design (`docs/proposals/divergence-sentinel.md`) proposes
 two layers of divergence detection:
 
 - **Layer 1** — deterministic, in-gateway trajectory monitor (shipped in
@@ -273,7 +273,7 @@ replies from a prior real run and copy them into the YAML.
 
 ## 8. References
 
-- `docs/design/divergence-sentinel-design.md` §6 — the protocol this
+- `docs/proposals/divergence-sentinel.md` §6 — the protocol this
   document operationalises
 - `autonoetic/src/cli/sentinel_experiment.rs` — implementation
 - `autonoetic/src/cli/watchdog.rs::run_watchdog` — programmatic entry

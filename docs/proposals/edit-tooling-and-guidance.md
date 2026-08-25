@@ -103,7 +103,7 @@ file, later refactored into a tool-contributed block by #4/#6.
 ### Issue 1 — Implement `content_patch` (targeted edits on content-store entries)
 **Track A · depends on: none · ships with #2**
 
-Add a core-tier `content_patch` tool (full spec: `docs/design/content-patch-tool.md`).
+Add a core-tier `content_patch` tool (full spec: `docs/proposals/content-patch-tool.md`).
 
 - [ ] `runtime/fuzzy_match.rs`: 3 strategies (exact, line-trimmed,
       whitespace-normalized) with indentation handling folded into replacement

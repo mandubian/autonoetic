@@ -1,5 +1,5 @@
 //! Fix-now security core of the "Agent Genesis — One Door" RFC
-//! (docs/design/agent-genesis-one-door.md, Parts A/B/D/E.1):
+//! (docs/proposals/agent-genesis-one-door.md, Parts A/B/D/E.1):
 //!
 //! - `skill_install` always lands a **Candidate** revision and never
 //!   promotes/moves an alias (one door — issue #793).

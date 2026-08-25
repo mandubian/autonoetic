@@ -1,7 +1,7 @@
 //! Data Envelopes — Egress Localization Label Plane
 //!
 //! Foundation for the gateway-enforced **label plane** described in
-//! `docs/rfc/data-envelopes-egress-localization.md`. This module defines the
+//! `docs/proposals/data-envelopes-egress-localization.md`. This module defines the
 //! *types* only; gateway-side enforcement (chokepoint filtering, indication
 //! substitution, routing) lands in subsequent phases (#905, #907).
 //!

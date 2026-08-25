@@ -2,7 +2,7 @@
 
 **Status:** Draft — 2026-06-29 (rev. 2)
 **Authors:** OpenCode session, from observed session `session-79b128af`
-**Related:** `docs/AGENTS.md`, `docs/rfc/gateway-agent-divergence-robustness.md`, `autonoetic-gateway/src/execution.rs`, `autonoetic-gateway/src/scheduler/workflow_store.rs`
+**Related:** `docs/AGENTS.md`, `docs/proposals/gateway-agent-divergence-robustness.md`, `autonoetic-gateway/src/execution.rs`, `autonoetic-gateway/src/scheduler/workflow_store.rs`
 
 ---
 

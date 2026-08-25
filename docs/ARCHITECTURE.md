@@ -356,7 +356,7 @@ below.
 ### Egress Localization (Data Envelopes)
 
 A gateway-enforced **label plane** bounds where content may leave the machine
-(full design: `docs/rfc/data-envelopes-egress-localization.md`). Where
+(full design: `docs/proposals/data-envelopes-egress-localization.md`). Where
 credentials are protected by *never entering context*, this generalizes the
 property to ordinary content — "an agent may read my emails, but their content
 must never reach a remote model."
@@ -928,7 +928,7 @@ coverage gaps stay visible rather than silently dropped.
 - **CLI**: `autonoetic trace contract-health [--since <RFC3339>] [--json]`
 
 This is the foundation for principle-aware sentinel correlation; see
-`docs/design/divergence-sentinel-design.md`.
+`docs/proposals/divergence-sentinel.md`.
 
 ---
 

@@ -182,7 +182,7 @@ on whoever decides (O-1), and reciprocal accountability stops being rhetorical.
 O-1 says a rejection "(and ideally an approval)" records a reason. "Ideally" is
 not mechanically checkable — so this section makes O-1 concrete as a **graduated**
 duty: *when* a reason is owed, never *whether it is good*. Motivated by the
-Session Room UX requirement (`docs/rfc/session-room-channel-agnostic-timeline.md`
+Session Room UX requirement (`docs/archived/session-room-channel-agnostic-timeline.md`
 §3.5) that accountability must not become tedium: the obligation must bind hardest
 exactly where a "why" matters, and fall away where it would be busywork.
 
@@ -346,7 +346,7 @@ concentration of power the constitution otherwise guards against.
 
 When the security sentinel
 ([`../security-sentinel.md`](../internals/divergence-sentinel.md),
-[`divergence-sentinel-design.md`](divergence-sentinel-design.md)) detects an agent
+[`divergence-sentinel-design.md`](divergence-sentinel.md)) detects an agent
 doing bad things, *who decides it is degraded or banished?* The Lawful-Executor
 shape gives a clean separation that we should leave room for:
 
@@ -433,7 +433,7 @@ auditable commitment. The design principle the maintainer named —
 **common freedom without too much bureaucracy** — becomes a concrete test for
 every clause here: *does this add freedom-preserving structure, or just
 process?* If the latter, it doesn't belong (same bar as
-[`constitutional-evolution-reflections.md`](constitutional-evolution-reflections.md)).
+[`constitutional-evolution-reflections.md`](../concepts/constitutional-evolution.md)).
 
 ---
 
@@ -535,12 +535,12 @@ mechanism or breaking the wire.
   signing (unchanged by this RFC).
 - [`../revision-signing.md`](../reference/revision-signing.md) — revision keys, candidate
   basis for AI contributor attestation (Part C / OQ-3).
-- [`constitutional-evolution-reflections.md`](constitutional-evolution-reflections.md)
+- [`constitutional-evolution-reflections.md`](../concepts/constitutional-evolution.md)
   — the "would the system break without it?" bar this RFC's clauses must clear.
-- [`constitution-gate-amendments.md`](constitution-gate-amendments.md) —
+- [`constitution-gate-amendments.md`](../archived/constitution-gate-amendments.md) —
   agent-as-decider work that O-5 (duty to escalate) builds on.
 - [`../security-sentinel.md`](../internals/divergence-sentinel.md) /
-  [`divergence-sentinel-design.md`](divergence-sentinel-design.md) — the detector
+  [`divergence-sentinel-design.md`](divergence-sentinel.md) — the detector
   whose findings the (future) judicial authority would adjudicate (D.3): sentinel
   proposes, authority sentences, gateway enforces.
 - [`../autonoetic-concepts-for-beginners.md`](../start/concepts.md)

@@ -11,7 +11,7 @@ agents without forcing every handoff through planner-only orchestration.
 - `docs/concepts/planner-principles.md` — planner proposes, gateway executes.
 - `docs/guide/cognitive-capsule.md` — portable artifact/agent closure.
 - `docs/archived/human-gate-unification-plan.md` — unified human suspension gates.
-- `docs/design/operator-approval-inspection-plan.md` — code visibility during approval.
+- `docs/proposals/operator-approval-inspection.md` — code visibility during approval.
 
 ---
 

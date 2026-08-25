@@ -319,7 +319,7 @@ fences"`, `"never restart from scratch"`).
 
 ## See also
 
-- `docs/design/agent-prompt-factorization.md` — the roadmap/history and the
+- `docs/archived/agent-prompt-factorization.md` — the roadmap/history and the
   rationale for what was migrated, what was intentionally left role-specific
   (e.g. unittest policy, no-network, single-pass discovery), and why foundation
   unification (item E) was deferred.

@@ -4,7 +4,7 @@ This is the design companion to the [Session Room user guide](../../guide/sessio
 It explains *how* the room works: the canonical timeline, the three event
 streams, the channel-as-client boundary, and the two-axis actor model. The
 broader design rationale lives in
-[`docs/rfc/session-room-channel-agnostic-timeline.md`](../../rfc/session-room-channel-agnostic-timeline.md).
+[`docs/archived/session-room-channel-agnostic-timeline.md`](../../archived/session-room-channel-agnostic-timeline.md).
 
 ## The idea in one paragraph
 
@@ -200,7 +200,7 @@ agents and the gateway, applied to presentation surfaces.
   (anchored to the viewed version handle, optional line hint); writes an
   `operator.comment` timeline row and delivers the framed comment to the owning
   agent at its next turn via the `event.ingest` path (comment-only, never mutates
-  agent state). See [operator live file comments](../../design/operator-live-comments.md).
+  agent state). See [operator live file comments](../../archived/operator-live-comments.md).
 
 ### The render core and the `Channel` trait
 

@@ -1,6 +1,6 @@
 //! Enforcement Register — the generated bridge between constitutional
 //! **clauses** (principles and rights) and the concrete code that enforces
-//! them (epic #297; design `docs/design/constitution-restructure.md`).
+//! them (epic #297; design `docs/proposals/constitution-restructure.md`).
 //!
 //! The constitution is being restructured so the *signed* artifact holds a
 //! small set of **principles** (rules — invariants binding the *agent*) and
@@ -810,7 +810,7 @@ pub fn render_register_markdown() -> String {
          hand — run the register generator. Maps each constitutional **clause** — a principle \
          (binds the agent) or a right (binds the gateway) — to the mechanical checks, code, \
          tests, and config that enforce it. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as \
-         stable reference keys. See `docs/design/constitution-restructure.md`.\n\n",
+         stable reference keys. See `docs/proposals/constitution-restructure.md`.\n\n",
     );
 
     out.push_str("## Bind-direction summary\n\n");

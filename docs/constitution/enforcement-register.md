@@ -1,6 +1,6 @@
 # Enforcement Register (generated)
 
-> **Generated** from `autonoetic-gateway/src/enforcement_register.rs`. Do not edit by hand — run the register generator. Maps each constitutional **clause** — a principle (binds the agent) or a right (binds the gateway) — to the mechanical checks, code, tests, and config that enforce it. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as stable reference keys. See `docs/design/constitution-restructure.md`.
+> **Generated** from `autonoetic-gateway/src/enforcement_register.rs`. Do not edit by hand — run the register generator. Maps each constitutional **clause** — a principle (binds the agent) or a right (binds the gateway) — to the mechanical checks, code, tests, and config that enforce it. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as stable reference keys. See `docs/proposals/constitution-restructure.md`.
 
 ## Bind-direction summary
 

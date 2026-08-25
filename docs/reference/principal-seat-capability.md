@@ -47,7 +47,7 @@ The test for which axis something belongs on:
    *because* it is `Human`; humans are sovereign over the *frame*
    (amendments, escalation), but in day-to-day interaction a `human`
    principal and an `ai` principal are bound by the same obligations and
-   owed the same rights (`docs/design/principal-model-and-symmetric-obligations.md`
+   owed the same rights (`docs/proposals/principal-model-and-symmetric-obligations.md`
    Part A). This is what makes "office before occupant" real: the *duty*
    attaches to the act and the seat, not to the kind of the occupant.
 
@@ -129,7 +129,7 @@ to.** Exhaustive matches (no `_`) force this; wildcard matches let it slip.
 ## See also
 
 - `docs/concepts/philosophy.md` §3.2 — "the office is defined before the occupant."
-- `docs/design/principal-model-and-symmetric-obligations.md` — the RFC that
+- `docs/proposals/principal-model-and-symmetric-obligations.md` — the RFC that
   proposed the unified `Principal` (Part A) and authority-as-role (Part D);
   this page is the stable vocabulary those proposals assume.
 - `docs/AGENTS.md` — the agent-facing capabilities reference (the

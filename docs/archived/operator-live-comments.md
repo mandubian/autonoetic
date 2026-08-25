@@ -1,8 +1,10 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`session-room.md`](../guide/session-room.md). Kept as the design record; not source of truth.
+
 # Design: Operator Live File Comments
 
 Status: **Proposed**
 Scope: file-anchored, **next-turn**, **comment-only** (no operator editing).
-Related: extends Phases 5–6 of `docs/design/human-agent-artifact-collaboration-plan.md`
+Related: extends Phases 5–6 of `docs/proposals/human-agent-artifact-collaboration.md`
 (`workbench.ask` / `workbench.open`); builds on the t=0 content tree pane (PR #496).
 
 ## Context

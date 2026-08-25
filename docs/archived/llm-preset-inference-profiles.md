@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`composition.md`](../internals/prompt/composition.md). Kept as the design record; not source of truth.
+
 # RFC: LLM Preset Inference Profiles — Agent Identity vs Runtime Model Resolution
 
 **Status:** Draft — 2026-06-09  

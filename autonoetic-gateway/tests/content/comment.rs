@@ -1,6 +1,6 @@
 //! `content.comment` JSON-RPC — operator comments anchored to a live content
 //! file, recorded on the timeline and delivered to the owning agent at its next
-//! turn (#521). See `docs/design/operator-live-comments.md`.
+//! turn (#521). See `docs/archived/operator-live-comments.md`.
 
 
 

@@ -1,4 +1,4 @@
-//! Intent-based execution requests (RFC `docs/rfc/portable-wasm-execution-tier.md`, P2).
+//! Intent-based execution requests (RFC `docs/archived/portable-wasm-execution-tier.md`, P2).
 //!
 //! Replaces the bare `entrypoint: &str` handed to the sandbox with a structured
 //! description of *what to run* rather than *a shell line*. The Process backend

@@ -406,7 +406,7 @@ It does **not** stream every root-session tool call (for example `content_write`
 `digest.md` and `session_overview.md` record them.
 
 A channel-agnostic fix is planned in
-[`docs/design/operator-activity-feed-plan.md`](../design/operator-activity-feed-plan.md): the gateway
+[`docs/proposals/operator-activity-feed.md`](../proposals/operator-activity-feed.md): the gateway
 will emit an `operator_activity` feed keyed by `root_session_id` so the terminal, Discord,
 WhatsApp, and HTTP bridges all consume the same summaries.
 
@@ -433,7 +433,7 @@ See `docs/start/concepts.md` for the full conceptual framing.
 
 Root-session tool work (`content_write`, delegation, failures) is recorded in the gateway **`operator_activity`** feed, keyed by `root_session_id`. The chat TUI polls this feed during `check_signals`; future Discord/WhatsApp bridges should use the same `operator.activity.list` JSON-RPC method or the HTTP SSE stream documented in `docs/reference/http-api.md`.
 
-Design: `docs/design/operator-activity-feed-plan.md`.
+Design: `docs/proposals/operator-activity-feed.md`.
 
 ## File Layout
 
