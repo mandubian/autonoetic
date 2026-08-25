@@ -1674,7 +1674,7 @@ impl AgentExecutor {
                             cfg,
                             session_id,
                             root_session,
-                            &self.manifest.agent.id,
+                            &self.manifest,
                             &plan.batch,
                         )
                     })

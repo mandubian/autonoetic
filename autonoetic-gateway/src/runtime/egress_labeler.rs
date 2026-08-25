@@ -1303,42 +1303,32 @@ pub fn session_sink_declassified(
 /// (RFC §5.3 / §8): the session has no preset cleared for the tainted batch,
 /// so the offer is a session-wide declassification to `RemoteModel`.
 ///
-/// Dedup: an identical pending request (same target × sink under the root) is
-/// reused, so a session retrying a refused turn doesn't flood the pending
-/// list. Returns the request id (new or existing); `None` when filing fails
-/// (e.g. the approval flood cap rejects it — the refusal text then just omits
-/// the offer).
+/// Routed through [`crate::runtime::human_gate::GateService`] (#1164, restoring
+/// the #724 single door): dedup, typed `DecisionContext`, enrichment thread and
+/// flood-cap accounting are the gate's, not this helper's. Dedup keys on target
+/// × sink via `MatchStrategy::ExactPayload` against a **canonical** action
+/// reason — the batch-specific label lives in the `DecisionContext` (rendered
+/// into the row's operator-facing reason), not in the payload, so a session
+/// retrying with differently-labeled batches still reuses one pending offer.
+///
+/// Returns the request id (new or existing); `None` when no offer is pending —
+/// including when the gate errors (approval flood cap, store failure), which is
+/// logged loudly rather than silently swallowed.
 pub fn file_declassify_offer(
-    store: &GatewayStore,
+    store: &Arc<GatewayStore>,
     config: &autonoetic_types::config::GatewayConfig,
     session_id: &str,
     root_session_id: &str,
-    agent_id: &str,
+    manifest: &autonoetic_types::agent::AgentManifest,
     batch: &EgressLabel,
 ) -> Option<String> {
-    use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
+    use crate::runtime::human_gate::{GateKind, GateRequest, GateResult, MatchStrategy};
+    use autonoetic_types::background::ScheduledAction;
 
     let target = session_egress_declass_target(root_session_id);
-    if let Ok(pending) = store.get_pending_approvals_for_root(root_session_id) {
-        for req in &pending {
-            if let ScheduledAction::EgressDeclassify {
-                target: t,
-                allowed_sink,
-                ..
-            } = &req.action
-            {
-                if *t == target && *allowed_sink == Sink::RemoteModel {
-                    return Some(req.request_id.clone());
-                }
-            }
-        }
-    }
-
     let reason = format!(
-        "turn refused (egress_no_eligible_provider): this turn's new data is labeled {} and no \
-         configured preset is cleared for it. Approving declassifies this root session to \
-         RemoteModel (session-wide); reject to keep it local-only.",
-        label_display_name(batch)
+        "session-wide declassification offer after egress_no_eligible_provider refusal \
+         (root {root_session_id})"
     );
     let action = ScheduledAction::EgressDeclassify {
         target,
@@ -1346,31 +1336,61 @@ pub fn file_declassify_offer(
         reason: reason.clone(),
         payload: None,
     };
-    let request_id = autonoetic_types::id_format::short_random_id("apr-");
-    let mut request = ApprovalRequest {
-        request_id: request_id.clone(),
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        root_session_id: Some(root_session_id.to_string()),
-        workflow_id: None,
-        task_id: None,
-        approval_level: crate::scheduler::approval::resolve_approval_level(config, &action),
-        action,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        status: None,
-        decided_at: None,
-        decided_by: None,
-        reason: Some(reason),
-        evidence_ref: None,
-        decision_reason: None,
-        min_dwell_ms: None,
-        confirm_phrase: None,
-        code_excerpts: None,
-        risk_summary: None,
-        expires_at: None,
+    let context = crate::runtime::human_gate::DecisionContext::tier2(
+        format!(
+            "Declassify root session {root_session_id} to RemoteModel; this turn's new data \
+             is labeled {}",
+            label_display_name(batch)
+        ),
+        "RFC §8 egress boundary: no configured LLM preset is cleared for this turn's taint",
+        "Approving lets tainted content leave for a remote model provider, session-wide",
+        "Approve to run this session on a remote preset; reject to keep it local-only",
+    );
+    let gates = crate::runtime::human_gate::GateService::new(store.clone());
+    let request = GateRequest {
+        kind: GateKind::Approval {
+            action,
+            // Empty targets: grant coverage must not auto-clear a
+            // declassification (only a host-scoped network grant exists; it
+            // widens Network, never RemoteModel).
+            targets: Vec::new(),
+            match_strategy: MatchStrategy::ExactPayload,
+        },
+        manifest,
+        session_id: Some(session_id),
+        run_context: None,
+        config: Some(config),
+        context,
+        summary: format!("EgressDeclassify offer (root {root_session_id})"),
+        approval_ref: None,
+        request_id: None,
+        pre_validated: false,
+        cache_backfill: None,
+        turn_id: None,
     };
-    store.create_approval(&mut request).ok()?;
-    Some(request_id)
+    match gates.check(request) {
+        Ok(GateResult::AlreadyPending { gate_id, .. })
+        | Ok(GateResult::Suspended { gate_id, .. }) => Some(gate_id),
+        Ok(unexpected) => {
+            tracing::warn!(
+                target: "egress",
+                result = ?unexpected,
+                root_session_id,
+                "EgressDeclassify offer gate cleared instead of filing; omitting the offer"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "egress",
+                error = %e,
+                root_session_id,
+                "failed to file EgressDeclassify offer through GateService (flood cap or \
+                 store error); refusal text will omit the offer"
+            );
+            None
+        }
+    }
 }
 
 // ── RFC §5.3 inline ask (pin × taint conflict, #968) ─────────────────────
