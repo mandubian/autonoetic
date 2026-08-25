@@ -158,16 +158,11 @@ impl GatewayStore {
                 ],
             )?;
         if inserted == 0 {
-            // Lost a concurrent create of the same content-addressed id:
-            // the row is identical by construction. Leave its short_id_index
-            // entry alone and hand back the winner's short id so callers can
-            // build the same `already_exists` response the get-first path
-            // produces.
-            let existing_short: String = tx.query_row(
-                "SELECT short_id FROM agent_revisions WHERE revision_id = ?1",
-                params![&rev.revision_id],
-                |row| row.get(0),
-            )?;
+            // Lost a concurrent create of the same content-addressed id: the
+            // winner's row is identical by construction, so its
+            // short_id_index entry stays authoritative. `None` signals the
+            // caller to take its `already_exists` path and re-read the
+            // winner's short id itself.
             tx.commit()?;
             return Ok(None);
         }

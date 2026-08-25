@@ -548,8 +548,20 @@ fn propose_improvement(
         signer_id: None,
     };
 
-    let short_id = store.insert_agent_revision_transactional(&new_rev)
-        .with_context(|| format!("Failed to insert candidate revision for '{}'", agent_id))?;
+    // Idempotent insert (#651): a concurrent create of the same
+    // content-addressed candidate wins the race; reuse the winner's short id
+    // instead of failing the improve run on a UNIQUE-constraint error.
+    let short_id = match store.insert_agent_revision_transactional(&new_rev)
+        .with_context(|| format!("Failed to insert candidate revision for '{}'", agent_id))?
+    {
+        Some(short) => short,
+        None => store
+            .get_agent_revision(&revision_id)?
+            .ok_or_else(|| anyhow::anyhow!(
+                "candidate revision {revision_id} conflicted on insert but cannot be re-read"
+            ))?
+            .short_id,
+    };
 
     // Copy files from the PROMOTED revision's store directory to the new
     // candidate's directory.  This guarantees the on-disk files match the
