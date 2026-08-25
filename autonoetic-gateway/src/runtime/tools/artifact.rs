@@ -692,6 +692,7 @@ mod tests {
             remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
+                mounts: Vec::new(),
                 engine: "autonoetic".to_string(),
                 gateway_version: "0.1.0".to_string(),
                 sdk_version: "0.1.0".to_string(),

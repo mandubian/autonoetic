@@ -25,6 +25,7 @@ use crate::support::manifest_builder::TestManifest;
 
 fn runtime_declaration() -> RuntimeDeclaration {
     RuntimeDeclaration {
+        mounts: Vec::new(),
         engine: "autonoetic".to_string(),
         gateway_version: "0.1.0".to_string(),
         sdk_version: "0.1.0".to_string(),

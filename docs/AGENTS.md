@@ -136,6 +136,11 @@ metadata:
       type: "stateful"
       sandbox: "bubblewrap"
       runtime_lock: "runtime.lock"
+      mounts:                        # Optional (#1002): request host paths; granted only
+        - host_path: ~/mail          # against the operator's sandbox.allowed_mount_roots
+          readonly: true             # (read-only by default; readonly:false additionally needs
+                                     # the path under sandbox.allowed_mount_roots_rw). Paths
+                                     # overlapping the gateway dir are never granted.
     agent:
       id: "agent.id"
       name: "Human Name"

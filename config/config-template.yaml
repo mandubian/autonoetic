@@ -66,6 +66,15 @@ constitution:
 sandbox:
   share_net: false
   dev_mode: legacy   # legacy | minimal | host-bind
+  # Operator allowlist granting declared agent mounts (#1002): a manifest's
+  # runtime.mounts entry is honored iff its canonical path is at/under one of
+  # these roots. Empty denies every declared mount, loudly.
+  # allowed_mount_roots:
+  #   - /var/data/mail
+  # Read-write ceiling: `readonly: false` declarations are granted only when
+  # also covered here. ro roots cannot be widened by a manifest.
+  # allowed_mount_roots_rw:
+  #   - /var/data/work
 
 # ── Background Scheduler ──────────────────────────────────────────────
 background_scheduler_enabled: true

@@ -40,6 +40,21 @@ pub(crate) fn init_host_deny_paths(paths: Vec<PathBuf>) {
     let _ = SANDBOX_HOST_DENY_PATHS.set(normalize_deny_paths(&paths));
 }
 
+/// Canonicalized operator-registered deny paths, for overlap checks outside
+/// this driver (#1002: a declared mount must not shadow any of these). Empty
+/// when [`crate::sandbox::init_sandbox_host_deny_paths`] was never called.
+pub fn canonical_host_deny_paths() -> Vec<PathBuf> {
+    SANDBOX_HOST_DENY_PATHS
+        .get()
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|p| std::fs::canonicalize(p).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 /// Normalize a set of deny paths for use as bwrap mount destinations:
 /// - **Make absolute** — resolve relative paths against the gateway CWD. bwrap
 ///   interprets bind destinations against the sandbox namespace (rooted at the

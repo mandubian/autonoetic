@@ -1225,6 +1225,198 @@ pub struct SandboxMount {
     pub readonly: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Declared host mounts (#1002 slices 2-3)
+// ---------------------------------------------------------------------------
+
+/// One declared mount the operator's allowlist does not cover, with the
+/// reason and the grant that would satisfy it — denials teach (RFC
+/// sandbox-mount-allow-set §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountDenial {
+    /// The requesting manifest's raw `host_path` (pre-expansion).
+    pub host_path: String,
+    /// Canonicalized form that was checked.
+    pub canonical_path: String,
+    pub reason: String,
+}
+
+/// Resolve a manifest's `runtime.mounts` against the operator's
+/// `sandbox.allowed_mount_roots`. A mount is granted iff its canonicalized
+/// host path is equal to or under a canonicalized allowed root; anything else
+/// — outside every root, or a path that doesn't exist on host (bwrap cannot
+/// bind a missing source) — is denied loudly. The manifest alone never widens
+/// filesystem reach; the config allowlist is the grant, like
+/// `NetworkAccess.hosts`.
+pub fn resolve_declared_mounts(
+    declared: &[autonoetic_types::agent::DeclaredMount],
+    allowed_roots: &[String],
+    allowed_rw_roots: &[String],
+    protected_paths: &[PathBuf],
+) -> (Vec<SandboxMount>, Vec<MountDenial>) {
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let mut granted = Vec::new();
+    let mut denied = Vec::new();
+
+    let mut unresolvable_roots = 0usize;
+    let mut canon_roots = |roots: &[String]| -> Vec<PathBuf> {
+        roots
+            .iter()
+            .filter_map(|root| expand_tilde(root, &home))
+            .filter_map(|root| match std::fs::canonicalize(&root) {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    unresolvable_roots += 1;
+                    None
+                }
+            })
+            .collect()
+    };
+    let canonical_roots = canon_roots(allowed_roots);
+    let canonical_rw_roots = canon_roots(allowed_rw_roots);
+
+    let covered_by = |canonical: &Path, roots: &[PathBuf]| {
+        roots.iter().any(|root| canonical.starts_with(root))
+    };
+    // Deny beats grant (#1163 review finding 1): a declared mount that is at,
+    // above, or inside a protected path would shadow the bwrap deny-mask
+    // emitted earlier in the argv (mask flags precede extra mounts so
+    // gateway-owned mounts can layer over them — a privilege declared mounts
+    // must not inherit). Gateway-owned paths are already normalized.
+    let overlaps_protected = |canonical: &Path| {
+        protected_paths
+            .iter()
+            .any(|pp| canonical.starts_with(pp) || pp.starts_with(canonical))
+    };
+    let root_hint = |denial: &mut MountDenial| {
+        if unresolvable_roots > 0 {
+            denial.reason.push_str(&format!(
+                " (note: {unresolvable_roots} allowed_mount_roots entr                 {:?} could not be resolved on this host — check for typos)",
+                if unresolvable_roots == 1 { "y" } else { "ies" }
+            ));
+        }
+    };
+
+    for mount in declared {
+        let raw = mount.host_path.trim();
+        if raw.is_empty() {
+            denied.push(MountDenial {
+                host_path: mount.host_path.clone(),
+                canonical_path: String::new(),
+                reason: "empty host_path".to_string(),
+            });
+            continue;
+        }
+        let expanded = match expand_tilde(raw, &home) {
+            Some(p) => p,
+            None => {
+                denied.push(MountDenial {
+                    host_path: mount.host_path.clone(),
+                    canonical_path: raw.to_string(),
+                    reason: format!("cannot expand '~' (HOME unset) for {raw}"),
+                });
+                continue;
+            }
+        };
+        let canonical = match std::fs::canonicalize(&expanded) {
+            Ok(p) => p,
+            Err(_) => {
+                let mut d = MountDenial {
+                    host_path: mount.host_path.clone(),
+                    canonical_path: expanded.to_string_lossy().to_string(),
+                    reason: [
+                        "host path does not exist (or is not reachable); create it ",
+                        "or fix the declaration",
+                    ]
+                    .concat()
+                        .to_string(),
+                };
+                root_hint(&mut d);
+                denied.push(d);
+                continue;
+            }
+        };
+        if overlaps_protected(&canonical) {
+            denied.push(MountDenial {
+                host_path: mount.host_path.clone(),
+                canonical_path: canonical.to_string_lossy().to_string(),
+                reason: [
+                        "declared mount overlaps a protected path (the gateway ",
+                        "directory or an operator deny-list entry) — mounts never shadow ",
+                        "the sandbox secret mask",
+                    ]
+                    .concat()
+                    .to_string(),
+            });
+            continue;
+        }
+        if !covered_by(&canonical, &canonical_roots) && !covered_by(&canonical, &canonical_rw_roots)
+        {
+            let mut d = MountDenial {
+                host_path: mount.host_path.clone(),
+                canonical_path: canonical.to_string_lossy().to_string(),
+                reason: [
+                        "not under any sandbox.allowed_mount_roots entry — ask the ",
+                        "operator to extend the allowlist (config) or remove the ",
+                        "declaration",
+                    ]
+                    .concat()
+                    .to_string(),
+            };
+            root_hint(&mut d);
+            denied.push(d);
+            continue;
+        }
+        // Mode ceiling (#1163 review finding 2): readonly is granted as
+        // declared; rw additionally requires an rw root. A manifest asking
+        // for rw under an ro-only root is a widening attempt — deny with a
+        // reason that names the rw allowlist, never silently downgrade.
+        let effective_readonly = if mount.readonly {
+            true
+        } else if covered_by(&canonical, &canonical_rw_roots) {
+            false
+        } else {
+            let mut d = MountDenial {
+                host_path: mount.host_path.clone(),
+                canonical_path: canonical.to_string_lossy().to_string(),
+                reason: [
+                        "writable mount requires the path to also be under ",
+                        "sandbox.allowed_mount_roots_rw — read-only roots cannot be ",
+                        "widened by a manifest",
+                    ]
+                    .concat()
+                    .to_string(),
+            };
+            root_hint(&mut d);
+            denied.push(d);
+            continue;
+        };
+        // The mount lands at its canonical path inside the sandbox: symlinked
+        // declarations resolve to their target (a `~`-declared path under a
+        // symlinked home lands at the real path).
+        let dest = canonical.to_string_lossy().to_string();
+        granted.push(SandboxMount {
+            source: canonical,
+            dest,
+            readonly: effective_readonly,
+        });
+    }
+    (granted, denied)
+}
+
+fn expand_tilde(p: &str, home: &Option<PathBuf>) -> Option<PathBuf> {
+    if p == "~" {
+        return home.clone();
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        return home.as_ref().map(|h| h.join(rest));
+    }
+    if p.starts_with('~') {
+        return None;
+    }
+    Some(PathBuf::from(p))
+}
+
 pub(crate) fn sandbox_env_overrides_allowed() -> bool {
     parse_env_bool(
         std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV)
@@ -1504,3 +1696,353 @@ mod tests {
         assert_eq!(loaded["data"]["cursor"], json!(42));
     }
 }
+
+#[cfg(test)]
+mod declared_mount_tests {
+    use super::*;
+
+    fn declared(path: &str, readonly: bool) -> autonoetic_types::agent::DeclaredMount {
+        autonoetic_types::agent::DeclaredMount {
+            host_path: path.to_string(),
+            readonly,
+        }
+    }
+
+    fn tmpdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn resolve(
+        mounts: &[autonoetic_types::agent::DeclaredMount],
+        ro_roots: &[String],
+        rw_roots: &[String],
+        protected: &[PathBuf],
+    ) -> (Vec<SandboxMount>, Vec<MountDenial>) {
+        resolve_declared_mounts(mounts, ro_roots, rw_roots, protected)
+    }
+
+    fn s(p: &std::path::Path) -> String {
+        p.to_string_lossy().to_string()
+    }
+
+    /// Root `/a`, mount `/a/b/c` — the strict-subpath case operators actually
+    /// configure (#1163 review finding 5).
+    #[test]
+    fn strict_subpath_of_root_is_granted() {
+        let tmp = tmpdir();
+        let root = tmp.path().join("root");
+        let nested = root.join("b");
+        let file_dir = nested.join("c");
+        std::fs::create_dir_all(&file_dir).unwrap();
+        let (granted, denied) = resolve(
+            &[declared(&s(&file_dir), true)],
+            &[s(&root)],
+            &[],
+            &[],
+        );
+        assert!(denied.is_empty(), "unexpected denials: {denied:?}");
+        assert_eq!(granted.len(), 1);
+        assert!(granted[0].readonly);
+    }
+
+    /// `/root` must NOT cover `/rootdir` — component-wise prefix only. Pins
+    /// the property a string-prefix refactor would silently break (#1163
+    /// review finding 5).
+    #[test]
+    fn root_does_not_cover_sibling_with_shared_prefix() {
+        let tmp = tmpdir();
+        let root = tmp.path().join("root");
+        let sibling = tmp.path().join("rootdir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (granted, denied) = resolve(
+            &[declared(&s(&sibling), true)],
+            &[s(&root)],
+            &[],
+            &[],
+        );
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+    }
+
+    /// Root itself granted (exact match).
+    #[test]
+    fn root_exact_match_is_granted() {
+        let tmp = tmpdir();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let (granted, denied) = resolve(&[declared(&s(&root), true)], &[s(&root)], &[], &[]);
+        assert!(denied.is_empty());
+        assert_eq!(granted.len(), 1);
+    }
+
+    /// Outside every root → denied, naming the grant.
+    #[test]
+    fn mount_outside_roots_is_denied_with_reason() {
+        let tmp = tmpdir();
+        let secret = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&secret).unwrap();
+        let root = tmp.path().join("granted");
+        std::fs::create_dir_all(&root).unwrap();
+        let (granted, denied) = resolve(&[declared(&s(&secret), false)], &[s(&root)], &[], &[]);
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0].reason.contains("allowed_mount_roots"),
+            "{}",
+            denied[0].reason
+        );
+    }
+
+    /// Empty allowlist denies everything (fail-closed default).
+    #[test]
+    fn empty_allowlist_denies_all() {
+        let tmp = tmpdir();
+        let p = tmp.path().join("x");
+        std::fs::create_dir_all(&p).unwrap();
+        let (granted, denied) = resolve(&[declared(&s(&p), true)], &[], &[], &[]);
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+    }
+
+    /// Non-existent host path → denied; assert the count before indexing so a
+    /// regression fails on the assert, not a panic (#1163 review finding 5).
+    #[test]
+    fn nonexistent_path_is_denied() {
+        let tmp = tmpdir();
+        let missing = tmp.path().join("nope");
+        let (granted, denied) = resolve(
+            &[declared(&missing.to_string_lossy(), true)],
+            &[s(tmp.path())],
+            &[],
+            &[],
+        );
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0].reason.contains("does not exist"),
+            "{}",
+            denied[0].reason
+        );
+    }
+
+    /// A symlinked declared path is checked (and mounted) at its canonical
+    /// target — indirection cannot smuggle reach (#1163 review finding 1's
+    /// cousin, pinned here).
+    #[test]
+    fn symlinked_path_is_checked_canonically() {
+        let tmp = tmpdir();
+        let inside = tmp.path().join("inside");
+        std::fs::create_dir_all(&inside).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = tmp.path().join("linkdir");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let (granted, denied) = resolve(&[declared(&s(&link), true)], &[s(&inside)], &[], &[]);
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+    }
+
+    /// DENY BEATS GRANT (#1163 review finding 1): a declared mount at, above,
+    /// or inside the gateway dir is rejected even when the allowlist covers
+    /// it — mounts never shadow the bwrap secret mask. `vault.key`,
+    /// `gateway.db`, `state_attestation.ed25519` stay masked.
+    #[test]
+    fn mount_overlapping_gateway_dir_is_denied_even_when_allowlisted() {
+        let tmp = tmpdir();
+        let gw = tmp.path().join("runtime");
+        std::fs::create_dir_all(gw.join("sessions")).unwrap();
+
+        // (a) inside the gateway dir
+        let (granted, denied) = resolve(
+            &[declared(&s(&gw.join("sessions")), true)],
+            &[s(tmp.path())],
+            &[],
+            &[gw.clone()],
+        );
+        assert!(granted.is_empty(), "inside-gateway grant must be refused");
+        assert_eq!(denied.len(), 1);
+        assert!(denied[0].reason.contains("protected"), "{}", denied[0].reason);
+
+        // (b) ABOVE the gateway dir — the shadowing repro shape from the
+        // review (`--ro-bind <proj> <proj>` after the mask flags).
+        let (granted, denied) = resolve(
+            &[declared(&s(tmp.path()), true)],
+            &[s(tmp.path())],
+            &[],
+            &[gw.clone()],
+        );
+        assert!(granted.is_empty(), "above-gateway grant must be refused");
+        assert_eq!(denied.len(), 1);
+        assert!(denied[0].reason.contains("protected"));
+
+        // (c) the gateway dir itself
+        let (granted, denied) = resolve(
+            &[declared(&s(&gw), true)],
+            &[s(tmp.path())],
+            &[],
+            &[gw.clone()],
+        );
+        assert!(granted.is_empty(), "exact-gateway grant must be refused");
+        assert_eq!(denied.len(), 1);
+    }
+
+    /// Operator deny-list entries are protected exactly like the gateway dir
+    /// (#1163 review finding 1 — the operator config file with provider
+    /// credentials is in SANDBOX_HOST_DENY_PATHS).
+    #[test]
+    fn mount_overlapping_host_deny_path_is_denied() {
+        let tmp = tmpdir();
+        let cfg_file = tmp.path().join("config.yaml");
+        std::fs::write(&cfg_file, "provider: x").unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let (granted, denied) = resolve(
+            &[declared(&s(tmp.path()), true)],
+            &[s(tmp.path())],
+            &[],
+            &[cfg_file.clone()],
+        );
+        assert!(granted.is_empty(), "a dir containing a deny-listed file must not be grantable");
+        assert_eq!(denied.len(), 1);
+        assert!(denied[0].reason.contains("protected"));
+    }
+
+    /// MODE CEILING (#1163 review finding 2): readonly is the default grant;
+    /// rw requires the path to also be under `allowed_mount_roots_rw`.
+    /// The manifest can narrow (ro under an rw root) but never widen.
+    #[test]
+    fn rw_requires_an_rw_root() {
+        let tmp = tmpdir();
+        let ro_root = tmp.path().join("ro");
+        let rw_root = tmp.path().join("rwx");
+        std::fs::create_dir_all(&ro_root).unwrap();
+        std::fs::create_dir_all(&rw_root).unwrap();
+
+        // ro root only + manifest readonly:true → granted ro.
+        let (granted, denied) = resolve(&[declared(&s(&ro_root), true)], &[s(&ro_root)], &[], &[]);
+        assert!(denied.is_empty());
+        assert!(granted[0].readonly);
+
+        // ro root only + manifest readonly:false → DENIED, teaching the rw
+        // allowlist. Never silently downgraded.
+        let (granted, denied) = resolve(&[declared(&s(&ro_root), false)], &[s(&ro_root)], &[], &[]);
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0].reason.contains("allowed_mount_roots_rw"),
+            "{}",
+            denied[0].reason
+        );
+
+        // rw root covers the path + manifest readonly:false → granted rw.
+        let (granted, denied) =
+            resolve(&[declared(&s(&rw_root), false)], &[s(&rw_root)], &[s(&rw_root)], &[]);
+        assert!(denied.is_empty());
+        assert!(!granted[0].readonly);
+
+        // rw root covers the path, manifest narrows to ro → granted ro.
+        let (granted, denied) =
+            resolve(&[declared(&s(&rw_root), true)], &[s(&rw_root)], &[s(&rw_root)], &[]);
+        assert!(denied.is_empty());
+        assert!(granted[0].readonly);
+    }
+
+    /// Denial reasons are agent-facing prose (#1163 review finding 4): no
+    /// long whitespace runs from broken string continuations, no double
+    /// spaces — every branch of the resolver is exercised and its reason
+    /// printed-checked here, so a mangled literal fails a test instead of
+    /// reaching the agent verbatim.
+    #[test]
+    fn denial_reasons_are_clean_prose() {
+        let tmp = tmpdir();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let protected = tmp.path().join("runtime");
+        std::fs::create_dir_all(&protected).unwrap();
+
+        let cases: Vec<(&str, Vec<autonoetic_types::agent::DeclaredMount>, Vec<String>)> = vec![
+            (
+                "empty",
+                vec![declared("  ", true)],
+                vec![root.to_string_lossy().to_string()],
+            ),
+            (
+                "nonexistent",
+                vec![declared(
+                    &tmp.path().join("missing").to_string_lossy(),
+                    true,
+                )],
+                vec![tmp.path().to_string_lossy().to_string()],
+            ),
+            (
+                "protected",
+                vec![declared(&protected.to_string_lossy(), true)],
+                vec![tmp.path().to_string_lossy().to_string()],
+            ),
+            (
+                "outside_roots",
+                vec![declared(
+                    &tmp.path().join("elsewhere").to_string_lossy(),
+                    true,
+                )],
+                vec![root.to_string_lossy().to_string()],
+            ),
+        ];
+        // Create the dirs the outside/protected cases need.
+        std::fs::create_dir_all(tmp.path().join("elsewhere")).unwrap();
+
+        for (label, mounts, roots) in cases {
+            let (_, denied) = resolve(&mounts, &roots, &[], &[protected.clone()]);
+            assert_eq!(denied.len(), 1, "case {label}");
+            let reason = &denied[0].reason;
+            assert!(
+                !reason.contains("  "),
+                "case {label} reason has a double-space run: {reason:?}"
+            );
+            assert!(
+                reason.chars().filter(|c| *c == ' ').count() <= reason.chars().count() / 4,
+                "case {label} reason looks space-padded: {reason:?}"
+            );
+        }
+
+        // The rw-ceiling branch (needs a real path under an ro root).
+        let (granted, denied) = resolve(
+            &[declared(&root.to_string_lossy(), false)],
+            &[root.to_string_lossy().to_string()],
+            &[],
+            &[],
+        );
+        assert!(granted.is_empty());
+        let reason = &denied[0].reason;
+        assert!(
+            !reason.contains("  "),
+            "rw-ceiling reason has a double-space run: {reason:?}"
+        );
+        assert!(
+            reason.contains("allowed_mount_roots_rw"),
+            "rw-ceiling reason must name the ceiling: {reason:?}"
+        );
+    }
+
+    /// An unresolvable allowed root surfaces in the denial reason — denials
+    /// teach, including about the operator's own typos (#1163 review nit).
+    #[test]
+    fn unresolvable_root_is_surfaced_in_denials() {
+        let tmp = tmpdir();
+        let p = tmp.path().join("x");
+        std::fs::create_dir_all(&p).unwrap();
+        let bogus_root = tmp.path().join("typo-root");
+        let (granted, denied) = resolve(&[declared(&s(&p), true)], &[s(&bogus_root)], &[], &[]);
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0].reason.contains("could not be resolved"),
+            "{}",
+            denied[0].reason
+        );
+    }
+}
+

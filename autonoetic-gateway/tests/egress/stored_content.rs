@@ -29,6 +29,7 @@ fn test_manifest() -> AgentManifest {
     AgentManifest {
         version: "1.0".into(),
         runtime: RuntimeDeclaration {
+            mounts: Vec::new(),
             engine: "autonoetic".into(),
             gateway_version: "0.1.0".into(),
             sdk_version: "0.1.0".into(),

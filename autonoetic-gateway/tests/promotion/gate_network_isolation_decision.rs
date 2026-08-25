@@ -40,6 +40,7 @@ fn driver_network_off_guarantee_truth_table() {
 fn manifest(agent_id: &str, sandbox: &str) -> AgentManifest {
     AgentManifest {
         runtime: RuntimeDeclaration {
+            mounts: Vec::new(),
             engine: "autonoetic".to_string(),
             gateway_version: "0.1.0".to_string(),
             sdk_version: "0.1.0".to_string(),

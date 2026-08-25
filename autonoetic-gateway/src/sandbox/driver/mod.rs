@@ -160,6 +160,19 @@ pub trait SandboxDriver: Send + Sync {
         Ok(())
     }
 
+    /// `Err` when this driver cannot honour declared host mounts (#1002
+    /// slice 3). A manifest mount valid under one tier and silently useless
+    /// under another must fail loudly under that tier — the default accepts;
+    /// the wasm tier overrides (no host filesystem in the same sense) so a
+    /// wasm manifest declaring `runtime.mounts` is rejected instead of
+    /// quietly never seeing them.
+    fn check_mount_support(
+        &self,
+        _mounts: &[autonoetic_types::agent::DeclaredMount],
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// In-sandbox path where the SDK bridge socket is exposed for `socket_name`.
     /// `None` means this driver runs no SDK bridge.
     fn sdk_socket_path(&self, _socket_name: &str) -> Option<String> {
@@ -390,6 +403,31 @@ mod tests {
         assert!(!SandboxDriverKind::Bubblewrap.runs_in_process());
         assert!(!SandboxDriverKind::Docker.runs_in_process());
         assert!(!SandboxDriverKind::MicroVm.runs_in_process());
+    }
+
+    /// #1002 slice 3: declared mounts are rejected loudly by the wasm tier
+    /// (no host filesystem) and accepted by every process tier.
+    #[test]
+    fn wasm_is_the_only_driver_rejecting_declared_mounts() {
+        let mounts = vec![autonoetic_types::agent::DeclaredMount {
+            host_path: "/var/data/mail".to_string(),
+            readonly: true,
+        }];
+        for driver in builtin_registry().drivers() {
+            let supported = driver.check_mount_support(&mounts).is_ok();
+            assert_eq!(
+                supported,
+                driver.kind() != SandboxDriverKind::Wasm,
+                "unexpected mount support for {:?}",
+                driver.kind()
+            );
+            // No declarations, nothing to reject — every tier accepts empty.
+            assert!(
+                driver.check_mount_support(&[]).is_ok(),
+                "{:?} must accept an empty mount list",
+                driver.kind()
+            );
+        }
     }
 
     /// MicroVM is the one driver that cannot bootstrap dependencies; every other
