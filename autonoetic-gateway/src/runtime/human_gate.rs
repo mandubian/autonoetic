@@ -6,7 +6,7 @@
 //! "check → dedup → gate → suspend" pattern that was previously reimplemented
 //! independently in 15+ tool files.
 //!
-//! See <docs/design/human-gate-unification-plan.md> for the full design.
+//! See <docs/archived/human-gate-unification-plan.md> for the full design.
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -178,7 +178,7 @@ eviction.
   and context management are agent responsibilities — not gateway guarantees.
   The Lawful-Executor invariant says the gateway shouldn't manage agent state.
 - **Implementation already handles this.** The system has context overflow
-  mitigation (see `docs/design/llm-context-overflow-mitigation-plan.md`).
+  mitigation (see `docs/archived/llm-context-overflow-mitigation-plan.md`).
   This is an engineering problem, not a constitutional gap.
 - **Hard to define "minimum viable."** Different tasks require different
   amounts of context. A one-size-fits-all guarantee would be either too

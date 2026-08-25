@@ -11,7 +11,7 @@ implemented). This RFC re-derives the selection and turns it into an
 executable protocol.
 
 **Related:** `docs/credential-management.md`, `docs/remote-access-approval.md`,
-`docs/approval-system.md`, `docs/agent-prompt-guidance.md`,
+`docs/archived/approval-system.md`, `docs/agent-prompt-guidance.md`,
 `autonoetic-gateway/src/runtime/tools/` (web, content_patch, credential,
 scheduler), `smoke/yfinance-factory/`, `smoke/memory-loop/`.
 

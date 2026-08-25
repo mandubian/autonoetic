@@ -7,7 +7,7 @@
 //! This is the structural guarantee behind `gateway approvals ask-agent`:
 //! an operator probe cannot trigger an action even if the agent is willing
 //! or the system prompt is bypassed. See
-//! `docs/design/human-gate-unification-plan.md` §Phase 5.
+//! `docs/archived/human-gate-unification-plan.md` §Phase 5.
 
 
 use autonoetic_gateway::runtime::tool_dispatch::determine_tool_tier_filter;

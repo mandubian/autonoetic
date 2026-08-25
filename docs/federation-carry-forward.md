@@ -514,8 +514,9 @@ classification is sound for their agent population.
 
 - #1066 — build-time capability validation + planner manifest preflight
   (Options 1 + 2; ships the avoidable-round collapse)
-- `docs/approval-system.md` — the five-layer approval dedup model this design
-  mirrors (planner proposes, gateway dedups + caps)
+- `docs/approved-resources-caching.md` — the approval dedup + session-grant
+  model this design mirrors (planner proposes, gateway dedups + caps); the
+  original five-layer write-up is `docs/archived/approval-system.md`
 - `docs/plan-capability-grants.md` — same "operator approves envelope, gateway
   materializes + enforces" pattern
 - `agents/lead/planner.default/SKILL.md` — Evaluation Federation section

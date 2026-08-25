@@ -980,5 +980,6 @@ planner finds output immediately
 ### 📋 Related Documentation
 
 - **Workflow Events**: `docs/workflow-orchestration.md` → "Workflow Event Types"
-- **Approval Flow**: `docs/approval-system.md`
+- **Approval Flow**: `docs/archived/approval-system.md` (pre-unification;
+  current behaviour in `docs/wiki/approval-system.md`)
 - **Chat CLI**: Real-time workflow event polling with approval visibility

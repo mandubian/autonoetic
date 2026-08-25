@@ -1,6 +1,6 @@
 //! Gateway-owned user interaction answer resolution and resume orchestration.
 //!
-//! See `docs/plan-channel-agnostic-interaction-answering.md`.
+//! See `docs/archived/plan-channel-agnostic-interaction-answering.md`.
 
 use crate::execution::GatewayExecutionService;
 use crate::log_redaction::looks_like_secret_value;

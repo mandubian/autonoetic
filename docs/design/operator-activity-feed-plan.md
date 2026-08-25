@@ -399,7 +399,7 @@ so bridges recover session context without local state. v1: bridge stores mappin
 
 - [ ] `GET /api/operator/activity/stream/…`
 - [ ] Update `docs/remote-agents-http-api.md`, `docs/human-agent-collaboration.md` (Observability).
-- [ ] Example bridge pseudocode in `docs/agent-messaging.md` or new `docs/channel-adapters.md`.
+- [ ] Example bridge pseudocode in `docs/agent-messaging.md`, or a new channel-adapters doc.
 
 ### Phase 4 — Hardening
 

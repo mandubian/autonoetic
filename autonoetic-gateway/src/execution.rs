@@ -5017,7 +5017,7 @@ impl GatewayExecutionService {
     /// pending approval, ask it the operator's question, capture its reply
     /// as a `gate_message` on the original approval, and return the reply.
     ///
-    /// See `docs/design/human-gate-unification-plan.md` §Phase 5 for the
+    /// See `docs/archived/human-gate-unification-plan.md` §Phase 5 for the
     /// design rationale (gate-state via suspension stays untouched; this
     /// implements the orthogonal "gate-context" axis).
     pub async fn spawn_clarification_for_approval(

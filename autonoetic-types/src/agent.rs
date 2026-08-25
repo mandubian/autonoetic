@@ -586,7 +586,7 @@ pub enum SandboxNetworkPolicy {
 /// it is set at session start (typically by `spawn_clarification_for_approval`)
 /// and stays for the life of the session. Tool tier is clamped read-only by
 /// the tier filter — agents in clarification sessions can only inspect, never
-/// act. See `docs/design/human-gate-unification-plan.md` §Phase 5.
+/// act. See `docs/archived/human-gate-unification-plan.md` §Phase 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
