@@ -115,8 +115,8 @@ Ship-blockers only in the sense that launching with them visibly degrades reliab
   triaged across #1162 (19 stale-contract repairs + #1164 filed for one genuine
   regression), #1167 and #1169 (constitution-runtime fixtures under nextest's
   process-per-test model, plus an unmasked promote-resume stack overflow).
-  Residual is environmental only (#1158): live-LLM ×2, host-bwrap ×3. Runner-
-  discrepancy class remains open: any suite green under shared-process
+  Residual is environmental only (#1158): live-LLM ×2, host-bwrap ×3.
+  The runner-discrepancy class remains open: any suite green under shared-process
   `cargo test` but unverified under nextest is suspect.)*
 - **#378** — finish GateService migration; three production `create_approval` callers
   remain outside the single door (`session.rs`, `user_profile.rs`, `scheduler/runner.rs`).
