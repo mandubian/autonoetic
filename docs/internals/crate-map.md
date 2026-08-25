@@ -214,7 +214,7 @@ autonoetic gateway approvals approve <request_id>
 
 ```
 .autonoetic/
-├── gateway.toml                    # Gateway configuration
+├── config.yaml                     # Gateway configuration (YAML)
 ├── runtime/
 │   ├── content/sha256/ab/...       # Content-addressable store
 │   ├── sessions/<session_id>/
@@ -289,21 +289,25 @@ Markdown body with natural language instructions.
 
 ## Runtime Configuration
 
-### Gateway Config (`gateway.toml`)
+### Gateway Config (`config.yaml`)
 
-```toml
-port = 8080
-ofp_port = 8081
-agents_dir = "/path/to/agents"
+Parsed with `serde_yaml` — the filename extension is never inspected, but the
+*content* must be YAML. Full field reference:
+[`../reference/config.md`](../reference/config.md).
+
+```yaml
+port: 8080
+ofp_port: 8081
+agents_dir: /path/to/agents
 
 # Reliability controls
-max_concurrent_spawns = 10
-max_pending_spawns_per_agent = 3
+max_concurrent_spawns: 10
+max_pending_spawns_per_agent: 3
 
 # Schema enforcement
-[schema_enforcement]
-mode = "deterministic"  # disabled, deterministic, or llm
-audit = true
+schema_enforcement:
+  mode: deterministic   # disabled, deterministic, or llm
+  audit: true
 ```
 
 > **Note:** `default_lead_agent_id` and `agent_install_approval_policy` have been removed. Routing requires an explicit `target_agent_id`; agent activation is always via `agent_revision_promote`.
@@ -319,7 +323,7 @@ Session-scoped LLM/tool/token/wall-clock/optional USD caps are configured in YAM
 | `AUTONOETIC_DOCKER_IMAGE` | Docker image for sandbox |
 | `AUTONOETIC_FIRECRACKER_CONFIG` | Firecracker config path |
 | `AUTONOETIC_PYTHON_SDK_PATH` | Python SDK path for sandbox |
-| `AUTONOETIC_SHARED_SECRET` | Bearer token for HTTP API |
+| `AUTONOETIC_SHARED_SECRET` | Auth token required for the HTTP API (Bearer) **and** local JSON-RPC ingress |
 | `AUTONOETIC_EVIDENCE_MODE` | `full` (default) or `off` |
 | `AUTONOETIC_LLM_CONTEXT_WINDOW` | Optional token context size for CLI “% of context used” when not set in agent `llm_config` |
 | `CCOS_SOCKET_PATH` | Unix socket path for SDK |

@@ -272,8 +272,7 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 - [`docs/guide/cognitive-capsule.md`](docs/guide/cognitive-capsule.md): Portable agent capsule export/import
 - [`docs/design/README.md`](docs/design/README.md): Active design plans with open work
 - [`docs/archived/architecture-summary.md`](docs/archived/architecture-summary.md): What's kept vs externalized
-- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Gateway neutrality principles
-- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities
+- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities, and why the gateway stays a narrow rule enforcer rather than a workflow engine
 
 ### Planning
 

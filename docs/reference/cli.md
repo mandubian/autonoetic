@@ -10,7 +10,7 @@ autonoetic run
 
 # Or the manual decomposed workflow:
 autonoetic agent bootstrap --from ./agents/ --overwrite
-autonoetic gateway start --port 8080 --config gateway.toml
+autonoetic gateway start --port 8080 --config config.yaml
 autonoetic chat --agent planner.default
 
 # Inspect traces
@@ -89,7 +89,7 @@ autonoetic gateway start [OPTIONS]
 
 Options:
   --port <PORT>        Gateway JSON-RPC port (default: from config)
-  --config <PATH>      Path to gateway.toml
+  --config <PATH>      Path to a config.yaml (see reference/config.md)
 ```
 
 **Environment variables:**
@@ -1154,16 +1154,17 @@ autonoetic trace fork session-abc123 --at-turn 5 \
 ### Bootstrap Reference Agents
 
 ```bash
-# Create config first (required for bootstrap)
-cat > gateway.toml << 'EOF'
-port = 8080
-agents_dir = "./agents"
+# Create config first (required for bootstrap). The gateway parses YAML —
+# a TOML-style `port = 8080` will not load.
+cat > config.yaml << 'EOF'
+port: 8080
+agents_dir: ./agents
 EOF
 
 # Bootstrap all reference bundles
 autonoetic agent bootstrap --from ./agents/ --overwrite
 
 # Start and verify
-autonoetic gateway start --config gateway.toml
+autonoetic gateway start --config config.yaml
 autonoetic agent list
 ```
