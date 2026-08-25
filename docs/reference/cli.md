@@ -20,10 +20,17 @@ autonoetic trace show <session_id>
 
 ## Global Options
 
+Accepted by every subcommand.
+
 | Option | Description |
 |--------|-------------|
-| `-c, --config <PATH>` | Path to gateway.toml config file |
-| `--non-interactive` | Disable interactive prompts |
+| `--config <PATH>` | Path to a custom `config.yaml` or `policy.yaml` (default: `~/.autonoetic/`) |
+| `--log-level <LEVEL>` | Override the gateway log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `--non-interactive` | Disable all prompts — required for CI |
+| `-h, --help` | Print help |
+| `-V, --version` | Print version |
+
+There is no `-c` short form for `--config`.
 
 ---
 
@@ -892,6 +899,194 @@ Run the gateway as an MCP server for external clients.
 ```bash
 autonoetic mcp expose [--port <PORT>]
 ```
+
+---
+
+## Security Commands
+
+Security sentinel: status, findings, triage, and red-team pattern proposals.
+Behaviour is described in [`../internals/divergence-sentinel.md`](../internals/divergence-sentinel.md).
+
+### `autonoetic security status`
+
+Sentinel health: finding counts, triage backlog, last sweep time.
+
+```bash
+autonoetic security status
+```
+
+### `autonoetic security findings`
+
+List security findings.
+
+```bash
+autonoetic security findings --severity critical
+autonoetic security findings --finding-type credential_leak --json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--severity <SEVERITY>` | Filter by severity: `critical`, `warning`, `info` |
+| `--finding-type <TYPE>` | Filter by type, e.g. `credential_leak`, `sandbox_escape_attempt` |
+| `--triage <TRIAGE>` | Filter by triage state: `pending`, `true_positive`, `false_positive`, `benign`, `deferred` |
+| `--limit <N>` | Maximum findings to show (default: 50) |
+| `--json` | Output as JSON |
+
+### `autonoetic security triage` / `bulk-triage`
+
+Record a triage decision on one finding, or on every pending finding matching a
+filter.
+
+```bash
+autonoetic security triage <finding_id> --decision false_positive
+autonoetic security bulk-triage --finding-type credential_leak --decision benign
+```
+
+### `autonoetic security patterns` / `pattern-accept` / `pattern-reject`
+
+List red-team attack-pattern proposals and accept or reject them.
+
+```bash
+autonoetic security patterns
+autonoetic security pattern-accept <proposal_id>
+autonoetic security pattern-reject <proposal_id>
+```
+
+---
+
+## Recording Commands
+
+Record real HTTP traffic during agent execution, for sealed evaluation replay.
+
+> **Requires a running gateway (#1119):** `recording list/inspect/delete/cancel`
+> and `eval sealed` speak JSON-RPC (`recording.*`) rather than reading
+> `gateway.db` directly. `recording start` runs an agent in-process, as before.
+> Capsule commands stay offline by design.
+
+### `autonoetic recording start`
+
+```bash
+autonoetic recording start --agent-id myagent.default --duration 5m
+autonoetic recording start --agent-id myagent.default --max-requests 50
+```
+
+| Option | Description |
+|--------|-------------|
+| `--agent-id <ID>` | Agent to record (required) |
+| `--duration <DURATION>` | Recording duration, e.g. `5m`, `1h` |
+| `--max-requests <N>` | Stop after this many requests |
+
+### `autonoetic recording list` / `inspect`
+
+```bash
+autonoetic recording list
+autonoetic recording list --agent-id myagent.default
+autonoetic recording inspect <fixture_set_ref>
+```
+
+---
+
+## Eval Commands
+
+Sealed-network evaluation against recorded fixtures.
+
+### `autonoetic eval sealed`
+
+```bash
+autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy
+autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy --agent-id sealed_evaluator.default
+```
+
+| Option | Description |
+|--------|-------------|
+| `--artifact-ref <REF>` | Artifact to evaluate (required) |
+| `--fixture-set <REF>` | Fixture set to replay (required) |
+| `--agent-id <ID>` | Evaluator agent (default: `sealed_evaluator.default`) |
+
+---
+
+## Review Commands
+
+Post-promotion review results. Design: [`../design/post-promotion-review-design.md`](../design/post-promotion-review-design.md).
+
+```bash
+autonoetic review status
+autonoetic review status --agent-id myagent.default
+autonoetic review inspect <review_id>
+autonoetic review history --agent-id myagent.default --limit 10
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Current review status per agent |
+| `inspect` | Full detail for one review |
+| `history` | Historical review results |
+
+---
+
+## Watchdog Command
+
+Run the divergence watchdog against one session — a second-opinion judge on
+whether a session is going off the rails.
+
+```bash
+autonoetic watchdog <session_id>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<SESSION_ID>` | Target session to review (required) |
+
+---
+
+## Sentinel Experiment Command
+
+Run the watchdog validation experiment (sentinel P4) over a labeled corpus and
+write a confusion-matrix report.
+
+```bash
+autonoetic sentinel-experiment --corpus corpus.yaml
+autonoetic sentinel-experiment --corpus corpus.yaml --no-tools --skip-watchdog
+```
+
+| Option | Description |
+|--------|-------------|
+| `--corpus <PATH>` | Labeled corpus YAML (required) — format in [`../design/divergence-sentinel-validation.md`](../design/divergence-sentinel-validation.md) |
+| `--output <PATH>` | Report path (default: the corpus path with a `.results.md` extension, next to the corpus) |
+| `--skip-watchdog` | Use cached watchdog replies in the corpus instead of re-spending LLM tokens |
+| `--no-tools` | Run the watchdog tool-free (`watchdog-fast.default`, empty tool registry) — roughly an order of magnitude cheaper, and produces no side-effect rows on the target session |
+
+> The watchdog has live tools that write to the gateway store, so running this
+> against real sessions creates real side effects (planner notices, operator
+> escalations). The harness reports the deltas in a Side-Effect Summary so they
+> can be cleaned up. `--no-tools` avoids them entirely.
+
+---
+
+## Improve Command
+
+Run the self-improvement loop: diagnose, propose, validate, deploy. See
+[`../design/self-improvement-loop-design.md`](../design/self-improvement-loop-design.md).
+
+### `autonoetic improve run`
+
+Exactly one session selector is required.
+
+```bash
+autonoetic improve run --session session-abc123
+autonoetic improve run --last-sessions 10 --agent myagent.default
+autonoetic improve run --since 2026-08-01 --agent myagent.default --dry-run
+```
+
+| Option | Description |
+|--------|-------------|
+| `--session <ID>` | Single session to improve from |
+| `--last-sessions <N>` | The N most recent sessions for this agent |
+| `--since <DATE>` | Sessions since this date (RFC3339 or `YYYY-MM-DD`) |
+| `--agent <ID>` | Agent ID — required with `--last-sessions` or `--since` |
+| `--dry-run` | Diagnose and propose, but stop before A/B replay |
+| `--no-prompt` | Refuse to deploy; print the comparison report path instead |
+| `--propose-code-fix` | File a GitHub issue with code-level findings from failed sessions. Requires an authenticated `gh` CLI; use with `--session` |
 
 ---
 

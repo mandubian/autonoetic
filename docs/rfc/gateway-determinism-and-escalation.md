@@ -54,7 +54,7 @@ that this RFC treats as law:
   this RFC owns *error-class unification*, *escalation context quality*,
   *async-child governance*, and *reactive-patch consolidation*. Cross-references
   are marked inline.
-- `docs/concepts/gateway-architecture-principles.md` — "Dumb Gateway, Smart Agent" /
+- `../concepts/separation-of-powers.md` — "Dumb Gateway, Smart Agent" /
   Lawful Executor.
 - `docs/archived/human-gate-unification-plan.md` — the shipped `GateService`;
   the gate-context standard in §3.2 extends it.

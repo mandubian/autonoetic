@@ -2,6 +2,9 @@ pub mod agent;
 pub mod capsule;
 pub mod chat;
 pub mod common;
+/// Guard: every clap subcommand appears in `docs/reference/cli.md`. Test-only.
+#[cfg(test)]
+mod docs_coverage;
 pub mod eval;
 pub mod gateway;
 pub mod mcp;

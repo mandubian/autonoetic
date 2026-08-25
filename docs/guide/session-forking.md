@@ -185,7 +185,7 @@ send a message to continue the branch from the fork point.
 
 ## Related
 
-- `docs/reference/cli-reference.md` — full `autonoetic trace fork` reference
+- `docs/reference/cli.md` — full `autonoetic trace fork` reference
 - `docs/internals/storage/content-store.md` — content-addressed `session_history` storage
 - `docs/guide/session-room.md` / `docs/internals/session/room.md` — the timeline UI
 - Checkpoints and the causal chain are described in `docs/ARCHITECTURE.md`

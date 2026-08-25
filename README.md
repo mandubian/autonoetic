@@ -246,7 +246,8 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 ### Comprehensive Guides
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): System architecture, design principles, security model, data flow
-- [`docs/internals/modules.md`](docs/internals/modules.md): Workspace structure, module reference, SKILL.md format, configuration
+- [`docs/internals/crate-map.md`](docs/internals/crate-map.md): Workspace structure, per-crate module reference, SKILL.md format, configuration
+- [`docs/internals/gateway.md`](docs/internals/gateway.md): The gateway crate in depth — module map, request workflow, data-store domains
 - [`docs/AGENTS.md`](docs/AGENTS.md): Roles, routing, capabilities, agent lifecycle, building new agents
 - [`docs/reference/cli.md`](docs/reference/cli.md): Complete CLI command reference with examples
 
@@ -271,7 +272,7 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 - [`docs/guide/cognitive-capsule.md`](docs/guide/cognitive-capsule.md): Portable agent capsule export/import
 - [`docs/design/README.md`](docs/design/README.md): Active design plans with open work
 - [`docs/archived/architecture-summary.md`](docs/archived/architecture-summary.md): What's kept vs externalized
-- [`docs/concepts/gateway-architecture-principles.md`](docs/concepts/gateway-architecture-principles.md): Gateway neutrality principles
+- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Gateway neutrality principles
 - [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities
 
 ### Planning

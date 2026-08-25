@@ -727,7 +727,7 @@ If a command matches an agent's `CodeExecution` pattern but still fails with per
 - `docs/ARCHITECTURE.md` — system design and data flow
 - `docs/AGENTS.md` — agent roles, routing, SKILL.md format
 - `docs/reference/response-contract.md` — validation and repair internals
-- `docs/reference/session-budget.md` — per-session resource limits
+- `docs/reference/budgets.md` — per-session resource limits
 - `docs/internals/code-analysis.md` — capability and security analysis
 - `docs/reference/cli.md` — CLI command reference
 - `docs/internals/prompt/budget.md` — prompt budget transparency and enforcement
