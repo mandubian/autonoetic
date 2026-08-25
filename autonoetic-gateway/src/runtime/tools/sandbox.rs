@@ -2510,11 +2510,29 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         let mut declared_granted_mounts: Vec<crate::sandbox::SandboxMount> = Vec::new();
         if !manifest.runtime.mounts.is_empty() {
             driver.driver()?.check_mount_support(&manifest.runtime.mounts)?;
-            let allowed_roots = config
-                .map(|c| c.sandbox.allowed_mount_roots.as_slice())
-                .unwrap_or(&[]);
-            let (granted, denied) =
-                crate::sandbox::resolve_declared_mounts(&manifest.runtime.mounts, allowed_roots);
+            let sandbox_cfg = config.map(|c| c.sandbox.clone()).unwrap_or_default();
+            let allowed_roots = sandbox_cfg.allowed_mount_roots.as_slice();
+            let allowed_rw_roots = sandbox_cfg.allowed_mount_roots_rw.as_slice();
+            // Deny beats grant: the gateway dir and every operator deny-list
+            // entry are protected — a declared mount at/above/inside any of
+            // them is rejected here, never granted, so no grant can shadow
+            // the bwrap secret mask emitted earlier in the argv (#1163
+            // review finding 1). Also note: a missing config means an empty
+            // allowlist — fail-closed, but the operator should thread the
+            // config rather than wonder why everything is denied.
+            let mut protected: Vec<std::path::PathBuf> =
+                crate::sandbox::driver::bubblewrap::canonical_host_deny_paths();
+            if let Some(gw) = gateway_dir {
+                if let Ok(canon_gw) = std::fs::canonicalize(gw) {
+                    protected.push(canon_gw);
+                }
+            }
+            let (granted, denied) = crate::sandbox::resolve_declared_mounts(
+                &manifest.runtime.mounts,
+                allowed_roots,
+                allowed_rw_roots,
+                &protected,
+            );
             if !denied.is_empty() {
                 let denials: Vec<serde_json::Value> = denied
                     .iter()
@@ -2537,7 +2555,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         if denials.len() == 1 { "y is" } else { "ies are" }
                     ),
                     "mount_denied": denials,
-                    "enforced_rules": ["P-1.5"],
+                    // No rule id cited until filesystem-mount scoping has a
+                    // registered enforcement entry — an unregistered id lands
+                    // in contract-health `unattributed` (#1163 review
+                    // finding 3).
                 })
                 .to_string());
             }
@@ -2549,10 +2570,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         if !runtime_lock_mounts.is_empty() {
             all_mounts.extend(runtime_lock_mounts);
         }
-        // Declared mounts are additive in BOTH modes today (legacy still
-        // ro-binds `/`, so an allowed mount is already visible — binding it
-        // explicitly makes the grant visible in the mount set and keeps the
-        // same manifest working unchanged the day allow_set lands).
+        // Declared READ-ONLY mounts are additive in legacy mode (the host `/`
+        // is already ro-bound, so visibility is unchanged — the explicit bind
+        // makes the grant appear in the mount set and keeps the manifest
+        // working the day allow_set lands). A granted rw mount is NEW write
+        // reach in legacy mode — that is why rw requires its own operator
+        // ceiling (`allowed_mount_roots_rw`), never just a root entry.
         all_mounts.extend(declared_granted_mounts);
 
         // #1002 slice 1: record what this execution can see, as asserted here
@@ -3609,6 +3632,37 @@ mod declared_mount_gate_tests {
                 .unwrap()
                 .contains("allowed_mount_roots"),
             "denial must name the grant: {denied:?}"
+        );
+    }
+
+    /// rw ceiling at the tool surface: a manifest asking `readonly: false`
+    /// under an ro-only root fails with the teaching refusal naming
+    /// `allowed_mount_roots_rw` (#1163 review finding 2).
+    #[test]
+    fn rw_mount_without_rw_root_fails_with_teaching_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mail = tmp.path().join("mail");
+        std::fs::create_dir_all(&mail).unwrap();
+        let manifest = manifest_with_mounts(vec![autonoetic_types::agent::DeclaredMount {
+            host_path: mail.to_string_lossy().to_string(),
+            readonly: false,
+        }]);
+        let config = config_with_roots(vec![mail.to_string_lossy().to_string()]);
+
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
+                .unwrap(),
+        );
+        let v = run(&manifest, &config, &tmp.path().join("agent"), store);
+        assert_eq!(v["ok"], serde_json::json!(false), "result: {v}");
+        let denied = v["mount_denied"].as_array().expect("mount_denied array");
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("allowed_mount_roots_rw"),
+            "denial must name the rw ceiling: {denied:?}"
         );
     }
 

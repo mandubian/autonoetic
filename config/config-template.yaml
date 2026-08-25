@@ -71,6 +71,10 @@ sandbox:
   # these roots. Empty denies every declared mount, loudly.
   # allowed_mount_roots:
   #   - /var/data/mail
+  # Read-write ceiling: `readonly: false` declarations are granted only when
+  # also covered here. ro roots cannot be widened by a manifest.
+  # allowed_mount_roots_rw:
+  #   - /var/data/work
 
 # ── Background Scheduler ──────────────────────────────────────────────
 background_scheduler_enabled: true

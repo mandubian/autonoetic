@@ -26,8 +26,11 @@ fn is_default_remote_access_approval_mode(mode: &RemoteAccessApprovalMode) -> bo
 /// filesystem reach. Read-only unless `readonly: false` is explicit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeclaredMount {
-    /// Host path to expose inside the sandbox (same path inside). `~` expands
-    /// against the gateway user's home.
+    /// Host path to expose inside the sandbox. The mount lands at the path's
+    /// CANONICAL form inside the sandbox — a symlinked declaration resolves
+    /// to its target (indirection cannot smuggle reach past the allowlist,
+    /// and the in-sandbox path is the real one). `~` expands against the
+    /// gateway user's home.
     pub host_path: String,
     #[serde(default = "default_mount_readonly")]
     pub readonly: bool,

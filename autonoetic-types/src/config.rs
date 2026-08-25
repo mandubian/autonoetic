@@ -2527,6 +2527,15 @@ pub struct SandboxConfig {
     /// (the default) denies every declared mount, loudly.
     #[serde(default)]
     pub allowed_mount_roots: Vec<String>,
+
+    /// The read-write ceiling for declared mounts (#1002): a manifest's
+    /// `readonly: false` is granted only when the canonicalized path is also
+    /// at/under one of these roots. Roots listed here imply read access too;
+    /// `allowed_mount_roots` alone grants read-only. The manifest can only
+    /// narrow (ro under an rw root), never widen (rw under an ro-only root is
+    /// denied with a teaching refusal).
+    #[serde(default)]
+    pub allowed_mount_roots_rw: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -2536,6 +2545,7 @@ impl Default for SandboxConfig {
             dev_mode: default_sandbox_dev_mode(),
             allow_recording: false,
             allowed_mount_roots: Vec::new(),
+            allowed_mount_roots_rw: Vec::new(),
         }
     }
 }

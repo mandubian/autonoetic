@@ -172,7 +172,8 @@ Bubblewrap isolation settings. `config.yaml` is authoritative by default.
 |-------|------|---------|------------------|-------------|
 | `sandbox.share_net` | bool | `false` | `AUTONOETIC_BWRAP_SHARE_NET` (gated) | Share host network namespace (`--share-net`). Use when the host/kernel blocks loopback setup in isolated namespaces. |
 | `sandbox.dev_mode` | string | `"legacy"` | `AUTONOETIC_BWRAP_DEV_MODE` (gated) | `/dev` mount strategy: `"legacy"` (no override), `"minimal"` (`--dev /dev`), `"host-bind"` (`--dev-bind /dev /dev`, least isolated). |
-| `sandbox.allowed_mount_roots` | string list | `[]` | — | Operator allowlist for agent-declared host mounts (#1002): a SKILL.md `runtime.mounts` entry is granted iff its canonicalized path is equal to or under one of these roots. Empty (default) denies every declared mount with a structured `mount_denied` refusal. `~` expands against the gateway user's home. The `allowed_hosts` of filesystem reach. |
+| `sandbox.allowed_mount_roots` | string list | `[]` | — | Operator **read-only** allowlist for agent-declared host mounts (#1002): a SKILL.md `runtime.mounts` entry is granted iff its canonicalized path is equal to or under one of these roots. Empty (default) denies every declared mount with a structured `mount_denied` refusal. `~` expands against the gateway user's home. Paths overlapping the gateway directory or any operator deny-list entry are never granted — mounts cannot shadow the sandbox secret mask. |
+| `sandbox.allowed_mount_roots_rw` | string list | `[]` | — | Read-**write** ceiling: a `readonly: false` declaration is granted only when its canonicalized path is also at/under one of these roots. Read-only roots cannot be widened by a manifest — the request is denied with a refusal naming this key. |
 
 > Env overrides above are ignored unless `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true`.
 
