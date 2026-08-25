@@ -63,14 +63,19 @@ Ordered by urgency.
    The deny-list masking (#1145's mechanism) is acknowledged stopgap for exactly this.
    Fixing both together removes an entire class of "new secret file forgotten in the list".
 3. **#988** — no write-side path taint: copying labeled content to a new path launders
-   its egress label. Defeats the egress model at its core invariant.
+   its egress label. Defeats the egress model at its core invariant. *(resolved
+   2026-08-24: closed via the durable-object answer in #1001 — the label attaches to
+   the workspace as a whole (`restrict_workspace_egress_label` / fail-closed
+   `workspace_taint_from_store`, read-back intersection in `label_tool_result`), so
+   cp/unzip/rename within it have no per-file map to launder around. Per-path
+   granularity rejected as evadable; residual confinement work is #1002.)*
 4. **#987** — *(reframed 2026-08-24)* As filed, this targets OFP-send/capsule paths
    that turn out not to exist yet: the outbound `MessageRouter` is dead code, the
    listener defaults off, and there is no live federation egress (see #1154).
    The durable residue is an **acceptance criterion on #1154**: when the outbound
-   wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
-   label, not session taint alone — plus #988 below, which is real today without
-   any federation.
+    wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
+    label, not session taint alone — plus #988 above, which is real today without
+    any federation.
 5. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
    one careless match arm away from reintroducing the create→promote loop already
    killed once. Remove the variant. *(resolved 2026-08-24: merged as `84afe3fc`,
@@ -176,8 +181,10 @@ Then     federation go/no-go decision → #897/#815 in or out; freeze; launch ca
 ```
 
 Progress log (2026-08-25): Week 1's #649/#808 resolved (#1159/#1147); Week 2's CI
-signal largely served (#1162/#1167/#1169) — #988 still open; Week 3's #651
-(#1166), #916 (#1168), #378 (partially, #1169) done. Next: #988.
+signal largely served (#1162/#1167/#1169); Week 3's #651 (#1166), #916 (#1168),
+#378 (partially, #1169) done. #988 was resolved out of order (closed 2026-08-24
+via #1001's workspace-level taint). Tier 0 remaining: **#1002** (in progress,
+slices landing) and **#1078** (blocked on the signing key).
 
 Tier 0 items are all small-to-medium mechanically verifiable fixes; none requires the
 RFC-amendment machinery except possibly #1078 depending which side wins.
