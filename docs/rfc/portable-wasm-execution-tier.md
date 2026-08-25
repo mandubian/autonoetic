@@ -3,7 +3,7 @@
 - **Status:** Draft (for review)
 - **Author:** (proposed by operator; drafted with Claude Code)
 - **Scope:** `autonoetic-gateway` sandbox/execution layer, `autonoetic-types` manifest + runtime lock, agent SDK
-- **Related:** `docs/cognitive-capsule.md`, `docs/content-store.md`, `docs/ARCHITECTURE.md`, constitution §3 (`docs/constitution/versions/<latest>/constitution.md`)
+- **Related:** `docs/guide/cognitive-capsule.md`, `docs/internals/storage/content-store.md`, `docs/ARCHITECTURE.md`, constitution §3 (`docs/constitution/versions/<latest>/constitution.md`)
 
 ## 1. Summary
 

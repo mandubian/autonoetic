@@ -4,9 +4,9 @@
 > Parts A–B are concrete near-term work; Parts C–D are direction-setting and
 > deliberately phased. Nothing here amends the constitution; constitution text
 > and lock signing remain the authoritative entity's to ratify
-> (see [`../constitution-signing.md`](../constitution-signing.md) and the
+> (see [`../constitution-signing.md`](../constitution/signing.md) and the
 > "actors-as-citizens" framing in
-> [`../autonoetic-concepts-for-beginners.md`](../autonoetic-concepts-for-beginners.md)).
+> [`../autonoetic-concepts-for-beginners.md`](../start/concepts.md)).
 
 ---
 
@@ -257,7 +257,7 @@ This is three distinct things, currently collapsed into one:
 | Concept | Question it answers | Who | Mechanism (proposed) | Authoritative? |
 |---|---|---|---|---|
 | **Authorship** | Who wrote/contributed this clause? | any principal (AI/human) | `author` / `co-authored-by` attribution on the amendment record + commit trailer | No |
-| **Contributor attestation (sign-off)** | Who authored this text and stands behind it? | the contributing principal | a *detached, non-authoritative* signature — for an AI contributor, its **revision key** (see [`../revision-signing.md`](../revision-signing.md)); DCO-style `Signed-off-by` for humans | No — attestation, not enactment |
+| **Contributor attestation (sign-off)** | Who authored this text and stands behind it? | the contributing principal | a *detached, non-authoritative* signature — for an AI contributor, its **revision key** (see [`../revision-signing.md`](../reference/revision-signing.md)); DCO-style `Signed-off-by` for humans | No — attestation, not enactment |
 | **Authoritative ratification** | What text is *enacted as enforced law*? | the instance's **configured ratifying authority** (one entity today; possibly a threshold of several elsewhere — Part D) | the existing **Ed25519 lock signature** over the constitution digest (`constitution-signing.md`); generalizes to a signer set / threshold | **Yes — the only signature(s) that make it law** |
 
 ### C.1 Why keep them separate
@@ -345,7 +345,7 @@ concentration of power the constitution otherwise guards against.
 ### D.3 The sanction flow (the sentinel question, sketched — not built now)
 
 When the security sentinel
-([`../security-sentinel.md`](../security-sentinel.md),
+([`../security-sentinel.md`](../internals/divergence-sentinel.md),
 [`divergence-sentinel-design.md`](divergence-sentinel-design.md)) detects an agent
 doing bad things, *who decides it is degraded or banished?* The Lawful-Executor
 shape gives a clean separation that we should leave room for:
@@ -527,21 +527,21 @@ mechanism or breaking the wire.
 
 ## Relationship to existing docs
 
-- [`../principal-seat-capability.md`](../principal-seat-capability.md) — the
+- [`../principal-seat-capability.md`](../reference/principal-seat-capability.md) — the
   stable reference for the three orthogonal axes this RFC's `Principal`
   (Part A) and authority-as-role (Part D) assume: principal-kind vs seat vs
   capability, and why `GateDecider` is a capability rather than a role.
-- [`../constitution-signing.md`](../constitution-signing.md) — authoritative lock
+- [`../constitution-signing.md`](../constitution/signing.md) — authoritative lock
   signing (unchanged by this RFC).
-- [`../revision-signing.md`](../revision-signing.md) — revision keys, candidate
+- [`../revision-signing.md`](../reference/revision-signing.md) — revision keys, candidate
   basis for AI contributor attestation (Part C / OQ-3).
 - [`constitutional-evolution-reflections.md`](constitutional-evolution-reflections.md)
   — the "would the system break without it?" bar this RFC's clauses must clear.
 - [`constitution-gate-amendments.md`](constitution-gate-amendments.md) —
   agent-as-decider work that O-5 (duty to escalate) builds on.
-- [`../security-sentinel.md`](../security-sentinel.md) /
+- [`../security-sentinel.md`](../internals/divergence-sentinel.md) /
   [`divergence-sentinel-design.md`](divergence-sentinel-design.md) — the detector
   whose findings the (future) judicial authority would adjudicate (D.3): sentinel
   proposes, authority sentences, gateway enforces.
-- [`../autonoetic-concepts-for-beginners.md`](../autonoetic-concepts-for-beginners.md)
+- [`../autonoetic-concepts-for-beginners.md`](../start/concepts.md)
   — the actors-as-citizens framing this RFC operationalizes.

@@ -8,7 +8,7 @@
 > vocabulary [#301](https://github.com/mandubian/autonoetic/issues/301),
 > detection [#302](https://github.com/mandubian/autonoetic/issues/302),
 > migration [#303](https://github.com/mandubian/autonoetic/issues/303).
-> Touches: the constitution itself, and Autonoetic's root documentation (`docs/ARCHITECTURE.md`, `docs/AGENTS.md`, `docs/separation-of-powers.md`, `docs/planner-principles.md`, `CLAUDE.md`, `docs/config-reference.md`) — a structural change to how the project frames its own foundations.
+> Touches: the constitution itself, and Autonoetic's root documentation (`docs/ARCHITECTURE.md`, `docs/AGENTS.md`, `docs/concepts/separation-of-powers.md`, `docs/concepts/planner-principles.md`, `CLAUDE.md`, `docs/reference/config.md`) — a structural change to how the project frames its own foundations.
 
 ---
 
@@ -116,7 +116,7 @@ Adopt the vocabulary in §2 across code and root docs:
 
 - Rename Design Principle "Gateway as Dumb Secure Pipe" → **"Gateway as Lawful Executor: deterministic enforcement, no improvised judgment."**
 - Retag `DUMBNESS VIOLATION` → **`DISCRETION LEAK`**, and document the category: a place where the gateway exercises judgment reserved to the agent or to pre-committed law. These are *tracked debts*, not acceptable behaviour.
-- Sweep `docs/ARCHITECTURE.md`, `docs/separation-of-powers.md`, `docs/AGENTS.md`, `CLAUDE.md` for "dumb" phrasing.
+- Sweep `docs/ARCHITECTURE.md`, `docs/concepts/separation-of-powers.md`, `docs/AGENTS.md`, `CLAUDE.md` for "dumb" phrasing.
 
 This is vocabulary, not behaviour change — but it is structural because it edits the project's self-description at the root.
 

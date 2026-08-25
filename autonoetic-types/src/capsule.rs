@@ -9,7 +9,7 @@
 //! manifest and its supporting types). Export/import pipelines live in
 //! `autonoetic-gateway::capsule`.
 //!
-//! Design doc: `docs/cognitive-capsule.md`.
+//! Design doc: `docs/guide/cognitive-capsule.md`.
 
 use serde::{Deserialize, Serialize};
 

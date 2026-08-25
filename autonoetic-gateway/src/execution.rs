@@ -5756,7 +5756,7 @@ fn is_signal_delivered_for_terminal_workflow(
 }
 
 /// Advance `phase` from a gateway signal payload and trace any fact it earns
-/// (`docs/prompt-burden-study.md` §7.5).
+/// (`docs/internals/prompt/burden-study.md` §7.5).
 ///
 /// Paired with every `gateway_signal_turn_start_context` call. That function
 /// renders the signal into turn-start *messages*, so the evidence inside it never

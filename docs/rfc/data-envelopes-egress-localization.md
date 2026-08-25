@@ -12,9 +12,9 @@ Credentials already enjoy this protection by architecture (vault references, nev
 serialized into context); this RFC generalizes that property into a first-class,
 gateway-enforced concept: the **data envelope**.
 
-**Related:** `docs/credential-management.md` (vault, `credential_env` injection),
+**Related:** `docs/reference/credentials.md` (vault, `credential_env` injection),
 `docs/rfc/llm-preset-inference-profiles.md` (preset registry, routing),
-`docs/approved-resources-caching.md` (session approval grants, declassification
+`docs/internals/approval-cache.md` (session approval grants, declassification
 precedent),
 `docs/constitution/versions/2026.07.19/constitution.md` (§14 Lawful-Executor, I-6, I-11),
 `autonoetic-types/src/disclosure.rs` (DisclosureClass — the *inward* complement).

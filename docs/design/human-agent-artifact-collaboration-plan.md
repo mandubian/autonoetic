@@ -7,9 +7,9 @@ Workbench Projection** so humans and agents can co-construct artifacts and
 agents without forcing every handoff through planner-only orchestration.
 
 **Refs:**
-- `docs/workflow-orchestration.md` — durable workflows, task runs, child wake-ups.
-- `docs/planner-principles.md` — planner proposes, gateway executes.
-- `docs/cognitive-capsule.md` — portable artifact/agent closure.
+- `docs/internals/workflow-orchestration.md` — durable workflows, task runs, child wake-ups.
+- `docs/concepts/planner-principles.md` — planner proposes, gateway executes.
+- `docs/guide/cognitive-capsule.md` — portable artifact/agent closure.
 - `docs/archived/human-gate-unification-plan.md` — unified human suspension gates.
 - `docs/design/operator-approval-inspection-plan.md` — code visibility during approval.
 

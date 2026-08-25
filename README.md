@@ -97,7 +97,7 @@ in your browser, light/dark aware):
 [federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html).
 
 > New here? [**Why this exists**](#why-this-exists) lays out the three problems
-> that shape everything below; [**Autonoetic for beginners**](docs/autonoetic-concepts-for-beginners.md)
+> that shape everything below; [**Autonoetic for beginners**](docs/start/concepts.md)
 > builds the same ideas from first principles.
 
 ## Why this exists
@@ -200,10 +200,10 @@ rights, held to the same rules.
 
 Where to dig further:
 
-- [`docs/philosophy.md`](docs/philosophy.md) — the conceptions behind the design, and their intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
-- [`docs/autonoetic-concepts-for-beginners.md`](docs/autonoetic-concepts-for-beginners.md) — the same ideas from first principles, for readers coming from direct-code assistants
+- [`docs/concepts/philosophy.md`](docs/concepts/philosophy.md) — the conceptions behind the design, and their intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
+- [`docs/start/concepts.md`](docs/start/concepts.md) — the same ideas from first principles, for readers coming from direct-code assistants
 - [`docs/constitution/versions/2026.07.08/constitution.md`](docs/constitution/versions/2026.07.08/constitution.md) — the canonical law (current version)
-- [`docs/separation-of-powers.md`](docs/separation-of-powers.md) — agent vs gateway authority boundary
+- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md) — agent vs gateway authority boundary
 
 ## How this differs from a classic agent harness
 
@@ -246,9 +246,9 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 ### Comprehensive Guides
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): System architecture, design principles, security model, data flow
-- [`docs/MODULES.md`](docs/MODULES.md): Workspace structure, module reference, SKILL.md format, configuration
+- [`docs/internals/modules.md`](docs/internals/modules.md): Workspace structure, module reference, SKILL.md format, configuration
 - [`docs/AGENTS.md`](docs/AGENTS.md): Roles, routing, capabilities, agent lifecycle, building new agents
-- [`docs/CLI.md`](docs/CLI.md): Complete CLI command reference with examples
+- [`docs/reference/cli.md`](docs/reference/cli.md): Complete CLI command reference with examples
 
 ### Visual Maps
 
@@ -261,18 +261,18 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 
 ### Specialized Docs
 
-- [`docs/quickstart-planner-specialist-chat.md`](docs/quickstart-planner-specialist-chat.md): End-to-end CLI quickstart tutorial
-- [`docs/remote-agents-http-api.md`](docs/remote-agents-http-api.md): HTTP API for remote agents, SDK transport, authentication
+- [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md): End-to-end CLI quickstart tutorial
+- [`docs/reference/http-api.md`](docs/reference/http-api.md): HTTP API for remote agents, SDK transport, authentication
 - [`docs/AGENTS.md`](docs/AGENTS.md): Canonical agent reference — roles, routing, capabilities, lifecycle
-- [`docs/agent-features.md`](docs/agent-features.md): Detailed agent manifest reference (capabilities, IO, disclosure) — partially superseded by `AGENTS.md`
-- [`docs/iteration-repair-validation-runbook.md`](docs/iteration-repair-validation-runbook.md): Iterative repair validation steps
-- [`docs/schema-enforcement-hook.md`](docs/schema-enforcement-hook.md): Schema coercion for agent.spawn payloads
+- [`docs/reference/agent-features.md`](docs/reference/agent-features.md): Detailed agent manifest reference (capabilities, IO, disclosure) — partially superseded by `AGENTS.md`
+- [`docs/guide/runbooks/iteration-repair-validation.md`](docs/guide/runbooks/iteration-repair-validation.md): Iterative repair validation steps
+- [`docs/reference/schema-enforcement.md`](docs/reference/schema-enforcement.md): Schema coercion for agent.spawn payloads
 
-- [`docs/cognitive-capsule.md`](docs/cognitive-capsule.md): Portable agent capsule export/import
+- [`docs/guide/cognitive-capsule.md`](docs/guide/cognitive-capsule.md): Portable agent capsule export/import
 - [`docs/design/README.md`](docs/design/README.md): Active design plans with open work
-- [`docs/architecture-summary.md`](docs/architecture-summary.md): What's kept vs externalized
-- [`docs/gateway-architecture-principles.md`](docs/gateway-architecture-principles.md): Gateway neutrality principles
-- [`docs/separation-of-powers.md`](docs/separation-of-powers.md): Agent vs gateway responsibilities
+- [`docs/archived/architecture-summary.md`](docs/archived/architecture-summary.md): What's kept vs externalized
+- [`docs/concepts/gateway-architecture-principles.md`](docs/concepts/gateway-architecture-principles.md): Gateway neutrality principles
+- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities
 
 ### Planning
 
@@ -280,7 +280,7 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 
 ## Reference Agent Bundles
 
-Reference agent bundles are grouped under [`agents/`](agents/):
+Reference agent bundles are grouped under [`agents/`](agents):
 
 - `agents/lead/` for front-door/orchestration agents
 - `agents/specialists/` for hand roles
@@ -334,7 +334,7 @@ The current MVP is intentionally narrow:
 
 ## HTTP Content API (for Remote Agents)
 
-The gateway exposes REST endpoints for remote agents to access content. See [docs/remote-agents-http-api.md](docs/remote-agents-http-api.md) for full documentation.
+The gateway exposes REST endpoints for remote agents to access content. See [docs/reference/http-api.md](docs/reference/http-api.md) for full documentation.
 
 **Quick start for remote agents:**
 
@@ -367,7 +367,7 @@ OpenFang Protocol (OFP) for federation where possible — it is a robust,
 well-designed foundation for agent interoperability. Where Autonoetic
 diverges is documented above (see *Why this exists*) and in a detailed
 code-level comparison with a representative direct-loop harness:
-[`docs/comparison-hermes-agent.md`](docs/comparison-hermes-agent.md).
+[`docs/reports/2026-07-19-comparison-hermes-agent.md`](docs/reports/2026-07-19-comparison-hermes-agent.md).
 
 ## Status
 
@@ -390,7 +390,7 @@ A runnable smoke example now lives at [`examples/quickstart`](examples/quickstar
 
 For planner/specialist implicit routing through CLI chat, see:
 
-- [`docs/quickstart-planner-specialist-chat.md`](docs/quickstart-planner-specialist-chat.md)
+- [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md)
 
 From `autonoetic/`:
 
@@ -420,7 +420,7 @@ which uses the revision pipeline (`content_write` → `artifact_build` →
 
 Older runnable examples that demonstrated this flow (`examples/specialized_builder`,
 `examples/tiered_memory_probe`) have been archived under
-[`examples/archived/`](examples/archived/) — they depended on the since-removed
+[`examples/archived/`](examples/archived) — they depended on the since-removed
 `agent.install` tool (constitution P-9.2) and on GNU-only `find -printf`, and no
 longer run against a current gateway.
 

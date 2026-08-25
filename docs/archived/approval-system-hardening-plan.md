@@ -40,7 +40,7 @@ The current approval system is described in `docs/approval-system.md`. The revie
 | 6 | No operator-side revocation — only emergency-stop can revoke a granted host | **Medium** | CLI, `approvals.rs` grant CRUD |
 | 7 | Checkpoint orphan files on withdraw/reject — disk leak | **Medium** | `autonoetic-gateway/src/scheduler/approval.rs` (reject/cancel paths), `checkpoint.rs` reaper |
 | 8 | No analytics / rate visibility — no way to spot approval spam from a single agent | **Medium** | CLI, `approvals.rs` queries |
-| 9 | Doc gaps vs. code behaviour (exact-match, root-scoping, no signing) | **Low** | `docs/separation-of-powers.md`, `docs/approval-system.md` |
+| 9 | Doc gaps vs. code behaviour (exact-match, root-scoping, no signing) | **Low** | `docs/concepts/separation-of-powers.md`, `docs/approval-system.md` |
 
 ---
 
@@ -252,9 +252,9 @@ enum GrantTarget {
 Update the following to reflect the new behaviour and the threat model:
 
 - `docs/approval-system.md` — new sections for grant scope, target kinds, expiry, similarity, revocation. Replace "host-only, root-scoped" statements with the new, more precise model.
-- `docs/separation-of-powers.md` — document the integrity guarantees (HMAC'd checkpoints, action-equality check) and the threat model explicitly (in-scope: malicious agent; out-of-scope: local-filesystem attacker with vault key).
-- `docs/remote-access-approval.md` — update examples to show target-kind usage.
-- `docs/config-reference.md` — new config knobs (continuation key, retention for grants, default grant scope).
+- `docs/concepts/separation-of-powers.md` — document the integrity guarantees (HMAC'd checkpoints, action-equality check) and the threat model explicitly (in-scope: malicious agent; out-of-scope: local-filesystem attacker with vault key).
+- `docs/guide/remote-access-approval.md` — update examples to show target-kind usage.
+- `docs/reference/config.md` — new config knobs (continuation key, retention for grants, default grant scope).
 
 ---
 

@@ -2,7 +2,7 @@
 
 **Status:** Design — 2026-06-14 (revised)
 **Builds on:** [`docs/design/operator-legibility.md`](operator-legibility.md) §6 (Pillar C),
-[`docs/plan-capability-grants.md`](../plan-capability-grants.md)
+[`docs/reference/capability-grants.md`](../reference/capability-grants.md)
 **Proves out:** session `session-e9436118` (weather forecast agent build, 2026-06-13)
 
 ---
@@ -509,13 +509,13 @@ schema change. No new concept.
 - [`docs/design/operator-legibility.md`](operator-legibility.md) §6 — Pillar C
   original design (derive from agent capabilities). **Superseded** by this doc's
   discovery-based, session-scoped approach.
-- [`docs/plan-capability-grants.md`](../plan-capability-grants.md) — shipped
+- [`docs/reference/capability-grants.md`](../reference/capability-grants.md) — shipped
   feature doc. The plan-linked derivation becomes a fallback; the
   session-scoped discovery is the primary mechanism.
 - [`docs/archived/approval-system-hardening-plan.md`](../archived/approval-system-hardening-plan.md)
   — Phase 2 (scope model) is orthogonal and composes. The envelope uses the
   same `GrantScope`, `GrantTarget`, and `expires_at` infrastructure.
-- [`docs/remote-access-approval.md`](../remote-access-approval.md) — the static
+- [`docs/guide/remote-access-approval.md`](../guide/remote-access-approval.md) — the static
   analysis (`remote_access.rs`) becomes the **discovery engine** for the
   envelope, not just the approval trigger.
 

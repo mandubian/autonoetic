@@ -364,7 +364,7 @@ install the SAME artifact identity" above).
 
 **Why we delegate** (not optional): you do **not** have the `AgentRevision` capability — see your manifest above. The gateway's policy engine will reject `agent_revision_create_from_intent` and `agent_revision_promote` calls from this agent. `specialized_builder.default` is the **only** agent licensed to call those tools.
 
-This separation exists by design (see `docs/protected-agents.md`, recursive trust problem): the orchestrator that *decides* what to install must not be the same agent that *executes* the install — otherwise a regressed orchestrator could silently promote broken revisions, including a broken version of itself.
+This separation exists by design (see `docs/reference/protected-agents.md`, recursive trust problem): the orchestrator that *decides* what to install must not be the same agent that *executes* the install — otherwise a regressed orchestrator could silently promote broken revisions, including a broken version of itself.
 
 Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent **plus `install_mode: "create_candidate"`** only when no candidate exists. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)

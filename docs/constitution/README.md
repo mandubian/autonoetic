@@ -39,13 +39,35 @@ Lock signatures:
 
 Precise signature payload and verification rules are specified in:
 
-- `docs/constitution-signing.md`
+- `docs/constitution/signing.md`
 - `docs/constitution/key-management.md`
+
+## Doc paths cited by signed versions
+
+A ratified `constitution.md` is **digest-signed**: its bytes cannot be edited
+without invalidating the lock. So when the surrounding documentation is
+reorganised, citations inside already-signed versions keep pointing at the old
+paths — permanently, by design. They are historical artifacts, not stale files.
+
+The docs reorganisation (`docs/design/docs-reorganization-plan.md`) moved four
+docs that the signed texts cite:
+
+| Cited in signed versions | Now at |
+|---|---|
+| `docs/philosophy.md` | [`../concepts/philosophy.md`](../concepts/philosophy.md) |
+| `docs/config-reference.md` | [`../reference/config.md`](../reference/config.md) |
+| `docs/gateway-constitution-roadmap.md` | [`roadmap.md`](roadmap.md) |
+| `docs/gateway-constitution-audit-2026-04-24.md` | [`../reports/2026-04-24-constitution-audit.md`](../reports/2026-04-24-constitution-audit.md) |
+
+The next ratified version should cite the new paths in its own text; until then
+this table is the mapping. `docs_link_guard` deliberately does not scan
+`versions/**` for exactly this reason — a guard that "fixed" a signed text
+would break its signature.
 
 Each constitutional release should:
 
 1. add/update `docs/constitution/versions/<version>/constitution.md`,
 2. add/update `docs/constitution/versions/<version>/gateway-constitution.lock.json`,
-3. ensure the lock signature matches the lock payload (`docs/constitution-signing.md`),
+3. ensure the lock signature matches the lock payload (`docs/constitution/signing.md`),
 4. update `docs/constitution/CURRENT`,
 5. update `config/config-template.yaml` defaults when promoting the new release.

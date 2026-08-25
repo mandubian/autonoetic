@@ -1079,7 +1079,7 @@ pub fn actor_from_kind_id(
 /// `agent:` prefix is stripped first); a served user (`user:<id>`) ⇒ its own
 /// distinct principal kind, never collapsed into `Human` or `Script` (the
 /// conflation `PrincipalKind::ServedUser` exists to prevent — see
-/// `docs/philosophy.md` §3.3); a mechanical/unknown decider (`gateway`,
+/// `docs/concepts/philosophy.md` §3.3); a mechanical/unknown decider (`gateway`,
 /// `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
 pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
     use autonoetic_types::principal::{Principal, PrincipalKind};

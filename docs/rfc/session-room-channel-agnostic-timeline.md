@@ -505,7 +505,7 @@ Risk is low because P1 is server-side and independent, and the TUI is greenfield
 ## 9. Final deliverables (operator asked for both)
 
 - **Architecture documentation** (`docs/ARCHITECTURE.md` + a dedicated
-  `docs/session-room.md`): the canonical timeline, actor model, channel
+  `docs/guide/session-room.md`): the canonical timeline, actor model, channel
   renderers, surfaces, federation, and how it relates to causal chain / digest /
   operator_activity.
 - **User documentation** (`docs/` user guide): how to use the room — reading the

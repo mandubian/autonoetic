@@ -901,7 +901,7 @@ to declare `targets` (and command surfaces when used). Imports and call patterns
 /// install intent). The old `repair_hint` offered "declare ... or change the
 /// code" — the first option was unactionable, so agents always picked code
 /// edits and looped for hundreds of turns (see
-/// docs/postmortems/session-b6d27af2-weather-agent.md). The payload now says
+/// docs/reports/postmortems/session-b6d27af2-weather-agent.md). The payload now says
 /// `fix_target: manifest` explicitly and directs the agent to stop local
 /// repair and report to its caller.
 fn manifest_declaration_gap_response(
@@ -2371,7 +2371,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // hit) turns the namespace on. Seeding it from the capability let an exec
         // that raised no gate — because static analysis found no signal to ask
         // about — run with `--share-net` and no operator prompt. See
-        // `runtime::network_grant` and docs/sandbox-network-grant.md.
+        // `runtime::network_grant` and docs/internals/sandbox/network-grant.md.
         //
         // Widening under a session taint that excludes Network still requires an
         // active declassification grant (`egress.declassified`), not host

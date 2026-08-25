@@ -5,13 +5,13 @@ demos (`smoke/yfinance-factory`, `smoke/memory-loop`); four cases are specified
 here for manual runs and demo automation.
 
 **Origin:** The lost Hermes-use-case selection (opencode session, unrecoverable).
-Prior art: `docs/comparison-hermes-agent.md` (the study that motivated the
+Prior art: `docs/reports/2026-07-19-comparison-hermes-agent.md` (the study that motivated the
 7-feature gap closure, `docs/archived/plan-hermes-gap-closure.md` — now fully
 implemented). This RFC re-derives the selection and turns it into an
 executable protocol.
 
-**Related:** `docs/credential-management.md`, `docs/remote-access-approval.md`,
-`docs/archived/approval-system.md`, `docs/agent-prompt-guidance.md`,
+**Related:** `docs/reference/credentials.md`, `docs/guide/remote-access-approval.md`,
+`docs/archived/approval-system.md`, `docs/internals/prompt/composition.md`,
 `autonoetic-gateway/src/runtime/tools/` (web, content_patch, credential,
 scheduler), `smoke/yfinance-factory/`, `smoke/memory-loop/`.
 

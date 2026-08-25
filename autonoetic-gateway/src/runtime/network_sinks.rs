@@ -416,7 +416,7 @@ enum MaskScope {
 /// division without parsing. A regex literal containing an imported module name
 /// followed by `(` is the remaining known way to spoof a sink; it is a false
 /// positive rather than a missed detection, and detection is a precision layer
-/// (see `docs/sandbox-network-grant.md` for why it is not the boundary).
+/// (see `docs/internals/sandbox/network-grant.md` for why it is not the boundary).
 fn mask_strings_and_comments(code: &str, dialect: MaskDialect, scope: MaskScope) -> String {
     #[derive(PartialEq)]
     enum State {

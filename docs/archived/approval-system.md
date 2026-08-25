@@ -8,7 +8,7 @@
 >
 > See [`human-gate-unification-plan.md`](./human-gate-unification-plan.md)
 > for the unified architecture.
-> See [`constitution/versions/2026.05.10/constitution.md`](./constitution/versions/2026.05.10/constitution.md)
+> See [`constitution/versions/2026.05.10/constitution.md`](constitution/versions/2026.05.10/constitution.md)
 > for the constitutional rules governing gates (P-2.18 through P-2.21, P-8.19).
 >
 > The grant model, approval levels, and CLI commands below remain accurate
@@ -317,7 +317,7 @@ When an approval is resolved (approved, rejected, or cancelled), the gateway's *
 - **`deliver_signal`** — Dispatches an `ApprovalResolved` signal to the waiting session, resuming the agent's turn. Currently wired through the existing `write_signal` path in `approval.rs`.
 - **`publish_report`** — Can be triggered on `approval.resolved` to update observability data.
 
-Hooks are configured in `config.yaml` (see `docs/config-reference.md` → Hooks). The `approval.resolved` hook receives a `HookContext` with `request_id`, `decision`, `session_id`, `agent_id`, and `root_session_id`.
+Hooks are configured in `config.yaml` (see `docs/reference/config.md` → Hooks). The `approval.resolved` hook receives a `HookContext` with `request_id`, `decision`, `session_id`, `agent_id`, and `root_session_id`.
 
 ### Promotion Severity Gating
 

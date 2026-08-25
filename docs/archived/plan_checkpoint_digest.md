@@ -1157,7 +1157,7 @@ LLM-powered summarization and memory extraction.
 - [x] **6.4** Add `causal_events` pruning policy (keep last N days or archive to cold storage). Added `retention.causal_events_days` config field (default: 90) and `prune_causal_events` on `GatewayStore`, called via `apply_retention_policy` on gateway startup.
 - [x] **6.5** Update `docs/ARCHITECTURE.md` with new storage model. Added sections for Session Checkpoints, Queryable Event Store, Live Digest, Unified Gateway Database, Emergency Stop, and Retention Policy.
 - [x] **6.6** Update `CLAUDE.md` with checkpoint, event store, and digest architecture. Updated Key Concepts section with new systems.
-- [x] **6.7** Write `docs/agent-learning.md`: how agents use `execution_search`, `memory.search_by_tags`, and `digest_query` to learn from past sessions. New file documenting the three learning tools with examples.
+- [x] **6.7** Write `docs/guide/agent-learning.md`: how agents use `execution_search`, `memory.search_by_tags`, and `digest_query` to learn from past sessions. New file documenting the three learning tools with examples.
 
 #### Phase 6 Optional: Checkpoint Reproducibility Enhancements (Mid-term)
 
@@ -1240,12 +1240,12 @@ The agent doesn't need to be told to use these — the system prompts document t
 ---
 **2026-03-30: Relevance summary after revision/eval/federation MVP**
 
-- **Workspace Output Capture for Foreign Agents**: Still relevant, but not part of the new revision/eval MVP. This is now tracked under implicit artifact/output capture work (see `docs/spec-implicit-artifacts-agent-evolution.md`).
+- **Workspace Output Capture for Foreign Agents**: Still relevant, but not part of the new revision/eval MVP. This is now tracked under implicit artifact/output capture work (see `docs/proposals/implicit-artifacts-agent-evolution.md`).
 - **Remote Agent Spawn (Gateway-Orchestrated)**: Still relevant, but explicitly deferred to post-MVP federation work. See "Out of Scope" and "Future Extensions" in `docs/spec-agent-revision-evaluation-federation-mvp.md` and `docs/plan-agent-revision-evaluation-federation-mvp.md`.
 - **Post-Session Digest Full E2E**: Still relevant for QA, but not central to the new revision/eval architecture. Digest agent and pipeline are implemented; remaining work is full-path integration testing (see `autonoetic-gateway/tests/post_session_digest_integration.rs`).
-- **Response Validation Gate**: No longer backlog; this is implemented and documented (see `docs/response-validation-gate.md` and integration tests). The new plan covers output quality at eval/promotion time, not at every spawn.
+- **Response Validation Gate**: No longer backlog; this is implemented and documented (see `docs/reference/response-contract.md` and integration tests). The new plan covers output quality at eval/promotion time, not at every spawn.
 
-For current priorities, see `docs/plan-agent-revision-evaluation-federation-mvp.md` and `docs/spec-agent-revision-evaluation-federation-mvp.md`. For artifact/output capture, see `docs/spec-implicit-artifacts-agent-evolution.md`.
+For current priorities, see `docs/plan-agent-revision-evaluation-federation-mvp.md` and `docs/spec-agent-revision-evaluation-federation-mvp.md`. For artifact/output capture, see `docs/proposals/implicit-artifacts-agent-evolution.md`.
 
 ---
 
@@ -1415,7 +1415,7 @@ metadata:
   - `test_response_validation_repair_success_path` — agent receives repair feedback and attempts fix (proves loop runs).
 - [x] **RV.12** Feature flag: `response_validation.enabled` in `GatewayConfig` via `ResponseValidationConfig`. Default false (benign). Also has `repair_enabled` field for future repair window.
 - [x] **RV.13** CLI flag: `--response-validation on|off|repair` to override config per invocation. Repair mode enables bounded retry window.
-- [x] **RV.14** Documentation: Add `docs/response-validation-gate.md` with contract examples, repair semantics, bounded repair window behavior, and specialist guidance for coder/evaluator roles.
+- [x] **RV.14** Documentation: Add `docs/reference/response-contract.md` with contract examples, repair semantics, bounded repair window behavior, and specialist guidance for coder/evaluator roles.
 - [x] **RV.15** Implement real size-based validation for `max_total_size_mb` using authoritative byte sizes from the content store and/or artifact manifests. Until then, fail fast with `size-based response validation is not implemented yet` instead of silently ignoring the field.
 
 **Additional artifact hardening (post-RV implementation):**

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-05
 **Status:** Phase 1–3 Complete; Phase 4 Future
-**Related:** `docs/remote-access-approval.md`, `docs/plan-build-layers-dependency-resolution.md`, `docs/plan-capability-driven-sandbox-isolation.md`
+**Related:** `docs/guide/remote-access-approval.md`, `docs/plan-build-layers-dependency-resolution.md`, `docs/plan-capability-driven-sandbox-isolation.md`
 
 ---
 
@@ -18,7 +18,7 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 
 ### Design Principle
 
-**Gateway = dumb mechanism enforcement.** It detects capabilities, gates approvals, enforces isolation. It does NOT make intelligent decisions about specific cases. Intelligence lives in agents (SKILL.md). See `docs/gateway-architecture-principles.md`.
+**Gateway = dumb mechanism enforcement.** It detects capabilities, gates approvals, enforces isolation. It does NOT make intelligent decisions about specific cases. Intelligence lives in agents (SKILL.md). See `docs/concepts/gateway-architecture-principles.md`.
 
 ---
 
@@ -161,4 +161,4 @@ Architectural cleanup — makes `code_analysis` config affect `sandbox_exec`, no
   - Evaluator runs offline — layers provide deps
   - No 50-turn loops
 - [ ] Non-layered path: `dependencies: {packages: ["requests"]}` → approval triggered → approved → `share_net: true` → success
-- [ ] Update `docs/remote-access-approval.md` with new detection categories
+- [ ] Update `docs/guide/remote-access-approval.md` with new detection categories

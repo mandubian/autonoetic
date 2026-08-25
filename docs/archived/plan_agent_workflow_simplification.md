@@ -327,7 +327,7 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 
 ### K. Documentation Sync ⚠️ (deferred — low priority)
 
-1. ⚠️ `docs/spec-implicit-artifacts-agent-evolution.md` should be updated to clearly separate ordinary-agent output handoff from specialist explicit-artifact workflows.
+1. ⚠️ `docs/proposals/implicit-artifacts-agent-evolution.md` should be updated to clearly separate ordinary-agent output handoff from specialist explicit-artifact workflows.
 2. ⚠️ Docs covering approval retry and checkpoints should describe the system as suspend/resume continuation first, retry mechanics second.
 3. ✅ Planner and specialist skill docs are already minimal after the skill rewrites.
 

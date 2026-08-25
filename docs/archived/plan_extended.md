@@ -1216,7 +1216,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 
 **15.1 Update architecture docs**
 
-- **Files**: `autonoetic/docs/architecture-summary.md`, `autonoetic/docs/separation-of-powers.md`
+- **Files**: `autonoetic/docs/archived/architecture-summary.md`, `autonoetic/docs/concepts/separation-of-powers.md`
 - **Action**: Update to reflect the simplified gateway. Ensure consistency with the implemented primitives.
 
 **15.2 Update `concepts.md`**

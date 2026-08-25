@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-06 (updated 2026-04-07)
 **Status:** Core plan complete: intent path shipped, prompts/docs aligned, integration coverage for intent + AgentSkills-style bundles + optional live OpenRouter smoke.
-**Related:** `docs/AGENTS.md`, `docs/CLI.md`, `docs/agent-features.md`, `docs/plan-network-approval-builder-layers-fix.md`
+**Related:** `docs/AGENTS.md`, `docs/reference/cli.md`, `docs/reference/agent-features.md`, `docs/plan-network-approval-builder-layers-fix.md`
 
 ---
 
@@ -231,7 +231,7 @@ This module is deterministic infrastructure, not a policy engine:
 
 ### Current behavior
 
-The external-skill import path shown in `docs/quickstart-planner-specialist-chat.md` already acts as a translation boundary:
+The external-skill import path shown in `docs/start/planner-specialist-chat.md` already acts as a translation boundary:
 
 - `autonoetic/src/cli/agent.rs` → `handle_agent_import_skill()` loads the external `SKILL.md`
 - `autonoetic-gateway/src/runtime/parser.rs` → `SkillParser::parse()` accepts both:
@@ -471,8 +471,8 @@ That avoids immediately breaking tests and fixtures that still write minimal ad 
 **Files:**
 
 - `docs/AGENTS.md`
-- `docs/CLI.md`
-- `docs/agent-features.md`
+- `docs/reference/cli.md`
+- `docs/reference/agent-features.md`
 - `examples/quickstart/sample_agent/SKILL.md`
 - `autonoetic/src/cli/agent.rs`
 

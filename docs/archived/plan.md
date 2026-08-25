@@ -351,7 +351,7 @@ Progress notes (2026-03-09):
 - Foundation rules now define iteration as the default loop (`propose -> execute -> inspect -> repair -> converge`) and require outcome-vs-expectation checks.
 - Builder example instructions (`specialized_builder` and `tiered_memory_probe`) now explicitly forbid one-shot assumptions and require structured error inspection/retry.
 - Runtime test `test_in_session_repair_loop_recovery_from_structured_error` in tool_call_processor.rs proves malformed tool calls can be repaired in-session.
-- Runbook: `docs/iteration-repair-validation-runbook.md` (manual + automated validation steps, KPIs, and pass/fail criteria).
+- Runbook: `docs/guide/runbooks/iteration-repair-validation.md` (manual + automated validation steps, KPIs, and pass/fail criteria).
 
 4. Validation scenarios
 
@@ -746,7 +746,7 @@ Follow-up evolution items from the planner/specialist workflow and install relia
 - [x] Wire `agent.install` approval requests into the existing scheduler approval queue path (same pending/approved/rejected mechanics used by approved scheduled actions). Install requests stored under `approvals/pending`; caller retries with `install_approval_ref` after approve.
 - [x] Keep promotion evidence (`evaluator_pass` + `auditor_pass` or `override_approval_ref`) and human approval (`install_approval_ref`) as distinct checks; both may be required depending on policy.
 - [x] Add integration tests proving: low-risk install path (no approval when policy is risk_based and payload is low-risk), approval-required install path (request created, install blocked until approve), rejection path, and post-approval install success path. Regression test: `reevaluation_state::tests::test_agent_install_in_background_path_resolves_as_approval_metadata_only` asserts `AgentInstall` is non-executable in the background path and only resolves as approval metadata.
-- [x] Document operator workflow for reviewing and resolving `agent.install` approvals (e.g. in quickstart or a dedicated approvals doc: list pending, approve/reject, effect on install). Added "Approvals (agent.install and scheduled actions)" and "Troubleshooting: agent.install and memory writes" to `docs/quickstart-planner-specialist-chat.md`.
+- [x] Document operator workflow for reviewing and resolving `agent.install` approvals (e.g. in quickstart or a dedicated approvals doc: list pending, approve/reject, effect on install). Added "Approvals (agent.install and scheduled actions)" and "Troubleshooting: agent.install and memory writes" to `docs/start/planner-specialist-chat.md`.
 
 ### Specialized builder rights/write reliability
 
@@ -916,10 +916,10 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 - concepts.md already has Evolution Note (lines 84-95) marking implemented vs planned features
 - Textual state conventions (task.md, scratchpad.md, handoff.md) proposed in concepts.md
 
-- [x] Create comprehensive CLI reference documentation (`docs/cli-reference.md`)
+- [x] Create comprehensive CLI reference documentation (`docs/reference/cli-reference.md`)
 
 **Implementation notes (2026-03-13):**
-- Created `docs/cli-reference.md` covering all CLI commands: gateway, agent, chat, trace, skill, federate, mcp
+- Created `docs/reference/cli-reference.md` covering all CLI commands: gateway, agent, chat, trace, skill, federate, mcp
 - Documented all subcommands, arguments, and options
 - Added examples for common workflows
 
@@ -929,7 +929,7 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 
 **Goal:** Add a pluggable enforcement hook between tool-call interception and target-agent dispatch that can coerce payloads, reject with actionable errors, and log all decisions. Keep the hook swappable between pure code (first) and cheap LLM (later) implementations.
 
-**Design doc:** `docs/schema-enforcement-hook.md`
+**Design doc:** `docs/reference/schema-enforcement.md`
 
 **Implementation order:**
 
@@ -1180,7 +1180,7 @@ The approval request (example: `c19a8a50-d6c8-4c5f-aa3c-6ba119751b11`) remains p
 
 **Documentation tasks (all completed):**
 
-- [x] Updated `docs/quickstart-planner-specialist-chat.md` with payload storage explanation
+- [x] Updated `docs/start/planner-specialist-chat.md` with payload storage explanation
 - [x] Created `docs/agent-install-approval-retry.md` with full documentation
 
 **Test results:** 167 tests pass (3 new tests added)
@@ -1226,10 +1226,10 @@ The approval request (example: `c19a8a50-d6c8-4c5f-aa3c-6ba119751b11`) remains p
 
 | Document | Description |
 |----------|-------------|
-| `docs/quickstart-planner-specialist-chat.md` | Quickstart guide with approval flow |
+| `docs/start/planner-specialist-chat.md` | Quickstart guide with approval flow |
 | `docs/agent-install-approval-retry.md` | Detailed payload storage mechanism documentation |
 | `docs/agent_routing_and_roles.md` | Agent roles and evolution flow |
-| `docs/cli-reference.md` | CLI commands including `gateway approvals` |
+| `docs/reference/cli-reference.md` | CLI commands including `gateway approvals` |
 
 ---
 
@@ -2171,7 +2171,7 @@ No gateway code changes. No new tools. Uses existing delegation result routing.
 - [x] Add clarification output format to `auditor.default/SKILL.md`
 - [x] Add clarification output format to `debugger.default/SKILL.md`
 - [x] Add clarification output format to `researcher.default/SKILL.md`
-- [x] Create `docs/agent-clarification-protocol.md` documentation
+- [x] Create `docs/reference/agent-clarification.md` documentation
 
 ### Files Modified
 
@@ -2185,4 +2185,4 @@ No gateway code changes. No new tools. Uses existing delegation result routing.
 | `agents/specialists/auditor.default/SKILL.md` | Added "Clarification Protocol" section |
 | `agents/specialists/debugger.default/SKILL.md` | Added "Clarification Protocol" section |
 | `agents/specialists/researcher.default/SKILL.md` | Added "Clarification Protocol" section |
-| `docs/agent-clarification-protocol.md` | NEW: Full protocol documentation |
+| `docs/reference/agent-clarification.md` | NEW: Full protocol documentation |

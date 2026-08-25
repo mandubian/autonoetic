@@ -6,7 +6,7 @@
 deployments with different models; hard-coded `provider`/`model` in manifests is brittle.
 
 **Related:** `docs/archived/plan-unified-llm-presets.md` (preset registry shape),
-`docs/config-reference.md` (`llm_presets`, `llm_preset_mapping`, `llm_routing`),
+`docs/reference/config.md` (`llm_presets`, `llm_preset_mapping`, `llm_routing`),
 `docs/ARCHITECTURE.md` (checkpoints, reproducibility fields).
 
 ---
@@ -321,7 +321,7 @@ patching of inline models.
 - [x] Update `specialized_builder` / `agent-factory` install contracts to emit
       `llm_preset` only
 - [x] Remove `apply_llm_preset_to_skill()` provider/model regex patching
-- [x] Update `docs/AGENTS.md`, `docs/config-reference.md`, config template
+- [x] Update `docs/AGENTS.md`, `docs/reference/config.md`, config template
 
 ### Phase 3 — Failover polish
 

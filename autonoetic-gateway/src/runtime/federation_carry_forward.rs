@@ -1,6 +1,6 @@
 //! Federation carry-forward: per-input digest computation.
 //!
-//! See `docs/federation-carry-forward.md` for the full design (the design spec
+//! See `docs/internals/federation-carry-forward.md` for the full design (the design spec
 //! lands with #1067; until that merges the path resolves only on that branch).
 //! This module implements Stage 1: classifying an agent-bundle artifact's bytes
 //! into code / contract / prose buckets and computing a SHA-256 digest for each.
@@ -55,7 +55,7 @@ impl FederationDigests {
 /// Frontmatter fields that change what the gates verify *against*. Anything
 /// not in this list is prose. Keep in sync with `install_contract` and
 /// `docs/AGENTS.md` — a missing contract-relevant field is a silent-bypass
-/// hole. See `docs/federation-carry-forward.md` § "Frontmatter field
+/// hole. See `docs/internals/federation-carry-forward.md` § "Frontmatter field
 /// classification" (design spec; lands with #1067).
 ///
 /// An entry containing `.` is a **nested path** resolved inside the autonoetic
@@ -218,7 +218,7 @@ fn compute_code_digest(
     // unit_test_runner can import/run even when the bundle's base files are
     // byte-identical — without this, a deps-only rebuild (packager swapping a
     // layer) keeps an unchanged code_digest and a code-gate verdict could be
-    // wrongly carried forward (docs/federation-carry-forward.md risk #1).
+    // wrongly carried forward (docs/internals/federation-carry-forward.md risk #1).
     // ArtifactLayer.digest is the SHA-256 of the layer's compressed archive
     // and layer_id is derived from that digest — neither encodes mount_path,
     // so a packager rebuild that mounts identical content at a different path

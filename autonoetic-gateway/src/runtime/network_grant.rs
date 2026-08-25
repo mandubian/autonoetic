@@ -37,7 +37,7 @@
 //! That contradicted the policy `sandbox_exec` enforces everywhere else: for
 //! this tool, network reachability is operator-gated, not capability-derived.
 //! (`artifact_exec` and script-mode execution are capability-derived *by
-//! design* — see `docs/sandbox-network-grant.md` — so they are out of scope
+//! design* — see `docs/internals/sandbox/network-grant.md` — so they are out of scope
 //! here.)
 //!
 //! # The rule

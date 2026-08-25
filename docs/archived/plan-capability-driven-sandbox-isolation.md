@@ -1,6 +1,6 @@
 # Plan: Capability-Driven Sandbox Isolation
 
-**Spec:** `docs/spec-capability-driven-sandbox-isolation.md`
+**Spec:** `docs/internals/sandbox/isolation.md`
 **Depends on:** Build Layers (complete)
 
 ---

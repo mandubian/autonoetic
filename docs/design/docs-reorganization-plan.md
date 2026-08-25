@@ -57,6 +57,11 @@ Four axes, applied in this order:
 
 ## 3. Target tree
 
+**Status: built in PR 2.** Every directory below exists and the top level holds
+only the three entry points plus `index.html`. `design/` and `rfc/` still stand
+apart — they fold into `proposals/` in PR 4, where each doc's shipped-vs-open
+status decides whether it is archived, promoted, or kept (§5.1).
+
 ```
 docs/
 ├── README.md                  ← the map. One screen. Audience-first, no per-file dump
@@ -114,7 +119,7 @@ convention reads correctly in a Rust repo. Everything else moves.
 | `docs/wiki/**` + `index.toml` | bootstrap joins `docs/wiki`; agents call `wiki_list`/`wiki_get` | `bootstrap.rs:910`, `runtime/tools/wiki.rs:78` |
 | `docs/index.html`, `docs/diagrams/*.html`, `docs/.nojekyll` | GitHub Pages | Pages build |
 
-`docs/constitution-signing.md` and `docs/gateway-constitution-roadmap.md` are
+`docs/constitution/signing.md` and `docs/constitution/roadmap.md` are
 *not* frozen but are named in Rust error strings — moving them into
 `constitution/` requires editing `constitution_digest.rs:313` in the same
 commit.
@@ -397,6 +402,19 @@ cited 24 times and sync-checked by the runtime). The rule is the uppercase
 convention rather than "no extension" because accepting any extensionless path
 flags prose fragments and line-wrapped paths.
 
+**Relative links are checked too** (`every_relative_markdown_link_resolves`,
+added in PR 2). The `docs/…` citation check has a blind spot that only shows up
+under a reorganisation: most intra-docs navigation is written *relatively*, with
+targets like `./agent-learning.md` or `../design/README.md` — 246 such links
+inside `docs/` — and such a link breaks when **either** endpoint moves. A
+guard that only checked `docs/…` citations would have declared the move clean
+while shredding navigation. Turning it on before moving anything also surfaced
+**8 relative links already broken on `main`**, invisible to PR 1's check:
+`ARCHITECTURE.md` → a moved interaction-answering plan,
+`agent-clarification-protocol.md` → `foundation_instructions.md` (split into
+per-layer `foundation_*.md` files by the prompt-burden work),
+`prompt-budget.md` → an archived `agent-capabilities.md`, and five more.
+
 ### 8.2 Generated CLI reference
 
 `reference/cli.md` generated from the clap command tree by an `xtask`, with a
@@ -422,10 +440,10 @@ four commands. Hand-written prose (workflows, examples) lives in
 | PR | Content | Risk |
 |---|---|---|
 | **1. Guard first** ✅ **done** | Added `docs_link_guard` (§8.1) as a **lib** unit test — PR CI runs `--lib --bins` only, so a guard in `tests/` would not gate a PR — plus `docs/.link-guard-allow`; fixed all 19 dangling citations. **No moves.** | None — pure repair, and it becomes the safety net for everything after |
-| **2. Move, don't edit** | Create the tree; `git mv` only; sweep refs in Markdown, Rust strings, `agents/**/SKILL.md`, `CLAUDE.md`, root `README.md`. Zero content edits, so review is `git log --follow` + the PR-1 test | Medium — large diff, but mechanically verifiable |
+| **2. Move, don't edit** ✅ **done** | Guard extended to relative links **first** (§8.1), then 75 `git mv`s and a link rewrite across 138 files. The rewrite is a resolver, not a sed script: a relative link is recomputed whenever *either* endpoint moves, so all four cases (both static, source moved, target moved, both moved) are handled. `docs/README.md` rewritten as the map — pulled forward from PR 5 because every line's path changed anyway and shipping a stale catalogue would be worse | Medium — large diff, mechanically verified by both guard checks |
 | **3. The real merges** | §5 items 1–11 (CLI union, budgets, crate map, powers, ARCHITECTURE split, agent-features, skill manifest, sentinel, sandbox isolation) | Content review needed — one commit per merge |
 | **4. Status audit + `proposals/`** | Verify shipped-vs-open for all 39 design+RFC docs against the code; apply the §5.1 archive/promote/split test to each shipped one; write the single `proposals/README.md` table | Medium — needs judgement per doc. Do not trust the self-declared headers, and **do not archive a shipped doc that is the only description of its subsystem** (§5.1) |
-| **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), rewrite `docs/README.md` as a map, point `docs/index.html` at it | Low |
+| **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.
 

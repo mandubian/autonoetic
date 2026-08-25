@@ -495,7 +495,7 @@ Search for all references to `ModelEntry`, `decision_to_llm_config`, old `create
 
 Replace the entire `llm_routing` section with the new unified format. Show fixed presets with `tier`/`cost`, routing presets with `routing:`, and the slimmed `llm_routing` for overrides/gates only.
 
-**7.2 Update `docs/config-reference.md`**
+**7.2 Update `docs/reference/config.md`**
 
 - Update `LLM Presets` section: document fixed vs routing presets
 - Document `routing` sub-object within presets
@@ -509,7 +509,7 @@ Add note to Feature 2 about the unified preset refactor.
 
 **Files changed:**
 - `config/config-template.yaml`
-- `docs/config-reference.md`
+- `docs/reference/config.md`
 - `docs/plan-hermes-gap-closure.md`
 
 ---
@@ -574,4 +574,4 @@ Add note to Feature 2 about the unified preset refactor.
 | `autonoetic-gateway/src/runtime/post_session_digest.rs` | Updated preset conversion |
 | `autonoetic/src/cli/agent.rs` | `resolve_llm_config()`, `LlmTemplateConfig`, `render_skill_template()` |
 | `config/config-template.yaml` | New unified format |
-| `docs/config-reference.md` | Updated reference |
+| `docs/reference/config.md` | Updated reference |

@@ -70,7 +70,7 @@ impl BwrapIsolationOverrides {
     /// network on operator approval: agent-supplied code (`sandbox_exec`) must
     /// decide per exec via [`crate::runtime::network_grant::decide_share_net`],
     /// because a ceiling-seeded baseline silently survives whenever no gate is
-    /// raised — the #1022 window. See `docs/sandbox-network-grant.md`.
+    /// raised — the #1022 window. See `docs/internals/sandbox/network-grant.md`.
     pub fn from_capabilities(caps: &[Capability]) -> Self {
         let share_net = caps
             .iter()

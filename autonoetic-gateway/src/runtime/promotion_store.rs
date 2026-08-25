@@ -349,7 +349,7 @@ impl PromotionStore {
     }
 
     /// Annotate an artifact's promotion record with the three federation
-    /// carry-forward digests (Stage 1; see `docs/federation-carry-forward.md`,
+    /// carry-forward digests (Stage 1; see `docs/internals/federation-carry-forward.md`,
     /// the design spec landing with #1067).
     ///
     /// Called by `promotion.record` after the verdict is written, copying the

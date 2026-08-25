@@ -1,6 +1,6 @@
 # Autonoetic Gateway Configuration
 # See docs/ARCHITECTURE.md and docs/AGENTS.md for full documentation
-# Full reference: docs/config-reference.md
+# Full reference: docs/reference/config.md
 
 # Directory layout. Two sibling directories, both resolved from config —
 # neither is derived from the other:
@@ -426,7 +426,7 @@ evidence_mode: full
 # ── Security Sentinel ────────────────────────────────────────────────
 # System-tier read-only auditor over causal events, promotion history,
 # approvals, layer mounts, and SKILL.md bodies. Produces append-only
-# `SecurityFinding` records. See docs/security-sentinel.md.
+# `SecurityFinding` records. See docs/internals/divergence-sentinel.md.
 #
 # Defaults are operator-friendly; uncomment to override:
 #
@@ -483,7 +483,7 @@ code_analysis:
 
 # ── Federation carry-forward ───────────────────────────────────────────
 # Controls whether a federation gate verdict may survive a rebuild when the
-# bytes that gate reviewed did not change (see docs/federation-carry-forward.md).
+# bytes that gate reviewed did not change (see docs/internals/federation-carry-forward.md).
 # The planner always proposes a carry; the gateway verifies against this floor.
 #   off (default)          — every rebuild re-runs every gate (today's behavior).
 #   conservative           — carry a code-reviewing gate (unit_test_runner,
@@ -555,7 +555,7 @@ retention:
 
 # ── Cognitive Capsules ────────────────────────────────────────────────
 # Controls the agent-portability capsule export/import pipeline.
-# See docs/cognitive-capsule.md.
+# See docs/guide/cognitive-capsule.md.
 # capsule:
 #   default_mode: thin                    # thin | hermetic | replay | headless
 #   auto_sign: true                       # sign exports with the gateway key

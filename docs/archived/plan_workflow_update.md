@@ -374,7 +374,7 @@ Files/functions to delete after W1–W4:
 
 ### W5.2 — Update docs
 
-**Files**: `docs/approval-notification-delivery.md`, `docs/workflow-orchestration.md`, `docs/agent-install-approval-retry.md`
+**Files**: `docs/internals/approval-delivery.md`, `docs/internals/workflow-orchestration.md`, `docs/agent-install-approval-retry.md`
 
 Update to describe:
 - Single `gateway.db` as the notification/approval store

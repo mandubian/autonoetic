@@ -89,7 +89,7 @@ pub struct Right {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
-    /// Part of the entrenched correction core (`docs/philosophy.md` §3.1 /
+    /// Part of the entrenched correction core (`docs/concepts/philosophy.md` §3.1 /
     /// §4.1): a clause whose loss would remove the machinery other errors are
     /// corrected through. May be strengthened by ordinary amendment; a
     /// weakening or removal amendment additionally requires the explicit,
@@ -118,7 +118,7 @@ pub struct EnforcementEntry {
 
 /// Principles (rule-side, bind the agent). Seeded with the loop-guard family
 /// as the proof; grows as #303 migrates the remaining sections. `P-8.1` is
-/// migrated here (ahead of the rest of §8) because `docs/philosophy.md` §3.1
+/// migrated here (ahead of the rest of §8) because `docs/concepts/philosophy.md` §3.1
 /// names it as a member of the entrenched correction core — migrating it
 /// lets the entrenchment backstop cover it structurally.
 pub fn principles() -> &'static [Principle] {
@@ -195,7 +195,7 @@ pub fn principles() -> &'static [Principle] {
 
 /// Rights (gateway-side, bind the gateway). Seeded with two real rights as
 /// the proof that rights are register-modelled identically to principles,
-/// plus the four rights `docs/philosophy.md` §3.1/§4.1 names as the
+/// plus the four rights `docs/concepts/philosophy.md` §3.1/§4.1 names as the
 /// **entrenched correction core** — the machinery through which every other
 /// constitutional error gets fixed (read your own history, know why you were
 /// denied, be able to propose change, be non-repudiably attributed).
@@ -847,7 +847,7 @@ pub fn render_register_markdown() -> String {
 }
 
 /// `""` for an ordinary clause, `" *(entrenched)*"` for one in the
-/// correction core (`docs/philosophy.md` §3.1/§4.1). Surfaced in the rendered
+/// correction core (`docs/concepts/philosophy.md` §3.1/§4.1). Surfaced in the rendered
 /// register so the entrenchment a weakening amendment must overcome is visible
 /// at the clause, not buried in the struct.
 fn entrenched_tag(entrenched: bool) -> &'static str {
@@ -957,7 +957,7 @@ mod tests {
         }
     }
 
-    // ── Entrenchment (`docs/philosophy.md` §3.1/§4.1) ───────────────────
+    // ── Entrenchment (`docs/concepts/philosophy.md` §3.1/§4.1) ───────────────────
 
     #[test]
     fn entrenched_clauses_all_exist_in_register() {

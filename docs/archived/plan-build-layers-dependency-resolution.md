@@ -1,6 +1,6 @@
 # Implementation Plan: Build Layers & Dependency Resolution
 
-**Spec:** `docs/spec-build-layers-dependency-resolution.md`
+**Spec:** `docs/internals/build-layers.md`
 **Date:** 2026-03-27
 
 ---

@@ -5,7 +5,7 @@ This plan replaces the current brittle "resume sessions and hope the right agent
 It builds on the findings in:
 
 - `autonoetic/plan_signal.md`
-- `autonoetic/docs/approval-notification-delivery.md`
+- `autonoetic/docs/internals/approval-delivery.md`
 - the current trace/timeline infrastructure in `autonoetic-gateway/src/runtime/session_timeline.rs`
 - the current CLI trace surface in `autonoetic/src/cli/trace.rs`
 

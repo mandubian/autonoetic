@@ -895,7 +895,7 @@ traffic regardless of HTTP_PROXY. See §5.2c rationale.
 
 - Planner/promotion-gate consumer treats `unable_to_evaluate` as a
   non-promoting block, not a broken-artifact verdict.
-- Documentation update in `docs/planner-principles.md` and
+- Documentation update in `docs/concepts/planner-principles.md` and
   `docs/promotion-gate.md` (or wherever the promotion-gate semantics live).
 
 ### 5.6 Optional: refactor P-3.10 enforcement to use the new field

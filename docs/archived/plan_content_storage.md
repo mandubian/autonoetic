@@ -392,7 +392,7 @@ This should replace the current brittle “planner remembers the right files” 
 
 **File**:
 
-- `autonoetic/docs/content-store.md`
+- `autonoetic/docs/internals/storage/content-store.md`
 
 Tasks:
 

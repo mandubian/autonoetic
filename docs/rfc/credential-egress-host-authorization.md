@@ -20,7 +20,7 @@ agent is locked out of `credential_request`.
 approval_hardening.rs` (R++4 confirm phrases),
 `autonoetic-gateway/src/runtime/session_timeline.rs`
 (`approval_timeline_extra_from_action` — the `grant_hosts` card),
-`docs/remote-access-approval.md`, `docs/credential-management.md`.
+`docs/guide/remote-access-approval.md`, `docs/reference/credentials.md`.
 
 ---
 

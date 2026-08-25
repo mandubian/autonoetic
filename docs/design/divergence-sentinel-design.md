@@ -117,7 +117,7 @@ Already factorized into `GateService` (`runtime/human_gate.rs`) — see
 | `reconcile_stale_active_executions` | `scheduler/gateway_store/migrate.rs:686-695` |
 | `RetentionConfig` (execution_traces, causal_events) | various |
 | `runtime_lock` drift check | `runtime_lock.rs` |
-| `constitution` signature verification | `docs/constitution-signing.md` |
+| `constitution` signature verification | `docs/constitution/signing.md` |
 
 Out of scope, except that emergency stop is the **escalation target** when
 Sentinel fires its most severe judgment.
@@ -337,7 +337,7 @@ If the experiment fails, P3+ is dropped and Layer 1 is enough.
   warning, a partial existing example of trajectory monitoring
 - `autonoetic-gateway/src/runtime/post_session_digest.rs` — post-session
   analysis (Sentinel is its in-session counterpart)
-- `docs/agent-learning.md` — `digest_query`, `execution_search` APIs the
+- `docs/guide/agent-learning.md` — `digest_query`, `execution_search` APIs the
   watchdog will use
-- `docs/separation-of-powers.md` — why the watchdog has no execution
+- `docs/concepts/separation-of-powers.md` — why the watchdog has no execution
   capabilities

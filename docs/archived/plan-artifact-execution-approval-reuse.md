@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-17
 **Status:** Complete (Phases 1–5)
-**Related:** `docs/approval-system.md`, `docs/remote-access-approval.md`, `docs/AGENTS.md`, `docs/agent_routing_and_roles.md`, `docs/plan-capability-driven-sandbox-isolation.md`, `docs/plan-network-approval-builder-layers-fix.md`
+**Related:** `docs/approval-system.md`, `docs/guide/remote-access-approval.md`, `docs/AGENTS.md`, `docs/agent_routing_and_roles.md`, `docs/plan-capability-driven-sandbox-isolation.md`, `docs/plan-network-approval-builder-layers-fix.md`
 
 ---
 

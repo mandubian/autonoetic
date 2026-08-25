@@ -69,7 +69,7 @@ in:
 
 - `autonoetic-types/src/config.rs`
 - `config/config-template.yaml`
-- `docs/config-reference.md`
+- `docs/reference/config.md`
 
 Then validate:
 
@@ -78,7 +78,7 @@ cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_
 cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
 ```
 
-Canonicalization details are documented in `docs/constitution-signing.md`.
+Canonicalization details are documented in `docs/constitution/signing.md`.
 Operational key handling for multi-machine deterministic signing is in
 `docs/constitution/key-management.md`.
 
@@ -93,7 +93,7 @@ autonoetic-gateway/      Core runtime — all logic lives here
     policy.rs              Capability validation before privileged operations
     sandbox.rs             Sandbox orchestration: SDK bridge, dependency composition, spawn/wait
     sandbox/driver/        SandboxDriver trait + registry; one file per backend
-                           (bubblewrap, docker, microvm, wasm) — see docs/sandbox-drivers.md
+                           (bubblewrap, docker, microvm, wasm) — see docs/internals/sandbox/drivers.md
     scheduler/             Approval lifecycle, background reevaluation, gateway SQLite store
     runtime/
       lifecycle.rs         AgentExecutor — the main reasoning loop (the biggest file ~3800 lines)
@@ -148,7 +148,7 @@ agents/                  Agent bundles (SKILL.md manifests)
 ### Approval system
 Five layers of approval dedup (checked in order):
 1. **Exec cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address/host_constant); entries expire after `default_grant_ttl_secs` (24h default, 0 disables), same budget as session grants
-2. **Plan grants** — operator-approved plan envelope materialized as a session grant; see `docs/plan-capability-grants.md`
+2. **Plan grants** — operator-approved plan envelope materialized as a session grant; see `docs/reference/capability-grants.md`
 3. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
 4. **Existing approved/pending approvals** (domain-level matching)
 5. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
@@ -231,8 +231,8 @@ SDKs live outside the Rust workspace:
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow, emergency stop
 - `docs/wiki/approval-system.md` — Approval lifecycle, session grants, dedup, escalation (maintained digest; the pre-unification write-up is `docs/archived/approval-system.md`)
-- `docs/approved-resources-caching.md` — Exec replay cache and session approval grants
-- `docs/plan-capability-grants.md` — Plan-as-capability-grant: materialization, revocation, dedup layer
-- `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
-- `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
+- `docs/internals/approval-cache.md` — Exec replay cache and session approval grants
+- `docs/reference/capability-grants.md` — Plan-as-capability-grant: materialization, revocation, dedup layer
+- `docs/guide/remote-access-approval.md` — Static analysis detection, approval flow diagram
+- `docs/reference/credentials.md` — Credential vault, `credential_env` injection, CLI credential commands
 - `docs/AGENTS.md` — Agent roles, SKILL.md format, capabilities (user-facing, not dev instructions)

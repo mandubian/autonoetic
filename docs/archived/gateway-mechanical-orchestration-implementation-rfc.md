@@ -2,9 +2,9 @@
 >
 
 **Status:** Implemented RFC
-**Depends on:** [../archived/gateway-mechanical-orchestration-plan.md](../archived/gateway-mechanical-orchestration-plan.md)
+**Depends on:** [../archived/gateway-mechanical-orchestration-plan.md](gateway-mechanical-orchestration-plan.md)
 **Scope:** Implementation plan only; no code changes in this document
-**Refs:** [../workflow-orchestration.md](../workflow-orchestration.md), [../separation-of-powers.md](../separation-of-powers.md), [../protected-agents.md](../protected-agents.md), [human-gate-unification-plan.md](./human-gate-unification-plan.md)
+**Refs:** [../workflow-orchestration.md](../internals/workflow-orchestration.md), [../separation-of-powers.md](../concepts/separation-of-powers.md), [../protected-agents.md](../reference/protected-agents.md), [human-gate-unification-plan.md](./human-gate-unification-plan.md)
 
 ---
 
