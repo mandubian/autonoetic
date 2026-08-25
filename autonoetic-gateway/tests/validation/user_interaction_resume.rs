@@ -77,6 +77,22 @@ fn stub_user_ask_then_text(
     ]
 }
 
+/// The ask/resume chain binds the constitution digest into the P-6.23
+/// attestation tail; these tests build executors directly rather than through
+/// gateway bootstrap (which normally calls initialize_constitution).
+/// Init-or-assert-initialized: tolerate a shared-process neighbor's runtime,
+/// never a genuine load failure.
+fn ensure_constitution_runtime() {
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "initialize_constitution failed without a fallback runtime: {e:#}"
+        );
+    }
+}
+
 #[serial_test::serial]
 #[test]
 fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> {
@@ -86,6 +102,7 @@ fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> {
 }
 
 async fn test_user_ask_suspend_answer_resume_checkpoint_body() -> anyhow::Result<()> {
+    ensure_constitution_runtime();
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -234,6 +251,7 @@ fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
 }
 
 async fn test_user_ask_resume_option_selected_value_body() -> anyhow::Result<()> {
+    ensure_constitution_runtime();
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -347,6 +365,7 @@ fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
 }
 
 async fn test_user_ask_freeform_in_session_history_body() -> anyhow::Result<()> {
+    ensure_constitution_runtime();
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -475,6 +494,7 @@ fn test_duplicate_resume_claim_guard_skips_second_caller() -> anyhow::Result<()>
 }
 
 async fn test_duplicate_resume_claim_guard_skips_second_caller_body() -> anyhow::Result<()> {
+    ensure_constitution_runtime();
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");

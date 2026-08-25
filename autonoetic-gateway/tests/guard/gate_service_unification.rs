@@ -21,14 +21,10 @@ const SRC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
 const ALLOWLIST: &[&str] = &[
     // GateService itself — the single allowed caller.
     "runtime/human_gate.rs",
-    // Pending migrations tracked by #724.
-    "runtime/tools/federation.rs",       // promotion-review escalation projection (approval row routed via GateService)
-    // Introduced by #966 *after* #724 closed, so this guard caught a genuine
-    // regression — and then went unheard for four weeks, because a permanently
-    // red check carries no signal. Allowlisted so the guard can catch the next
-    // one; the migration is #1164 and this entry goes with it.
-    "runtime/egress_labeler.rs",
-    // Additional direct callers not yet classified as approval subjects.
+    // Unmigrated direct callers. #724 is CLOSED; these entries outlived it.
+    // Each needs its own migration issue before its next behavioral change —
+    // a stale allowlist is how this guard quietly stops guarding.
+    "runtime/tools/federation.rs", // promotion-review escalation projection
     "runtime/tools/session.rs",
     "runtime/tools/user_profile.rs",
     "scheduler/gateway_store/session_envelopes.rs",

@@ -398,8 +398,18 @@ fn session_sink_declassified_tracks_grant_lifecycle() -> anyhow::Result<()> {
 fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
     use autonoetic_gateway::runtime::egress_labeler::file_declassify_offer;
     let tmp = tempfile::tempdir()?;
-    let store = GatewayStore::open(tmp.path())?;
+    let store = std::sync::Arc::new(GatewayStore::open(tmp.path())?);
     let config = GatewayConfig::default();
+    let manifest = autonoetic_types::agent::AgentManifest {
+        agent: autonoetic_types::agent::AgentIdentity {
+            id: "coder.default".to_string(),
+            name: "Coder".to_string(),
+            description: "test".to_string(),
+            singleton: false,
+            resident_idle_ttl_secs: None,
+        },
+        ..Default::default()
+    };
     let root = "root-offer";
     let session = "root-offer/coder";
 
@@ -408,7 +418,7 @@ fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
         &config,
         session,
         root,
-        "coder.default",
+        &manifest,
         &EgressLabel::local_only(),
     )
     .expect("offer filed");
@@ -420,11 +430,24 @@ fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
         &config,
         session,
         root,
-        "coder.default",
+        &manifest,
         &EgressLabel::local_only(),
     )
     .expect("offer reused");
     assert_eq!(id1, id2);
+
+    // A differently-labeled batch still dedups onto the same offer: the
+    // payload is canonical; the label lives in the DecisionContext only.
+    let id3 = file_declassify_offer(
+        &store,
+        &config,
+        session,
+        root,
+        &manifest,
+        &EgressLabel::unrestricted(),
+    )
+    .expect("offer reused across batch labels");
+    assert_eq!(id1, id3);
 
     let pending = store.get_pending_approvals_for_root(root)?;
     assert_eq!(pending.len(), 1, "exactly one pending offer");
