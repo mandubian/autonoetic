@@ -34,7 +34,7 @@ not *trajectories of error→fix*.
 - `docs/design/divergence-sentinel-design.md` — the original Sentinel design (P0 done, P1 done, P2 done)
 - `docs/rfc/unit-test-runner-divergence-loop.md` — the "category error" diagnosis this RFC generalizes
 - `docs/reports/postmortems/session-b6d27af2-weather-agent.md` — attribution: "mostly agents not following their own prompts"
-- `docs/concepts/gateway-architecture-principles.md` — "Dumb Gateway, Smart Agent" tenet
+- `../concepts/separation-of-powers.md` — "Dumb Gateway, Smart Agent" tenet
 - `docs/reports/2026-04-24-constitution-audit.md` — §5 flags the egress-validation gap
 - `docs/archived/approval-system-hardening-plan.md`, `docs/archived/human-gate-unification-plan.md` — the *shipped* approval/clarification hardening (see §6)
 - `autonoetic-gateway/src/runtime/guard.rs`, `trajectory_monitor.rs`, `trajectory_health.rs`, `response_validation.rs`

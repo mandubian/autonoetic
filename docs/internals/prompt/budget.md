@@ -232,6 +232,5 @@ The context window for budget calculations is resolved with this priority:
 
 ## Related Docs
 
-- [Session Budget](../../reference/session-budget.md) — per-session token/round/time limits
-- [Budget Management](../../reference/budget-management.md) — OpenRouter catalog, pricing estimates
+- [Session budgets](../../reference/budgets.md) — per-session token/round/time/USD limits, enforcement flow, and the OpenRouter catalog
 - [Agent Capabilities](../../AGENTS.md#capabilities-system) — capability system for tool access control

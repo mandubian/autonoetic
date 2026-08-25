@@ -167,5 +167,4 @@ Compression failures never break the session. If any of these occur, the origina
 ## Related Docs
 
 - [Prompt Budget](budget.md) — token budget tracking and enforcement
-- [Session Budget](../../reference/session-budget.md) — per-session token/round/time limits
-- [Budget Management](../../reference/budget-management.md) — model cost estimation
+- [Session budgets](../../reference/budgets.md) — per-session limits and model cost estimation

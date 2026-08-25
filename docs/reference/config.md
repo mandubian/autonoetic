@@ -509,7 +509,7 @@ session_budget:
   max_wall_clock_secs: 7200
 ```
 
-See `docs/reference/session-budget.md` and `docs/reference/budget-management.md` for details.
+See `docs/reference/budgets.md` for details.
 
 ---
 

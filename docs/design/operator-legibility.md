@@ -4,7 +4,7 @@
 > Builds on: [`../archived/human-gate-unification-plan.md`](../archived/human-gate-unification-plan.md) (GateService),
 > [`human-agent-artifact-collaboration-plan.md`](human-agent-artifact-collaboration-plan.md) (PlanFrame + workbench),
 > [`operator-activity-feed-plan.md`](operator-activity-feed-plan.md).
-> Rooted in: [`separation-of-powers.md`](../concepts/separation-of-powers.md), [`gateway-architecture-principles.md`](../concepts/gateway-architecture-principles.md).
+> Rooted in: [`separation-of-powers.md`](../concepts/separation-of-powers.md).
 
 ## 1. The problem, in one sentence
 

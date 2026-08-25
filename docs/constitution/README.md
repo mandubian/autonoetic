@@ -59,6 +59,14 @@ docs that the signed texts cite:
 | `docs/gateway-constitution-roadmap.md` | [`roadmap.md`](roadmap.md) |
 | `docs/gateway-constitution-audit-2026-04-24.md` | [`../reports/2026-04-24-constitution-audit.md`](../reports/2026-04-24-constitution-audit.md) |
 
+The enforcement tables also name two docs by bare filename in their **Doc**
+column (P-6.1…P-6.5), and those two have since been merged into one:
+
+| Named in the Doc column | Now |
+|---|---|
+| `session-budget.md` | merged into [`../reference/budgets.md`](../reference/budgets.md) |
+| `budget-management.md` | merged into [`../reference/budgets.md`](../reference/budgets.md) |
+
 The next ratified version should cite the new paths in its own text; until then
 this table is the mapping. `docs_link_guard` deliberately does not scan
 `versions/**` for exactly this reason — a guard that "fixed" a signed text

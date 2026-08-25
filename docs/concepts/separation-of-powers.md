@@ -46,6 +46,63 @@ Agent (low-privilege):           Gateway (high-privilege):
 
 ---
 
+## A narrow rule enforcer, not a workflow engine
+
+The gateway is a **narrow rule enforcer** and a generic, neutral runtime
+executor — not a business-logic workflow engine. Where the section above draws
+the line by *privilege*, this one draws it by *judgement*: mechanical
+invariants are the gateway's, routing decisions are the agent's.
+
+**What the gateway does:**
+
+- **Enforce hard invariants** — mechanically refuse operations that violate
+  safety rules (a high-risk deployment missing a promotion record, an agent
+  install without dependency resolution).
+- **Rule Zero** — apply every rule equally. No agent, planner, or "trust me"
+  flag overrides a safety invariant.
+- **Analyze and explain** — scan code for patterns (imports, capabilities) and
+  surface findings as structured data (`warnings[]`, `BundleHealthReport`) so
+  the calling agent can act on them.
+- **Canonicalize tool names** — map shorthand to canonical forms.
+- **Type errors** — distinguish recoverable from fatal.
+
+That establishes a safe floor without prescribing *how* an agent navigates
+workflows to satisfy it.
+
+**What the gateway does not do** — domain-specific routing or workflow logic:
+
+- "Auto-spawn a packager agent when dependencies are missing" (routing)
+- "Decide whether an agent's problem is worth fixing" (workflow decision)
+- "Block research→builder transitions unless research returned data" (business
+  logic)
+
+Each of those hardcodes an assumption about agent deployment. The gateway says
+*what is wrong*; the planner decides *what to do about it*.
+
+**Where that logic belongs:** in `SKILL.md` instructions, not platform code.
+`planner.default`'s guardrails tell the agent to stop and return failure when
+research yields nothing actionable. A `specialized_builder` receiving a
+structured refusal decides to generate a `packager.default` dependency task and
+retry. The agent *chooses* to follow these rules through instruction-following,
+producing a **gate → explain → plan → execute → re-check** loop.
+
+**Why this split:**
+
+1. **Mechanical safety against LLM mistakes** — LLM decisions are advisory;
+   safety-critical invariants must be deterministic.
+2. **Agent autonomy** — routing, delegation, and auto-fix belong to agents.
+3. **Extensibility** — a new agent type needs no platform change.
+4. **Separation of concerns** — the gateway analyzes, gates, and explains;
+   agents plan and execute.
+
+This was learned the hard way: an early session deployed a broken artifact
+(`import requests` with no installed `requirements.txt`) because the pipeline
+relied entirely on LLM judgement. The fix was *not* to have the gateway invoke
+a builder automatically — that would make it a workflow engine — but to
+hard-gate the promotion so missing dependencies trigger a refusal, and to send
+the structured explanation back so the planner could add the packager step
+itself.
+
 ## Approval Execution Boundary
 
 Approval-gated tool calls are a concrete example of separation-of-powers:

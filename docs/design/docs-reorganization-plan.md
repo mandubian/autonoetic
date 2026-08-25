@@ -133,10 +133,10 @@ must be merged, not picked.
 
 | # | Merge | Into | Why / risk |
 |---|---|---|---|
-| 1 | `CLI.md` + `cli-reference.md` | `reference/cli.md` | **Union** — 4 of 18 subcommands documented in neither. Fix properly: generate from clap (§8.2) |
-| 2 | `budget-management.md` + `session-budget.md` | `reference/budgets.md` | 85 + 73 lines that already cross-reference each other as "see the other one for the rest" |
-| 3 | `gateway-architecture.md` + `MODULES.md` | `internals/crate-map.md` | Same job (module map), overlapping scope; `gateway-architecture.md` has **0 inbound refs** despite 715 lines |
-| 4 | `gateway-architecture-principles.md` → `separation-of-powers.md` | `concepts/separation-of-powers.md` | 45 lines from April ("dumb gateway, smart agent") that restate the canonical 424-line doc. 27 inbound refs → sweep required |
+| 1 ✅ | `CLI.md` + `cli-reference.md` | `reference/cli.md` | **Done.** Union, as predicted: `security`/`watchdog`/`sentinel-experiment`/`improve` were in neither, and the surviving doc advertised a `-c` short flag clap never defined. Coverage is now machine-checked (§8.2) rather than generated |
+| 2 ✅ | `budget-management.md` + `session-budget.md` | `reference/budgets.md` | **Done.** Both opened by pointing at the other for the missing half |
+| 3 ⚠️ | `gateway-architecture.md` + `MODULES.md` | `internals/crate-map.md` + `internals/gateway.md` | **Done differently — see §5.2.** Deduped the overlap instead of concatenating: the two docs answer different questions and one 1,128-line file would serve neither |
+| 4 ✅ | `gateway-architecture-principles.md` → `separation-of-powers.md` | `concepts/separation-of-powers.md` | **Done.** Folded in as "A narrow rule enforcer, not a workflow engine" — it draws the line by *judgement* where the host doc draws it by *privilege* |
 | 5 | `architecture-summary.md` | archived; ideas into `concepts/philosophy.md` | May essay framed against CCOS; superseded by `ARCHITECTURE.md` + `philosophy.md` |
 | 6 | `ARCHITECTURE.md` **split** | keep overview; move session/storage chapters to `internals/` | 1,608 lines; a pasted Live Digest sample leaks `## Turn 1 — {timestamp}` headings into the document outline |
 | 7 | `agent-features.md` | `AGENTS.md`, then archived | `README.md` has called it "partially superseded" since May — finish the merge (middleware / disclosure / background scheduling are the unique parts) |
@@ -145,6 +145,30 @@ must be merged, not picked.
 | 10 | `session-room.md` / `session-room-architecture.md` / `rfc/session-room-channel-agnostic-timeline.md` / `design/session-room-conversational-input.md` | `guide/session-room.md` + `internals/session/room.md`; RFC + input plan archived | User guide vs architecture split is *good* — keep it, drop the two shipped design docs |
 | 11 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (spec archived) | April spec, 97 lines, 23 inbound refs → sweep required |
 | 12 | `plan-egress-phase2-907.md`, `plan-egress-phase3-908.md` | archived; live model → `internals/egress/` | Phases merged. Phase 4 (#909) stays a proposal while slices are open |
+
+### 5.2 Deviation: merge #3 deduped rather than concatenated
+
+The plan called for folding `MODULES.md` into `gateway-architecture.md` as one
+`crate-map.md`. Implementing it showed that wrong. The two docs state their
+scopes explicitly and they differ: one is "developers navigating **this crate**"
+(`autonoetic-gateway/src/` only), the other is "**all** Autonoetic system
+modules". They answer *where does X live across the workspace?* and *how does
+the gateway work inside?* — and concatenating them produces a 1,128-line file
+that answers neither well.
+
+What was actually duplicated is narrower: **a gateway module map existed twice**,
+once as an annotated ASCII tree and once as per-file tables, free to drift. So:
+
+- `internals/gateway.md` — the gateway crate in depth (was
+  `gateway-architecture.md`), and the **only** per-file gateway module map;
+- `internals/crate-map.md` — the workspace map (was `MODULES.md`), whose
+  duplicated gateway tables (107 lines) collapse to a crate-level summary plus
+  a pointer. HTTP endpoints now point at `reference/http-api.md`, which already
+  specified them.
+
+The rule this suggests for the remaining merges: **merge information, not
+files.** Two docs with genuinely different audiences should keep their
+separation; what must be single is each *fact*.
 
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 
@@ -441,13 +465,30 @@ four commands. Hand-written prose (workflows, examples) lives in
 |---|---|---|
 | **1. Guard first** ✅ **done** | Added `docs_link_guard` (§8.1) as a **lib** unit test — PR CI runs `--lib --bins` only, so a guard in `tests/` would not gate a PR — plus `docs/.link-guard-allow`; fixed all 19 dangling citations. **No moves.** | None — pure repair, and it becomes the safety net for everything after |
 | **2. Move, don't edit** ✅ **done** | Guard extended to relative links **first** (§8.1), then 75 `git mv`s and a link rewrite across 138 files. The rewrite is a resolver, not a sed script: a relative link is recomputed whenever *either* endpoint moves, so all four cases (both static, source moved, target moved, both moved) are handled. `docs/README.md` rewritten as the map — pulled forward from PR 5 because every line's path changed anyway and shipping a stale catalogue would be worse | Medium — large diff, mechanically verified by both guard checks |
-| **3. The real merges** | §5 items 1–11 (CLI union, budgets, crate map, powers, ARCHITECTURE split, agent-features, skill manifest, sentinel, sandbox isolation) | Content review needed — one commit per merge |
+| **3. The real merges** ✅ **partly done** | Shipped: #1 CLI union (+ a coverage guard so the omission class cannot recur), #2 budgets, #3 crate map (deduped — §5.2), #4 powers. **Deferred with reasons below:** #6 ARCHITECTURE split, #7 agent-features fold, #8 skill manifest, #9 sentinel, #11 sandbox isolation | Content review needed — one commit per merge |
 | **4. Status audit + `proposals/`** | Verify shipped-vs-open for all 39 design+RFC docs against the code; apply the §5.1 archive/promote/split test to each shipped one; write the single `proposals/README.md` table | Medium — needs judgement per doc. Do not trust the self-declared headers, and **do not archive a shipped doc that is the only description of its subsystem** (§5.1) |
 | **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.
 
 ---
+
+### 9.1 What PR 3 deferred, and why
+
+PR 3 took the merges where two documents stated the *same fact twice*. The rest
+are restructurings or classifications, each with a reason to wait:
+
+| Merge | Why not yet |
+|---|---|
+| #6 `ARCHITECTURE.md` split | 1,608 lines and the highest-fan-in doc in the repo. Splitting moves anchors, so inbound `#section` links break in ways neither guard check can see (an anchor is not a path). Wants an anchor check first — a natural PR 5 addition |
+| #7 `agent-features.md` → `AGENTS.md` | A 434-line fold into the canonical agent reference, which is also cited from agent bundles and prompt-composition tests. Its unique material (middleware, disclosure, background scheduling) deserves a careful read against current code, not a paste |
+| #8 skill manifest | `reference/skill-manifest.md` already exists post-rename; folding `AGENTS.md`'s SKILL.md section into it touches the doc agents read at runtime, so it belongs with #7 |
+| #9 sentinel | The live doc must absorb `design/divergence-sentinel-design.md`, which is `design/` — that is PR 4's territory, and PR 4 decides whether it is archived or promoted first |
+| #11 sandbox isolation | Same shape: needs the shipped-status verdict on `rfc/sandbox-mount-allow-set.md` (§5.1 flags it as promote-not-archive) before deciding what `internals/sandbox/isolation.md` should contain |
+
+The dependency is real, not scheduling preference: #9 and #11 cannot be done
+correctly before the PR 4 audit, because archiving a design doc that is the only
+description of shipped behaviour would delete the description (§5.1).
 
 ## 10. Decisions
 
