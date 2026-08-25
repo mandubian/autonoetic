@@ -312,13 +312,13 @@
         <span class="mono">Paused</span> and continues in place on the operator's next message, no fork.
         That is the whole distinction from <code>EmergencyStop</code>, which hard-aborts and never
         resumes; <kbd>Esc</kbd> deliberately does not arm the circuit breaker.</p>
-      <p class="fine">Known discrepancy: <span class="mono">Ri-0.12</span>'s clause text still reads
-        "all 11 session yield causes (6 terminal + 5 resumable)" and omits <code>Idle</code> from its
-        auto-resume list — it predates <code>Idle</code> (#902) and the cooperative pause
-        (#1026/#1051). The counts above are the enforced code. Realigning the clause needs a
-        constitutional amendment, not a doc edit; the exhaustive classification in
-        <span class="mono">autonoetic-gateway/tests/constitution/rights_mid_bucket.rs</span> now makes
-        any future variant a compile error rather than a silent omission.</p>
+      <p class="fine">Ri-0.12 realignment: the clause text has been corrected in
+        <span class="mono">docs/constitution/versions/2026.08.25</span> (#1078) — 12 causes
+        (5 terminal + 7 resumable), <code>ManualStop</code> described as the cooperative pause,
+        and <code>Idle</code> added to the listed auto-resume set. This page's counts were always
+        the enforced code; the amendment makes the law match. The version is signed + activated
+        separately ("Signing runbook" in the version's RATIFY.md); until then the active
+        constitution remains 2026.07.30 and this note stays accurate.</p>
     </div>
 
     <p class="para" style="margin-top:16px;">Two guarantees make this a closed system, not a maze.
