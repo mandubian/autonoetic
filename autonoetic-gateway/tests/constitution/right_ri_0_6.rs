@@ -30,10 +30,17 @@ fn setup() -> (
     // The executor binds the constitution version/digest into the per-turn
     // state attestation tail (P-6.23) whenever a gateway_dir is set; this
     // suite builds executors directly rather than through gateway bootstrap
-    // (which normally calls initialize_constitution). Best-effort, idempotent.
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    // (which normally calls initialize_constitution). Init-or-assert-
+    // initialized: tolerate a shared-process neighbor's runtime, never a
+    // genuine load failure.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
         &GatewayConfig::default(),
-    );
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "initialize_constitution failed without a fallback runtime: {e:#}"
+        );
+    }
     let temp = tempdir().unwrap();
     let agents_dir = temp.keep().join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();

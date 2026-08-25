@@ -204,10 +204,17 @@ async fn test_promote_mechanically_re_executes_on_resume_without_llm_re_issue_bo
     // The executor binds the constitution version/digest into the per-turn
     // state attestation tail (P-6.23) whenever a gateway_dir is set; this
     // test builds executors directly rather than through gateway bootstrap
-    // (which normally calls initialize_constitution). Best-effort, idempotent.
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    // (which normally calls initialize_constitution). Init-or-assert-
+    // initialized: tolerate a shared-process neighbor's runtime, never a
+    // genuine load failure.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
         &autonoetic_types::config::GatewayConfig::default(),
-    );
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "initialize_constitution failed without a fallback runtime: {e:#}"
+        );
+    }
     let workspace = support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.approval_dwell_multiplier = 0.0;

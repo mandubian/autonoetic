@@ -190,9 +190,17 @@ impl LlmDriver for EndTurnDriver {
 /// tests build executors directly rather than through gateway bootstrap
 /// (which normally calls initialize_constitution). Best-effort, idempotent.
 fn ensure_constitution_runtime() {
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    // Init-or-assert-initialized: a pre-initialized runtime from a
+    // shared-process neighbor is fine; a genuine load failure must not be
+    // swallowed into a later, less actionable digest panic.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
         &GatewayConfig::default(),
-    );
+    ) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "initialize_constitution failed without a fallback runtime: {e:#}"
+        );
+    }
 }
 
 fn ri_0_7_manifest() -> AgentManifest {
