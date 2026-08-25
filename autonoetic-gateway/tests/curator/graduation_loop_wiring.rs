@@ -67,8 +67,12 @@ fn curator_emit_structured_graduation_fields() {
 
 #[test]
 fn orchestrator_routes_promote_to_skill_to_steward() {
+    // Matched on the step *title*, not its number. This assertion used to pin
+    // "### Step 4b: …"; inserting a step upstream renumbered it to 5b and broke
+    // a test whose subject — that a graduation-routing step exists — had not
+    // changed at all. The number is formatting; the title is the contract.
     assert!(
-        ORCHESTRATOR_SKILL_MD.contains("### Step 4b: Route lesson graduations"),
+        ORCHESTRATOR_SKILL_MD.contains(": Route lesson graduations"),
         "orchestrator must have a graduation routing step"
     );
     assert!(

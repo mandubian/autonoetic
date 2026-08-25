@@ -307,15 +307,23 @@ fn test_loop_guard_permission_errors_skip_budget() {
 }
 
 #[test]
-fn test_loop_guard_validation_errors_count_normally() {
+fn test_loop_guard_execution_errors_count_against_the_budget() {
     let mut guard = LoopGuard::new(100);
 
-    // max_tool_failures default is 8 — validation errors count as normal failures.
+    // `max_tool_failures` defaults to 8. Execution errors are recoverable *and*
+    // not "the agent learning the API", so they accumulate.
+    //
+    // This test used to drive the budget with `Validation` errors. #895 excluded
+    // those deliberately — a validation failure means the agent is failing
+    // forward with structurally different arguments each time, so the
+    // no-progress counter is the right guard, not the failure budget. See
+    // `guard::tests::test_validation_errors_do_not_count_against_tool_budget`,
+    // which pins that. The budget itself still needs coverage, hence Execution.
     for _ in 0..8 {
         guard.register_failure(
             "web_fetch",
             r#"{"url":"https://bad.com"}"#,
-            Some(&ToolErrorType::Validation),
+            Some(&ToolErrorType::Execution),
         );
     }
 
@@ -326,17 +334,18 @@ fn test_loop_guard_validation_errors_count_normally() {
 fn test_loop_guard_mixed_errors_permission_skipped() {
     let mut guard = LoopGuard::new(100);
 
-    // Permission errors are skipped; only the 7 validation failures count
-    // (below the max_tool_failures=8 budget).
+    // Permission errors are irrecoverable and skipped; only the 7 execution
+    // failures count (below the max_tool_failures=8 budget). Validation is now
+    // skipped too (#895), so the countable side uses Execution.
     for _ in 0..7 {
-        guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
+        guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Execution));
         guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Permission));
     }
 
     assert!(guard.check_loop().is_ok());
 
-    // The 8th validation failure trips the budget.
-    guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
+    // The 8th execution failure trips the budget.
+    guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Execution));
     assert!(guard.check_loop().is_err());
 }
 

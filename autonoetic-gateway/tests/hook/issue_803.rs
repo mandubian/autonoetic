@@ -99,6 +99,10 @@ fn create_revision(
                 "instructions": "# Lineage",
                 "execution_mode": "script",
                 "script_entry": "main.py",
+                // Required for script agents since #887: without it the roster
+                // advertises `free_text` and callers send prose that crashes the
+                // script. These fixtures predate that rule.
+                "io": { "accepts": { "type": "object" } },
                 "capabilities": []
             })
             .to_string(),
@@ -239,6 +243,10 @@ fn designer_lineage_ignores_llm_supplied_requester() {
                 "instructions": "# Forge",
                 "execution_mode": "script",
                 "script_entry": "main.py",
+                // Required for script agents since #887: without it the roster
+                // advertises `free_text` and callers send prose that crashes the
+                // script. These fixtures predate that rule.
+                "io": { "accepts": { "type": "object" } },
                 "capabilities": [],
                 "requested_by_type": "human",
                 "requested_by_id": "operator"

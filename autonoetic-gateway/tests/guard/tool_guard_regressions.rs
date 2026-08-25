@@ -47,6 +47,12 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
                 patterns: vec!["*".to_string()],
                 commands: vec![],
             },
+            // `artifact_exec` has needed its own capability since shell and
+            // artifact execution were split (edff04cc); `CodeExecution` alone no
+            // longer makes the tool available, so without this the call is
+            // refused as `permission` and never reaches the artifact_ref lookup
+            // this test is about.
+            Capability::ArtifactExecution,
             Capability::ReadAccess {
                 scopes: vec!["*".to_string()],
             },
@@ -95,12 +101,18 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         Some(store.clone()),
         None,
     );
-    let inspect_err = inspect.expect_err("unknown artifact_ref should fail inspect");
+    // `artifact_inspect` reports a missing ref as a *structured* tool error
+    // (`ok: false` + `error_type`), not a transport `Err`. The assertion is the
+    // same — an unknown ref must not silently succeed — but it reads the body.
+    let inspect_body = inspect.expect("artifact_inspect should return a structured response");
+    let inspect_json: serde_json::Value = serde_json::from_str(&inspect_body)?;
+    assert_eq!(inspect_json["ok"], false, "unknown artifact_ref must not succeed: {inspect_body}");
     assert!(
-        inspect_err
-            .to_string()
+        inspect_json["message"]
+            .as_str()
+            .unwrap_or_default()
             .contains("artifact_ref 'impl_task-1234' not found"),
-        "unexpected artifact_inspect error: {inspect_err}"
+        "unexpected artifact_inspect error: {inspect_body}"
     );
 
     let sandbox_with_impl = registry.execute(

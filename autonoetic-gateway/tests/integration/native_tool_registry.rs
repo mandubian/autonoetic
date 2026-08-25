@@ -39,7 +39,15 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
 }
 
 /// How long a stub server waits for the code under test to connect.
-const STUB_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Sized against what it is waiting for: a loopback HTTP connect, which happens
+/// in milliseconds if it happens at all. The bound only has to be long enough to
+/// survive scheduler noise, not long enough to be "safe" — several tests spawn a
+/// stub that is *expected* never to be contacted (a policy denial, a refused
+/// egress), and every one of those burns the full timeout in a thread the test
+/// then joins. At 10s that was enough dead time to starve a sibling test's own
+/// wall-clock assertion under `--test-threads` parallelism.
+const STUB_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Accept one connection on a listener that will be reused, or give up after
 /// [`STUB_ACCEPT_TIMEOUT`].
@@ -88,6 +96,26 @@ fn accept_one_borrowed(listener: &TcpListener, label: &str) -> Option<TcpStream>
 /// own assertion — which says what actually went wrong.
 fn accept_one(listener: TcpListener, label: &str) -> Option<TcpStream> {
     accept_one_borrowed(&listener, label)
+}
+
+/// The gateway dir and store half of what the web tools' egress boundary needs.
+///
+/// Since #955/#957 `web_fetch`/`web_search` fail closed when they cannot confirm
+/// the session's egress taint: a missing `GatewayStore` *or* a missing session id
+/// means `egress_boundary_refused`, before any HTTP is attempted. These tests
+/// predate that gate and passed `None` for both, so the tool refused and the
+/// local stub servers were never contacted.
+///
+/// This returns only the store (and the dir it lives in) — the session id is the
+/// other half and is passed at each call site, since tests that care about
+/// session identity set their own. A session with no recorded taint resolves to
+/// `EgressLabel::unrestricted()`, so together they restore the boundary to a
+/// no-op and put the tool under test back in the answering position.
+fn web_egress_context(temp: &std::path::Path) -> (std::path::PathBuf, Arc<GatewayStore>) {
+    let gateway_dir = temp.join("runtime");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    (gateway_dir, store)
 }
 
 fn spawn_redirect_http_server(
@@ -348,12 +376,17 @@ fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
         parsed.get("message").and_then(|v| v.as_str()),
         Some("One or more tasks were not found. Verify task_ids and workflow_id.")
     );
-    // Wall-clock bound: catches a regression to blocking for the full 30s
-    // timeout, while tolerating scheduler noise when the whole binary runs
-    // with high thread parallelism (the 2s form flaked at ~96 threads).
+    // `waited_secs == 0` above is the authoritative "did not block" check — it
+    // comes from the tool itself. This wall-clock bound is only an independent
+    // cross-check that the tool is not reporting 0 while actually blocking, so
+    // it is sized against the thing it guards (the 30s timeout), not against
+    // "fast". Sizing it for speed measures the machine instead of the code: at
+    // 2s it flaked around 96 threads, and at 10s it failed *deterministically*
+    // on a busy host while passing at `--test-threads=4`.
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "blocking workflow.wait should fail fast for missing tasks"
+        elapsed < std::time::Duration::from_secs(25),
+        "blocking workflow.wait should not block for the full timeout \
+         (took {elapsed:?}, timeout_secs was 30)"
     );
 }
 
@@ -364,6 +397,7 @@ fn test_web_fetch_tool_roundtrip_local_server() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
     let (base_url, handle) = spawn_one_shot_http_server(
         "200 OK",
@@ -384,12 +418,12 @@ fn test_web_fetch_tool_roundtrip_local_server() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("web.fetch should succeed");
@@ -413,6 +447,7 @@ fn test_web_fetch_follows_same_host_redirect() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let (final_base, final_handle) = spawn_one_shot_http_server(
@@ -437,12 +472,12 @@ fn test_web_fetch_follows_same_host_redirect() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("web.fetch should follow same-host redirect");
@@ -542,6 +577,7 @@ fn test_web_fetch_cross_domain_redirect_follows_when_target_pre_approved() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let (final_base, final_handle) = spawn_one_shot_http_server(
@@ -566,12 +602,12 @@ fn test_web_fetch_cross_domain_redirect_follows_when_target_pre_approved() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("web.fetch should follow cross-domain redirect when target is pre-approved");
@@ -597,6 +633,7 @@ fn test_web_fetch_tool_denied_by_netconnect_policy() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let args = serde_json::json!({
@@ -610,12 +647,12 @@ fn test_web_fetch_tool_denied_by_netconnect_policy() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect_err("web.fetch should be denied");
@@ -911,6 +948,7 @@ fn test_web_search_tool_roundtrip_local_engine() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
     let body = serde_json::json!({
         "Results": [],
@@ -947,12 +985,12 @@ fn test_web_search_tool_roundtrip_local_engine() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("web.search should succeed");
@@ -978,6 +1016,7 @@ fn test_web_search_google_requires_api_key_env() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let args = serde_json::json!({
@@ -995,12 +1034,12 @@ fn test_web_search_google_requires_api_key_env() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect_err("google search without key should fail");
@@ -1014,6 +1053,7 @@ fn test_web_search_google_roundtrip_local_engine() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
     let body = serde_json::json!({
         "searchInformation": {
@@ -1057,12 +1097,12 @@ fn test_web_search_google_roundtrip_local_engine() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("google web.search should succeed");
@@ -1092,6 +1132,7 @@ fn test_web_search_google_legacy_cx_env_alias_roundtrip() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let body = serde_json::json!({
@@ -1129,12 +1170,12 @@ fn test_web_search_google_legacy_cx_env_alias_roundtrip() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("google web.search should accept GOOGLE_SEARCH_CX legacy alias");
@@ -1163,6 +1204,7 @@ fn test_web_search_auto_falls_back_to_duckduckgo_when_google_fails() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let google_body = serde_json::json!({
@@ -1208,12 +1250,12 @@ fn test_web_search_auto_falls_back_to_duckduckgo_when_google_fails() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("auto provider should fall back to duckduckgo");
@@ -1264,6 +1306,7 @@ fn test_web_search_cache_hits_without_second_network_call() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let (gateway_dir, gateway_store) = web_egress_context(temp.path());
     write_remote_access_any(temp.path());
 
     let body = serde_json::json!({
@@ -1300,12 +1343,12 @@ fn test_web_search_cache_hits_without_second_network_call() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("first web.search call should succeed");
@@ -1315,12 +1358,12 @@ fn test_web_search_cache_hits_without_second_network_call() {
             &manifest,
             &policy,
             temp.path(),
-            None,
+            Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-web"),
             None,
             None,
-            None,
-            None,
+            Some(gateway_store.clone()),
             None,
         )
         .expect("second web.search call should succeed");
@@ -1374,6 +1417,19 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
     };
+
+    // The target must be *promoted*, not merely present in the ingest dir.
+    // Since #1141 the scheduler resolves targets through the revision store
+    // only, so an unpromoted agent is rejected as `not_found` before the
+    // sub-10s guardrail is ever consulted — which is what this test exists to
+    // exercise. Seeding a revision keeps the assertion on the guardrail.
+    crate::support::seed_agent_revision(
+        &gateway_store,
+        &config,
+        "reasoner.default",
+        &agents_dir.join("reasoner.default"),
+    )
+    .expect("reasoning target should promote");
 
     let args = serde_json::json!({
         "message": "tick",
