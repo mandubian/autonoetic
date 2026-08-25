@@ -95,7 +95,8 @@ docs/config defaults (done for `ofp_port`).
 
 Ship-blockers only in the sense that launching with them visibly degrades reliability:
 
-- **#651** — non-atomic revision create (get-then-insert race).
+- **#651** — non-atomic revision create (get-then-insert race). *(resolved
+  2026-08-25: merged as `b736e207`, #1166 — idempotent agent-revision create.)*
 - **#855** — planner delegation lacks exit criterion/turn budget → child divergence.
 - **#842** — `soft_budget_tokens` unset everywhere → context governor never fires on
   128K models; budget exhaustion arrives as truncation instead of managed compression.
@@ -103,11 +104,27 @@ Ship-blockers only in the sense that launching with them visibly degrades reliab
 - **#779** — provider failover actually executed at the driver boundary.
 - **#916, #884** — stack-budget guards: startup path and the 4200-line router dispatch
   arm have each been patched reactively; neither has a failing-first test.
+  *(2026-08-25: startup-path guard landed as #1168 (`12dee2fb`); the dispatch-arm
+  guard (`router_dispatch_stack_budget`) was already present — both arms now have
+  budget tests. #916 closed-worthy; #884's remaining scope is the dispatch arm's
+  size itself.)*
 - **#1134, #956, #1034** — test-infra credibility: seed-race flake, last standalone
   binaries, `#[cfg(test)]` contract tests to domain binaries. CI signal is a
-  precondition for everything above staying fixed.
+  precondition for everything above staying fixed. *(2026-08-25: the first full
+  serial run found 35 deterministic failures hidden behind nightly fail-fast;
+  triaged across #1162 (19 stale-contract repairs + #1164 filed for one genuine
+  regression), #1167 and #1169 (constitution-runtime fixtures under nextest's
+  process-per-test model, plus an unmasked promote-resume stack overflow).
+  Residual is environmental only (#1158): live-LLM ×2, host-bwrap ×3. Runner-
+  discrepancy class remains open: any suite green under shared-process
+  `cargo test` but unverified under nextest is suspect.)*
 - **#378** — finish GateService migration; three production `create_approval` callers
   remain outside the single door (`session.rs`, `user_profile.rs`, `scheduler/runner.rs`).
+  *(updated 2026-08-25: a fourth bypass slipped in via #966 after #724 closed —
+  `egress_labeler.rs`, unheard by its guard for four weeks (#1163/#1164); migrated
+  in #1169. Five unmigrated direct callers remain allowlisted (`federation.rs`,
+  `session.rs`, `user_profile.rs`, `session_envelopes.rs`, `runner.rs`) — each
+  needs its own issue before its next behavioral change.)*
 
 ## 5. Tier 2 — Post-launch backlog (explicitly non-blocking)
 
@@ -157,6 +174,10 @@ Week 2   #988 (egress write-side taint), #1134/#956/#1034 (CI signal)
 Week 3   #855, #842, #775, #776, #779, #651, #916, #884, #378
 Then     federation go/no-go decision → #897/#815 in or out; freeze; launch candidate
 ```
+
+Progress log (2026-08-25): Week 1's #649/#808 resolved (#1159/#1147); Week 2's CI
+signal largely served (#1162/#1167/#1169) — #988 still open; Week 3's #651
+(#1166), #916 (#1168), #378 (partially, #1169) done. Next: #988.
 
 Tier 0 items are all small-to-medium mechanically verifiable fixes; none requires the
 RFC-amendment machinery except possibly #1078 depending which side wins.
