@@ -101,15 +101,21 @@ fn profile_share_request_dedups_pending_gate_per_user() {
         serde_json::json!({"user_id": "user-1", "scope": "restricted", "reason": "again"}),
     ))
     .unwrap();
-    // AlreadyPending semantics match the session-escalate migration:
-    // the request itself succeeded, but no new gate was minted.
-    assert_eq!(second["ok"], serde_json::json!(true));
+    // AlreadyPending parity (credential.rs): ok stays FALSE — a pending gate
+    // is not a success — with the mechanical suspension keys intact.
+    assert_eq!(second["ok"], serde_json::json!(false));
     assert_eq!(second["approval_required"], serde_json::json!(true));
+    assert_eq!(second["suspended"], serde_json::json!(true));
     assert_eq!(second.get("deduplicated"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        second["request_id"].as_str().unwrap(),
+        gate_id,
+        "second request must reference the SAME pending gate"
+    );
     assert_eq!(
         second["approval_request_id"].as_str().unwrap(),
         gate_id,
-        "second request must reference the SAME pending gate"
+        "legacy alias key kept for consumers"
     );
 
     // A DIFFERENT user still mints its own gate.

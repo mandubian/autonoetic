@@ -422,10 +422,12 @@ impl NativeTool for UserProfileShareTool {
         let gate_req = GateRequest {
             kind: GateKind::Approval {
                 action,
-                targets: vec![args.user_id.clone()],
-                // ProfileShare is a non-host action (no detected_hosts), so
-                // per human_gate's contract it MUST use ExactPayload:
-                // structural equality of (user_id, agent_id, scope).
+                // targets intentionally empty (#1170 review): ProfileShare is
+                // a non-host action and ExactPayload relies on structural
+                // equality only — a non-host identifier in targets would let
+                // step-3 grant coverage match an unrelated string. Same shape
+                // as plan_frame.rs.
+                targets: Vec::new(),
                 match_strategy: MatchStrategy::ExactPayload,
             },
             manifest,
@@ -456,9 +458,15 @@ impl NativeTool for UserProfileShareTool {
         };
 
         match gate.check(gate_req)? {
+            // Same envelope parity as credential.rs AlreadyPending: a pending
+            // gate is NOT a success — ok stays false with the mechanical
+            // suspension keys intact, so the runtime classifies it correctly.
             GateResult::AlreadyPending { gate_id, .. } => Ok(json!({
-                "ok": true,
+                "ok": false,
                 "approval_required": true,
+                "approval_already_pending": true,
+                "suspended": true,
+                "request_id": gate_id,
                 "approval_request_id": gate_id,
                 "deduplicated": true,
                 "user_id": args.user_id,
