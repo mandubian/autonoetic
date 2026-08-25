@@ -11,8 +11,8 @@ The document mixed design proposals with implementation notes that no longer mat
 Use these docs for up-to-date behavior:
 
 - `docs/approval-system.md`
-- `docs/workflow-orchestration.md`
-- `docs/approval-notification-delivery.md`
-- `docs/content-store.md`
+- `docs/internals/workflow-orchestration.md`
+- `docs/internals/approval-delivery.md`
+- `docs/internals/storage/content-store.md`
 
 For open design work, create new focused specs instead of extending this archived draft.

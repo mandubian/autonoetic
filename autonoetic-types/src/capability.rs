@@ -188,7 +188,7 @@ pub enum Capability {
     /// snapshots, and (in Replay mode) session checkpoints across machines
     /// or gateways — a high-impact data-movement boundary that must be
     /// explicitly granted. Not a default. See
-    /// `docs/cognitive-capsule.md`.
+    /// `docs/guide/cognitive-capsule.md`.
     CapsuleExport,
 
     /// Export one's *own* cognitive capsule via `capsule.export` (Ri-0.17:
@@ -196,7 +196,7 @@ pub enum Capability {
     /// only this capability may export the capsule of `agent_id ==` its own
     /// identity (`manifest.agent.id`), and no other. The broad `CapsuleExport`
     /// remains the operator-grant path for exporting any agent. Not a default.
-    /// See `docs/cognitive-capsule.md`.
+    /// See `docs/guide/cognitive-capsule.md`.
     SelfCapsuleExport,
 
     /// Propose new wiki pages (docs) to be curated into the platform wiki.

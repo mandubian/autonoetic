@@ -400,7 +400,7 @@ high-divergence agent over many sessions is a candidate for improvement.
 ## 11. References
 
 - `docs/design/divergence-sentinel-design.md` — sister design (in-session)
-- `docs/cognitive-capsule.md` — capsule format used
+- `docs/guide/cognitive-capsule.md` — capsule format used
   for replay determinism (Phase 4 is the last piece for full replay)
 - `docs/archived/sealed-network-evaluation-plan.md` — fixture replay
   infrastructure
@@ -410,5 +410,5 @@ high-divergence agent over many sessions is a candidate for improvement.
 - `autonoetic-gateway/src/runtime/tools/agent_revision.rs` — revision API
 - `autonoetic-gateway/src/runtime/tools/evaluation.rs` — eval suite API
 - `autonoetic-gateway/src/runtime/tools/promotion.rs` — promotion gating
-- `docs/separation-of-powers.md` — constitutional context for what may /
+- `docs/concepts/separation-of-powers.md` — constitutional context for what may /
   may not be auto-modified

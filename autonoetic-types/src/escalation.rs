@@ -16,7 +16,7 @@ pub struct RoleVerdictSummary {
     /// Federation carry-forward (Stage 3): present when this verdict is a
     /// carry-forward claim from a prior artifact rather than a freshly-run
     /// gate. The gateway verifies it before accepting. See
-    /// `docs/federation-carry-forward.md`.
+    /// `docs/internals/federation-carry-forward.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carried_from: Option<CarriedFrom>,
 }

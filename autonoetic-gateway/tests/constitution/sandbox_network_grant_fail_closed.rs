@@ -15,7 +15,7 @@
 //!
 //! Sibling exec paths are deliberately NOT covered here: `artifact_exec` and
 //! script-mode execution are capability-driven *by design* (artifact_exec
-//! auto-approves on capability presence). See `docs/sandbox-network-grant.md`.
+//! auto-approves on capability presence). See `docs/internals/sandbox/network-grant.md`.
 
 use autonoetic_gateway::runtime::egress_labeler::require_boundary_session_taint;
 use autonoetic_gateway::runtime::network_grant::{

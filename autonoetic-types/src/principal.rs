@@ -29,7 +29,7 @@ pub enum PrincipalKind {
     /// The end-user a session ultimately serves, when distinct from the
     /// operator running the gateway (e.g. a hosted or multi-tenant
     /// deployment). Distinct from `Human` so the two can never be conflated
-    /// once they diverge — see `docs/philosophy.md` §3.3 and §5.1. Carries no
+    /// once they diverge — see `docs/concepts/philosophy.md` §3.3 and §5.1. Carries no
     /// extra authority by default; it is an attribution kind, not a seat.
     ServedUser,
 }

@@ -509,7 +509,7 @@ async fn alias_installed_agent_without_a_directory_is_not_reported_missing() -> 
 
 /// An installed-but-unloadable agent is a distinct failure from a missing one:
 /// `target_agent_unavailable` with `exists: true`. Documented in the guidance and
-/// `docs/agent-messaging.md`, so it needs coverage — a broken bundle must not be
+/// `docs/reference/agent-messaging.md`, so it needs coverage — a broken bundle must not be
 /// reported as "not installed".
 #[serial_test::serial]
 #[tokio::test]

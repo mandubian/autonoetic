@@ -75,7 +75,7 @@ Child results carry a `failure` object with a closed `kind`:
 | `capability_denied` | A needed capability was refused | **No retry.** Re-delegate / escalate — the Ri-0.3 `available_actions` affordances (#769) are the branch table |
 | `input_contract` | Spawn payload failed `io.accepts` | Repair and retry once (the schema error already carries repair hints) |
 | `output_contract_unmet` | Declared `expected_outputs` missing at completion (Part B) | **No blind retry.** Re-delegate, decompose, relax the contract, or escalate |
-| `clarification_needed` | Child cannot proceed / cannot satisfy the contract, with its account | Parent reasons; not a sanctionable failure (invariant 2; existing [`../agent-clarification-protocol.md`](../agent-clarification-protocol.md)) |
+| `clarification_needed` | Child cannot proceed / cannot satisfy the contract, with its account | Parent reasons; not a sanctionable failure (invariant 2; existing [`../agent-clarification-protocol.md`](../reference/agent-clarification.md)) |
 | `gave_up` | Child terminated without result or account | Parent reasons; counts toward the Part B.4 loop guard |
 
 Retry policies are per-kind, pre-committed configuration — the gateway
@@ -173,7 +173,7 @@ channel with taught authority.
 ## Part E — Adjacent gaps with existing designs (referenced, not redesigned)
 
 Two task-killers already have full designs in
-[`../comparison-hermes-agent.md`](../comparison-hermes-agent.md) and need
+[`../comparison-hermes-agent.md`](../reports/2026-07-19-comparison-hermes-agent.md) and need
 building, not designing. Named here so the robustness picture is complete
 and tracked from one place:
 

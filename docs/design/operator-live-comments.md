@@ -164,7 +164,7 @@ A new event type alongside `operator.message`
 
 Plumbing delivers the comment; a **guidance block** makes the agent treat it as an
 operator observation it must engage with — reusing the guidance-block mechanism
-(`docs/agent-prompt-guidance.md`). Doctrine, roughly:
+(`docs/internals/prompt/composition.md`). Doctrine, roughly:
 
 > An operator comment anchored to a file is a high-signal observation. Acknowledge it,
 > then either address it (and say how) or explain why you are not. If the comment is

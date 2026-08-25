@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-12  
 **Status:** Draft v2  
-**Related:** `docs/agent-learning.md`, `docs/fts-session-search.md`, `docs/content-store.md`, `docs/ARCHITECTURE.md`
+**Related:** `docs/guide/agent-learning.md`, `docs/guide/session-search.md`, `docs/internals/storage/content-store.md`, `docs/ARCHITECTURE.md`
 
 ---
 
@@ -689,7 +689,7 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 - [ ] Report timeline node backlinks resolve correctly
 - [ ] Execution trace rows now populate `event_id`
 - [ ] Hook-driven report publishing works end-to-end
-- [ ] Update `docs/agent-learning.md`, `docs/fts-session-search.md`, `docs/ARCHITECTURE.md`
+- [ ] Update `docs/guide/agent-learning.md`, `docs/guide/session-search.md`, `docs/ARCHITECTURE.md`
 
 ---
 

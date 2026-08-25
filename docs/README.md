@@ -1,100 +1,69 @@
-# Autonoetic Documentation Index
+# Autonoetic documentation
 
-Stable reference material lives at the top level of `docs/`. Active plans with
-open work are in [`design/`](design/README.md). Completed or superseded plans
-are in [`archived/`](archived/).
+Three entry points, then eight directories sorted by **what you came here for**.
 
-## Core Architecture
+| Start here | For |
+|---|---|
+| [`start/concepts.md`](start/concepts.md) | New to Autonoetic — what a gateway, capability, and constitution are, and why agents don't hold privileges |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The system: components, data flow, security model, execution modes |
+| [`AGENTS.md`](AGENTS.md) | The agent model: roles, routing, `SKILL.md`, capabilities, lifecycle |
 
-- [`autonoetic-concepts-for-beginners.md`](./autonoetic-concepts-for-beginners.md) — Beginner-friendly conceptual guide: constitution, agent rights/rules, gateway authority, capabilities, artifacts, and how Autonoetic differs from direct-agent systems.
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — Full system architecture and runtime model.
-- [`architecture-summary.md`](./architecture-summary.md) — Short architecture overview.
-- [`gateway-architecture-principles.md`](./gateway-architecture-principles.md) — Gateway design principles.
-- [`MODULES.md`](./MODULES.md) — Module-level map of the codebase.
-- [`AGENTS.md`](./AGENTS.md) — **Canonical** agent reference: roles, routing, SKILL.md format, capabilities, lifecycle.
-- [`separation-of-powers.md`](./separation-of-powers.md) — Agent vs gateway authority boundary.
-- [`agent-features.md`](./agent-features.md) — *Partially superseded by `AGENTS.md`*; still has unique detail on middleware / disclosure / background scheduling.
-- [`agent_routing_and_roles.md`](./archived/agent_routing_and_roles.md) — *Archived / deprecated*; describes a removed default-front-door routing model. Use `AGENTS.md` → Routing Rules instead.
-- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded by `AGENTS.md` → Capabilities System* (kept in sync with `capability.rs`).
-- [`agent-adapter-specialist.md`](./agent-adapter-specialist.md) — Adapter specialist contract.
+## Where things live
 
-## Workflow and Interaction
+| Directory | Holds | You are |
+|---|---|---|
+| [`start/`](start/) | Tutorials — a first success, in order | new here |
+| [`guide/`](guide/) | How-to, one operator or author task per doc. [`guide/runbooks/`](guide/runbooks/) for procedures with a pass/fail outcome | trying to do something |
+| [`reference/`](reference/) | Contracts you code against: CLI, config keys, HTTP API, SQLite schema, `SKILL.md` fields, tool errors, capabilities | integrating |
+| [`concepts/`](concepts/) | Why it is built this way — philosophy, separation of powers, planner principles | trying to understand |
+| [`internals/`](internals/) | How the runtime does it, by subsystem: [`prompt/`](internals/prompt/) [`sandbox/`](internals/sandbox/) [`storage/`](internals/storage/) [`session/`](internals/session/) [`egress/`](internals/egress/) | changing the runtime |
+| [`constitution/`](constitution/) | The governance corpus: signed versions, the [enforcement register](constitution/enforcement-register.md), signing, key management, roadmap | reading the law |
+| [`wiki/`](wiki/) | Short digests served to **agents** at runtime via `wiki_list` / `wiki_get` — not the human reference | editing what agents read |
+| [`proposals/`](proposals/) | In-flight design and RFC work. [`design/`](design/) and [`rfc/`](rfc/) fold in here as their status is audited | proposing a change |
+| [`reports/`](reports/) | Dated and immutable: audits, validations, [postmortems](reports/postmortems/), comparative studies | looking for evidence |
+| [`archived/`](archived/) | Superseded. Historical record, never source of truth | doing archaeology |
+| [`diagrams/`](diagrams/) | Rendered visual maps (published via GitHub Pages) | looking at pictures |
 
-- [`workflow-orchestration.md`](./workflow-orchestration.md) — Durable workflow/task lifecycle (live reference for mechanical orchestration).
-- [`human-agent-collaboration.md`](./human-agent-collaboration.md) — PlanFrame, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff.
-- [`archived/human-gate-unification-plan.md`](./archived/human-gate-unification-plan.md) — GateService migration (archived; shipped — residual tool migrations + agent-as-decider deferred).
-- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) — Unified gate constitutional rationale.
-- [`approval-notification-delivery.md`](./approval-notification-delivery.md) — Approval delivery paths.
-- [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) — Clarification signal format.
-- [`quickstart-planner-specialist-chat.md`](./quickstart-planner-specialist-chat.md) — Planner/specialist walkthrough.
+**This file is a map, not a catalogue.** Per-file lists go stale — the
+directory listing is the catalogue. Each directory's contents are named for
+what they describe.
 
-## Runtime, Storage, and Budgets
+## Which directory does my doc go in?
 
-- [`gateway-store-schema.md`](./gateway-store-schema.md) — **SQLite schema reference**: every table, column, owner module, relation, and usage status (audited against `migrate.rs`).
-- [`content-store.md`](./content-store.md) — Content addressing and visibility.
-- [`cognitive-capsule.md`](./cognitive-capsule.md) — Portable agent capsule export/import (implemented).
-- [`agent-learning.md`](./agent-learning.md) — Learning and memory retrieval.
-- [`context-compression.md`](./context-compression.md) — Context governor and overflow handling.
-- [`prompt-budget.md`](./prompt-budget.md) — Prompt budget controls.
-- [`prompt-burden-study.md`](./prompt-burden-study.md) — What makes the system prompt large and what actually shrank it: per-layer measurement, levers that worked vs. did not, and the rules to apply before adding doctrine.
-- [`agent-prompt-guidance.md`](./agent-prompt-guidance.md) — How the prompt is composed, and how to add doctrine (foundation layers, guidance blocks, phase and section gates, output contract).
-- [`session-budget.md`](./session-budget.md) — Session budget behavior.
-- [`budget-management.md`](./budget-management.md) — Broader budget policies.
-- [`approved-resources-caching.md`](./approved-resources-caching.md) — Approval/exec cache.
-- [`response-validation-gate.md`](./response-validation-gate.md) — Response contract validation.
+Apply the first test that answers:
 
-## Security, Analysis, and Governance
+- **Would changing this break someone outside the repo?** Config keys, CLI
+  flags, HTTP routes, SQLite columns, `SKILL.md` fields, error envelopes →
+  `reference/`. How the labeler resolves a sink, how the governor compresses →
+  `internals/`.
+- **Does it have a goal and an order?** Then it is a `guide/`, not a
+  `reference/` (which has coverage and no order).
+- **Would it survive a rewrite of the code?** Then `concepts/`, not
+  `internals/`.
+- **Is the work still in flight?** `proposals/`. The moment it ships, the
+  *description of behaviour* moves to `internals/` or `reference/` and the
+  proposal is archived with a pointer — a shipped proposal is never the live
+  description. If no live doc describes it, the proposal is **promoted** rather
+  than archived, otherwise archiving deletes the documentation.
+- **Written once, dated, never updated?** `reports/`. If you want to update it,
+  you wanted a `guide/runbooks/` doc.
 
-- [`remote-access-approval.md`](./remote-access-approval.md) — Remote access detection and gating.
-- [`credential-management.md`](./credential-management.md) — Credential vault (live reference for multi-credential).
-- [`code-analysis.md`](./code-analysis.md) — Static analysis model.
-- [`schema-enforcement-hook.md`](./schema-enforcement-hook.md) — Schema enforcement.
-- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded*; use `AGENTS.md` → Capabilities System.
-- [`security-sentinel.md`](./security-sentinel.md) — Divergence sentinel overview.
-- [`gateway-constitution-roadmap.md`](./gateway-constitution-roadmap.md) — Constitutional gap-closure backlog.
-- [`constitution-signing.md`](./constitution-signing.md) — Constitution lock and signing.
-- [`iteration-repair-validation-runbook.md`](./iteration-repair-validation-runbook.md) — Repair/validation runbook.
-- [`civic-eval-measurement-runbook.md`](./civic-eval-measurement-runbook.md) — Measurement procedure for the E.3 binding flip and C.2 strict-readiness decisions.
+## Conventions
 
-## CLI and External Interfaces
+- `kebab-case.md`, except `README.md`, `ARCHITECTURE.md`, `AGENTS.md`.
+- No kind prefixes or suffixes in filenames (`plan-`, `spec-`, `-rfc`,
+  `-plan`, `-design`) — the directory carries the kind.
+- No dates in filenames outside `reports/`, where the date leads:
+  `YYYY-MM-DD-slug.md`.
+- **A cited path is a promise that it resolves.** `docs_link_guard`
+  (`autonoetic-gateway/src/docs_link_guard.rs`) fails the build on a dangling
+  `docs/…` citation or broken relative link, in Markdown, agent bundles, and
+  production Rust alike. Intentional exceptions go in `.link-guard-allow` with
+  a reason.
 
-- [`CLI.md`](./CLI.md) — Main CLI reference.
-- [`cli-reference.md`](./cli-reference.md) — Command reference.
-- [`config-reference.md`](./config-reference.md) — Gateway configuration.
-- [`remote-agents-http-api.md`](./remote-agents-http-api.md) — HTTP API for remote agents.
+Two directories have paths the runtime depends on and must not be moved:
+`constitution/versions/**` and `constitution/CURRENT` (loaded at startup,
+digest-signed), and `wiki/**` with its `index.toml` (read at bootstrap).
 
-## Specs and Comparisons
-
-- [`spec-build-layers-dependency-resolution.md`](./spec-build-layers-dependency-resolution.md)
-- [`spec-capability-driven-sandbox-isolation.md`](./spec-capability-driven-sandbox-isolation.md)
-- [`spec-implicit-artifacts-agent-evolution.md`](./spec-implicit-artifacts-agent-evolution.md)
-- [`comparison-hermes-agent.md`](./comparison-hermes-agent.md)
-
-## Active Design (`design/`)
-
-See [`design/README.md`](design/README.md) for the full, status-annotated
-table — that file is the source of truth and this index intentionally does
-not duplicate it (highlights here go stale). As of the `2026.07.08`
-constitution, items that were recently active and are now largely shipped
-include:
-
-- **Constitution restructure** (P-x.y format + enforcement register) — see [`constitution/enforcement-register.md`](./constitution/enforcement-register.md)
-- **Gate unification** — `GateService` is the single pipeline for all `GateKind`s (constitution §2, P-2.18 `ENFORCED`)
-- **Agent-as-decider** — the `GateDecider` capability is `ENFORCED` (P-2.20); the *broader* multi-decider / voting-weight vision remains a draft RFC ([`design/principal-model-and-symmetric-obligations.md`](./design/principal-model-and-symmetric-obligations.md))
-
-Items with genuinely open work (divergence-sentinel P4 validation,
-self-improvement loop P5–P7, operator approval inspection Phase 2,
-post-promotion review Tier 2, and several draft RFCs) are tracked in the
-design table.
-
-## Archived (`archived/`)
-
-Historical plans, reviews, and superseded architecture notes. Not
-source-of-truth. Notable completed work now archived from `design/`:
-
-- Promotion federation (plan + reviews) — see [`archived/approval-system-hardening-plan.md`](./archived/approval-system-hardening-plan.md)
-- Sealed-network evaluation, recording mode, sealed evaluator replay
-- Progressive UX / auto-learning, context overflow mitigation
-- Cognitive capsule implementation plan (reference: [`cognitive-capsule.md`](./cognitive-capsule.md))
-- Early architecture (`concepts.md`, `architecture_modules.md`, `protocols.md`, …)
-- Pre-unification [`approval-system.md`](./archived/approval-system.md) and mechanical orchestration plan/RFC
+The reorganization this layout came from, including what is still to merge, is
+[`design/docs-reorganization-plan.md`](design/docs-reorganization-plan.md).

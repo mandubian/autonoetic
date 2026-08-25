@@ -931,7 +931,7 @@ pub enum FederationConstitutionMode {
 
 /// How conservative the gateway is when accepting a gate-verdict
 /// carry-forward across a rebuild (federation carry-forward;
-/// see `docs/federation-carry-forward.md`). The planner always proposes;
+/// see `docs/internals/federation-carry-forward.md`). The planner always proposes;
 /// the gateway verifies against this floor.
 ///
 /// - `off` — every rebuild re-runs every gate (today's behavior; default).
@@ -1386,12 +1386,12 @@ pub struct GatewayConfig {
 
     /// Post-promotion background review of promoted agents (Phase 4 Tier 1):
     /// cadence, enablement, and the drift thresholds. See
-    /// `docs/config-reference.md`.
+    /// `docs/reference/config.md`.
     #[serde(default)]
     pub post_promotion_review: PostPromotionReviewConfig,
 
     /// Cognitive Capsule export/import settings (signing trust, size caps,
-    /// default mode). See `docs/cognitive-capsule.md`.
+    /// default mode). See `docs/guide/cognitive-capsule.md`.
     #[serde(default)]
     pub capsule: CapsuleConfig,
 
@@ -2308,7 +2308,7 @@ fn default_sentinel_findings_critical() -> u64 {
 /// Configuration for Cognitive Capsule export/import.
 ///
 /// Capsules are revision-pinned, optionally signed portable snapshots of
-/// agents (see `docs/cognitive-capsule.md`). This
+/// agents (see `docs/guide/cognitive-capsule.md`). This
 /// section controls signing-trust, size limits, and default export mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleConfig {

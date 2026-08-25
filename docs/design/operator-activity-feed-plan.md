@@ -14,10 +14,10 @@ gateway, not in each UI.
 
 - `docs/archived/plan_workflow_update.md` — “CLI is a consumer, not an orchestrator”
 - `docs/archived/plan-channel-agnostic-interaction-answering.md` — gateway-owned orchestration
-- `docs/remote-agents-http-api.md` — `metadata.channel` convention, HTTP/SSE ingress
+- `docs/reference/http-api.md` — `metadata.channel` convention, HTTP/SSE ingress
 - `autonoetic-gateway/src/runtime/session_report.rs` — existing “important event” heuristic
 - `autonoetic-types/src/task_completion.rs` — channel-neutral presentation precedent
-- `docs/human-agent-collaboration.md` — collaborative planner / workbench flows
+- `docs/guide/human-agent-collaboration.md` — collaborative planner / workbench flows
 
 ---
 
@@ -321,7 +321,7 @@ SSE mirror of list polling (same pattern as `GET /api/session/stream/{session_id
 - Each event: JSON `OperatorActivityRecord`.
 - Termination: only on client disconnect (unlike session stream).
 
-Document in `docs/remote-agents-http-api.md`.
+Document in `docs/reference/http-api.md`.
 
 ---
 
@@ -398,8 +398,8 @@ so bridges recover session context without local state. v1: bridge stores mappin
 ### Phase 3 — HTTP SSE + docs
 
 - [ ] `GET /api/operator/activity/stream/…`
-- [ ] Update `docs/remote-agents-http-api.md`, `docs/human-agent-collaboration.md` (Observability).
-- [ ] Example bridge pseudocode in `docs/agent-messaging.md`, or a new channel-adapters doc.
+- [ ] Update `docs/reference/http-api.md`, `docs/guide/human-agent-collaboration.md` (Observability).
+- [ ] Example bridge pseudocode in `docs/reference/agent-messaging.md`, or a new channel-adapters doc.
 
 ### Phase 4 — Hardening
 
@@ -479,5 +479,5 @@ Operators using **any** channel can answer without opening `digest.md`:
 - “Why did chat go quiet?” → see `Attention` row for `jsonrpc_spawn_complete_empty` with tool
   count, not an empty transcript.
 
-Implementation is complete when Phase 2 tests pass and `docs/human-agent-collaboration.md` documents
+Implementation is complete when Phase 2 tests pass and `docs/guide/human-agent-collaboration.md` documents
 the feed as the canonical live view for collaborative sessions.

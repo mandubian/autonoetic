@@ -241,7 +241,7 @@ Gateway: 1. Resolve name → handle from session manifest
 
 ### Security Sentinel
 
-A dedicated system-tier agent audits the gateway's own state for security issues. See [`docs/security-sentinel.md`](security-sentinel.md) for design, phased build plan, and the three hard problems (recursive trust, prompt injection against the auditor, and calibration).
+A dedicated system-tier agent audits the gateway's own state for security issues. See [`docs/internals/divergence-sentinel.md`](internals/divergence-sentinel.md) for design, phased build plan, and the three hard problems (recursive trust, prompt injection against the auditor, and calibration).
 
 The sentinel lives in `agents/system/` — a new tier parallel to `lead/`, `specialists/`, and `evolution/`. Placing it in a distinct tier signals that it must be visibly harder to silently revise than evolution-tier agents.
 
@@ -260,7 +260,7 @@ Two cooperating mechanisms control how sensitive data flows through the gateway:
 
 Together with **P-4.14** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: P-4.14 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
 
-Redaction primitives are centralised in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/observability-redaction.md`](observability-redaction.md).
+Redaction primitives are centralised in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/internals/observability-redaction.md`](internals/observability-redaction.md).
 
 ### Capability-Based Access Control
 
@@ -412,7 +412,7 @@ must never reach a remote model."
 
   The **data-owner compartment** pattern (resident agent + `local_only` +
   `agent_message` replies) is documented in
-  [`docs/egress-data-owner-compartment.md`](egress-data-owner-compartment.md).
+  [`docs/internals/egress/data-owner-compartment.md`](internals/egress/data-owner-compartment.md).
 
 ---
 
@@ -973,8 +973,8 @@ The **canonical timeline** (`live_digest_events`) built from the live digest is
 the spine of the **Session Room** — a channel-agnostic, importance-ranked,
 multi-actor view of a session that channels (the terminal TUI, and external
 bridges) consume as gateway API clients. See
-[Session Room — Architecture](session-room-architecture.md) and the
-[user guide](session-room.md).
+[Session Room — Architecture](internals/session/room.md) and the
+[user guide](guide/session-room.md).
 
 ---
 
@@ -1161,7 +1161,7 @@ runtime/gateway.db
 
 `user_interactions` rows can store `workflow_id`, `task_id`, and `checkpoint_turn_id` when the question was raised from a workflow task (tool run context). **Adapters and CLIs should submit answers via** JSON-RPC `interaction.answer` or `interaction.resolve_and_answer` (or the shared in-process orchestrator used by the chat TUI) so paused workflow tasks and `UserInputRequired` checkpoints resume deterministically—not via SQLite writes alone.
 
-See [`plan-channel-agnostic-interaction-answering.md`](./plan-channel-agnostic-interaction-answering.md).
+See [`plan-channel-agnostic-interaction-answering.md`](archived/plan-channel-agnostic-interaction-answering.md).
 
 ### Retention Policy
 
@@ -1487,7 +1487,7 @@ On startup, the gateway checks each declared agent:
 
 CLI control: `autonoetic gateway system-agents list|bootstrap|run <agent_id>`
 
-System agent jobs use the same `scheduled_jobs` table and execution path as agent-created jobs — no special privileges. See [Scheduled Tasks Guide](scheduled-tasks.md) for full documentation.
+System agent jobs use the same `scheduled_jobs` table and execution path as agent-created jobs — no special privileges. See [Scheduled Tasks Guide](reference/scheduled-tasks.md) for full documentation.
 
 ### Fast Scheduler Sidecar
 
@@ -1570,7 +1570,7 @@ The LoopGuard uses `error_type` to distinguish recoverable from non-recoverable 
 
 #### Trip conditions
 
-The guard's main independent trip conditions are below, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it. Thresholds are configurable; current defaults live in `docs/config-reference.md`:
+The guard's main independent trip conditions are below, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it. Thresholds are configurable; current defaults live in `docs/reference/config.md`:
 
 | `reason` | Condition | Rule |
 |---|---|---|

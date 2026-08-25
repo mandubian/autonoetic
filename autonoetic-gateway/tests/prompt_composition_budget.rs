@@ -1,4 +1,4 @@
-//! Prompt-composition budget harness (`docs/prompt-burden-study.md`).
+//! Prompt-composition budget harness (`docs/internals/prompt/burden-study.md`).
 //!
 //! The context governor treats `system_prompt_tokens` as a constant — nothing in
 //! the runtime ever measures, let alone reduces, the fixed prompt. So the cost of

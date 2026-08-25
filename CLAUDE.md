@@ -53,7 +53,7 @@ If signer key rotated, update `trusted_signers` for
 
 - `autonoetic-types/src/config.rs`
 - `config/config-template.yaml`
-- `docs/config-reference.md`
+- `docs/reference/config.md`
 
 Then validate:
 
@@ -62,7 +62,7 @@ cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_
 cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
 ```
 
-Canonicalization details are documented in `docs/constitution-signing.md`.
+Canonicalization details are documented in `docs/constitution/signing.md`.
 Operational key handling for multi-machine deterministic signing is in
 `docs/constitution/key-management.md`.
 
@@ -127,7 +127,7 @@ Reference bundles are under `agents/`:
 
 ### HTTP API
 
-The gateway exposes a REST API for remote agents. Authentication uses HMAC. See `docs/remote-agents-http-api.md`.
+The gateway exposes a REST API for remote agents. Authentication uses HMAC. See `docs/reference/http-api.md`.
 
 ### Tests
 
@@ -146,19 +146,19 @@ Notable suite for approval continuation:
 ## Key Documentation
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow
-- `docs/philosophy.md` — The conceptions behind the constitution: functional autonoesis, bind-direction social contract, correctability over perfection, democratic trajectory, end-user primacy, and the intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
+- `docs/concepts/philosophy.md` — The conceptions behind the constitution: functional autonoesis, bind-direction social contract, correctability over perfection, democratic trajectory, end-user primacy, and the intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
 - `docs/AGENTS.md` — Agent roles, routing, capabilities, lifecycle
-- `docs/CLI.md` — Complete CLI reference
-- `docs/separation-of-powers.md` — Agent vs gateway responsibilities
-- `docs/remote-agents-http-api.md` — HTTP API and SDK transport
-- `docs/agent-learning.md` — How agents learn from past sessions using execution_search, knowledge_search, digest_query
-- `docs/planner-principles.md` — Principle-first planner design: why principles beat rules, security boundary, what moved to specialists
-- `docs/agent-discovery.md` — Agent discovery: agent.list gateway tool + discovery.default semantic matching agent
-- `docs/agent-prompt-guidance.md` — How the system prompt is composed: foundation layers, the guidance-block mechanism (tool/capability/model/role/**phase**-gated, `NativeTool::guidance()`), **`sections:` gates for `SKILL.md` role doctrine**, the `io.returns` Output Contract, the SKILL.md doctrine regression guard, and the three tests to apply before adding doctrine
-- `docs/prompt-burden-study.md` — Why the prompts are the size they are and what actually shrank them: the per-layer measurement, the levers that worked (**ownership beat compression ~7:1**) and the ones that did not (moving prose into a `ToolPresent` block is a token wash), the silent-drift failure mode behind every defect found, and the enforced per-agent budget. Read before adding prompt weight
-- `docs/session-forking.md` — Forking a session from a past turn: runnable Hibernation checkpoint, yield-point granularity, timeline mirroring (copy vs reuse-by-reference choice), CLI/RPC/room surfaces
-- `docs/network-sink-detection.md` — Why network detection resolves **sinks** (the closed stdlib/builtin primitive set) through the code's own import bindings instead of matching library names (#1021): what the library-name treadmill missed (including stdlib `http.client`), the Python/JS/Go/Rust coverage analysis, why a Rust resolver beats a `python3` AST subprocess, and the detection-vs-declaration boundary held for #1023
-- `docs/sandbox-network-grant.md` — Why `sandbox_exec` network reachability is a per-exec **grant**, not a capability-inherited **ceiling** (#1022 audit): the pre-fix bypass chain, why zero-signal egress is reachable without obfuscation, the decision table in `runtime/network_grant.rs`, and which sibling exec paths are capability-driven by design
-- `docs/sandbox-drivers.md` — The `SandboxDriver` trait + registry (#1117): what each backend owns (command construction, SDK bridge plumbing, child env, network guarantee, dependency support), the process vs in-process tier split, why `guarantees_network_off` is per-driver and fails closed, and the three edits it takes to add a backend
-- `docs/wasm-execution-tier.md` — Portable in-process WASM tier (`sandbox: "wasm"`) and first-class JavaScript agents (compiled to wasm via Javy at bootstrap): concepts, the `wasm-tier` build feature, `gateway preflight`, resource bounds, and a JS-agent tutorial. python.wasm is deferred (see the RFC status note).
-- `docs/content-visibility.md` — How content written in one session becomes readable in another: the three `ContentVisibility` levels, why reachability is decided by *where a write propagated* rather than by searching peer sessions (which is what makes `Private` a guarantee), the root-not-parent propagation target and the absent "caller only" level, why a failed `set_root_session` makes `Session` silently behave like `Private`, and why refs beat names across sessions
+- `docs/reference/cli.md` — Complete CLI reference
+- `docs/concepts/separation-of-powers.md` — Agent vs gateway responsibilities
+- `docs/reference/http-api.md` — HTTP API and SDK transport
+- `docs/guide/agent-learning.md` — How agents learn from past sessions using execution_search, knowledge_search, digest_query
+- `docs/concepts/planner-principles.md` — Principle-first planner design: why principles beat rules, security boundary, what moved to specialists
+- `docs/reference/agent-discovery.md` — Agent discovery: agent.list gateway tool + discovery.default semantic matching agent
+- `docs/internals/prompt/composition.md` — How the system prompt is composed: foundation layers, the guidance-block mechanism (tool/capability/model/role/**phase**-gated, `NativeTool::guidance()`), **`sections:` gates for `SKILL.md` role doctrine**, the `io.returns` Output Contract, the SKILL.md doctrine regression guard, and the three tests to apply before adding doctrine
+- `docs/internals/prompt/burden-study.md` — Why the prompts are the size they are and what actually shrank them: the per-layer measurement, the levers that worked (**ownership beat compression ~7:1**) and the ones that did not (moving prose into a `ToolPresent` block is a token wash), the silent-drift failure mode behind every defect found, and the enforced per-agent budget. Read before adding prompt weight
+- `docs/guide/session-forking.md` — Forking a session from a past turn: runnable Hibernation checkpoint, yield-point granularity, timeline mirroring (copy vs reuse-by-reference choice), CLI/RPC/room surfaces
+- `docs/internals/sandbox/sink-detection.md` — Why network detection resolves **sinks** (the closed stdlib/builtin primitive set) through the code's own import bindings instead of matching library names (#1021): what the library-name treadmill missed (including stdlib `http.client`), the Python/JS/Go/Rust coverage analysis, why a Rust resolver beats a `python3` AST subprocess, and the detection-vs-declaration boundary held for #1023
+- `docs/internals/sandbox/network-grant.md` — Why `sandbox_exec` network reachability is a per-exec **grant**, not a capability-inherited **ceiling** (#1022 audit): the pre-fix bypass chain, why zero-signal egress is reachable without obfuscation, the decision table in `runtime/network_grant.rs`, and which sibling exec paths are capability-driven by design
+- `docs/internals/sandbox/drivers.md` — The `SandboxDriver` trait + registry (#1117): what each backend owns (command construction, SDK bridge plumbing, child env, network guarantee, dependency support), the process vs in-process tier split, why `guarantees_network_off` is per-driver and fails closed, and the three edits it takes to add a backend
+- `docs/internals/sandbox/wasm-tier.md` — Portable in-process WASM tier (`sandbox: "wasm"`) and first-class JavaScript agents (compiled to wasm via Javy at bootstrap): concepts, the `wasm-tier` build feature, `gateway preflight`, resource bounds, and a JS-agent tutorial. python.wasm is deferred (see the RFC status note).
+- `docs/internals/storage/content-visibility.md` — How content written in one session becomes readable in another: the three `ContentVisibility` levels, why reachability is decided by *where a write propagated* rather than by searching peer sessions (which is what makes `Private` a guarantee), the root-not-parent propagation target and the absent "caller only" level, why a failed `set_root_session` makes `Session` silently behave like `Private`, and why refs beat names across sessions

@@ -8,7 +8,7 @@ When an agent requests a privileged action (network access, file system writes, 
 
 1. **Exec Cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address). If the exact command+targets fingerprint was previously approved, reuse it automatically.
 
-2. **Plan Grants** — when the operator approves a plan, the declared network envelope is materialized as a session approval grant. Subsequent tool calls targeting hosts within the plan's envelope skip straight to execution. Revoked on envelope-expanding amend. Plan grants are a distinct dedup layer that sits above session grants. See [`docs/plan-capability-grants.md`](../plan-capability-grants.md).
+2. **Plan Grants** — when the operator approves a plan, the declared network envelope is materialized as a session approval grant. Subsequent tool calls targeting hosts within the plan's envelope skip straight to execution. Revoked on envelope-expanding amend. Plan grants are a distinct dedup layer that sits above session grants. See [`docs/reference/capability-grants.md`](../reference/capability-grants.md).
 
 3. **Session Approval Grants** (target-level, scope-aware, within root session) — stored in `session_approval_grants` + `session_approval_grant_targets` tables. Supports pattern types: `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`. Scoped `RootSession` or `Session`. Optional expiry (`expires_at`).
 

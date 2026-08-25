@@ -27,18 +27,18 @@ use autonoetic_types::config::LoopGuardConfig;
 
 /// Default config (max_spawn_identity_repeats == 3) trips on the third
 /// identical spawn. Verifies the production default matches what
-/// `docs/config-reference.md` documents.
+/// `docs/reference/config.md` documents.
 #[test]
 fn default_config_trips_on_third_identical_spawn() {
     // Explicit pin that the production default matches what
-    // `docs/config-reference.md` and `config-template.yaml` publish. The
+    // `docs/reference/config.md` and `config-template.yaml` publish. The
     // behavior assertion below (third identical spawn trips) implicitly
     // covers it too, but spelling out the number surfaces a default bump
     // as a test failure rather than a silent behavior change.
     assert_eq!(
         LoopGuardConfig::default().max_spawn_identity_repeats,
         3,
-        "default matches docs/config-reference.md and config-template.yaml"
+        "default matches docs/reference/config.md and config-template.yaml"
     );
 
     let mut guard = LoopGuard::with_config(&LoopGuardConfig::default());

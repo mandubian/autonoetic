@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-12  
 **Status:** Draft v1  
-**Related:** docs/approval-system.md, docs/workflow-orchestration.md, docs/remote-access-approval.md, docs/ARCHITECTURE.md
+**Related:** docs/approval-system.md, docs/internals/workflow-orchestration.md, docs/guide/remote-access-approval.md, docs/ARCHITECTURE.md
 
 ---
 

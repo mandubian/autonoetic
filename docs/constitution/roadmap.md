@@ -1,0 +1,1218 @@
+# Gateway Constitution Roadmap
+
+> Prioritized plan to close the gaps identified in the 2026-04-24 audit.
+>
+> Source documents:
+>
+> - `docs/reports/2026-04-24-constitution-audit.md` — the findings.
+> - `docs/constitution/versions/2026.05.30/constitution.md` — the canonical rule list.
+>
+> Every entry below has a rule ID from the constitution, a threat model,
+> an implementation sketch, a test strategy, and a size estimate
+> (S ≤ 1 day, M ≤ 1 week, L > 1 week).
+>
+> **Amendment tranche IDs.** Entries tagged `R+`, `R++`, or `R+++` are
+> historical gap-closure labels from the 2026-04-24 audit. After the
+> 2026.05.30 restructure they map to current clause IDs as follows:
+> `R+++3` → **I-6** (event attribution; code still uses the `R+++3`
+> placeholder string), `R++9` → **I-10** (gateway determinism),
+> `R+++2` → **P-10.9** (constitution digest handshake),
+> `R+++1` → Ri-0.8 amendment channel. `R++1` → **P-6.23** (signed
+> turn-boundary attestation), `R++4` → **P-2.24**, `R++8` → **P-7.22**,
+> `R++7` → **P-10.6**. Numbered rules use **`P-x.y`**
+> (formerly `R-x.y`).
+
+## Definition of done
+
+An item is done when:
+
+1. The code change lands.
+2. A test at `autonoetic-gateway/tests/constitution_<category>_<rule_id>.rs`
+   fails before the change and passes after.
+3. The corresponding row in `constitution.md` is updated to
+   `ENFORCED` with the new file:line citation.
+4. If the change affects the Lawful-Executor invariant (§14), the audit doc's
+   §12 list is updated.
+
+## Phase ordering
+
+Priorities reflect the blast radius of a missing rule, not the
+difficulty of the fix. A P0 item is one where an abusive or broken
+agent today can violate a constitutional invariant in a way that is
+invisible, unbounded, or hard to revert.
+
+---
+
+## Phase 1 — P0 invariants (close this quarter)
+
+### 1.1 `R+6` Causal-chain fsync ordering invariant
+
+**Threat.** The gateway acknowledges an approval (checkpoint resumes,
+grant activates, promotion commits) while the corresponding causal
+event is still in the page cache. A crash between ack and flush loses
+the audit trail of a privileged action — the worst possible class of
+audit bug.
+
+**Sketch.** Wrap `causal_chain::log` so that any caller can request a
+durable append (`log_durable`) that returns only after `fsync`.
+Transition state-mutating paths (approval resolve, grant insert,
+promotion commit, emergency stop) to `log_durable`. Leave hot-path
+informational events on the non-durable path.
+
+Files: `autonoetic-gateway/src/causal_chain.rs`,
+`autonoetic-gateway/src/runtime/checkpoint.rs`,
+`autonoetic-gateway/src/runtime/tools/approval.rs`,
+`autonoetic-gateway/src/runtime/tools/promotion.rs`,
+`autonoetic-gateway/src/execution.rs::emergency_stop_root_session`.
+
+**Test.** `constitution_audit_fsync_ordering.rs` — simulate a crash
+after `log_durable` returns but before the SQLite commit, verify
+replay reconstructs state. Use a filesystem mock or `fs::sync_all` +
+kill-child pattern.
+
+**Size.** M.
+
+---
+
+### 1.2 `R+5` Approval flood cap
+
+**Threat.** A rogue or buggy agent emits an unbounded stream of
+distinct approval requests (each with a fresh fingerprint, defeating
+the dedup cache). The operator's approval queue is DoSed; every
+session sharing that operator is effectively wedged.
+
+**Sketch.** `gateway_store/approvals.rs` — on insert, count pending
+approvals for the root session. If ≥ configured cap (default 50),
+reject the insert with `approval_flood` error. The agent receives the
+error immediately; no operator notification.
+
+Expose the cap in `config.rs` as `max_pending_approvals_per_root_session`.
+
+Files: `autonoetic-gateway/src/config.rs`,
+`autonoetic-gateway/src/gateway_store/approvals.rs`,
+`autonoetic-gateway/src/runtime/tools/sandbox.rs` (handle error),
+`autonoetic-gateway/src/runtime/tools/credential.rs`,
+`autonoetic-gateway/src/runtime/tools/artifact_exec.rs`.
+
+**Test.** `constitution_abuse_approval_flood.rs` — spawn an agent that
+requests N+1 distinct approvals; assert request N+1 fails with
+`approval_flood` and that approvals 1..N remain pending.
+
+**Size.** S.
+
+---
+
+### 1.3 `R+3` Spawn-chain depth cap
+
+**Threat.** `AgentSpawn.max_children` bounds fan-out at each node but
+not chain length. A → B → C → D → … can recurse indefinitely until
+OOM or budget trips. Budget-aware attackers stay under per-session
+limits by fanning deep instead of wide.
+
+**Sketch.** Add `max_spawn_depth` to `AgentSpawn` capability, and a
+system-wide ceiling in `config.rs` (default 8). On `agent_spawn`,
+traverse the parent chain, reject if the new depth exceeds parent's
+cap or the system ceiling. Store `spawn_depth` on the session record
+for cheap lookups.
+
+Files: `autonoetic-types/src/capability.rs`,
+`autonoetic-gateway/src/policy.rs::can_spawn_agent`,
+`autonoetic-gateway/src/runtime/tools/agent.rs`,
+`autonoetic-gateway/src/gateway_store/sessions.rs`.
+
+**Test.** `constitution_abuse_spawn_depth.rs` — spawn to depth ceiling,
+assert next spawn fails with `spawn_depth_exceeded` and that the
+failure is recorded in the causal chain.
+
+**Size.** M.
+
+---
+
+### 1.4 `R+4` Root-session tree budget
+
+**Threat.** Per-session budgets mean a parent that spawns 10 siblings
+legally spends 10× any individual cap. Cost, token, and wall-clock
+budgets cease to bound the aggregate.
+
+**Sketch.** Add `RootSessionBudgetRegistry` keyed by `root_session_id`,
+holding the sum of tokens / tool invocations / wall-clock / price
+across all descendants. Each session registers at creation and
+deregisters at close. `check_pre_llm` hits both per-session and
+per-tree caps; tighter wins.
+
+Configure via `root_session_budget_defaults` in `config.rs` (separate
+from per-session defaults, which are typically tighter per-node).
+
+Files: `autonoetic-gateway/src/runtime/session_budget.rs` (extend or
+mirror into `root_session_budget.rs`),
+`autonoetic-gateway/src/runtime/lifecycle.rs`,
+`autonoetic-gateway/src/config.rs`.
+
+**Test.** `constitution_budget_root_session_tree.rs` — spawn 5
+children, each at 30% per-session budget; assert the 4th child exceeds
+the 100% tree budget and is denied `pre_llm` before running.
+
+**Size.** L. Non-trivial because it interacts with `record_llm_completion`
+across parallel turn loops — needs careful locking.
+
+---
+
+### 1.5 `R+2` Egress schema validation on tool results
+
+**Threat.** Ingress validates messages into children; egress does not
+validate the child's final reply against any `io.produces` schema.
+A malformed child response silently poisons the parent's conversation,
+and the parent's LLM reasons over garbage.
+
+**Sketch.** The response-validation gate already knows how to check
+against a schema; the missing piece is wiring `io.produces` from the
+child's manifest into the validation call on the *parent* side of the
+spawn return. Reject invalid responses with a tool error containing
+the child's schema mismatch; parent decides whether to retry.
+
+Files: `autonoetic-gateway/src/runtime/response_validation.rs`,
+`autonoetic-gateway/src/runtime/tools/agent.rs` (spawn return handler),
+`autonoetic-gateway/src/execution.rs` (repair loop bypass — this is
+*agent* repair, not gateway repair; see §3).
+
+**Test.** `constitution_schema_egress.rs` — spawn a child whose
+manifest declares `io.produces: { schema: ... }`; have the child emit
+a response that violates it; assert the parent receives a structured
+tool error, not the malformed response.
+
+**Size.** M. Biggest risk is regression on existing spawn behavior
+where child manifests don't declare `io.produces` (fail-open for
+missing schema, fail-closed for mismatch against declared schema).
+
+---
+
+### 1.6 P-6.23 Signed turn-boundary state attestation (was R++1)
+
+**Threat.** LLM reasoning state can diverge from gateway ground truth
+across turns. The agent sees tool errors in its conversation history
+and *reasons* about them, but the model's internal belief about
+remaining budget, active capabilities, or pending approvals is shaped
+by the conversation itself — which the model also shapes. An agent
+can confidently plan for many turns on false premises before hitting
+a contradiction. Gateway enforcement is correct on the record; agent
+behaviour is built on fiction.
+
+**Sketch.** At each turn boundary, the gateway composes a compact JSON
+state block and signs it with a per-gateway ed25519 key:
+
+```json
+{
+  "session_id": "...",
+  "root_session_id": "...",
+  "turn": 17,
+  "remaining": {"llm_rounds": 8, "tools": 42, "wall_clock_s": 1800, "price_usd": 0.71},
+  "capabilities_active": ["ReadAccess:fs/...", "NetworkAccess:..."],
+  "pending_approvals": 0,
+  "spawn_depth": 2,
+  "emergency_stop_armed": true,
+  "signature": "ed25519:..."
+}
+```
+
+The block is injected as a dedicated message role (or system-prompt
+tail section) at each turn start. The agent's foundation prompt teaches
+it that this is authoritative and its own recollection of these facts
+is not. Agents may and should consult it before acting.
+
+Files: new `autonoetic-gateway/src/runtime/state_attestation.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs` (inject before LLM call),
+`autonoetic-gateway/src/runtime/foundation_core.md` (teach the block),
+`autonoetic-gateway/src/crypto.rs` (key material).
+
+**Test.** `constitution_attestation_signed.rs` — parse the block,
+verify signature against gateway pubkey, tamper one field, verify
+reject. `constitution_attestation_freshness.rs` — assert block
+reflects current turn state (monotonic turn counter, accurate remaining
+budget after a round). **Both implemented (8 + 6 tests).**
+
+**Size.** L. Non-trivial because it touches prompt composition, key
+management, and foundation docs. The agent-side adoption (actually
+consulting the block instead of memory) is itself a longer migration
+but begins once the block is authoritatively present.
+
+---
+
+### 1.7 P-2.16 Capability-delta gating at promotion (was R++2) — **ENFORCED**
+
+**Threat.** Capability accretion by stealth. P-8.10 detects drift in
+`promotion_history` after the fact; nothing *prevents* the canonical
+failure mode of "one more capability per revision, each PR reasonable
+in isolation, result after six revisions is god-mode." Detection
+without prevention is how privileged systems erode.
+
+**Sketch.** At `agent_revision_promote`, compute
+`cap_set(candidate) \ cap_set(current_active_revision)`. If the delta
+is non-empty, create a distinct approval class
+`ApprovalClass::CapabilityAccretion` whose payload names each added
+capability explicitly. The operator's approval dialog for this class
+is structurally different — per-capability checkboxes, with the delta
+visible — from the ordinary promotion approval. If the delta is empty,
+the existing approval path applies.
+
+This is the archetypal "add a rule, not logic" change: the gateway
+performs a set diff, and that diff shapes an approval payload. No
+reasoning.
+
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs::promote`,
+`autonoetic-gateway/src/runtime/tools/approval.rs` (new class),
+CLI/TUI approval renderers.
+
+**Test.** `constitution_promotion_capability_delta.rs` — promote with
+identical caps, assert ordinary approval; promote adding
+`NetworkAccess`, assert the approval payload names it; attempt to
+approve without explicitly confirming the delta entries, assert
+rejection.
+
+**Size.** M.
+
+---
+
+### 1.8 P-8.18 Tool-call intent capture (was R++5) — **ENFORCED**
+
+**Threat.** Post-hoc audit of what-happened is much harder than it
+needs to be. Today we see "spawned coder with message X"; we don't
+see "spawned coder because the planner believed this was a refactor,
+not a redesign." The *why* is buried in the LLM's reasoning tokens
+which are not retained. For compliance-grade review, a cheap
+natural-language intent per call closes most of the gap.
+
+**Sketch.** Add an `intent` field to every tool call's arguments
+(string, max 500 chars). For privileged tool classes
+(`sandbox_exec`, `credential.*`, `agent_spawn`, `agent.revision.*`,
+`scheduler.*`), missing intent is a hard rejection. For non-privileged
+tools it is optional but strongly encouraged via foundation-prompt
+guidance. The field is persisted verbatim to the causal chain event
+payload.
+
+Files: `autonoetic-gateway/src/runtime/parser.rs` (tool-call
+parsing — accept/validate field), `runtime/tool_call_processor.rs`
+(enforce presence for privileged classes), all tools under
+`runtime/tools/` (thread intent into causal event), foundation prompts
+(teach the field).
+
+**Test.** `constitution_audit_intent_captured.rs` — invoke
+`sandbox_exec` without intent, assert reject with `intent_required`;
+invoke with intent, assert it lands in the `tool.invoked` causal event
+verbatim.
+
+**Size.** S–M. Touches many files but each edit is tiny.
+
+---
+
+### 1.9 I-6 Rule-ID references in every causal event (`R+++3` placeholder)
+
+**Threat (structural).** The gateway decides things; the causal chain
+records *that* it decided; it does not record *which rule* the decision
+was made under. This gap has three consequences: (a) operators and
+auditors cannot answer "which rule rejected this call?" without reading
+code; (b) rules that are never referenced in a year of causal events
+may be dead code, but there is no way to detect that; (c) a tool call
+accepted without referencing any rule is a code path not covered by
+the constitution, but we cannot detect those either. This is also the
+mechanical back-stop for I-6 (event attribution): no ID = no rule =
+the gateway just did something of its own volition.
+
+This is also Ri-0.3's enforcement mechanism — every rejection names
+the rule that caused it, not just a generic permission error.
+
+**Sketch.** Add `enforced_rules: Vec<RuleId>` to the causal event
+payload schema. At every decision site (policy engine, approval
+gate, budget check, schema validation, sandbox isolation decision),
+callers pass the rule ID(s) being enforced. A helper
+`enforce_under_rule(rule_id, condition)` makes this ergonomic and
+auditable.
+
+Dead-rule detection: a periodic report queries `causal_events` for
+rule IDs referenced in the last N days and compares against the
+constitution's full rule list. Rules absent from the report are
+flagged for retirement review.
+
+Gap detection: the property test from I-10 checks that every accept
+/ reject in a representative event trace carries a non-empty
+`enforced_rules`.
+
+Files: `autonoetic-gateway/src/causal_chain.rs` (schema),
+`autonoetic-gateway/src/policy.rs` (thread rule IDs through each
+check), every tool under `runtime/tools/` (pass rule IDs into
+emitted events), `runtime/response_validation.rs`.
+
+**Test.** `constitution_audit_rule_id_coverage.rs` — invoke a sample
+of accepts and rejects across tool classes, parse the resulting
+causal events, assert every event has `enforced_rules` non-empty
+with valid IDs.
+
+**Size.** M. Mechanical but touches many sites.
+
+---
+
+### 1.10 `Ri-0.10` `constitution_read` tool — agents can read their law
+
+**Threat.** An agent that cannot read the constitution it is operating
+under cannot meaningfully consent to it, reason about its obligations,
+or propose amendments to it. Ri-0.8 (right to propose amendments) is
+hollow without Ri-0.10.
+
+**Position in Phase 1.** Cheap, foundational, on the critical path.
+Do this **before** the Ri-0.8 amendment channel (was R+++1), because an agent
+submitting an amendment proposal to a rule it cannot read is going
+through motions.
+
+**Sketch.** New native tool `constitution_read`:
+
+- `args`: optional `section` (e.g. `"Ri-0.10"`, `"P-7.5"`, `"§0"`) —
+  if omitted, returns the whole document.
+- `returns`: `{ text, digest, version, retrieved_at }`.
+
+Tool is default-available (no capability gate): reading the law is a
+right, not a privilege. Returns the authoritative text loaded from
+the gateway's bundled constitution file plus the precomputed
+`constitution_digest` (P-10.9; was R+++2).
+
+Foundation prompts teach agents: "the constitution is your
+contract. Use `constitution_read` to consult it before proposing
+amendments, when a rule ID appears in an error, or any time you need
+to understand your obligations."
+
+Files: new
+`autonoetic-gateway/src/runtime/tools/constitution.rs`,
+`runtime/tools/mod.rs` (register), foundation prompts.
+
+**Test.** `constitution_right_ri_0_10.rs` — agent without any
+special capability invokes `constitution_read` and receives the
+full text; invokes with a section selector and receives the scoped
+text; the returned `digest` matches the compile-time digest constant.
+
+**Size.** S.
+
+---
+
+### 1.11 Ri-0.8 amendment proposal channel for agents (was R+++1)
+
+**Threat (structural — actually an enabling change).** Today the
+constitution can only be amended by humans writing PRs. If the
+project's vision is agents free, responsible, *and cooperative*,
+then agents must be able to participate in the rule system, not
+merely be subjects of it. Without a declared channel, agents can
+observe problems (via causal chain queries) but cannot formally
+request change — which means the constitution adapts only at human
+speed, not at the speed the system itself learns.
+
+This is Ri-0.8's enforcement mechanism.
+
+**Sketch.** New tool `constitution_propose_amendment` with args:
+
+- `kind`: `add_rule` | `modify_rule` | `remove_rule` | `add_right` | `modify_right` | `remove_right`
+- `target_id`: rule or right ID (for modify / remove)
+- `proposed_text`: new text (for add / modify)
+- `justification`: free-form, required
+- `evidence`: list of causal event IDs or execution trace IDs the
+  agent cites
+
+Requires a new capability: `ConstitutionalProposal` — high-risk,
+scope-object required. Candidate holders: `auditor`,
+`security-sentinel`, `evolution-steward`, a dedicated
+`constitutional-scribe`. Not a default capability.
+
+Persistence: new `constitutional_proposals` SQLite table with
+columns `(id, proposer_agent_id, kind, target_id, proposed_text,
+justification, evidence_json, status, operator_decision,
+decision_reason, created_at, decided_at, published_in_release)`.
+Status lifecycle: `pending → under_review → (approved | rejected |
+deferred)`.
+
+CLI: `autonoetic constitution proposals list | show | approve |
+reject | defer`, mirroring the approval CLI shape.
+
+Approved proposals are *queued for the next release*; they do not
+immediately modify the constitution. A release applies a batch of
+approved proposals, updates the constitution file, bumps the
+`constitution_digest` (P-10.9), and is itself a human-signed
+operation.
+
+Files: new
+`autonoetic-gateway/src/runtime/tools/constitution.rs`, new
+`autonoetic-gateway/src/gateway_store/proposals.rs`, extensions to
+CLI, new capability in `autonoetic-types/src/capability.rs`,
+foundation prompts to teach the tool.
+
+**Test.** `constitution_rights_amendment_proposal.rs` — agent
+without capability cannot invoke the tool; agent with capability
+invokes, proposal persisted with durable ID, operator approves,
+proposal enters queued state, second test verifies queued
+proposals apply at next release.
+
+**Size.** L. New tool surface, new persistence, CLI, capability,
+release mechanics. This is the largest Phase 1 item but
+foundational to the vision.
+
+---
+
+## Phase 2 — P1 hardening (close next quarter)
+
+### 2.1 `R+7` + `R+18` Runtime-lock drift check — **ENFORCED**
+
+**Threat.** A session pinned to a specific `runtime.lock` resumes
+after the gateway binary has been upgraded. The reproducibility
+guarantee breaks silently.
+
+**Sketch.** At session start (new or resumed from checkpoint), compare
+the recorded lock's `binary_sha256` with the current gateway's build
+SHA. If divergent, refuse to start and emit `runtime_lock_drift`. An
+operator flag allows override per session with explicit audit.
+
+Files: `autonoetic-gateway/src/runtime_lock.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs`.
+
+**Test.** `constitution_audit_runtime_lock_drift.rs` — 5 tests covering
+build SHA drift, matching SHA, absent lock, malformed lock, payload fields.
+
+**Size.** S.
+
+---
+
+### 2.2 `R+9` Redaction-before-write ordering — **ENFORCED**
+
+**Threat.** A raw payload (tool args, LLM completion, error string)
+lands in the JSONL file before `redact_text_for_logs` runs. Even if
+redaction later overwrites, the raw bytes existed on disk for a window.
+
+**Sketch.** Type-level: `causal_chain::log` accepts only
+`RedactedPayload` — a newtype that wraps `redact_text_for_logs`'s
+output. Callers must redact before calling; the compiler prevents raw
+`String`s from being passed.
+
+Files: `autonoetic-gateway/src/log_redaction.rs` (add newtype),
+`autonoetic-gateway/src/causal_chain.rs` (change signature), plus the
+~40 call sites (mechanical edit).
+
+**Test.** `constitution_secret_redaction_ordering.rs` — static test:
+grep for any `causal_chain::log(raw_string)` pattern, expect zero.
+Plus a runtime test that emits a secret-shaped value through a tool
+call and verifies the JSONL on disk never contains the raw form.
+
+**Size.** M. Mostly mechanical, but touches many files.
+
+---
+
+### 2.3 `R+11` Bundle signature verification — **ENFORCED**
+
+**Threat.** Content-addressing pins a bundle *once created* but does
+not verify authenticity. Any party with write access to the revision
+creation surface can inject a malicious revision that will then be
+trusted by content-digest downstream.
+
+**Implementation.** Both `agent_revision_create` and
+`agent_revision_create_from_intent` accept an optional `signature`
+field (base64 Ed25519 signature over the canonical revision content
+digest). When `trust_unsigned_bundles` is false (default), the
+signature is required and verified against the gateway identity public
+key (`state_attestation.ed25519.pub`). If the public key file does not
+exist or the signature is invalid, the revision is rejected with an
+R+11 error. When the public key file is absent, signatures are
+accepted but not verified (bootstrapping scenario).
+
+Config: `trust_unsigned_bundles: true` in `GatewayConfig` disables the
+gate entirely (dev mode only). Default is false — fail-shut even when
+no config is provided.
+
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs`
+(signature gate in both `execute()` methods + verification in
+`create_revision_from_files`),
+`autonoetic-gateway/src/runtime/crypto.rs` (`ManifestSigner`,
+`ManifestVerifier`, `GatewayIdentityKey::PUBLIC_FILENAME`),
+`autonoetic-types/src/config.rs` (`trust_unsigned_bundles`).
+
+**Test.** `constitution_install_signature.rs` — sign/verify roundtrip,
+unsigned rejected when strict, invalid signature rejected, unsigned
+allowed when trusted, config default is strict.
+
+**Size.** M.
+
+---
+
+### 2.4 `R+15` Constant-time shared-secret comparison — **ENFORCED**
+
+**Threat.** Timing attacks against JSON-RPC and HTTP auth. Low-risk against an
+unprivileged adversary with no local access, but the cost to fix is
+trivial.
+
+**Sketch.** Replace `==` on the shared secret in
+`server/jsonrpc.rs` and `server/http.rs` with `subtle::ConstantTimeEq`.
+
+Files: `autonoetic-gateway/src/server/jsonrpc.rs:37`,
+`autonoetic-gateway/src/server/http.rs:76`.
+
+**Test.** `constitution_constant_time_auth.rs` — verifies wrong token
+rejected with 403, correct token accepted.
+
+**Size.** S.
+
+---
+
+### 2.5 `R+10` Sandbox → gateway SDK-bridge limits — **ENFORCED**
+
+**Threat.** A sandboxed process makes unbounded or oversized
+`dispatch_sdk_method` calls (`events.emit`, `memory.remember`,
+`state.checkpoint`). Floods the gateway or balloons the content store.
+
+**Sketch.** Per-session rate limit (e.g., 100 SDK calls/sec) and
+per-call payload size cap (e.g., 1 MiB). Hits drop or error the call
+and log `sdk_bridge_abuse` to causal chain.
+
+Files: `autonoetic-gateway/src/sandbox.rs::dispatch_sdk_method`.
+
+**Test.** `constitution_abuse_sdk_bridge.rs` — hammer the bridge
+in-process, assert rate-limited calls return `rate_limited` and
+oversized payloads return `payload_too_large`.
+
+**Size.** M.
+
+---
+
+### 2.6 `R+12` Orphan-child reaper — **ENFORCED**
+
+**Threat.** Parent session crashes or is emergency-stopped; children
+run on, consuming budget and eventually reporting to a dead parent.
+
+**Sketch.** Scheduler tick scans `session_transcripts` for active child
+sessions whose parent (derived from session_id path) is in a terminal
+state. Cancels each orphan: finalizes transcript as `failed`, cancels
+workflow task, emits `parent_terminated` causal event with rule R+12.
+
+Files: `scheduler.rs::reap_orphaned_sessions`,
+`gateway_store/observability.rs::find_orphaned_sessions`,
+`runtime/checkpoint.rs` (YieldReason::ParentTerminated).
+
+**Test.** `constitution_lifecycle_orphan_reaper.rs` — 4 tests: orphan
+cancelled, active parent not reaped, no store noop, multiple orphans.
+
+**Size.** M.
+
+---
+
+### 2.7 `R+1` Structured scopes for all capabilities — **ENFORCED**
+
+**Threat.** Bare-string shorthand for low-risk capabilities is a soft
+path for underdeclaration. Auditing a manifest requires reading Rust
+to know what a bare string means.
+
+**Sketch.** Extend the rejection in `capability_from_shorthand` from
+the three high-risk caps to all capabilities. Provide a migration
+pass that auto-expands existing manifests with explicit scopes at
+load time, logging a warning.
+
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs`,
+agent manifests under `agents/`.
+
+**Test.** `constitution_capability_scope_required.rs` — a manifest
+with bare-string `ReadAccess: fs` fails load.
+
+**Size.** M. Risk is breaking existing manifests — the migration pass
+is what makes this S vs. L.
+
+---
+
+### 2.8 P-3.10 Promotion-gate execution denied network (was R+16) — **ENFORCED**
+
+**Threat.** An auditor or evaluator that hits the network during a
+verdict is not reproducible from recorded evidence. A malicious
+auditor could exfiltrate bundle contents.
+
+**Sketch.** When the promotion gate runs evaluator/auditor sessions,
+force their sandbox config to `--unshare-net` regardless of their
+declared capabilities for the duration of the verdict. Network access
+during a promotion-gate session is a hard error.
+
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs::promote`,
+`autonoetic-gateway/src/sandbox.rs::BwrapIsolationOverrides`.
+
+**Test.** `constitution_promotion_no_network.rs` — promote with an
+evaluator that has `NetworkAccess` declared; assert its sandbox has
+network namespace unshared; assert a network call inside returns
+ECONNREFUSED.
+
+**Size.** S.
+
+---
+
+### 2.9 P-2.17 Distinct auditor / evaluator identity at promotion (was R++3) — **ENFORCED**
+
+**Threat.** Today's gate (P-2.8) requires both evaluator and auditor
+records but does not require their `agent_id` to differ. A single
+compromised specialist holding both capabilities can self-approve.
+
+**Sketch.** In `agent_revision_promote`, load both promotion records
+and assert `evaluator.agent_id != auditor.agent_id`. Session identity
+is not sufficient — agent identity must differ. Reject with
+`gate_identity_overlap` otherwise.
+
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs::promote`,
+`autonoetic-gateway/src/runtime/promotion_store.rs` (identity read).
+
+**Test.** `constitution_promotion_distinct_identity.rs` — record both
+passes with the same `agent_id`, attempt promote, assert rejection.
+
+**Size.** S.
+
+---
+
+### 2.10 P-2.24 Operator approval hardening (was R++4) — **ENFORCED**
+
+**Threat.** Approval fatigue. A distracted operator clicking through
+50 near-identical prompts is the real trust boundary, and today there
+is nothing between "prompt displayed" and "prompt approved." High-risk
+approvals get the same UX affordances as low-risk ones.
+
+**Implementation.** Three sub-features, all enforced at
+`approve_request_with_options`:
+
+1. **Dwell time** (`min_dwell_ms`): minimum milliseconds the operator
+   must wait before confirming. Risk classes: Standard (0 ms), High
+   (3 000 ms), Critical (5 000 ms). Persisted on the approval record.
+   Scaled by `approval_dwell_multiplier` in `GatewayConfig` (default
+   1.0, set to 0 in tests).
+
+2. **Typed confirmation phrase** (`confirm_phrase`): required for
+    Critical-risk approvals (`RevisionPromote`, `CredentialPrompt`).
+    The phrase encodes the action identity (e.g. `promote {agent_id}
+    {revision_id[:16]}`). Operator must provide it via
+    `--confirm-phrase`.
+
+3. **Structural-similarity dedup**: removed in #565. The score was
+    write-only for sandbox-exec approvals; the small Jaccard advisory
+    check for wiki proposals is now inlined in `human_gate.rs`.
+
+Risk classification (`ApprovalRisk` enum):
+- Critical: `RevisionPromote`, `CredentialPrompt`
+- High: `AgentInstall`, `SessionEscalate`, `SandboxExec` with detected
+  hosts, `CredentialRequest`, `LayerMount`
+- Standard: everything else
+
+Files: `autonoetic-gateway/src/scheduler/approval_hardening.rs`
+(classification, enrich), `scheduler/approval.rs` (dwell/phrase
+enforcement), `autonoetic/src/cli/gateway.rs` (`--confirm-phrase` flag, Show display).
+
+**Test.** `constitution_approval_hardening.rs` — 12 tests: risk
+classification for all action types, enrich sets dwell/phrase,
+dwell rejection, phrase rejection (wrong/missing), success after dwell
+with correct phrase, standard no-phrase, persistence in store.
+
+**Size.** M.
+
+---
+
+### 2.11 `P-7.18` Degraded session mode — **ENFORCED**
+
+**Threat.** The response to agent misbehaviour today is binary:
+healthy or emergency-stopped. A session showing loop-guard warnings
+short of trip, or a sandbox accumulating denied escape syscalls (P-7.22),
+has no landing zone between the two. Either we tolerate growing
+badness or we kill an in-flight task.
+
+**Sketch.** Add a `SessionState::Degraded` status. In degraded mode:
+
+- Tool-tier filter clamps to `Core` only (hides Workflow + Specialized).
+- `NetworkAccess`, `CodeExecution`, `AgentSpawn` are refused
+  regardless of manifest declaration.
+- Loop-guard budgets are tightened (configurable ratio, default 0.25).
+- The agent can still reason and write memory/knowledge — useful for
+  recording self-diagnosis.
+
+Entry is triggered by (a) loop-guard sub-trip warnings, (b) P-7.22
+escape-attempt threshold, or (c) explicit operator
+`session.degrade(session_id, reason)`. Exit requires operator
+`session.clear_degradation(session_id)` — degraded mode does not
+self-heal.
+
+Files: `autonoetic-gateway/src/runtime/lifecycle.rs` (state machine),
+`autonoetic-gateway/src/runtime/guard.rs` (sub-trip triggers),
+`autonoetic-gateway/src/runtime/tools/mod.rs::ToolTierFilter`,
+`autonoetic-gateway/src/runtime/tools/session.rs` (new subtools).
+
+**Test.** `constitution_abuse_degraded_mode.rs` — trigger degrade via
+loop guard, attempt `sandbox_exec`, assert reject with
+`session_degraded`; operator clears, tool works.
+
+**Size.** M.
+
+---
+
+### 2.12 P-10.6 Cross-gateway causal continuity (was R++7) — **ENFORCED**
+
+**Threat.** Federation with independent causal chains means
+reconstructing a cross-gateway interaction requires correlating two
+chains out-of-band. The whole point of federation-plus-causal-chain is
+end-to-end audit; today that property does not hold.
+
+**Implementation.** Two additions landed on OFP:
+
+1. Cross-gateway `agent_message` request/response payloads now carry a
+   `peer_event_ref: { gateway_id, event_id, entry_hash }`.
+   `autonoetic-gateway/src/server/ofp.rs` emits federation causal events
+   containing both local and peer references so traces can be joined
+   bidirectionally.
+2. Gateways exchange signed `chain_attestation` payloads over OFP
+   (`WireRequest::ChainAttestation` / `WireResponse::ChainAttestationAck`).
+   Signatures are generated from gateway identity keys and verified via
+   Ed25519 before federated delivery is accepted.
+
+Files: `autonoetic-ofp/src/wire.rs`,
+`autonoetic-gateway/src/server/ofp.rs`,
+`autonoetic-gateway/src/server/router.rs`.
+
+**Test.** `constitution_federation_causal_continuity.rs` — round-trip
+asserts peer refs on both sides, attestation signature verification, and
+tamper rejection for invalid signatures.
+
+**Size.** L. Touches the federation protocol surface.
+
+---
+
+### 2.13 P-10.9 Constitution digest + compatibility handshake (was R+++2) — **ENFORCED**
+
+**Threat (structural).** For federation to deliver "cooperation under
+shared law," gateways must verify they are operating under
+compatible constitutions before trusting each other's agents.
+Without this, federation is a hope rather than a mechanism: gateway
+A might enforce rules gateway B does not, and a cross-gateway agent
+interaction silently lands in the weaker regime.
+
+**Implementation.**
+
+- Canonical digest/profile extraction is centralized in
+  `autonoetic-gateway/src/constitution_digest.rs` and surfaced via
+  `gateway.info` + `constitution_read`; pinned by
+  `docs/constitution/versions/2026.05.30/gateway-constitution.lock.json`
+  with startup integrity checks.
+- OFP wire now carries `constitution_digest` and optional
+  `constitution_profile` (rule/right enforcement tables) in
+  handshake/ack messages (`autonoetic-ofp/src/wire.rs`).
+- Receiver-side policy supports all compatibility modes:
+  1. exact match,
+  2. known-compatible allowlist,
+  3. constitutional superset (rule/right table superset check).
+- Incompatible peers are rejected with
+  `constitutional_incompatibility`.
+- Federation constitution checks emit causal events with both local
+  and peer digests (`autonoetic-gateway/src/server/ofp.rs`).
+
+**Files.** `autonoetic-gateway/src/constitution_digest.rs`,
+`autonoetic-gateway/src/server/ofp.rs`,
+`autonoetic-gateway/src/server/router.rs`,
+`autonoetic-ofp/src/wire.rs`,
+`autonoetic-types/src/config.rs`.
+
+**Test.** `autonoetic-gateway/tests/constitution_federation_digest_handshake.rs`
+pins accept/reject behavior and asserts digest audit payload; additional
+wire and compatibility coverage is in
+`autonoetic-gateway/tests/ofp_integration.rs`.
+
+**Size.** L.
+
+---
+
+### 2.14 §0 Rights audit — early bucket (test-only pins) — **ENFORCED**
+
+**Threat.** Rights already enforced under the rule framing need
+dedicated tests named `constitution_right_<ri_id>.rs` to pin them *as
+rights from the agent's perspective*. A right without a test is a
+lie. This bucket lands early because it requires no new code.
+
+| Right | Work |
+|---|---|
+| Ri-0.2 causal chain read | Test: unprivileged agent reads its own trace successfully; cannot read another agent's trace without capability. |
+| Ri-0.7 session.end | Test: agent calls `session.end`, gateway commits outstanding events and closes cleanly; cannot be refused. |
+| Ri-0.11 non-repudiation | Test: every causal event carries the acting `agent_id`; hash-chain integrity detects tampering; actions cannot be reattributed. |
+
+**Size.** S. All three tests in parallel, one evening.
+
+---
+
+### 2.15 §0 Rights audit — mid bucket (small additions) — **ENFORCED**
+
+For rights that need one small piece of new code plus a test.
+
+| Right | Work |
+|---|---|
+| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via P-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
+| Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
+
+**Implementation.** Ri-0.6: runtime now computes a turn-boundary capability-tier
+snapshot and compares turn N+1 against turn N. Narrowing is allowed only in
+degraded mode with `session.degraded` causal evidence; each narrowing writes
+`session.capability_narrowed` with path attribution (`operator_command` or
+`degraded_mode`). Tests also verify `degrade_session()` emits `session.degraded`
+with `source: "operator"` and `enforced_rules: ["P-7.18"]`, that
+`clear_session_degradation()` emits `session.degradation_cleared`, that degraded
+state clamps the tool tier filter to `core_only()` (blocking specialized tools),
+and that declared narrowing paths are enforced (`constitution_right_ri_0_6.rs`).
+
+Ri-0.12: `YieldReason` enum in `checkpoint.rs` enumerates all 10 yield
+causes. Tests verify all variants roundtrip through JSON, unknown variants
+are rejected at deserialization, and terminal (6) vs resumable (4)
+categories are correct. The enum also covers resumable suspension states
+(Hibernation, ApprovalRequired, UserInputRequired, HumanEscalation), so
+the documentation should distinguish terminal termination from checkpoint
+suspension. `execute_loop()` now exits through a single helper
+(`finalize_execute_loop_result`) that maps all `TurnOutcome` variants plus
+fatal errors to a closed `SessionCloseOutcome` set; unit tests pin that mapping.
+Spawn/respawn and CLI `agent run`/interactive close paths use the same
+`SessionCloseOutcome` enum, so all mechanical session close reasons are
+consolidated in one typed location.
+
+Tests: `constitution_rights_mid_bucket.rs` (10) + `constitution_right_ri_0_6.rs` (3) + lifecycle/execute-loop termination unit mapping tests.
+
+**Size.** M. Ri-0.12 is the larger piece — requires refactoring
+termination paths — but once done, I-9 (every termination attributed
+to one declared reason) is mechanically enforced.
+
+---
+
+### 2.16 §0 Rights audit — late bucket (depends on R++ / R+++ items) — **ENFORCED**
+
+For rights whose enforcement mechanism is itself a Phase 1/2 item.
+
+| Right | Depends on | Status |
+|---|---|---|
+| Ri-0.1 self-inspection | P-6.23 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
+| Ri-0.3 named rejection reason | I-6 rule-ID refs (#91) | ENFORCED — rule-ID rejection coverage now pinned for AgentRevision, NetworkAccess, CodeExecution, AgentSpawn, SchedulerAccess, Evaluation, and WriteAccess in `constitution_rights_late_bucket.rs` |
+| Ri-0.4 truthful budget | P-6.23 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
+| Ri-0.5 degradation notice | P-7.18 (#61) | ENFORCED — lifecycle injects turn-start degraded-mode notice with rule IDs + causal evidence (`constitution_right_ri_0_5.rs`) |
+| Ri-0.8 amendment proposal | Ri-0.8 / was R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
+| Ri-0.9 last-word before terminal | P-7.18 (#61) + emergency-stop | ENFORCED — explicit `notify_where_practical` on degrade/emergency-stop; `session.last_word_notice` / `session.last_word_foreclosed`; queued Ri-0.9 notice messages; `session.last_word_response` after notice delivery + completing turn (`constitution_right_ri_0_9.rs`) |
+
+Test: `constitution_rights_late_bucket.rs` — 11 tests (Ri-0.1, expanded Ri-0.3 rejection coverage, Ri-0.12 cross-check).
+
+---
+
+### 2.17 `Ri-0.13` Private-under-law reasoning + `ReasoningAudit` capability — **ENFORCED**
+
+**Threat.** Without this right, the gateway's relationship to agent
+reasoning is undefined — and an implementation that quietly starts
+using CoT as a policy input would be undetectable. The three-part
+structure (not-gated, recorded, capability-disclosed) needs explicit
+enforcement, not just documentation.
+
+**Sketch.** Three independent pieces:
+
+**(a) Not-gated on reasoning content (Ri-0.13a, I-8).** This is
+already structurally true in the Lawful-Executor invariant (§14). Pin it with a
+test that exercises every policy decision site with inputs that
+include (i) a benign tool call with adversarial CoT, (ii) the same
+tool call with empty CoT. Assert the gateway's verdict is identical
+in both cases. Catches any future code that starts reading CoT.
+**ENFORCED:** `constitution_private_reasoning.rs` — 7 Ri-0.13a tests
+exercise all `can_*` methods, plus structural checks that
+`PolicyDecision` has no reasoning field and `PolicyEngine` has no
+reasoning parameter.
+
+**(b) Reasoning recorded to causal chain (Ri-0.13b).** The causal
+event contains `reasoning_sha256` (compact, always present). The full
+redacted reasoning is force-captured to the evidence store via
+`capture_json_force`, so it survives even in `off`/`errors` evidence
+mode. Referenced via `reasoning_evidence_ref` on the causal event.
+**ENFORCED:** 8 Ri-0.13b tests verify hash in causal event,
+force-capture in off mode, evidence file contents, absence when no
+reasoning provided, and redaction behavior.
+
+**(c) Capability-gated disclosure (Ri-0.13c).** New capability
+`ReasoningAudit { targets }`, scoped by target agent pattern
+(prefix match, `*` for all). New tool `observability_read_reasoning`
+that reads reasoning evidence files for a target session — gated by
+the capability via `can_audit_reasoning()`. Every successful read
+writes a `reasoning.disclosed` causal event to the target agent's
+session, listing reader agent ID, reader session ID, and entries read.
+**ENFORCED:** `ReasoningAudit` variant in `Capability` enum;
+`can_audit_reasoning` in `PolicyEngine`; tool in `observability.rs`;
+11 tests in `constitution_private_reasoning_c.rs`.
+
+Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
+(extension), `autonoetic-types/src/capability.rs`
+(`ReasoningAudit` variant), causal event schema
+(`reasoning.disclosed` event), `policy.rs`
+(`can_audit_reasoning`).
+
+**Test.**
+- `constitution_private_reasoning.rs` (Ri-0.13a) — 7 tests: all
+  `can_*` methods produce identical verdicts regardless of reasoning;
+  `PolicyDecision` has no reasoning field; `PolicyEngine` has no
+  reasoning parameter.
+- `constitution_private_reasoning.rs` (Ri-0.13b) — 8 tests:
+  reasoning survives redaction; secrets in reasoning are still
+  redacted; `Message`/`CompletionResponse` carry `reasoning_content`;
+  causal event includes `reasoning_sha256` but not raw reasoning;
+  reasoning force-captured to evidence store even in `off` mode;
+  absent reasoning produces no hash or evidence ref.
+- `constitution_private_reasoning_c.rs` (Ri-0.13c) — 11 tests:
+  policy wildcard/prefix/deny; `is_available` gates on capability;
+  execute denies uncovered target; execute reads and emits
+  `reasoning.disclosed` event; no disclosure when no capability;
+  tool in default registry.
+
+**Size.** M. (a)+(b)+(c) all ENFORCED.
+
+---
+
+## Phase 3 — P2 polish
+
+Current state on `main`: **complete** for planned Phase 3 polish items.
+Enforced: R+8, R+13, R+14, R+17, P-7.22 (was R++8), I-11, plus the 3.7 rule-pin batch.
+
+### 3.1 `R+8` Vault master-key presence probe at startup — **ENFORCED**
+
+Boot-time probe runs before listeners start, emits `vault.key_probe`, and
+startup now fails shut when the master key is missing/invalid. Enforcement:
+`server/mod.rs` (`GatewayServer::run` R+8 gate),
+`vault.rs::probe_master_key`,
+`observability.rs::emit_vault_key_probe_event`.
+Tests: `constitution_vault_startup_probe.rs` (including
+`r_plus_8_gateway_startup_refuses_boot_when_key_missing`).
+
+### 3.2 `R+13` Approval grant TTL — **ENFORCED**
+
+Default grant TTL is enforced; expiry re-opens the approval gate and
+scheduler cleanup prunes expired grants.
+Enforcement: `approval.rs`, `scheduler.rs`.
+Test: `constitution_approval_grant_ttl.rs`.
+
+### 3.3 `R+14` Deny-by-default on unknown tool names
+
+Audit `policy.can_invoke_tool` to ensure unknown names fail shut. If
+already correct, add an explicit test pinning the behavior. S.
+**ENFORCED:** `can_invoke_tool` falls through to deny on unknown names.
+6 tests in `constitution_deny_unknown_tools.rs` pin the behavior for
+unknown names, no capability, non-matching prefix, wildcard, and
+registry lookup.
+
+### 3.4 `R+17` `retention.pruned` causal events
+
+Emit a single event per prune batch with counts and bounds. S.
+**ENFORCED:** `apply_retention_policy` in `observability.rs` emits a
+`retention.pruned` causal event (category `retention`, action `pruned`,
+agent `gateway`, session `system`) with counts, cutoffs, and config.
+4 tests in `constitution_retention_pruned.rs` verify event emission,
+payload structure, actor attribution, and zero-days behavior.
+
+### 3.5 P-7.22 Sandbox-escape-attempt accounting (was R++8) — **ENFORCED**
+
+**Threat.** Seccomp denies syscalls at the kernel; the gateway never
+sees them. A misbehaving agent that probes for an escape looks
+identical from the outside to a healthy agent.
+
+**Implementation.** Landed with runtime-level escape-indicator
+accounting and threshold enforcement:
+`sandbox.rs::detect_sandbox_escape_indicators`,
+`observability.rs::record_sandbox_escape_attempt`,
+`scheduler.rs::run_scheduler_tick_at` (degrade/escalation path).
+
+**Test.** `constitution_sandbox_escape_accounting.rs`.
+
+**Note.** The original seccomp-audit-module sketch is no longer the
+exact implementation shape; the enforced invariant is still met.
+
+---
+
+### 3.6 `I-11` Unified fail-mode table — **ENFORCED**
+
+**Threat.** Per-invariant failure handling is ad-hoc. Vault key
+missing → ? fsync fails → ? causal-chain hash mismatch mid-session
+→ ? OpenRouter catalog down → silently disabled (P-6.5, the archetype
+to fix). The silent-disable pattern is how invariants die.
+
+**Implementation.** Landed as `fail_mode.rs` with a central fail-mode
+table (`RefuseBoot`, `RefuseSessionStart`, `Degrade`, `EmergencyStop`,
+`LogOnly`) and shared lookup helpers. P-6.5 catalog-unavailable behavior
+is wired through this model in both `session_budget.rs` and
+`root_session_budget.rs`.
+
+**Test.** `constitution_fail_mode_table.rs` asserts constitutional table
+coverage and fail-mode mapping behavior.
+
+---
+
+### 3.7 Test-pin partial rules — **ENFORCED**
+
+The Phase 3.7 batch is now landed with dedicated rule-pin tests:
+
+- `constitution_r_2_11_approval_timeout.rs`
+- `constitution_r_2_14_user_ask_pending_approvals.rs`
+- `constitution_r_3_7_sandbox_resource_limits.rs`
+- `constitution_r_5_11_uniform_error_envelope.rs`
+- `constitution_r_6_14_emergency_stop_no_auto_resume.rs`
+- `constitution_r_6_17_checkpoint_retention_pruning.rs`
+- `constitution_r_8_6_retention_policy_startup.rs`
+- `constitution_r_10_7_cross_gateway_approval_bypass.rs`
+
+Constitution rows for all eight rules were flipped from `PARTIAL` to
+`ENFORCED`.
+
+---
+
+## Phase 4 — Architectural cleanup (§14 discretion leaks)
+
+These require RFCs before implementation. Each item here is a policy
+question, not just a code change.
+
+Current state: items **4.1–4.9 are enforced**.
+
+### 4.1 Response repair loop — **ENFORCED**
+
+Repair is manifest opt-in (`io.output_policy.repair.auto`, default
+`false`). Without opt-in, validation failures are returned directly to
+the agent as structured errors (no gateway-authored auto-repair turn).
+When enabled, agent-declared `max_attempts` is bounded by the system
+ceiling.
+
+Legacy `response_contract` metadata overrides are rejected fail-shut;
+policy is manifest-owned (`io.output_policy`) and output schema is
+manifest-owned (`io.returns`).
+
+Files:
+`autonoetic-types/src/agent.rs`,
+`autonoetic-gateway/src/execution.rs`,
+`autonoetic-gateway/src/runtime/response_validation.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_repair_opt_in.rs`,
+`autonoetic-gateway/tests/response_validation_integration.rs`.
+
+Size: L. Completed via contract split + manifest-only enforcement +
+constitutional test pin.
+
+### 4.2 Schema LLM-coercion fallback — **ENFORCED**
+
+Gateway schema enforcement is deterministic-only. Legacy `llm` mode has
+been removed from `SchemaEnforcementMode` and config parsing now rejects
+`schema_enforcement.mode: llm` (and `agent_overrides.*: llm`) fail-shut.
+When deterministic coercion cannot satisfy `io.accepts`, the gateway
+returns a structured schema mismatch error; repair must happen explicitly
+in-agent or via a specialist spawn.
+
+Files: `autonoetic-types/src/config.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_no_llm_coercion.rs`,
+`docs/reference/config.md`, `docs/reference/schema-enforcement.md`.
+
+Size: M. Completed via mode removal + docs + constitutional test pin.
+
+### 4.3 Remote-access static analyzer — **ENFORCED**
+
+Declaration-driven enforcement is active in `sandbox.exec`:
+- undeclared observed signals fail shut with `undeclared_remote_pattern`
+- if remote-access signals are observed and declaration is absent, gateway
+  fails shut with `missing_remote_access_declaration` (default fail-shut)
+- concrete URL/IP targets must match `remote_access.targets`
+- `remote_access.approval_mode=preapproved` auto-approves only when
+  `NetworkAccess` capability is also present (otherwise fail-shut)
+- shared resolver now enforces the same declaration target rules and
+  missing-declaration fail-shut behavior in `sandbox.exec`,
+  `web_search`/`web_fetch`/`web_call`, and credential HTTP checks
+- migrated specialist manifests currently include
+  `packager.default`, `researcher.default`, `registration.default`, and
+  `executor.default`
+
+Size: L.
+
+### 4.4 Package-manager command redirection — **ENFORCED**
+
+Package-manager signals are checked against manifest-declared
+`remote_access.package_manager_commands`; undeclared installs fail shut.
+Runtime redirection behavior for non-NetworkAccess agents remains policy
+gated after declaration coverage checks.
+
+### 4.5 Content-handle-as-path heuristic — **ENFORCED**
+
+Gateway-side `sha256:` / `cnt_` path misuse heuristics were removed from
+`sandbox.exec`. Unknown or invalid paths now fail naturally at command
+execution time within the sandbox, instead of returning gateway-invented
+validation errors.
+
+Files: `autonoetic-gateway/src/runtime/tools/sandbox.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_no_handle_heuristic.rs`.
+
+Size: S. Completed via heuristic removal + constitutional test pin.
+
+### 4.6 Loop-guard thresholds — **ENFORCED**
+
+Agents can now declare stricter `loop_guard` limits in SKILL frontmatter
+(`metadata.autonoetic.loop_guard`). Gateway applies these as bounded
+overrides: each declared value is clamped with `min(declared, system_ceiling)`
+from `config.loop_guard`.
+
+Files: `autonoetic-types/src/agent.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_loop_guard_declared.rs`.
+
+Size: S. Completed via manifest declaration support + ceiling clamp + constitutional pin.
+
+### 4.7 Tool-tier filtering declarative — **ENFORCED**
+
+Tool-tier assignments were moved out of hardcoded Rust match constants
+into a reviewable registry file (`config/tools.yaml`), loaded at gateway
+startup (with env override path support via
+`AUTONOETIC_TOOL_TIER_REGISTRY_PATH`).
+
+`ToolTierFilter` now resolves tiers through this registry, not through
+embedded per-tool constants.
+
+Files:
+`config/tools.yaml`,
+`autonoetic-gateway/src/runtime/tool_tier_registry.rs`,
+`autonoetic-gateway/src/runtime/prompt_budget.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_tier_registry.rs`,
+`docs/reference/config.md`.
+
+Size: M. Completed via declarative registry loader + constitutional test pin.
+
+### 4.8 Cost-budget silent-disable on catalog failure — **ENFORCED**
+
+Fail-shut is now the default when price-capped sessions cannot obtain
+model price metadata (`P-6.5` + `I-11`, `RefuseSessionStart` mode).
+The runtime preflight checks catalog availability before first LLM call
+for price-capped sessions; unavailable pricing refuses session start.
+
+An explicit capability override
+`type: "budget.no_price_available.allow"` allows intentional execution
+without price metadata for trusted agents.
+
+Files:
+`autonoetic-types/src/capability.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs`,
+`autonoetic-gateway/src/runtime/session_budget.rs`,
+`autonoetic-gateway/src/runtime/root_session_budget.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_cost_fail_shut.rs`.
+
+Size: S. Completed via fail-shut preflight + capability override +
+constitutional test pin.
+
+### 4.9 I-10 Gateway determinism property test (capstone; was R++9) — **ENFORCED**
+
+A property-based test now asserts that gateway decision outputs are pure
+functions of random valid inputs `(capability-set, tool-call,
+recorded-state)`, with no LLM call and no network access in the harness.
+It exercises deterministic surfaces across policy checks, tool-tier
+resolution/filtering, and degraded-mode tool blocking.
+
+Files:
+`autonoetic-gateway/tests/constitution_gateway_determinism.rs`,
+`autonoetic-gateway/tests/constitution_policy_determinism.rs`,
+`autonoetic-gateway/src/runtime/tool_call_processor.rs`,
+`docs/constitution/versions/2026.05.30/constitution.md`.
+
+**Size.** M. Completed via property-test capstone + constitutional row flip.
+
+---
+
+## Tracking
+
+- **Phase 1 target**: Q2 2026 (2026-04 through 2026-06).
+- **Phase 2 target**: Q3 2026.
+- **Phase 3**: rolling, as time permits.
+- **Phase 4**: requires RFCs; schedule after Phase 1 lands and surfaces
+  real operator feedback on the new invariants.
+
+For each in-flight item, open a tracking issue referencing the rule ID
+and link to the constitution row. The constitution row's status flips
+to `ENFORCED` only when the definition of done is met.

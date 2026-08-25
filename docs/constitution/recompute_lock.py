@@ -213,7 +213,7 @@ def main() -> None:
         print("generated signing seed (base64, 32 bytes):", seed_b64)
         print(
             "NOTE: update trusted_signers for the signer_id above in "
-            "autonoetic-types/src/config.rs, config/config-template.yaml, and docs/config-reference.md."
+            "autonoetic-types/src/config.rs, config/config-template.yaml, and docs/reference/config.md."
         )
 
 

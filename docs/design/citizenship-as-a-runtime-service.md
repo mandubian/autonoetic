@@ -142,7 +142,7 @@ delivered, not reconstructed; the agent is not asked to call
 extraction from write-only archaeology into actual learning, and is the
 single highest-leverage item in this RFC. (This is also the "closed learning
 loop" gap named honestly in
-[`../comparison-hermes-agent.md`](../comparison-hermes-agent.md).)
+[`../comparison-hermes-agent.md`](../reports/2026-07-19-comparison-hermes-agent.md).)
 
 Advisory first (invariant 5): the block is injected with provenance
 ("distilled from sessions X, Y"), and Part E measures whether injected
@@ -182,7 +182,7 @@ Every specialist's `io.returns` contract gains a required `anomalies` field
 (empty list allowed; *absence* not). The existing response-validation gate
 enforces required fields mechanically; conscientiousness is not enforceable.
 This turns the "actors are sensors" claim
-([beginners doc §15](../autonoetic-concepts-for-beginners.md)) from a hope
+([beginners doc §15](../start/concepts.md)) from a hope
 into a contract. Rollout per invariant 5: Advisory enforcement first (warn,
 count), Strict once the field stops being noise.
 
@@ -200,7 +200,7 @@ horizon needs anyway; witnessing is where it starts accumulating.
 
 O-6 records proposal decisions but sets no deadline, so the duty to decide is
 satisfiable by never deciding (named as gap #2 in
-[`../philosophy.md`](../philosophy.md) §5). Pair O-6 with a timeliness bound
+[`../philosophy.md`](../concepts/philosophy.md) §5). Pair O-6 with a timeliness bound
 (the approval system already has timeouts — P-2.11/P-7.11; proposals have
 none): breach is surfaced in contract health against the adjudicating seat,
 and the proposer is notified (Ri-0.5 spirit). This is *sequencing-critical*:
@@ -300,7 +300,7 @@ is unit-testable without the full promotion pipeline.
 
 The procedure for proving stability (and the parallel C.2 strict-readiness
 measurement) lives in
-[`../civic-eval-measurement-runbook.md`](../civic-eval-measurement-runbook.md) —
+[`../civic-eval-measurement-runbook.md`](../guide/runbooks/civic-eval-measurement.md) —
 run it before flipping either default.
 
 ## Part F — Offices, not universal virtue — **SHIPPED**

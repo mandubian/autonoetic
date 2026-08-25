@@ -139,7 +139,7 @@ pub struct PromotionRecord {
     pub blessed_packages: Vec<crate::layer::ResolvedPackage>,
 
     // --- Federation carry-forward digests (Stage 1, see
-    //     docs/federation-carry-forward.md — the design spec landing with
+    //     docs/internals/federation-carry-forward.md — the design spec landing with
     //     #1067) ---
     //
     // The three per-input digests of the artifact this verdict was recorded
@@ -158,7 +158,7 @@ pub struct PromotionRecord {
     pub prose_digest: Option<String>,
 
     /// Federation carry-forward provenance (Stage 3; see
-    /// `docs/federation-carry-forward.md`). When a role's verdict on THIS
+    /// `docs/internals/federation-carry-forward.md`). When a role's verdict on THIS
     /// artifact was carried forward from a prior artifact (rather than freshly
     /// run), this map records per-role provenance: which prior artifact + role
     /// it came from, the verified digests at carry time, and the justification.

@@ -1,7 +1,7 @@
 # Worklist: homogenize hand-built tool errors onto the canonical envelope (P-5.11)
 
 Status: **TODO** — migration worklist (the "one big PR" rollout slice).
-Refs: `docs/tool-error-contract.md` (the contract), constitution **P-5.11**, PR #532
+Refs: `docs/reference/tool-errors.md` (the contract), constitution **P-5.11**, PR #532
 (the promotion-gate exemplar of the target pattern), `autonoetic-types/src/tool_error.rs`.
 
 ## Goal

@@ -125,7 +125,6 @@ fn production_prefix(text: &str) -> &str {
     }
 }
 
-/// Extract `docs/…` paths ending in a documentation-ish extension.
 /// An extensionless pointer file: last segment all-uppercase, as in
 /// `docs/constitution/CURRENT` (the active-constitution pointer, cited 24
 /// times). Without this, extensionless citations of load-bearing files would
@@ -147,6 +146,8 @@ fn is_pointer_file(path: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
+/// Extract `docs/…` citations: paths with a documentation extension, or
+/// extensionless pointer files (see [`is_pointer_file`]).
 fn extract_doc_paths(line: &str) -> Vec<String> {
     const EXTS: &[&str] = &[".md", ".toml", ".json", ".py"];
     let bytes = line.as_bytes();
@@ -174,6 +175,89 @@ fn extract_doc_paths(line: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// Extract Markdown link targets that are repo-relative file paths.
+///
+/// `docs/…`-prefixed citations are covered by [`extract_doc_paths`], but most
+/// intra-docs navigation is *relative* — `](./agent-learning.md)`,
+/// `](../design/README.md)` — and a relative link breaks the moment its file
+/// or its target moves directory. 246 such links exist inside `docs/`, so a
+/// reorganisation that only checks `docs/…` citations would silently shred
+/// navigation.
+///
+/// Returns targets with any `#anchor` and `"title"` stripped. External links,
+/// anchors-only, and non-file schemes are skipped: this guard checks paths,
+/// not the network.
+///
+/// Known limitation: link syntax written as a *literal example* inside inline
+/// code is still read as a link, because inline-code spans are not tracked
+/// (correctly skipping them means not skipping the target in the common
+/// ``[`label`](path)`` form). Prose that demonstrates link syntax should name
+/// the target on its own instead — rare enough that parsing spans is not worth
+/// the complexity.
+fn extract_relative_links(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        // Find `](`.
+        if bytes[i] != b']' || bytes[i + 1] != b'(' {
+            i += 1;
+            continue;
+        }
+        let start = i + 2;
+        let Some(close_rel) = line[start..].find(')') else {
+            break;
+        };
+        let raw = &line[start..start + close_rel];
+        i = start + close_rel + 1;
+        // Strip an optional link title: `path "Title"`.
+        let target = raw.split_whitespace().next().unwrap_or("").trim();
+        if target.is_empty() || target.starts_with('#') {
+            continue;
+        }
+        // Not a repo path: URLs, protocol-relative, mail, templates.
+        if target.contains("://")
+            || target.starts_with("//")
+            || target.starts_with("mailto:")
+            || target.starts_with('<')
+            || target.contains('{')
+            || target.starts_with('$')
+        {
+            continue;
+        }
+        // Absolute filesystem paths are not repo-relative navigation.
+        if target.starts_with('/') {
+            continue;
+        }
+        let path = target.split('#').next().unwrap_or(target);
+        if path.is_empty() {
+            continue;
+        }
+        out.push(path.to_string());
+    }
+    out
+}
+
+/// Resolve `link` relative to the directory of `from_rel`, collapsing `..`.
+fn resolve_relative(from_rel: &Path, link: &str) -> PathBuf {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(dir) = from_rel.parent() {
+        for c in dir.components() {
+            parts.push(c.as_os_str().to_string_lossy().to_string());
+        }
+    }
+    for seg in link.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other.to_string()),
+        }
+    }
+    PathBuf::from(parts.join("/"))
 }
 
 /// Parse `docs/.link-guard-allow` into exact paths and prefix globs.
@@ -254,6 +338,79 @@ mod tests {
              with a reason.\n\n  {}\n",
             failures.len(),
             failures.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn every_relative_markdown_link_resolves() {
+        let root = workspace_root();
+        let (allow_exact, allow_globs) = load_allowlist(&root);
+        let mut failures: Vec<String> = Vec::new();
+
+        for rel in collect_sources(&root) {
+            if rel.extension().is_some_and(|e| e != "md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for link in extract_relative_links(line) {
+                    let target = resolve_relative(&rel, &link);
+                    if root.join(&target).exists() {
+                        continue;
+                    }
+                    let as_str = target.to_string_lossy().replace('\\', "/");
+                    if allow_exact.contains(&as_str)
+                        || allow_globs.iter().any(|g| as_str.starts_with(g.as_str()))
+                    {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} links to `{}` → `{}` which does not exist\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        link,
+                        as_str,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} broken relative Markdown link(s). Moving a doc rewrites every \
+             relative link into and out of it — fix the target, or add it to \
+             `docs/.link-guard-allow` with a reason.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn relative_link_extraction_and_resolution() {
+        assert_eq!(
+            extract_relative_links("see [a](./x.md) and [b](../design/y.md#frag)"),
+            vec!["./x.md".to_string(), "../design/y.md".to_string()]
+        );
+        // External and anchor-only links are not repo paths.
+        assert!(extract_relative_links("[x](https://example.com/a.md)").is_empty());
+        assert!(extract_relative_links("[x](#section)").is_empty());
+        assert!(extract_relative_links("[x](mailto:a@b.c)").is_empty());
+        // Resolution is relative to the *linking file's* directory.
+        //
+        // Deliberately synthetic paths: a unit test of path arithmetic must not
+        // name real docs, or a future reorganisation's reference sweep rewrites
+        // the fixture and the assertion fails for a reason unrelated to the
+        // logic under test. (Exactly what happened during the PR-2 move.)
+        assert_eq!(
+            resolve_relative(Path::new("dir/sub/from.md"), "../other/to.md"),
+            PathBuf::from("dir/other/to.md")
+        );
+        assert_eq!(
+            resolve_relative(Path::new("dir/from.md"), "./to.md"),
+            PathBuf::from("dir/to.md")
         );
     }
 

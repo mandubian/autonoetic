@@ -200,7 +200,7 @@ impl SessionPhase {
 
 impl SessionPhase {
     /// Derive phase facts from a **gateway signal** delivered at turn start
-    /// rather than as a tool result (`docs/prompt-burden-study.md`,
+    /// rather than as a tool result (`docs/internals/prompt/burden-study.md`,
     /// OQ4).
     ///
     /// This is the path [`Self::observe`] structurally cannot see. When a child

@@ -600,9 +600,9 @@ Hardening exit criteria for this phase:
 
 ### Phase 6: Documentation
 
-- [x] **6.1** Update `docs/workflow-orchestration.md` with the continuation model, removing the "agent retry with approval_ref" description.
-- [x] **6.2** Update `docs/approval-notification-delivery.md` to reflect that workflow-bound approvals no longer use signal delivery.
-- [x] **6.3** Update `docs/separation-of-powers.md` to clarify that the gateway executes approved actions directly (within the separation-of-powers model: the agent proposed the action, the operator approved it, the gateway executes it).
+- [x] **6.1** Update `docs/internals/workflow-orchestration.md` with the continuation model, removing the "agent retry with approval_ref" description.
+- [x] **6.2** Update `docs/internals/approval-delivery.md` to reflect that workflow-bound approvals no longer use signal delivery.
+- [x] **6.3** Update `docs/concepts/separation-of-powers.md` to clarify that the gateway executes approved actions directly (within the separation-of-powers model: the agent proposed the action, the operator approved it, the gateway executes it).
 - [x] **6.4** Update `CLAUDE.md` with new architecture notes.
 
 ---

@@ -66,7 +66,7 @@ Public key is safe to distribute and should be committed in:
 
 - `autonoetic-types/src/config.rs`
 - `config/config-template.yaml`
-- `docs/config-reference.md`
+- `docs/reference/config.md`
 
 under signer id `autonoetic:constitution:v1` (or your chosen signer id).
 
@@ -95,7 +95,7 @@ When rotating signer material:
 2. Update trusted signer public key in:
    - `autonoetic-types/src/config.rs`
    - `config/config-template.yaml`
-   - `docs/config-reference.md`
+   - `docs/reference/config.md`
 3. Commit lock + public key updates together.
 4. Distribute new private seed to authorized signing environments only.
 

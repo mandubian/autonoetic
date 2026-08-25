@@ -174,7 +174,7 @@ pub struct SessionCheckpoint {
     /// Whether the session had escalated to all tool tiers.
     #[serde(default)]
     pub tool_tier_escalated: bool,
-    /// Session-phase facts earned so far (`docs/prompt-burden-study.md`).
+    /// Session-phase facts earned so far (`docs/internals/prompt/burden-study.md`).
     /// Persisted so a resumed session keeps the phase-gated guidance it had
     /// already earned: losing it would silently strip procedure from the prompt
     /// at exactly the point the work is most advanced. `#[serde(default)]` +

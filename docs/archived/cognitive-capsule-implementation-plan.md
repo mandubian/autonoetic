@@ -79,7 +79,7 @@ match arms for the new `Capability` variant.
 - `autonoetic-gateway/src/runtime/analysis/mod.rs`, `runtime/capability_inference.rs`, `runtime/state_attestation.rs`, `runtime/tools/mod.rs`:
   - Add `Capability::CapsuleExport => "CapsuleExport"` arm to each local `capability_type_name` match (4 sites; compiler-enforced via E0004)
 - `config/config-template.yaml` — commented `capsule:` block under retention
-- `docs/config-reference.md` — appended "Cognitive Capsules" subsection mirroring the retention/sentinel sections
+- `docs/reference/config.md` — appended "Cognitive Capsules" subsection mirroring the retention/sentinel sections
 
 ### Verification
 
@@ -227,7 +227,7 @@ arguments.
 
 - `autonoetic-gateway/tests/capsule_tools_integration.rs` — capability gate (tool unavailable without `CapsuleExport`) + tool definition schema check
 - `autonoetic/tests/capsule_cli_e2e.rs` — drives the actual binary end-to-end through export → inspect → verify → import --dry-run
-- `docs/CLI.md` — new "Capsule Commands" section
+- `docs/reference/cli.md` — new "Capsule Commands" section
 
 ---
 

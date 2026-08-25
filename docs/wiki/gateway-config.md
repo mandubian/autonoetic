@@ -14,7 +14,7 @@ This page is the curated, mechanically-checked map of that surface.
 2. **Say where it lives.** The operator's config file is YAML — by default
    `~/.autonoetic/config.yaml` (override with the `--config` CLI flag). The
    annotated template is `config/config-template.yaml` in the repo, and the
-   full reference is `docs/config-reference.md`.
+   full reference is `docs/reference/config.md`.
 3. **Say how to verify.** `autonoetic agent effective-config --json` prints
    the *effective* config (file + defaults + env overrides) — the operator
    can confirm a change landed without guessing at logs.
@@ -148,10 +148,10 @@ problem — say which trip reason fired.
 
 ## When this page isn't enough
 
-The full annotated surface is `docs/config-reference.md` (operator-side) and
+The full annotated surface is `docs/reference/config.md` (operator-side) and
 `config/config-template.yaml`. If the operator asks about a key you don't
 know, the honest answer is: "not in my curated map — check
-`docs/config-reference.md`, or run `autonoetic agent effective-config` to
+`docs/reference/config.md`, or run `autonoetic agent effective-config` to
 see the live schema." You may also propose extending this page via the
 wiki proposal flow so the next agent knows.
 

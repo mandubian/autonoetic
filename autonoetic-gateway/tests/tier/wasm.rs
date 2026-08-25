@@ -66,7 +66,7 @@ fn javy_compiled_javascript_runs_through_run_to_output() {
 }
 
 /// The stdin-reading JavaScript pattern documented in
-/// `docs/wasm-execution-tier.md` works on Javy + the wasm tier: the agent reads
+/// `docs/internals/sandbox/wasm-tier.md` works on Javy + the wasm tier: the agent reads
 /// its task payload from stdin and echoes a result on stdout. Skips without javy.
 #[test]
 fn javy_javascript_agent_reads_stdin_pattern() {

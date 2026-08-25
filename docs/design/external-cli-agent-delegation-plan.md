@@ -10,9 +10,9 @@ artifacts, approvals, and validation.
 **Refs:**
 - `docs/design/human-agent-artifact-collaboration-plan.md` — PlanFrame,
   workbench projection, reconcile, return-to-agent flow.
-- `docs/workflow-orchestration.md` — workflow/task lifecycle and child wake-ups.
-- `docs/separation-of-powers.md` — gateway-owned enforcement boundary.
-- `docs/credential-management.md` — secrets stay in gateway vault.
+- `docs/internals/workflow-orchestration.md` — workflow/task lifecycle and child wake-ups.
+- `docs/concepts/separation-of-powers.md` — gateway-owned enforcement boundary.
+- `docs/reference/credentials.md` — secrets stay in gateway vault.
 - `docs/rfc/session-room-channel-agnostic-timeline.md` §5 — the Session Room
   **renders** this delegation: external-provider work surfaces as
   `ForeignAgent`-attributed timeline events carrying the provenance below.

@@ -310,7 +310,7 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
         "constitution lock digest mismatch (lock={}, computed={}). \
          The markdown and lock file are out of sync: if you edited `constitution.md`, run \
          `python3 docs/constitution/recompute_lock.py --version {}` with the project signing key \
-         (see AGENTS.md / docs/constitution-signing.md). \
+         (see AGENTS.md / docs/constitution/signing.md). \
          Also ensure `constitution.source_path` and `constitution.lock_path` resolve under the same directory \
          so the gateway does not pair a markdown file from one tree with a lock from another.",
         lock.constitution_digest,

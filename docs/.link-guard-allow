@@ -7,13 +7,11 @@
 # it resolves. Legitimate uses are (a) a plan naming a tree it proposes to
 # create, and (b) a path that must stay literal for another reason.
 
-# --- docs/design/docs-reorganization-plan.md proposes this tree (PR 2 creates
-# --- it). Delete all seven globs below when the move lands; until then nothing
-# --- can exist under them, so they mask nothing.
-docs/start/* — proposed tree, docs-reorganization-plan.md §3
-docs/guide/* — proposed tree, docs-reorganization-plan.md §3
-docs/reference/* — proposed tree, docs-reorganization-plan.md §3
-docs/concepts/* — proposed tree, docs-reorganization-plan.md §3
-docs/internals/* — proposed tree, docs-reorganization-plan.md §3
-docs/proposals/* — proposed tree, docs-reorganization-plan.md §3
-docs/reports/* — proposed tree, docs-reorganization-plan.md §3
+# --- docs/constitution/README.md maps paths cited by digest-signed constitution
+# --- texts to their current homes. The left column of that table must quote the
+# --- old path literally: signed bytes cannot be edited, so those citations are
+# --- permanent historical artifacts. Do not "fix" them.
+docs/philosophy.md — quoted as a historical citation in constitution/README.md
+docs/config-reference.md — quoted as a historical citation in constitution/README.md
+docs/gateway-constitution-roadmap.md — quoted as a historical citation in constitution/README.md
+docs/gateway-constitution-audit-2026-04-24.md — quoted as a historical citation in constitution/README.md

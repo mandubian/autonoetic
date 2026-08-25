@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Scope:** Design only; no behavior changes in this document
-**Refs:** [docs/protected-agents.md](../protected-agents.md), [docs/separation-of-powers.md](../separation-of-powers.md), [docs/workflow-orchestration.md](../workflow-orchestration.md), Constitution Lawful-Executor invariant, I-10 gateway determinism
+**Refs:** [docs/reference/protected-agents.md](../reference/protected-agents.md), [docs/concepts/separation-of-powers.md](../concepts/separation-of-powers.md), [docs/internals/workflow-orchestration.md](../internals/workflow-orchestration.md), Constitution Lawful-Executor invariant, I-10 gateway determinism
 
 ---
 
