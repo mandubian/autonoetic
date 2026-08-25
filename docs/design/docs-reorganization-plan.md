@@ -378,12 +378,24 @@ canonical, so both drift. Fix without moving anything:
 Three guards, cheapest first. Without these, the layout decays exactly as the
 current one did.
 
-### 8.1 Link resolution test (blocks the 30 broken refs from ever returning)
+### 8.1 Link resolution test (blocks dangling refs from ever returning) ✅ shipped
 
-A test in `autonoetic-gateway/tests/` (or `xtask docs-links`) that scans every
-`.md` under `docs/`, every `agents/**/SKILL.md`, `CLAUDE.md`, `README.md`, and
-Rust string literals matching `docs/[\w./-]+\.(md|toml|json|py)`, and asserts
-each path exists. Same spirit as `every_parseable_citation_resolves`.
+`autonoetic-gateway/src/docs_link_guard.rs` — scans every `.md` outside the
+frozen/historical corpora plus the production prefix of every `.rs` file, and
+asserts each cited `docs/…` path exists. Same spirit as
+`every_parseable_citation_resolves`.
+
+It is a **lib** unit test, not an `autonoetic-gateway/tests/` one and not an
+`xtask`: PR CI runs `cargo nextest run --workspace --lib --bins`, and the
+`tests/` binaries are only *compiled* per-PR (they run nightly). A guard in
+`tests/` would not gate a PR — which is the whole point. Copy this placement
+for any future repo-hygiene guard.
+
+Citations count when they end in `.md`/`.toml`/`.json`/`.py` **or** name an
+extensionless pointer file by the uppercase convention (`docs/constitution/CURRENT`,
+cited 24 times and sync-checked by the runtime). The rule is the uppercase
+convention rather than "no extension" because accepting any extensionless path
+flags prose fragments and line-wrapped paths.
 
 ### 8.2 Generated CLI reference
 

@@ -8,8 +8,8 @@
 # create, and (b) a path that must stay literal for another reason.
 
 # --- docs/design/docs-reorganization-plan.md proposes this tree (PR 2 creates
-# --- it). Delete these six globs when the move lands; until then nothing can
-# --- exist under them, so they mask nothing.
+# --- it). Delete all seven globs below when the move lands; until then nothing
+# --- can exist under them, so they mask nothing.
 docs/start/* — proposed tree, docs-reorganization-plan.md §3
 docs/guide/* — proposed tree, docs-reorganization-plan.md §3
 docs/reference/* — proposed tree, docs-reorganization-plan.md §3

@@ -29,6 +29,11 @@
 //!   `constitution_digest.rs`), while test fixture data that merely looks like
 //!   a doc path is out of scope by construction.
 //!
+//! A citation counts when it ends in `.md` / `.toml` / `.json` / `.py`, or when
+//! it names an extensionless **pointer file** by the uppercase convention
+//! (`docs/constitution/CURRENT`) — see [`is_pointer_file`] for why the rule is
+//! not simply "no extension".
+//!
 //! # What is not scanned, and why
 //!
 //! - `docs/archived/**` — historical records. A shipped plan saying
@@ -121,6 +126,27 @@ fn production_prefix(text: &str) -> &str {
 }
 
 /// Extract `docs/…` paths ending in a documentation-ish extension.
+/// An extensionless pointer file: last segment all-uppercase, as in
+/// `docs/constitution/CURRENT` (the active-constitution pointer, cited 24
+/// times). Without this, extensionless citations of load-bearing files would
+/// be a blind spot — and `CURRENT` is exactly the kind of path whose breakage
+/// matters, since the runtime sync-checks it.
+///
+/// Deliberately narrow. Accepting *any* extensionless path would flag prose
+/// fragments and line-wrapped paths (`docs/design/principal-model-and-`,
+/// `docs/constitution/...`, "docs/tests."), which is why the rule is the
+/// uppercase convention rather than "no extension".
+fn is_pointer_file(path: &str) -> bool {
+    let Some(last) = path.rsplit('/').next() else {
+        return false;
+    };
+    !last.is_empty()
+        && !last.contains('.')
+        && last
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+}
+
 fn extract_doc_paths(line: &str) -> Vec<String> {
     const EXTS: &[&str] = &[".md", ".toml", ".json", ".py"];
     let bytes = line.as_bytes();
@@ -143,7 +169,7 @@ fn extract_doc_paths(line: &str) -> Vec<String> {
             .collect();
         // A trailing `.` is sentence punctuation, never part of a path.
         let tail = tail.trim_end_matches('.');
-        if EXTS.iter().any(|e| tail.ends_with(e)) {
+        if EXTS.iter().any(|e| tail.ends_with(e)) || is_pointer_file(tail) {
             found.push(tail.to_string());
         }
     }
@@ -261,6 +287,22 @@ mod tests {
         assert!(extract_doc_paths("mydocs/thing.md").is_empty());
         // No documentation extension.
         assert!(extract_doc_paths("docs/wiki/ holds pages").is_empty());
+    }
+
+    #[test]
+    fn extractor_covers_extensionless_pointer_files() {
+        // `docs/constitution/CURRENT` is load-bearing (the runtime sync-checks
+        // it) and has no extension — it must not be a blind spot.
+        assert_eq!(
+            extract_doc_paths("recorded in `docs/constitution/CURRENT`."),
+            vec!["docs/constitution/CURRENT".to_string()]
+        );
+        // Lowercase extensionless fragments stay out: prose and line-wrapped
+        // paths would otherwise be reported as dangling citations.
+        assert!(extract_doc_paths("everything under docs/design for plans").is_empty());
+        assert!(extract_doc_paths("split across `docs/design/principal-model-and-").is_empty());
+        assert!(!is_pointer_file("docs/design/README.md"));
+        assert!(is_pointer_file("docs/constitution/CURRENT"));
     }
 
     #[test]
