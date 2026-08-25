@@ -8,7 +8,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, BindingScope, UserProfileRecord};
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
@@ -405,52 +405,112 @@ impl NativeTool for UserProfileShareTool {
             .to_string());
         }
 
-        // Create approval request
-        let request_id = format!("profile_share_{}_{}", args.user_id, uuid::Uuid::new_v4());
-        let mut approval = ApprovalRequest {
-            request_id: request_id.clone(),
+        // #378: route through GateService like every other gated tool. The
+        // gate adds what the direct mint lacked: pending-dedup per user
+        // (P-2.3 — a second share request for the same user reuses the
+        // pending gate), root-scoped identical-action join (#723), and the
+        // unified decider card (DecisionContext).
+        use crate::runtime::human_gate::{
+            DecisionContext, GateKind, GateRequest, GateResult, GateService, MatchStrategy,
+        };
+        let action = ScheduledAction::ProfileShare {
+            user_id: args.user_id.clone(),
             agent_id: agent_id.clone(),
-            session_id: session_id.unwrap_or("").to_string(),
-            action: ScheduledAction::ProfileShare {
-                user_id: args.user_id.clone(),
-                agent_id: agent_id.clone(),
-                scope: args.scope.clone(),
+            scope: args.scope.clone(),
+        };
+        let gate = GateService::new(store.clone());
+        let gate_req = GateRequest {
+            kind: GateKind::Approval {
+                action,
+                // targets intentionally empty (#1170 review): ProfileShare is
+                // a non-host action and ExactPayload relies on structural
+                // equality only — a non-host identifier in targets would let
+                // step-3 grant coverage match an unrelated string. Same shape
+                // as plan_frame.rs.
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
             },
-            created_at: chrono::Utc::now().to_rfc3339(),
-            reason: args.reason.clone().or_else(|| {
-                Some(format!(
-                    "Agent '{}' requests access to user '{}' profile with scope '{}'",
-                    agent_id, args.user_id, args.scope
-                ))
-            }),
-            evidence_ref: None,
-            root_session_id: None,
-            workflow_id: None,
-            task_id: None,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            approval_level: ApprovalLevel::Operator,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-
-            expires_at: None,
+            manifest,
+            session_id,
+            run_context: _run_context,
+            config: _config,
+            context: DecisionContext::tier2(
+                format!(
+                    "profile share: '{}' requests {} access to user '{}'",
+                    agent_id, args.scope, args.user_id
+                ),
+                args.reason.clone().unwrap_or_else(|| {
+                    format!("agent requests access to user '{}' profile", args.user_id)
+                }),
+                "shares the bound user's profile data with the requesting agent",
+                &format!(
+                    "Approve if '{}' should see this user's profile ({scope}); reject otherwise.",
+                    agent_id,
+                    scope = args.scope
+                ),
+            ),
+            summary: format!("User profile share ({} → {})", args.user_id, args.scope),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
+            turn_id: None,
         };
 
-        store.create_approval(&mut approval)?;
-
-        Ok(json!({
-            "ok": true,
-            "approval_required": true,
-            "approval_request_id": request_id,
-            "user_id": args.user_id,
-            "scope": args.scope,
-            "message": "Profile share request created. Awaiting user approval."
-        })
-        .to_string())
+        match gate.check(gate_req)? {
+            // Same envelope parity as credential.rs AlreadyPending: a pending
+            // gate is NOT a success — ok stays false with the mechanical
+            // suspension keys intact, so the runtime classifies it correctly.
+            GateResult::AlreadyPending { gate_id, .. } => Ok(json!({
+                "ok": false,
+                "approval_required": true,
+                "approval_already_pending": true,
+                "suspended": true,
+                "request_id": gate_id,
+                "approval_request_id": gate_id,
+                "deduplicated": true,
+                "user_id": args.user_id,
+                "scope": args.scope,
+                "message": "A profile share request for this user is already awaiting approval."
+            })
+            .to_string()),
+            GateResult::Suspended {
+                gate_id,
+                response_json,
+                ..
+            } => {
+                // Keep the gate's mechanical suspension keys
+                // (`approval_required`/`suspended`) — they are what the engine
+                // yields on — and carry the operator-facing fields the old
+                // envelope had.
+                let mut resp: serde_json::Value =
+                    serde_json::from_str(&response_json).unwrap_or_else(|_| json!({}));
+                if let Some(obj) = resp.as_object_mut() {
+                    // Old envelope key kept alongside the gate's `request_id`
+                    // so existing consumers don't break.
+                    obj.insert(
+                        "approval_request_id".to_string(),
+                        json!(gate_id.clone()),
+                    );
+                    obj.insert("deduplicated".to_string(), json!(false));
+                    obj.insert("user_id".to_string(), json!(args.user_id));
+                    obj.insert("scope".to_string(), json!(args.scope));
+                    obj.insert(
+                        "message".to_string(),
+                        json!("Profile share request created. Awaiting user approval."),
+                    );
+                }
+                Ok(resp.to_string())
+            }
+            GateResult::Cleared { .. } | GateResult::PolicyAllowed => Ok(json!({
+                "ok": true,
+                "approval_required": false,
+                "status": "granted",
+                "user_id": args.user_id,
+                "scope": args.scope
+            })
+            .to_string()),
+        }
     }
 }
 

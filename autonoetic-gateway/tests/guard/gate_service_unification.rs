@@ -25,8 +25,8 @@ const ALLOWLIST: &[&str] = &[
     // Each needs its own migration issue before its next behavioral change —
     // a stale allowlist is how this guard quietly stops guarding.
     "runtime/tools/federation.rs", // promotion-review escalation projection
-    "runtime/tools/session.rs",
-    "runtime/tools/user_profile.rs",
+    // (session.rs, user_profile.rs migrated in #378; egress_labeler.rs in
+    // #1164.)
     "scheduler/gateway_store/session_envelopes.rs",
     "scheduler/runner.rs",
 ];

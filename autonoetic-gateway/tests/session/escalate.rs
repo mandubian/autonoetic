@@ -482,3 +482,81 @@ async fn test_escalation_approval_resume_injects_guidance_body() -> anyhow::Resu
 
     Ok(())
 }
+
+/// #378 — a second human escalation in the same session reuses the pending
+/// gate (P-2.3 kind-level dedup) instead of minting a duplicate approval row.
+#[serial_test::serial]
+#[tokio::test]
+async fn test_session_escalate_dedups_pending_gate() -> anyhow::Result<()> {
+    let workspace = crate::support::TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+
+    let manifest = test_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let session_id = "escalation-dedup-session";
+    let args = serde_json::json!({
+        "reason": "still stuck",
+        "context": "same problem, second attempt to escalate",
+        "target": "human",
+        "urgency": "high",
+    });
+
+    let agent_dir = workspace.agents_dir.join("dedup-test-agent");
+    std::fs::create_dir_all(&agent_dir)?;
+    std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
+
+    let run = |args: &serde_json::Value| {
+        registry.execute(
+            "session_escalate",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+    };
+
+    let first = serde_json::from_str::<serde_json::Value>(&run(&args)?)?;
+    assert_eq!(first["escalation_required"], serde_json::json!(true));
+    assert_eq!(first.get("deduplicated"), Some(&serde_json::Value::Bool(false)));
+    let first_id = first["request_id"].as_str().unwrap().to_string();
+
+    // Second escalation — same session, same kind. Must reuse the pending
+    // gate, not mint a second row.
+    let second = serde_json::from_str::<serde_json::Value>(&run(&args)?)?;
+    assert_eq!(second["escalation_required"], serde_json::json!(true));
+    assert_eq!(
+        second.get("deduplicated"),
+        Some(&serde_json::Value::Bool(true)),
+        "second escalation must be deduplicated onto the pending gate"
+    );
+    assert_eq!(
+        second["request_id"].as_str().unwrap(),
+        first_id,
+        "both escalations must reference the SAME gate id"
+    );
+
+    let pending = load_approval_requests(&config, Some(store.as_ref()))?;
+    let count = pending
+        .iter()
+        .filter(|r| r.session_id == session_id)
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly ONE SessionEscalate approval row must exist for the session"
+    );
+
+    Ok(())
+}

@@ -74,7 +74,7 @@ impl NativeTool for SessionEscalateTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -154,8 +154,6 @@ impl NativeTool for SessionEscalateTool {
                 })?;
                 let root_session_id =
                     crate::runtime::content_store::root_session_id(sid).to_string();
-                let request_id =
-                    autonoetic_types::id_format::short_random_id("esc-");
                 let action = autonoetic_types::background::ScheduledAction::SessionEscalate {
                     session_id: sid.to_string(),
                     root_session_id: root_session_id.clone(),
@@ -167,66 +165,80 @@ impl NativeTool for SessionEscalateTool {
                     payload: None,
                     kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
                 };
-                // Same reasoning as the workflow lookup above, but this arm
-                // feeds an approval request, so a wrong gateway dir would file
-                // the escalation against the wrong store. Fail loudly instead.
-                let Some(gw_config) = config else {
-                    return Err(anyhow::anyhow!(
-                        "config is required for human escalation approval"
-                    ));
-                };
-                let wf_id = crate::scheduler::resolve_workflow_id_for_root_session(
-                    gw_config,
-                    &root_session_id,
-                )
-                .ok()
-                .flatten();
-                let task_id = wf_id.as_ref().and_then(|wf| {
-                    crate::scheduler::resolve_task_id_for_session(gw_config, None, wf, sid)
-                        .ok()
-                        .flatten()
-                });
-                let approval_level =
-                    crate::scheduler::approval::resolve_approval_level(gw_config, &action);
-                let mut request = autonoetic_types::background::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: sid.to_string(),
-                    action: action.clone(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    reason: Some(format!(
-                        "Agent '{}' is stuck and needs human guidance. Urgency: {}. Reason: {}",
-                        manifest.agent.id, args.urgency, args.reason
-                    )),
-                    evidence_ref: None,
-                    root_session_id: Some(root_session_id),
-                    workflow_id: wf_id.clone(),
-                    task_id,
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    decision_reason: None,
-                    approval_level,
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-                    code_excerpts: None,
-                    risk_summary: None,
 
-                    expires_at: None,
+                // #378: route through GateService like every other gated tool.
+                // Empty targets + HostLevel preserves the kind-level dedup the
+                // escalation pipeline uses: a second identical escalation in
+                // the same session reuses the pending gate instead of minting
+                // another approval row (P-2.3). Workflow/task binding comes
+                // from run_context, same as sandbox/web/credential parity.
+                use crate::runtime::human_gate::{
+                    DecisionContext, GateKind, GateRequest, GateResult, GateService,
+                    MatchStrategy,
                 };
-                store.create_approval(&mut request)?;
+                let gate = GateService::new(store.clone());
+                let gate_req = GateRequest {
+                    kind: GateKind::Approval {
+                        action: action.clone(),
+                        targets: Vec::new(),
+                        match_strategy: MatchStrategy::HostLevel,
+                    },
+                    manifest,
+                    session_id,
+                    run_context,
+                    config,
+                    context: DecisionContext::tier2(
+                        format!(
+                            "human escalation (urgency: {}): {}",
+                            args.urgency, args.reason
+                        ),
+                        "agent is stuck and requests operator guidance",
+                        "suspends the session pending an operator decision",
+                        "Provide guidance or approve continuation; reject to end the task",
+                    ),
+                    summary: format!("Human escalation from {}", manifest.agent.id),
+                    approval_ref: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    request_id: None,
+                    turn_id: None,
+                };
 
-                serde_json::json!({
-                    "escalation_type": "human",
-                    "message": "Escalation logged. A human operator will review your request.",
-                    "urgency": args.urgency,
-                    "reason": args.reason,
-                    "context": args.context,
-                    "suggested_actions": suggested_actions.clone(),
-                    "escalation_required": true,
-                    "request_id": request_id.clone(),
-                    "note": "The session is suspended pending operator approval. Do not continue executing tools."
-                })
+                match gate.check(gate_req)? {
+                    GateResult::AlreadyPending { gate_id, .. } => serde_json::json!({
+                        "escalation_type": "human",
+                        "message": "Escalation already pending; an operator will review it.",
+                        "urgency": args.urgency,
+                        "reason": args.reason,
+                        "context": args.context,
+                        "suggested_actions": suggested_actions.clone(),
+                        "escalation_required": true,
+                        "request_id": gate_id,
+                        "deduplicated": true,
+                        "note": "The session is suspended pending operator approval. Do not continue executing tools."
+                    }),
+                    GateResult::Suspended { gate_id, .. } => serde_json::json!({
+                        "escalation_type": "human",
+                        "message": "Escalation logged. A human operator will review your request.",
+                        "urgency": args.urgency,
+                        "reason": args.reason,
+                        "context": args.context,
+                        "suggested_actions": suggested_actions.clone(),
+                        "escalation_required": true,
+                        "request_id": gate_id,
+                        "deduplicated": false,
+                        "note": "The session is suspended pending operator approval. Do not continue executing tools."
+                    }),
+                    GateResult::Cleared { .. } | GateResult::PolicyAllowed => {
+                        // Unreachable for SessionEscalate: no session-grant
+                        // targets, no approval_ref, no policy bypass. Kept
+                        // explicit so a future GateService change fails loudly
+                        // here instead of silently skipping the operator.
+                        return Err(anyhow::anyhow!(
+                            "human escalation unexpectedly cleared without operator decision"
+                        ));
+                    }
+                }
             }
             _ => {
                 // Invalid target: return the canonical envelope and do NOT log an
