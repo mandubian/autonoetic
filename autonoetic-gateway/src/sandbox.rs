@@ -1423,7 +1423,7 @@ fn expand_tilde(p: &str, home: &Option<PathBuf>) -> Option<PathBuf> {
 /// writable workspace, and every explicit mount. Capped at [`MOUNT_SET_CAP`]
 /// entries with an explicit `truncated:+N` marker. Tools report this in their
 /// result; the processor persists it on the execution trace.
-pub fn compose_mount_set(
+pub(crate) fn compose_mount_set(
     driver: driver::SandboxDriverKind,
     agent_dir: &str,
     mounts: &[SandboxMount],
@@ -1452,7 +1452,7 @@ pub fn compose_mount_set(
 
 /// Upper bound on persisted mount-set entries — one row per exec must stay a
 /// row, not a directory listing.
-pub const MOUNT_SET_CAP: usize = 64;
+pub(crate) const MOUNT_SET_CAP: usize = 64;
 
 pub(crate) fn sandbox_env_overrides_allowed() -> bool {
     parse_env_bool(
