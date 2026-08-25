@@ -438,13 +438,14 @@ fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
 
     // A differently-labeled batch still dedups onto the same offer: the
     // payload is canonical; the label lives in the DecisionContext only.
+    // Both labels exclude RemoteModel, so either could trigger the refusal.
     let id3 = file_declassify_offer(
         &store,
         &config,
         session,
         root,
         &manifest,
-        &EgressLabel::unrestricted(),
+        &EgressLabel::no_remote_model(),
     )
     .expect("offer reused across batch labels");
     assert_eq!(id1, id3);
