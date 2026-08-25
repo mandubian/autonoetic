@@ -98,15 +98,19 @@ fn accept_one(listener: TcpListener, label: &str) -> Option<TcpStream> {
     accept_one_borrowed(&listener, label)
 }
 
-/// Store + session id for the web tools' egress boundary.
+/// The gateway dir and store half of what the web tools' egress boundary needs.
 ///
 /// Since #955/#957 `web_fetch`/`web_search` fail closed when they cannot confirm
-/// the session's egress taint: no `GatewayStore` (or no session id) means
-/// `egress_boundary_refused`, before any HTTP is attempted. These tests predate
-/// that gate and were passing `None` for both, so the tool refused and the local
-/// stub servers were never contacted. A session with no recorded taint resolves
-/// to `EgressLabel::unrestricted()`, so this restores the boundary to a no-op
-/// and puts the tool under test back in the answering position.
+/// the session's egress taint: a missing `GatewayStore` *or* a missing session id
+/// means `egress_boundary_refused`, before any HTTP is attempted. These tests
+/// predate that gate and passed `None` for both, so the tool refused and the
+/// local stub servers were never contacted.
+///
+/// This returns only the store (and the dir it lives in) — the session id is the
+/// other half and is passed at each call site, since tests that care about
+/// session identity set their own. A session with no recorded taint resolves to
+/// `EgressLabel::unrestricted()`, so together they restore the boundary to a
+/// no-op and put the tool under test back in the answering position.
 fn web_egress_context(temp: &std::path::Path) -> (std::path::PathBuf, Arc<GatewayStore>) {
     let gateway_dir = temp.join("runtime");
     std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
