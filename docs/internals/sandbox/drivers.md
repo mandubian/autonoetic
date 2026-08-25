@@ -74,6 +74,69 @@ An unregistered kind answers `false`, so the gate fails closed. This is a
 network **grant** decided in `runtime/network_grant.rs` — see
 `docs/internals/sandbox/network-grant.md`.
 
+## Host-filesystem exposure (`host_fs`)
+
+What of the *host* exists inside the sandbox is a per-driver property, and only
+bubblewrap has a choice about it. `config:sandbox.host_fs` selects between two
+modes; docker, microvm and wasm already behave like `allow_set` because none of
+them binds the host root, so the key changes the bubblewrap tier only.
+
+| Mode | Behaviour |
+|---|---|
+| `legacy` (current default) | `--ro-bind / /` — the whole host filesystem is readable inside the sandbox. Deprecated; a warning is logged at startup, and the secret mask is the stopgap that keeps credentials out |
+| `allow_set` | Nothing of the host exists except what the gateway asserts |
+
+The default flips after launch (DP-1 in the originating proposal).
+
+### What the allow-set contains
+
+`allow_set` cannot be expressed as "bind less", because bwrap's default root
+*is* the host root. Composition therefore starts by making the root empty and
+layers upward, in order:
+
+1. `--tmpfs /` — an empty root, so every later bind is additive rather than
+   subtractive. This is the step that makes the mode a whitelist.
+2. `--proc /proc`.
+3. **Toolchain roots**, read-only: `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`,
+   `/etc/ld.so.cache`. Candidates absent on this host are skipped. Symlinked
+   paths are canonicalized as the bind *source* but bound at their **original**
+   path, so on merged-`/usr` systems a command referencing either `/bin/sh` or
+   `/usr/bin/sh` resolves.
+4. **Name resolution**, read-only: `/etc/resolv.conf`, `/etc/hosts`,
+   `/etc/nsswitch.conf` — needed whenever the exec may reach the network, and
+   harmless (three tiny file binds) when it may not.
+5. **The Python SDK tree**, read-only, bound *at its own path* rather than by
+   exposing the gateway directory — that distinction is what keeps gateway
+   secrets out of the sandbox. Without this bind `import autonoetic_sdk` fails
+   under `allow_set`, because the legacy blanket bind used to supply it.
+6. **Workspace, layers, declared and granted mounts, session content.**
+
+`ALLOW_SET_TOOLCHAIN_ROOTS` and `ALLOW_SET_NAME_RESOLUTION` in
+`sandbox/driver/bubblewrap.rs` are the literal lists; `host_fs_mode()` resolves
+the mode from the per-exec overrides.
+
+### Declared mounts are the filesystem's `allowed_hosts`
+
+Reach beyond the allow-set is **declared by the agent and asserted by the
+gateway**, the same shape as network egress: a `SKILL.md` `runtime.mounts`
+entry asks, the operator's config bounds what may be granted, and the gateway
+decides per exec.
+
+- `config:sandbox.allowed_mount_roots` — roots any declared mount must sit
+  under. A mount is granted iff its canonicalized path is under one of them.
+- `config:sandbox.allowed_mount_roots_rw` — the subset that may be granted
+  read-write. A declared mount may **narrow** (ro under an rw root) but never
+  **widen**: rw under a read-only root is refused.
+
+Refusals name the config key that would permit the mount rather than only
+stating that it was denied, so a denial teaches the fix — the same principle as
+the network-grant refusals. Enforcement lives in `sandbox.rs`; the manifest-side
+surface is in `runtime/tools/sandbox.rs`.
+
+Undeclared reach is a decision, not an oversight: under `allow_set` a path
+nobody declared is simply absent, and the exec fails on a missing file rather
+than silently reading something it was never granted.
+
 ## Adding a driver
 
 1. **One new file** under `sandbox/driver/` implementing `SandboxDriver`.

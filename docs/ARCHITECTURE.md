@@ -241,7 +241,7 @@ Gateway: 1. Resolve name → handle from session manifest
 
 ### Security Sentinel
 
-A dedicated system-tier agent audits the gateway's own state for security issues. See [`docs/internals/divergence-sentinel.md`](internals/divergence-sentinel.md) for design, phased build plan, and the three hard problems (recursive trust, prompt injection against the auditor, and calibration).
+A dedicated system-tier agent audits the gateway's own state for security issues. See [`docs/internals/security-sentinel.md`](internals/security-sentinel.md) for design, phased build plan, and the three hard problems (recursive trust, prompt injection against the auditor, and calibration).
 
 The sentinel lives in `agents/system/` — a new tier parallel to `lead/`, `specialists/`, and `evolution/`. Placing it in a distinct tier signals that it must be visibly harder to silently revise than evolution-tier agents.
 

@@ -905,7 +905,7 @@ autonoetic mcp expose [--port <PORT>]
 ## Security Commands
 
 Security sentinel: status, findings, triage, and red-team pattern proposals.
-Behaviour is described in [`../internals/divergence-sentinel.md`](../internals/divergence-sentinel.md).
+Behaviour is described in [`../internals/security-sentinel.md`](../internals/security-sentinel.md).
 
 ### `autonoetic security status`
 

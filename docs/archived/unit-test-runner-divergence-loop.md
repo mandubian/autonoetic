@@ -1,3 +1,5 @@
+> **Archived — shipped and promoted.** The behaviour is described in [`divergence-detection.md`](../internals/divergence-detection.md) (the failing-test false-positive class). Kept as the design record; not source of truth.
+
 # RFC: Unit Test Runner Divergence Loop & Stuck-Session Recovery
 
 **Status:** Implemented — 2026-06-23. All five changes landed (Changes 1–5).

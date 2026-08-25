@@ -203,7 +203,7 @@ They cooperate; neither subsumes the other.
 | `SandboxExec.command` leaks verbatim to `ViewerClass::Agent`. | #158 (issue), #160 (PR) | PR open. Pinned by `agent_viewer_sandbox_exec_command_currently_preserves_secrets` — flips when PR lands. |
 | `X-API-Key` (hyphenated) does not match `is_sensitive_key`. `X-Auth-Token` and similar with `token` substring do match. | #156 follow-up | Open — adding `api-key` to the catalogue is straightforward but requires intent confirmation. Pinned by `is_sensitive_key_misses_hyphenated_api_key`. |
 | CLI rendering of approvals does not call `redact_for_display` or `redact_for_viewer(Operator)`; it formats `ApprovalRequest.action` directly. | (not yet filed) | Open — applying `Operator` redaction would be more defensible. The CLI is operator-only so secret leakage is not a current concern, but the layer should be applied for consistency. |
-| Frozen-baseline contract claim in `docs/internals/divergence-sentinel.md` overstates what dual-sweep catches. | #153 | Open — separate version-pinned baseline module is the architectural fix. |
+| Frozen-baseline contract claim in `docs/internals/security-sentinel.md` overstates what dual-sweep catches. | #153 | Open — separate version-pinned baseline module is the architectural fix. |
 | Promotion gate scopes critical findings system-wide rather than per-agent. | #155 (issue), #163 (PR) | PR open — adds `scope_agent_id` and threads it through the Phase-1 checks. |
 
 When closing one of these, please update the relevant table or note in this file in the same PR.

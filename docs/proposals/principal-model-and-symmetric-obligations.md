@@ -345,7 +345,7 @@ concentration of power the constitution otherwise guards against.
 ### D.3 The sanction flow (the sentinel question, sketched — not built now)
 
 When the security sentinel
-([`../security-sentinel.md`](../internals/divergence-sentinel.md),
+([`../security-sentinel.md`](../internals/security-sentinel.md),
 [`divergence-sentinel-design.md`](divergence-sentinel.md)) detects an agent
 doing bad things, *who decides it is degraded or banished?* The Lawful-Executor
 shape gives a clean separation that we should leave room for:
@@ -539,7 +539,7 @@ mechanism or breaking the wire.
   — the "would the system break without it?" bar this RFC's clauses must clear.
 - [`constitution-gate-amendments.md`](../archived/constitution-gate-amendments.md) —
   agent-as-decider work that O-5 (duty to escalate) builds on.
-- [`../security-sentinel.md`](../internals/divergence-sentinel.md) /
+- [`../security-sentinel.md`](../internals/security-sentinel.md) /
   [`divergence-sentinel-design.md`](divergence-sentinel.md) — the detector
   whose findings the (future) judicial authority would adjudicate (D.3): sentinel
   proposes, authority sentences, gateway enforces.

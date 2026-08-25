@@ -257,7 +257,7 @@ Each entry records:
 
 The event's `target` column carries the entry's `target` field, enabling direct queries like "why was memory X dropped?". A summary event (`decision_journal_recorded`) is also emitted per agent run with the total entry count.
 
-The category parameter is configurable per agent type (defaults to `curator`). See `docs/internals/divergence-sentinel.md` for how the sentinel's future LLM-judgment layer will audit these entries.
+The category parameter is configurable per agent type (defaults to `curator`). See `docs/internals/security-sentinel.md` for how the sentinel's future LLM-judgment layer will audit these entries.
 
 ---
 
@@ -1270,7 +1270,7 @@ capsule:
 
 ## Security Sentinel
 
-System-tier read-only auditor over causal events, promotion history, approvals, layer mounts, and SKILL.md bodies. Produces append-only `SecurityFinding` records. See [`docs/internals/divergence-sentinel.md`](../internals/divergence-sentinel.md) for the full design and threat model.
+System-tier read-only auditor over causal events, promotion history, approvals, layer mounts, and SKILL.md bodies. Produces append-only `SecurityFinding` records. See [`docs/internals/security-sentinel.md`](../internals/security-sentinel.md) for the full design and threat model.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

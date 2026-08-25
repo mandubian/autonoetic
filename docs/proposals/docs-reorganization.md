@@ -141,7 +141,7 @@ must be merged, not picked.
 | 6 | `ARCHITECTURE.md` **split** | keep overview; move session/storage chapters to `internals/` | 1,608 lines; a pasted Live Digest sample leaks `## Turn 1 — {timestamp}` headings into the document outline |
 | 7 | `agent-features.md` | `AGENTS.md`, then archived | `README.md` has called it "partially superseded" since May — finish the merge (middleware / disclosure / background scheduling are the unique parts) |
 | 8 | `agent-skill-frontmatter.md` + `AGENTS.md` SKILL section | `reference/skill-manifest.md` | Three descriptions of one manifest (+ the `wiki/skill-manifest.md` digest). 0 inbound refs on the top-level file |
-| 9 | `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/divergence-sentinel.md` (+ open P4 items to `proposals/`) | Shipped behaviour described in a `design/` doc; overview doc untouched since May |
+| 9 | `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/security-sentinel.md` (+ open P4 items to `proposals/`) | Shipped behaviour described in a `design/` doc; overview doc untouched since May |
 | 10 | `session-room.md` / `session-room-architecture.md` / `rfc/session-room-channel-agnostic-timeline.md` / `design/session-room-conversational-input.md` | `guide/session-room.md` + `internals/session/room.md`; RFC + input plan archived | User guide vs architecture split is *good* — keep it, drop the two shipped design docs |
 | 11 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (spec archived) | April spec, 97 lines, 23 inbound refs → sweep required |
 | 12 | `plan-egress-phase2-907.md`, `plan-egress-phase3-908.md` | archived; live model → `internals/egress/` | Phases merged. Phase 4 (#909) stays a proposal while slices are open |
@@ -196,6 +196,27 @@ That is also why §8.3's `live_reference` invariant matters more than a `status`
 field: a status is a claim its author never has to keep true, while a
 `live_reference` that must resolve is checkable.
 
+### 5.4 Correction: two subsystems share the word "sentinel"
+
+PR 2 renamed `security-sentinel.md` → `internals/divergence-sentinel.md`, and
+merge #9 in §5 proposed folding `design/divergence-sentinel-design.md` into it.
+That was wrong: the file describes the **security sentinel** (security findings,
+triage, supply chain, red team; `src/sentinel/`), while divergence detection is a
+different subsystem (session trajectory, LoopGuard pressure, the watchdog;
+`runtime/trajectory_health.rs`). Same word, unrelated machinery.
+
+Found while looking for the promotion target for
+`unit-test-runner-divergence-loop`: the intended target's own heading said
+"Security Sentinel: System-Tier Security Agent". The lesson is narrow but real —
+**a rename is a claim about content, and merge #9 was proposed from filenames
+rather than from reading both files.**
+
+Fixed here: the file is `internals/security-sentinel.md` again, and divergence
+detection got the live doc it never had
+(`internals/divergence-detection.md`), which is where the promotion landed.
+Merge #9 is withdrawn: there is nothing to merge, because the two docs were
+never about the same thing.
+
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 
 A shipped design doc must **not** be archived reflexively. Archiving is correct
@@ -220,7 +241,7 @@ Preliminary pass (full audit is PR 4 — these are candidates, not verdicts):
 |---|---|---|
 | `design/task-robustness.md` | `expected_outputs` mentioned in `ARCHITECTURE.md`/`AGENTS.md`/`config-reference.md`; cross-provider failover described **nowhere**; Part E.1 covered by `context-compression.md` | **Split → promote** the failure taxonomy + failover + preflight |
 | `rfc/sandbox-mount-allow-set.md` | only `config-reference.md` names `mount_set`; declared mounts + operator allowlist + tier guard undescribed (shipped #1002 this week) | **Promote** into `internals/sandbox/drivers.md` |
-| `rfc/unit-test-runner-divergence-loop.md` | one passing mention in the beginners guide | **Promote** into `internals/divergence-sentinel.md` |
+| `rfc/unit-test-runner-divergence-loop.md` | one passing mention in the beginners guide | **Promote** into `internals/security-sentinel.md` |
 | `rfc/credential-egress-host-authorization.md` | `credential-management.md` documents `allowed_hosts` | Archive — **verify** it covers routing-input-not-bypass semantics |
 | `rfc/llm-preset-inference-profiles.md` | `config-reference.md` + `wiki/gateway-config.md` cover presets as config | Archive — **verify** the inference-profile concept is covered |
 | `design/promotion-completeness-invariant.md` | severity gating in `AGENTS.md`/`CLAUDE.md`/`agent-prompt-guidance.md` | Archive — **verify** the invariant itself is stated |
@@ -317,7 +338,7 @@ strings and in `agents/**/SKILL.md` are updated in that same PR by necessity.
 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (merge #11) |
 | `egress-data-owner-compartment.md` | `internals/egress/data-owner-compartment.md` |
 | *(new)* | `internals/egress/README.md` — the current label plane, distilled from the RFC + shipped phases |
-| `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/divergence-sentinel.md` (merge #9) |
+| `security-sentinel.md` + `design/divergence-sentinel-design.md` | `internals/security-sentinel.md` (merge #9) |
 | `federation-carry-forward.md` | `internals/federation-carry-forward.md` |
 | `code-analysis.md` | `internals/code-analysis.md` |
 | `observability-redaction.md` | `internals/observability-redaction.md` |
@@ -493,7 +514,7 @@ four commands. Hand-written prose (workflows, examples) lives in
 | **2. Move, don't edit** ✅ **done** | Guard extended to relative links **first** (§8.1), then 75 `git mv`s and a link rewrite across 138 files. The rewrite is a resolver, not a sed script: a relative link is recomputed whenever *either* endpoint moves, so all four cases (both static, source moved, target moved, both moved) are handled. `docs/README.md` rewritten as the map — pulled forward from PR 5 because every line's path changed anyway and shipping a stale catalogue would be worse | Medium — large diff, mechanically verified by both guard checks |
 | **3. The real merges** ✅ **partly done** | Shipped: #1 CLI union (+ a coverage guard so the omission class cannot recur), #2 budgets, #3 crate map (deduped — §5.2), #4 powers. **Deferred with reasons below:** #6 ARCHITECTURE split, #7 agent-features fold, #8 skill manifest, #9 sentinel, #11 sandbox isolation | Content review needed — one commit per merge |
 | **4a. Status audit + `proposals/`** ✅ **done** | All 39 design+RFC docs audited against code and against live-doc coverage. 29 → `proposals/` under one index, 9 → `archived/` each stamped with a pointer to the doc that now describes it, 1 → `concepts/` (a discussion essay, not a proposal). `design/` and `rfc/` are gone. New guard: every proposal must be linked from `proposals/README.md` | Done — judgement per doc, recorded in the index |
-| **4b. Promotions** | Write the four **PROMOTE** docs (§5.1) into `internals/`/`reference/`, then archive their proposals. Unblocks merges #9 and #11 from PR 3 | Content authorship — one doc at a time |
+| **4b. Promotions** ✅ **2 of 4** | Promoted `sandbox-mount-allow-set` → `internals/sandbox/drivers.md` and `unit-test-runner-divergence-loop` → a new `internals/divergence-detection.md`; both proposals archived with pointers. **Also corrected a PR-2 error — see §5.4.** Remaining: `task-robustness`, `content-patch-tool` | Content authorship — one doc at a time |
 | **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.

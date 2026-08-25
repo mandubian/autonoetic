@@ -43,7 +43,7 @@ impl GatewayServer {
                     "sandbox.host_fs is '{other}', not 'allow_set': bubblewrap sandboxes \
                      keep the legacy whole-host ro-bind. Set sandbox.host_fs: allow_set to \
                      mount only the gateway-asserted set (RFC \
-                     docs/proposals/sandbox-mount-allow-set.md); the default flips after launch."
+                     docs/internals/sandbox/drivers.md); the default flips after launch."
                 );
             }
         }
