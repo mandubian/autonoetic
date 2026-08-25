@@ -82,6 +82,16 @@ fn bounded_stack_child() {
     use autonoetic_gateway::server::GatewayServer;
     use autonoetic_types::config::GatewayConfig;
 
+    // Env guards are process-wide and this child runs alone, but RAII keeps
+    // the file honest if it ever joins a grouped binary (#1168 review).
+    let _shared_secret =
+        crate::support::EnvGuard::set("AUTONOETIC_SHARED_SECRET", "test-shared-secret");
+    let _vault_key = crate::support::EnvGuard::set(
+        "AUTONOETIC_VAULT_KEY",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
+    let _vault_key_path = crate::support::EnvGuard::set("AUTONOETIC_VAULT_KEY_PATH", "");
+
     let workspace = crate::support::TestWorkspace::new().expect("test workspace");
     let mut config: GatewayConfig = workspace.gateway_config();
     config.retention.causal_events_days = 1;
@@ -90,16 +100,32 @@ fn bounded_stack_child() {
     let gateway_dir = config.runtime_dir.clone();
     std::fs::create_dir_all(&gateway_dir).expect("gateway dir");
 
-    // Same secret env real startup expects (constitution snapshot + vault init
-    // live on `run`'s frame — they are the deep chains this guard exists for).
-    // Set before spawning the bounded thread: process-wide either way, and the
-    // deep consumers read them from within it.
-    std::env::set_var("AUTONOETIC_SHARED_SECRET", "test-shared-secret");
-    std::env::set_var(
-        "AUTONOETIC_VAULT_KEY",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    );
-    std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", "");
+    // Seed a stale causal event so the startup retention pass has something
+    // to prune: its disappearance (and the `retention.pruned` event) is then
+    // PROOF the pre-bind bootstrap ran, not merely that some event exists
+    // (#1168 review finding 2).
+    {
+        let store = GatewayStore::open(&gateway_dir).expect("seed store");
+        store
+            .create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: "evt-bootstrap-budget-stale".to_string(),
+                agent_id: "stack-budget".to_string(),
+                session_id: "session-stack-budget".to_string(),
+                turn_id: Some("turn-0001".to_string()),
+                event_seq: 1,
+                timestamp: "2000-01-01T00:00:00Z".to_string(),
+                category: "stack-budget".to_string(),
+                action: "stale-fixture".to_string(),
+                status: "SUCCESS".to_string(),
+                enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                target: None,
+                payload: None,
+                payload_ref: None,
+                evidence_ref: None,
+                reason: Some("older than the 1-day retention window".to_string()),
+            })
+            .expect("seed stale event");
+    }
 
     // Pre-bind the OFP port so startup fails fast at bind time — AFTER the
     // retention pass and constitution work we want on the frame.
@@ -125,17 +151,24 @@ fn bounded_stack_child() {
                 "expected the pre-bound OFP port to stop startup after bootstrap, got: {err_text}"
             );
 
-            // Startup progressed past the retention pass — same assertion
-            // shape as the retention startup test, proving we got through the
-            // real bootstrap rather than bailing early.
+            // Startup progressed past the retention pass: the seeded stale
+            // event is gone and `retention.pruned` was emitted — same
+            // assertions as the retention startup test, proving we got
+            // through the real bootstrap rather than bailing early.
             let store_after =
                 GatewayStore::open(&std::path::PathBuf::from(gateway_dir)).expect("reopen store");
             let events = store_after
                 .search_causal_events(None, None, 200)
                 .expect("search causal events");
             assert!(
-                !events.is_empty(),
-                "startup must have progressed far enough to emit causal events"
+                !events.iter().any(|e| e.event_id == "evt-bootstrap-budget-stale"),
+                "the seeded stale event must be pruned during the bounded startup"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.category == "retention" && e.action == "pruned"),
+                "retention.pruned must be emitted during the bounded startup"
             );
         })
         .expect("bounded-stack thread should spawn");
