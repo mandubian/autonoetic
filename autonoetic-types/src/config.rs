@@ -2536,6 +2536,21 @@ pub struct SandboxConfig {
     /// denied with a teaching refusal).
     #[serde(default)]
     pub allowed_mount_roots_rw: Vec<String>,
+
+    /// Host-filesystem exposure mode (#1002 slice 4): `"legacy"` ro-binds the
+    /// whole host `/` into bubblewrap sandboxes (current behaviour, deprecated
+    /// — a deprecation warning is logged at startup); `"allow_set"` mounts only
+    /// the gateway-asserted set (workspace, toolchain roots, layers, SDK,
+    /// declared+granted mounts, session content). Docker/microvm/wasm already
+    /// behave like `allow_set` (no host `/` bind), so this key only changes
+    /// the bubblewrap tier. Default flips after launch (RFC
+    /// sandbox-mount-allow-set.md DP-1).
+    #[serde(default = "default_host_fs_mode")]
+    pub host_fs: String,
+}
+
+fn default_host_fs_mode() -> String {
+    "legacy".to_string()
 }
 
 impl Default for SandboxConfig {
@@ -2546,6 +2561,7 @@ impl Default for SandboxConfig {
             allow_recording: false,
             allowed_mount_roots: Vec::new(),
             allowed_mount_roots_rw: Vec::new(),
+            host_fs: default_host_fs_mode(),
         }
     }
 }

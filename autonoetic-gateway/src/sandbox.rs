@@ -53,6 +53,11 @@ static SDK_DEPLOYED_PATH: OnceLock<String> = OnceLock::new();
 pub struct BwrapIsolationOverrides {
     pub share_net: bool,
     pub force_network_off: bool,
+    /// #1002 slice 4: when true, the bubblewrap driver mounts only the
+    /// gateway-asserted allow-set (no `--ro-bind / /`). Defaults false in
+    /// every constructor — the tool layer sets it from
+    /// `config.sandbox.host_fs == "allow_set"`.
+    pub host_fs_allow_set: bool,
 }
 
 impl BwrapIsolationOverrides {
@@ -78,6 +83,7 @@ impl BwrapIsolationOverrides {
         Self {
             share_net,
             force_network_off: false,
+            host_fs_allow_set: false,
         }
     }
 
@@ -85,6 +91,7 @@ impl BwrapIsolationOverrides {
         Self {
             share_net: false,
             force_network_off: true,
+            host_fs_allow_set: false,
         }
     }
 }
@@ -1427,9 +1434,12 @@ pub(crate) fn compose_mount_set(
     driver: driver::SandboxDriverKind,
     agent_dir: &str,
     mounts: &[SandboxMount],
+    host_root_visible: bool,
 ) -> Vec<String> {
     let mut entries: Vec<String> = Vec::with_capacity(2 + mounts.len());
-    if driver == driver::SandboxDriverKind::Bubblewrap {
+    // `host_root_visible` is true only in bubblewrap legacy mode — the record
+    // must not claim visibility it doesn't have (#1002 slice 4).
+    if host_root_visible && driver == driver::SandboxDriverKind::Bubblewrap {
         entries.push("ro:host_root".to_string());
     }
     entries.push(format!("rw:{agent_dir}"));
@@ -1557,6 +1567,7 @@ mod compose_mount_set_tests {
             driver::SandboxDriverKind::Bubblewrap,
             "/agents/coder",
             &[mount("notes.md", true)],
+            true,
         );
         assert_eq!(set[0], "ro:host_root");
         assert!(set.contains(&"rw:/agents/coder".to_string()));
@@ -1571,7 +1582,7 @@ mod compose_mount_set_tests {
             driver::SandboxDriverKind::Docker,
             driver::SandboxDriverKind::MicroVm,
         ] {
-            let set = compose_mount_set(kind, "/agents/coder", &[]);
+            let set = compose_mount_set(kind, "/agents/coder", &[], true);
             assert!(
                 !set.contains(&"ro:host_root".to_string()),
                 "{kind:?} must not claim the host root"
@@ -1591,6 +1602,7 @@ mod compose_mount_set_tests {
             driver::SandboxDriverKind::Bubblewrap,
             "/agents/coder",
             &mounts,
+            true,
         );
         assert_eq!(
             set.len(),
@@ -1613,6 +1625,7 @@ mod compose_mount_set_tests {
             driver::SandboxDriverKind::Bubblewrap,
             "/a",
             &[mount("x", false), mount("y", true)],
+            true,
         );
         assert_eq!(set.len(), 4);
         assert!(set.iter().all(|e| !e.starts_with("truncated:")));

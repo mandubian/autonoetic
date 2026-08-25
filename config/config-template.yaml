@@ -75,6 +75,11 @@ sandbox:
   # also covered here. ro roots cannot be widened by a manifest.
   # allowed_mount_roots_rw:
   #   - /var/data/work
+  # Host-filesystem exposure for bubblewrap sandboxes: "legacy" ro-binds the
+  # whole host / (deprecated, logs a startup warning); "allow_set" mounts only
+  # the gateway-asserted set. Default flips after launch (RFC
+  # docs/rfc/sandbox-mount-allow-set.md).
+  host_fs: legacy
 
 # ── Background Scheduler ──────────────────────────────────────────────
 background_scheduler_enabled: true

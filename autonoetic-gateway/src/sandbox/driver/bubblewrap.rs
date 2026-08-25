@@ -176,13 +176,20 @@ fn bubblewrap_command(
     overrides: Option<&BwrapIsolationOverrides>,
 ) -> anyhow::Result<(String, Vec<String>)> {
     let (program, args) = split_entrypoint(entrypoint)?;
-    let mut argv = base_argv(agent_dir);
+    let mode = host_fs_mode(overrides);
+    let mut argv = base_argv(agent_dir, mode);
     append_bwrap_isolation_flags(&mut argv, overrides);
-    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
-    // the host `/` is ro-bind-mounted above). Must come after the ro-bind of
-    // `/` so the destinations resolve, and before any explicit re-expose
-    // mounts so they can layer back on top.
-    argv.extend(bwrap_deny_path_flags(gateway_dir));
+    if mode == HostFsMode::Legacy {
+        // Mask gateway-internal secrets + operator deny paths (stopgap for
+        // #1002). Must come after the ro-bind of `/` so the destinations
+        // resolve, and before any explicit re-expose mounts so they can layer
+        // back on top.
+        //
+        // Skipped in AllowSet mode: the host `/` is not mounted, so masked
+        // paths are simply absent — and bwrap would ERROR on a mask whose
+        // destination parent doesn't exist in the namespace.
+        argv.extend(bwrap_deny_path_flags(gateway_dir));
+    }
     argv.push("--".to_string());
     argv.push(program);
     argv.extend(args);
@@ -201,13 +208,18 @@ fn bubblewrap_shell_command(
         !shell_command.trim().is_empty(),
         "shell command must not be empty"
     );
-    let mut argv = base_argv(agent_dir);
+    let mode = host_fs_mode(overrides);
+    let mut argv = base_argv(agent_dir, mode);
     append_bwrap_isolation_flags(&mut argv, overrides);
 
-    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
-    // the host `/` is ro-bind-mounted above) BEFORE explicit content/SDK
-    // mounts so those can layer back on top of the masked paths when needed.
-    argv.extend(bwrap_deny_path_flags(gateway_dir));
+    if mode == HostFsMode::Legacy {
+        // Mask gateway-internal secrets + operator deny paths (stopgap for
+        // #1002) BEFORE explicit content/SDK mounts so those can layer back on
+        // top of the masked paths when needed. Skipped in AllowSet mode: the
+        // masked destinations don't exist in the namespace (and bwrap errors
+        // binding to a missing parent).
+        argv.extend(bwrap_deny_path_flags(gateway_dir));
+    }
 
     // Add extra bind mounts for session content
     for mount in extra_mounts {
@@ -244,17 +256,78 @@ fn bubblewrap_shell_command(
 
 /// Mount prologue shared by both command forms: ro-bind the host `/`, bind the
 /// agent dir as the workspace, chdir into it.
-fn base_argv(agent_dir: &str) -> Vec<String> {
-    vec![
-        "--ro-bind".to_string(),
-        "/".to_string(),
-        "/".to_string(),
-        "--bind".to_string(),
-        agent_dir.to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-        "--chdir".to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-    ]
+/// Host-filesystem exposure for the bubblewrap tier (#1002 slice 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostFsMode {
+    /// Blanket `--ro-bind / /` (deprecated; the secret mask is the stopgap).
+    Legacy,
+    /// Only the gateway-asserted allow-set: workspace, toolchain roots, SDK
+    /// tree, session/declared mounts. Nothing else of the host exists.
+    AllowSet,
+}
+
+fn host_fs_mode(overrides: Option<&BwrapIsolationOverrides>) -> HostFsMode {
+    if overrides.map(|o| o.host_fs_allow_set).unwrap_or(false) {
+        HostFsMode::AllowSet
+    } else {
+        HostFsMode::Legacy
+    }
+}
+
+/// Toolchain roots bound read-only in [`HostFsMode::AllowSet`]. Candidates
+/// that don't exist on this host are skipped; symlinked paths (/bin → usr/bin
+/// on merged-/usr systems) are canonicalized as SOURCES but bound at their
+/// ORIGINAL path so commands referencing either spelling resolve.
+const ALLOW_SET_TOOLCHAIN_ROOTS: &[&str] = &[
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/bin",
+    "/sbin",
+    "/etc/ld.so.cache",
+];
+
+/// Name-resolution files — needed whenever the sandbox may reach the network
+/// (`--share-net`) and harmless otherwise (tiny ro file binds).
+const ALLOW_SET_NAME_RESOLUTION: &[&str] = &["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"];
+
+fn base_argv(agent_dir: &str, mode: HostFsMode) -> Vec<String> {
+    let mut argv = Vec::new();
+    match mode {
+        HostFsMode::Legacy => {
+            argv.push("--ro-bind".to_string());
+            argv.push("/".to_string());
+            argv.push("/".to_string());
+        }
+        HostFsMode::AllowSet => {
+            // bwrap's default root is the HOST root, so "nothing visible"
+            // requires an explicit empty root first; every bind below layers
+            // on top of it. Ordered: empty root → toolchain → mounts.
+            argv.push("--tmpfs".to_string());
+            argv.push("/".to_string());
+            argv.push("--proc".to_string());
+            argv.push("/proc".to_string());
+            for candidate in ALLOW_SET_TOOLCHAIN_ROOTS
+                .iter()
+                .chain(ALLOW_SET_NAME_RESOLUTION.iter())
+            {
+                let p = Path::new(candidate);
+                if !p.exists() {
+                    continue;
+                }
+                let source = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                argv.push("--ro-bind".to_string());
+                argv.push(source.to_string_lossy().to_string());
+                argv.push(candidate.to_string());
+            }
+        }
+    }
+    argv.push("--bind".to_string());
+    argv.push(agent_dir.to_string());
+    argv.push(BWRAP_WORKSPACE_DIR.to_string());
+    argv.push("--chdir".to_string());
+    argv.push(BWRAP_WORKSPACE_DIR.to_string());
+    argv
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,6 +711,83 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let flags = bwrap_deny_path_flags(&gateway_dir);
         assert!(flags.is_empty(), "expected no deny flags, got: {flags:?}");
+    }
+
+    /// #1002 slice 4: allow-set mode mounts the gateway-asserted set — no
+    /// blanket `--ro-bind / /`, no deny flags (nothing to mask: the host
+    /// root isn't there), toolchain roots bound read-only.
+    #[test]
+    fn bubblewrap_allow_set_mode_argv_shape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let gw = tmp.path().join("runtime");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let overrides = BwrapIsolationOverrides {
+            share_net: false,
+            force_network_off: false,
+            host_fs_allow_set: true,
+        };
+        let (_bin, argv) = bubblewrap_shell_command(
+            agent_dir.to_str().unwrap(),
+            &gw,
+            "echo hi",
+            &[],
+            Some(&overrides),
+        )
+        .expect("allow-set command builds");
+
+        assert!(
+            !argv.windows(2).any(|w| w[0] == "--ro-bind" && w[1] == "/"),
+            "allow-set mode must not ro-bind the host root: {argv:?}"
+        );
+        // Workspace bind present.
+        let workspace_pos = argv.iter().position(|a| a == "--bind").unwrap();
+        assert_eq!(argv[workspace_pos + 2], "/tmp");
+        // The deny mask is absent in allow-set mode: the mask mechanism is
+        // `--ro-bind /dev/null <masked-path>` or `--tmpfs <masked-path>` —
+        // and the only --tmpfs is the empty root at `/` itself (#1002 slice 4
+        // found this the hard way: bwrap's default root is the HOST).
+        assert!(!argv.iter().any(|a| a == "/dev/null"), "no /dev/null mask: {argv:?}");
+        assert!(
+            !argv.iter().any(|a| !a.starts_with("--") && a.contains("vault")),
+            "no vault mask in allow-set mode: {argv:?}"
+        );
+        // Toolchain root binds exist (host-dependent, but /usr is universal).
+        let usr = argv
+            .windows(2)
+            .any(|w| w[0] == "--ro-bind" && w[1].ends_with("/usr"));
+        assert!(usr, "toolchain roots must be bound in allow-set mode: {argv:?}");
+    }
+
+    /// Legacy mode keeps the blanket bind: the deny mask can only shadow what
+    /// is mounted, which is exactly the pre-#1002 contract.
+    #[test]
+    fn bubblewrap_legacy_mode_keeps_blanket_root_bind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let gw = tmp.path().join("runtime");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let overrides = BwrapIsolationOverrides {
+            share_net: false,
+            force_network_off: false,
+            host_fs_allow_set: false,
+        };
+        let (_bin, argv) = bubblewrap_shell_command(
+            agent_dir.to_str().unwrap(),
+            &gw,
+            "echo hi",
+            &[],
+            Some(&overrides),
+        )
+        .expect("legacy command builds");
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--ro-bind" && w[1] == "/"),
+            "legacy mode must keep the blanket host-root bind: {argv:?}"
+        );
     }
 
     /// The full shell-command builder inserts the deny slice between the

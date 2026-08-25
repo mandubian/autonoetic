@@ -1082,7 +1082,12 @@ impl NativeTool for ArtifactExecTool {
         let exec_kind = crate::exec_request::ExecutionKind::shell(command.clone());
         // #1002 slice 1 (follow-up): record what this execution can see —
         // same gateway-asserted record sandbox_exec reports.
-        let mount_set = crate::sandbox::compose_mount_set(driver, agent_dir_str, &mounts);
+        let mount_set = crate::sandbox::compose_mount_set(
+            driver,
+            agent_dir_str,
+            &mounts,
+            !overrides.host_fs_allow_set,
+        );
         let runner = SandboxRunner::spawn_with_session_content_and_env(
             driver,
             agent_dir_str,
@@ -1461,7 +1466,12 @@ fn execute_with_ticket(
 
     let exec_kind = crate::exec_request::ExecutionKind::shell(command.clone());
     // #1002 slice 1 (follow-up): see the matching block in the execute() path.
-    let mount_set = crate::sandbox::compose_mount_set(driver, agent_dir_str, &mounts);
+    let mount_set = crate::sandbox::compose_mount_set(
+            driver,
+            agent_dir_str,
+            &mounts,
+            !overrides.host_fs_allow_set,
+        );
     let runner = SandboxRunner::spawn_with_session_content_and_env(
         driver,
         agent_dir_str,
