@@ -254,7 +254,9 @@ fn extract_labelled_links(line: &str) -> Vec<(String, String)> {
             continue;
         }
         let label_start = i + 1;
-        let Some(label_len) = line[label_start..].find(']') else { break };
+        let Some(label_len) = line[label_start..].find(']') else {
+            break;
+        };
         let label_end = label_start + label_len;
         // The `](` must be adjacent for this to be a link rather than a
         // bracketed aside.
@@ -263,7 +265,9 @@ fn extract_labelled_links(line: &str) -> Vec<(String, String)> {
             continue;
         }
         let target_start = label_end + 2;
-        let Some(target_len) = line[target_start..].find(')') else { break };
+        let Some(target_len) = line[target_start..].find(')') else {
+            break;
+        };
         let raw = &line[target_start..target_start + target_len];
         let target = raw.split_whitespace().next().unwrap_or("").to_string();
         if !target.is_empty() {
@@ -292,6 +296,95 @@ fn resolve_relative(from_rel: &Path, link: &str) -> PathBuf {
         }
     }
     PathBuf::from(parts.join("/"))
+}
+
+/// GitHub-style heading slugs plus explicit `name=`/`id=` anchors in a file.
+///
+/// Approximates GitHub's algorithm: strip inline markup, drop anything that is
+/// not word/space/hyphen, lowercase, spaces to hyphens.
+fn anchor_targets(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            let title = rest.trim_start_matches('#').trim();
+            let cleaned: String = title
+                .chars()
+                .filter(|c| !matches!(c, '`' | '*' | '_' | '[' | ']' | '(' | ')'))
+                .collect();
+            let slug: String = cleaned
+                .chars()
+                .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-')
+                .collect::<String>()
+                .trim()
+                .to_lowercase()
+                .replace(' ', "-");
+            if !slug.is_empty() {
+                out.insert(slug);
+            }
+        }
+        for key in ["name=\"", "id=\""] {
+            let mut rest = line;
+            while let Some(i) = rest.find(key) {
+                rest = &rest[i + key.len()..];
+                if let Some(end) = rest.find('"') {
+                    out.insert(rest[..end].to_lowercase());
+                    rest = &rest[end..];
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Backticked tokens that look like a Rust/SDK type or path: CamelCase, no
+/// dots or spaces, optionally `Type::member`.
+///
+/// Excludes anything with a `.` (so `SKILL.md` and `foo.rs` are not symbols)
+/// and requires an initial capital followed by a lowercase somewhere, which
+/// filters bare acronyms (`JSON`, `HTTP`, `USD`) that are prose, not symbols.
+fn extract_symbol_citations(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for chunk in line.split('`').skip(1).step_by(2) {
+        let tok = chunk.trim();
+        if tok.is_empty() || tok.contains('.') || tok.contains(' ') || tok.contains('(') {
+            continue;
+        }
+        let mut chars = tok.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_uppercase()) {
+            continue;
+        }
+        if !tok.chars().any(|c| c.is_ascii_lowercase()) {
+            continue;
+        }
+        if !tok
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            continue;
+        }
+        out.push(tok.to_string());
+    }
+    out
+}
+
+/// Parse a `— reason`-annotated allow file into its bare entries.
+fn load_allow_entries(root: &Path, name: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Ok(text) = std::fs::read_to_string(root.join("docs").join(name)) else {
+        return out;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let entry = line.split('—').next().unwrap_or(line).trim();
+        if !entry.is_empty() {
+            out.insert(entry.to_string());
+        }
+    }
+    out
 }
 
 /// Parse `docs/.link-guard-allow` into exact paths and prefix globs.
@@ -445,6 +538,162 @@ mod tests {
         assert_eq!(
             resolve_relative(Path::new("dir/from.md"), "./to.md"),
             PathBuf::from("dir/to.md")
+        );
+    }
+
+    /// A `#anchor` in a link must exist as a heading in the target.
+    ///
+    /// The third invisible half of a link. The citation check proves the file
+    /// exists and the label check proves the name is honest; neither can tell
+    /// that `](ARCHITECTURE.md#causal-chain)` lands nowhere, because an anchor
+    /// is not a path. Nothing is broken today — this is preventive, and it is
+    /// what makes splitting a large doc safe: a split moves headings, and
+    /// every inbound `#section` link silently rots.
+    #[test]
+    fn anchor_links_resolve() {
+        let root = workspace_root();
+        let mut failures: Vec<String> = Vec::new();
+
+        for rel in collect_sources(&root) {
+            if rel.extension().is_some_and(|e| e != "md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for (_label, link) in extract_labelled_links(line) {
+                    if link.contains("://") || link.starts_with(['/', '<', '$']) || link.contains('{')
+                    {
+                        continue;
+                    }
+                    let (path, anchor) = match link.split_once('#') {
+                        Some((p, a)) if !a.is_empty() => (p, a),
+                        _ => continue,
+                    };
+                    // An empty path means "this file".
+                    let target = if path.is_empty() {
+                        rel.clone()
+                    } else {
+                        resolve_relative(&rel, path)
+                    };
+                    if !target.to_string_lossy().ends_with(".md") {
+                        continue;
+                    }
+                    let Ok(target_text) = std::fs::read_to_string(root.join(&target)) else {
+                        continue; // missing file is the citation check's finding
+                    };
+                    if anchor_targets(&target_text).contains(&anchor.to_lowercase()) {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} anchor `#{}` has no matching heading in {}\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        anchor,
+                        target.display(),
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} link(s) pointing at a heading that does not exist. Renaming or \
+             moving a heading breaks every inbound anchor — update the link, or \
+             restore the heading.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// A backticked type name in `reference/` or `internals/` must exist.
+    ///
+    /// Added because the docs shipped three API-accuracy errors that review
+    /// caught and no guard could: a **`ToolErrorKind` that does not exist**
+    /// (the real enum is `FailureClass`), a missing `RetryAdvice` variant, and
+    /// a hash description copied from a stale code comment. Paths and anchors
+    /// were checked; the symbols a reader would actually type into a grep were
+    /// not.
+    ///
+    /// Sources scanned are Rust plus the Python and TypeScript SDKs, since
+    /// reference docs legitimately name SDK classes. Symbols a doc names as
+    /// *not yet existing* (a proposed extraction, a "would clarify" table) go
+    /// in `docs/.symbol-guard-allow` with a reason.
+    #[test]
+    fn documented_symbols_exist() {
+        let root = workspace_root();
+        let allow = load_allow_entries(&root, ".symbol-guard-allow");
+
+        // One concatenated haystack: cheaper than re-reading per candidate.
+        let mut haystack = String::new();
+        for dir in [
+            "autonoetic-gateway/src",
+            "autonoetic-types/src",
+            "autonoetic/src",
+            "autonoetic-ofp/src",
+            "autonoetic-mcp/src",
+            "autonoetic-sdk/python",
+            "autonoetic-sdk/typescript/src",
+        ] {
+            let mut stack = vec![root.join(dir)];
+            while let Some(d) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|x| {
+                        matches!(x.to_str(), Some("rs") | Some("py") | Some("ts"))
+                    }) {
+                        if let Ok(t) = std::fs::read_to_string(&p) {
+                            haystack.push_str(&t);
+                            haystack.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+        for rel in collect_sources(&root) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if !rel_str.starts_with("docs/reference/") && !rel_str.starts_with("docs/internals/") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for sym in extract_symbol_citations(line) {
+                    if allow.contains(&sym) {
+                        continue;
+                    }
+                    let base = sym.rsplit("::").next().unwrap_or(&sym);
+                    if haystack.contains(base) {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} cites `{}` — no such symbol in Rust or SDK sources",
+                        rel.display(),
+                        lineno + 1,
+                        sym
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} documented symbol(s) that do not exist. A backticked type name \
+             is a claim a reader will grep for — fix the name, or add it to \
+             `docs/.symbol-guard-allow` with a reason if the doc deliberately \
+             names something not yet built.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
 

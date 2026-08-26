@@ -63,7 +63,7 @@ whatever ships next.
 | [`gateway-agent-divergence-robustness.md`](gateway-agent-divergence-robustness.md) | Partial | rev. 2 after code audit; umbrella #608 |
 | [`gateway-determinism-and-escalation.md`](gateway-determinism-and-escalation.md) | Partial | `session_escalate` exists; feedback wanted on the rest |
 | [`agent-singleton-and-spawn-dedup.md`](agent-singleton-and-spawn-dedup.md) | Open | rev. 2 draft; no `singleton_key` / `spawn_dedup` in code |
-| [`agent-wiki-contributions.md`](agent-wiki-contributions.md) | Open | No contribution tool in code (`wiki_list`/`wiki_get` are read-only). #425, #426 |
+| [`agent-wiki-contributions.md`](agent-wiki-contributions.md) | **Partial** | `wiki_propose` ships (`runtime/tools/wiki.rs`) — agents can propose a new page or an edit. The PR-4a audit recorded this as Open on a bad grep (`wiki_propose` matched an unrelated file first); corrected here. Remaining: the operator review UX, #425/#426 |
 | [`edit-tooling-and-guidance.md`](edit-tooling-and-guidance.md) | Open | Two intertwined tracks; roadmap |
 | [`error-envelope-homogenization.md`](error-envelope-homogenization.md) | Open | Migration worklist, self-declared TODO |
 | [`external-cli-agent-delegation.md`](external-cli-agent-delegation.md) | Open | Side-plan, not implemented — no `ExternalCli` in code |

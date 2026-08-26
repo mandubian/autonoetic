@@ -1,0 +1,22 @@
+# Intentional exceptions for `docs_link_guard::documented_symbols_exist`.
+#
+# Format: `Symbol — reason` (em dash). `#` comments and blank lines ignored.
+#
+# A backticked CamelCase name in reference/ or internals/ is read as a symbol a
+# reader can grep for. List one here only when the doc deliberately names
+# something that does NOT exist — a proposed extraction, a "this would clarify"
+# note. Prefer rewording if the name is not really a symbol.
+
+# --- internals/gateway.md § Caveats, Observations & Mutualisation Needs names
+# --- structures it argues *should* exist. They are proposals in prose, not API.
+SessionLifecycleManager — proposed refactor target, internals/gateway.md mutualisation table
+ReclamationService — proposed refactor target, internals/gateway.md mutualisation table
+SessionInterruptReason — proposed unified enum, internals/gateway.md mutualisation table
+
+# --- internals/sandbox/network-grant.md records extractions left as follow-ups
+# --- on #1039; the names are the plan, not the code.
+RemoteAccessGateOutcome — proposed extraction from sandbox.rs, follow-up on #1039
+GrantAdvice — proposed side-channel, follow-up on #1039
+
+# --- A JavaScript builtin, quoted in a JS example.
+ReferenceError — JS builtin in the wasm-tier JavaScript agent example
