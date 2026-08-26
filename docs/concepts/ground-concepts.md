@@ -45,12 +45,15 @@ boundary. Full treatment: [`separation-of-powers.md`](separation-of-powers.md).
 ## 3. Law outside the prompt (the Lawful Executor)
 
 Rules live in a signed constitution and in code, not in instructions the
-model can forget, out-reason, or be injected past. Every denial names its
-rule (Ri-0.3) as a closed enum, never prose.
+model can forget, out-reason, or be injected past. Rejections name their rule
+(Ri-0.3) as structured rule/right IDs, never prose.
 
 **Mechanical form:** `policy.rs` checks before privileged operations;
-structured `ToolError` with `enforced_rules` + `available_actions`; the
-enforcement register mapping every clause to code and tests.
+structured `ToolError` carrying `enforced_rules` (`Vec<String>` of `P-x.y` /
+`Ri-x.y` IDs — populated for policy-gated capability denials, with coverage
+pinned by `constitution/rights_late_bucket.rs`, not a closed enum on every
+error) plus a mechanically-derived `available_actions` list; the enforcement
+register mapping every clause to code and tests.
 
 **Rests on it:** every "say" claim in the launch pitch — least privilege,
 credential isolation, egress gating.
