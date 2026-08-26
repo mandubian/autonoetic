@@ -8,12 +8,12 @@ while Autonoetic remains the control plane for plans, policy, provenance,
 artifacts, approvals, and validation.
 
 **Refs:**
-- `docs/design/human-agent-artifact-collaboration-plan.md` — PlanFrame,
+- `docs/proposals/human-agent-artifact-collaboration.md` — PlanFrame,
   workbench projection, reconcile, return-to-agent flow.
 - `docs/internals/workflow-orchestration.md` — workflow/task lifecycle and child wake-ups.
 - `docs/concepts/separation-of-powers.md` — gateway-owned enforcement boundary.
 - `docs/reference/credentials.md` — secrets stay in gateway vault.
-- `docs/rfc/session-room-channel-agnostic-timeline.md` §5 — the Session Room
+- `docs/archived/session-room-channel-agnostic-timeline.md` §5 — the Session Room
   **renders** this delegation: external-provider work surfaces as
   `ForeignAgent`-attributed timeline events carrying the provenance below.
   This plan governs the *mechanism* and authority boundary; the Session Room is

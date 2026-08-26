@@ -760,7 +760,7 @@ The archive directory is cleaned on re-export for the same session, so stale pag
 
 ### `autonoetic session egress-policy`
 
-Declare, show, or clear a session's **egress policy** — the session-scoped half of the egress source rules (see [`docs/reference/config.md`](config.md#egress-data-localization) and [RFC: data envelopes](../rfc/data-envelopes-egress-localization.md) §5.4). This is the "for this room, these sources stay local" rung: name the private sources for one session without editing gateway config.
+Declare, show, or clear a session's **egress policy** — the session-scoped half of the egress source rules (see [`docs/reference/config.md`](config.md#egress-data-localization) and [RFC: data envelopes](../proposals/data-envelopes-egress-localization.md) §5.4). This is the "for this room, these sources stay local" rung: name the private sources for one session without editing gateway config.
 
 ```bash
 # Emails stay local for this session; the sandbox reading ~/mail/** too.
@@ -1007,7 +1007,7 @@ autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy --agent-id sea
 
 ## Review Commands
 
-Post-promotion review results. Design: [`../design/post-promotion-review-design.md`](../design/post-promotion-review-design.md).
+Post-promotion review results. Design: [`../design/post-promotion-review-design.md`](../proposals/post-promotion-review.md).
 
 ```bash
 autonoetic review status
@@ -1051,7 +1051,7 @@ autonoetic sentinel-experiment --corpus corpus.yaml --no-tools --skip-watchdog
 
 | Option | Description |
 |--------|-------------|
-| `--corpus <PATH>` | Labeled corpus YAML (required) — format in [`../design/divergence-sentinel-validation.md`](../design/divergence-sentinel-validation.md) |
+| `--corpus <PATH>` | Labeled corpus YAML (required) — format in [`../design/divergence-sentinel-validation.md`](../proposals/divergence-sentinel-validation.md) |
 | `--output <PATH>` | Report path (default: the corpus path with a `.results.md` extension, next to the corpus) |
 | `--skip-watchdog` | Use cached watchdog replies in the corpus instead of re-spending LLM tokens |
 | `--no-tools` | Run the watchdog tool-free (`watchdog-fast.default`, empty tool registry) — roughly an order of magnitude cheaper, and produces no side-effect rows on the target session |
@@ -1066,7 +1066,7 @@ autonoetic sentinel-experiment --corpus corpus.yaml --no-tools --skip-watchdog
 ## Improve Command
 
 Run the self-improvement loop: diagnose, propose, validate, deploy. See
-[`../design/self-improvement-loop-design.md`](../design/self-improvement-loop-design.md).
+[`../design/self-improvement-loop-design.md`](../proposals/self-improvement-loop.md).
 
 ### `autonoetic improve run`
 

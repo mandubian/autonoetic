@@ -1,5 +1,5 @@
 //! `self_describe` — the autonoetic self-awareness surface (#300, epic #297;
-//! design `docs/design/constitution-restructure.md`).
+//! design `docs/proposals/constitution-restructure.md`).
 //!
 //! Autonoetic consciousness is self-knowing across time. Today an agent
 //! must *assemble* self-knowledge from scattered tools (`agent_inspect`,

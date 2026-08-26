@@ -1,7 +1,7 @@
 # Implementation plan — #909 [Phase 4] Federation, MCP, sandbox, declassification
 
 **Tracking issue:** [mandubian/autonoetic#909](https://github.com/mandubian/autonoetic/issues/909)  
-RFC: [`docs/rfc/data-envelopes-egress-localization.md`](../rfc/data-envelopes-egress-localization.md) §5.5, §7, §8, §9.1.  
+RFC: [`docs/proposals/data-envelopes-egress-localization.md`](data-envelopes-egress-localization.md) §5.5, §7, §8, §9.1.  
 Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on merged Phase 3 (#908).
 
 ## Where Phase 3 left the label plane

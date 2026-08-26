@@ -2,7 +2,7 @@
 
 > Status: **Awaiting operator-side cycles (2026-05-22)**.
 > Tracking: [#249](https://github.com/mandubian/autonoetic/issues/249).
-> Sister design: [`self-improvement-loop-design.md`](./self-improvement-loop-design.md).
+> Sister design: [`self-improvement-loop-design.md`](./self-improvement-loop.md).
 
 ## 1. Purpose
 
@@ -223,7 +223,7 @@ A P5 GO unblocks #252 (P7 — progressive automation).
 
 ## 9. References
 
-- `docs/design/self-improvement-loop-design.md` — full design context
+- `docs/proposals/self-improvement-loop.md` — full design context
 - Issues [#249](https://github.com/mandubian/autonoetic/issues/249)
   (P4), [#250](https://github.com/mandubian/autonoetic/issues/250)
   (P5)

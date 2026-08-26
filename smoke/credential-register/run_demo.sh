@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # credential-register smoke: classic case 5 — register a credential through
 # the operator gate, then use it gateway-side with header injection.
-# See README.md and docs/rfc/classic-harness-usecase-validation.md §3.5.
+# See README.md and docs/proposals/classic-harness-usecase-validation.md §3.5.
 #
 # The demo secret is NOT a real secret — it exists to be provably absent
 # from every LLM-visible surface (the leak scan in verdict.py).

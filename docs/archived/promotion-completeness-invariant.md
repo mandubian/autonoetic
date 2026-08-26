@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`AGENTS.md`](../AGENTS.md). Kept as the design record; not source of truth.
+
 # Promotion Completeness Invariant (fail-closed promotion)
 
 Status: **proposed** (2026-06-05). Closes a promotion fail-open found in

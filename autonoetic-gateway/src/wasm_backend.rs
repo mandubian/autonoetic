@@ -1,4 +1,4 @@
-//! WASM execution backend (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4).
+//! WASM execution backend (RFC `docs/archived/portable-wasm-execution-tier.md`, P4).
 //!
 //! Gated behind the `wasm-tier` Cargo feature so the native build never pays
 //! wasmtime's compile-time/binary-size cost. Runs a WASI Preview 1 command

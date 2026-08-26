@@ -128,7 +128,7 @@ own delegation than the research costs.
 must pass." The `patch`-tool + test-loop heart of every coding harness.
 
 **What this case isolates:** `content_patch` (the Hermes `patch`-gap closure:
-two-phase apply, fallback strategies — `docs/design/content-patch-tool.md`),
+two-phase apply, fallback strategies — `docs/proposals/content-patch-tool.md`),
 workbench review, sandboxed test execution, evaluator promotion gates, and —
 if run against an installed agent — the revision flow
 (`agent_revision`/`content_patch` on a promoted bundle).
@@ -278,7 +278,7 @@ gate is confusing", or the redacted response still echoes the key.
    static declaration. The demo completed only because
    `executor.default` ships `targets: [{kind: "any"}]` — i.e. the
    runtime host approval was the effective control anyway. Product
-   proposal: [`credential-egress-host-authorization.md`](credential-egress-host-authorization.md)
+   proposal: [`credential-egress-host-authorization.md`](../archived/credential-egress-host-authorization.md)
    — route `allowed_hosts` through a host-named approval instead of
    either bypassing (exfiltration risk) or rebuilding.
 

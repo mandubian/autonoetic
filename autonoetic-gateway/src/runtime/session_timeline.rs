@@ -775,7 +775,7 @@ pub fn operator_message_event(
 /// the operator is flagging something they want addressed, so it must clear the
 /// default (Normal) floor. The `payload` carries the anchor + redacted body
 /// (built by the caller, which has the content handles). See
-/// `docs/design/operator-live-comments.md`.
+/// `docs/archived/operator-live-comments.md`.
 pub fn operator_comment_event(
     session_id: &str,
     commented_by: &str,

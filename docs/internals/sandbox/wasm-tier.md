@@ -14,7 +14,7 @@ JavaScript agent end to end.
 
 Related: [`docs/AGENTS.md`](../../AGENTS.md) (agent model & script-agent I/O),
 [`docs/ARCHITECTURE.md`](../../ARCHITECTURE.md) (sandbox drivers),
-[`docs/rfc/portable-wasm-execution-tier.md`](../../rfc/portable-wasm-execution-tier.md)
+[`docs/archived/portable-wasm-execution-tier.md`](../../archived/portable-wasm-execution-tier.md)
 (design & rationale).
 
 ---
@@ -323,4 +323,4 @@ pure-stdlib Python (no native deps) at a high cost (~20 MB shared artifact,
 licensing, provisioning). Revisit if a concrete no-bwrap/docker portability need,
 untrusted-pure-Python isolation need, or a mature native-deps WASI-CPython build
 appears. See the status note in
-[`docs/rfc/portable-wasm-execution-tier.md`](../../rfc/portable-wasm-execution-tier.md).
+[`docs/archived/portable-wasm-execution-tier.md`](../../archived/portable-wasm-execution-tier.md).

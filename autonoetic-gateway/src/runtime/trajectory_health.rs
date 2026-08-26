@@ -5,7 +5,7 @@
 //! **pure data + pure logic**: no IO, no thresholds wired into production
 //! turn paths, no consumer reads `TrajectoryHealth` yet.
 //!
-//! Layers (see `docs/design/divergence-sentinel-design.md` §4):
+//! Layers (see `docs/proposals/divergence-sentinel.md` §4):
 //!
 //! - **Signals** are individual observations (`DivergenceSignalKind`) with a
 //!   numeric `current` value vs a `threshold`, tagged with a `severity`

@@ -16,7 +16,7 @@
 >
 > Companion documents: the constitution (the enforced law),
 > `docs/concepts/separation-of-powers.md` (the power structure),
-> `docs/design/principal-model-and-symmetric-obligations.md` (the citizenship
+> `docs/proposals/principal-model-and-symmetric-obligations.md` (the citizenship
 > RFC, #359), `docs/start/concepts.md` (the
 > actors-as-citizens framing).
 
@@ -215,7 +215,7 @@ what was done on my behalf, exit without penalty) are entrenched **before**
 the spreading happens.
 
 A **fourth facet** of served-party primacy is taking shape in the
-data-envelope work (`docs/rfc/data-envelopes-egress-localization.md`):
+data-envelope work (`docs/proposals/data-envelopes-egress-localization.md`):
 **data locality** — the right to bound *where* content derived from one's
 data may flow, distinct from who may read it. *"An agent may read my emails,
 but their content must never reach a remote model"* is neither refuse, audit,
@@ -343,7 +343,7 @@ Doors still to open, in rough priority order:
    qualification is auditable: the §3.2 horizon this whole section points
    at.
 6. **A data-locality invariant.** The data-envelope track
-   (`docs/rfc/data-envelopes-egress-localization.md`) already enforces, in
+   (`docs/proposals/data-envelopes-egress-localization.md`) already enforces, in
    code, that content labeled for a set of sinks never reaches a sink outside
    it — with a full causal-audit trail (§3.1). Its phase 5 constitutionalizes
    this as a `P-x.y` rule plus an `I-x` gateway-only invariant (#910), making
@@ -498,7 +498,7 @@ behaviour.
 Dorothy Denning, *"A Lattice Model of Secure Information Flow"* (1976); Andrew
 Myers & Barbara Liskov, *"A Decentralized Model for Information Flow Control"*
 (1997). The data-envelope plane
-(`docs/rfc/data-envelopes-egress-localization.md`) is decentralized IFC in the
+(`docs/proposals/data-envelopes-egress-localization.md`) is decentralized IFC in the
 literal sense: an `EgressLabel` is a set of allowed sinks; derivation takes the
 lattice **meet** (`restrict`/`intersect` — never `join`, which would *widen*);
 taint is monotonic; and operator-approved declassification is the sole

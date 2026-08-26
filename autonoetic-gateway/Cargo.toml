@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 # Enables `reset_constitution_runtime_for_tests` (dependency crates can enable under `cfg(test)` only).
 test-utils = []
-# Portable WASM execution tier (RFC docs/rfc/portable-wasm-execution-tier.md, P4).
+# Portable WASM execution tier (RFC docs/archived/portable-wasm-execution-tier.md, P4).
 # Off by default — the native build doesn't pay wasmtime's compile/binary cost.
 wasm-tier = ["dep:wasmtime", "dep:wasmtime-wasi"]
 

@@ -1,7 +1,7 @@
 # Implementation plan — #908 [Phase 3] Memory, digest, curator labeling
 
 **Tracking issue:** [mandubian/autonoetic#908](https://github.com/mandubian/autonoetic/issues/908)
-RFC: [`docs/rfc/data-envelopes-egress-localization.md`](../rfc/data-envelopes-egress-localization.md) §6, §9.1.
+RFC: [`docs/proposals/data-envelopes-egress-localization.md`](../proposals/data-envelopes-egress-localization.md) §6, §9.1.
 Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on merged Phase 2 (#907 / #940 / #941).
 
 ## Where Phase 2 left the label plane

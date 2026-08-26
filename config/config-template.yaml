@@ -78,7 +78,7 @@ sandbox:
   # Host-filesystem exposure for bubblewrap sandboxes: "legacy" ro-binds the
   # whole host / (deprecated, logs a startup warning); "allow_set" mounts only
   # the gateway-asserted set. Default flips after launch (RFC
-  # docs/rfc/sandbox-mount-allow-set.md).
+  # docs/proposals/sandbox-mount-allow-set.md).
   host_fs: legacy
 
 # ── Background Scheduler ──────────────────────────────────────────────
@@ -366,7 +366,7 @@ schema_enforcement:
 evidence_mode: full
 
 # ── Egress (Data Localization) Source Rules ───────────────────────────
-# RFC: docs/rfc/data-envelopes-egress-localization.md §4.2.
+# RFC: docs/proposals/data-envelopes-egress-localization.md §4.2.
 #
 # "Label the exceptions, not the corpus": name private sources here as
 # firewall-style rules; everything else defaults `unrestricted`. Labels are
@@ -499,7 +499,7 @@ code_analysis:
 # federation:
 #   carry_forward_strictness: off
 
-# Promotion-completeness cursors (see docs/design/promotion-completeness-invariant.md).
+# Promotion-completeness cursors (see docs/archived/promotion-completeness-invariant.md).
 # Completeness (auditor/evaluator pass, distinct identities, reviewable artifact)
 # is ALWAYS fail-closed; these only tune the relief valves.
 #   require_operator_approval_for_new_agents (default true): first admission of a

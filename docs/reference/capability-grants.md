@@ -147,7 +147,7 @@ reaches the dedup chain.
 
 ## Related
 
-- `docs/design/operator-legibility.md` — design rationale (§6 Pillar C)
+- `docs/proposals/operator-legibility.md` — design rationale (§6 Pillar C)
 - `docs/wiki/approval-system.md` — the broader approval dedup system
 - `docs/guide/remote-access-approval.md` — static analysis for remote access detection
 - `autonoetic-gateway/src/runtime/tools/plan_frame.rs` — `materialize_plan_grants()`, revoke wiring

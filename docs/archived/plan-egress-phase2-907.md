@@ -1,7 +1,7 @@
 # Implementation plan — #907 [Phase 2] Bundle floors, envelope-aware history, taint-following routing
 
 **Tracking issue:** [mandubian/autonoetic#907](https://github.com/mandubian/autonoetic/issues/907)
-RFC: [`docs/rfc/data-envelopes-egress-localization.md`](../rfc/data-envelopes-egress-localization.md) §4.1, §4.5, §5.3, §5.5, §5.7, §9.1.
+RFC: [`docs/proposals/data-envelopes-egress-localization.md`](../proposals/data-envelopes-egress-localization.md) §4.1, §4.5, §5.3, §5.5, §5.7, §9.1.
 Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Builds on merged Phase 1 (#911/#912/#913/#914). Coordinates with **open PR #915** (#905 observability leftovers).
 
 ## Where Phase 1 left the label plane

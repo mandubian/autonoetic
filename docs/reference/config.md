@@ -72,7 +72,7 @@ drifted from the code and must be updated.
 | `max_session_turns_hard` | u32? | `null` (⇒ `2 × max_session_turns`) | **Absolute** per-session turn ceiling that continuation approvals **cannot** lift. Crossing it terminates the session with `MaxTurnsReached` (a declared budget-exhaustion reason under Ri-0.12); only emergency-stop or operator revoke can intervene. System ceiling for per-agent `max_session_turns_hard` overrides. Binds delegated (child) sessions exactly as it binds the root. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 | `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
-| `require_operator_approval_for_new_agents` | bool | `true` | Promotion-completeness cursor for **first admission of a brand-new agent** (no outgoing revision). `true`: a capability-bearing new agent requires operator approval (its whole capability set is "new"). `false`: a fully-audited new agent may self-promote — the completeness gate (auditor/evaluator pass, distinct identities, reviewable artifact) still applies and is always fail-closed. Re-promotion of an existing agent is unaffected. See `docs/design/promotion-completeness-invariant.md`. |
+| `require_operator_approval_for_new_agents` | bool | `true` | Promotion-completeness cursor for **first admission of a brand-new agent** (no outgoing revision). `true`: a capability-bearing new agent requires operator approval (its whole capability set is "new"). `false`: a fully-audited new agent may self-promote — the completeness gate (auditor/evaluator pass, distinct identities, reviewable artifact) still applies and is always fail-closed. Re-promotion of an existing agent is unaffected. See `docs/archived/promotion-completeness-invariant.md`. |
 | `allow_zero_capability_direct_promote` | bool | `true` | Promotion-completeness cursor: when `true`, a revision declaring **zero capabilities** may promote directly (it cannot invoke any privileged tool — runtime enforcement bounds its blast radius). Set `false` to require the full review gate even for zero-capability agents. Capability-bearing revisions are always gated regardless. |
 | `interaction_answer_orchestration` | bool | `true` | When `true`, JSON-RPC `interaction.answer` / `interaction.resolve_and_answer` persist answers and orchestrate workflow task or session resume. When `false`, the method fails fast (legacy detection). |
 | `allow_runtime_lock_drift` | bool | `false` | Allow sessions to start when `runtime.lock` gateway section disagrees with the running binary (P-8.12). Drift is still logged as a causal event. |
@@ -847,7 +847,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `cost.output_per_million` | float | `null` | Cost per million output tokens (USD). |
 | `latency.ttft_ms` | u64 | `null` | Expected time-to-first-token (ms). |
 | `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
-| `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](../rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
+| `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](../proposals/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
 | `request_timeout_secs` | integer | `null` | Per-preset per-request timeout (seconds). Overrides the global `llm_request_timeout_secs` for this preset (#1045) — a long-generating `coding` preset can outlast a `haiku` digest preset. The retry deadline derives from it, so the retry budget is per-preset too. Floor 5s; sub-floor values fall through to the global default. |
 | `ttfb_timeout_secs` | integer | `null` | Per-preset time-to-first-byte budget (seconds) for the streaming turn path. Overrides the global `llm_ttfb_timeout_secs` for this preset; when both are unset the first-byte wait shares `request_timeout_secs`. Give queueing-prone models a long first-byte budget without also tolerating equally long mid-stream silences. Floor 5s. |
 
@@ -900,7 +900,7 @@ etc.), but the following cross-cutting role keys are also honored:
 
 ## Egress (Data Localization)
 
-Operator source rules that label content by where it came from, so the gateway can keep private data from reaching disallowed sinks (a remote LLM, a peer gateway, a `share_net` sandbox, …). Specified in `docs/rfc/data-envelopes-egress-localization.md`. **"Label the exceptions, not the corpus"**: name private sources as firewall-style rules; everything else defaults `unrestricted`.
+Operator source rules that label content by where it came from, so the gateway can keep private data from reaching disallowed sinks (a remote LLM, a peer gateway, a `share_net` sandbox, …). Specified in `docs/proposals/data-envelopes-egress-localization.md`. **"Label the exceptions, not the corpus"**: name private sources as firewall-style rules; everything else defaults `unrestricted`.
 
 Labels are enforced mechanically (never by LLM judgment) and flow by **monotonic intersection** — a derivation can only *restrict* a label, never widen it. The only widening path is an operator-approved declassification.
 
@@ -1116,7 +1116,7 @@ retention:
 
 ## Operator Activity Feed
 
-Controls the channel-neutral operator activity feed (see [`docs/design/operator-activity-feed-plan.md`](../design/operator-activity-feed-plan.md)). The gateway owns visibility rules once; every consumer (chat TUI, HTTP SSE, future bridges) reads the same feed.
+Controls the channel-neutral operator activity feed (see [`docs/proposals/operator-activity-feed.md`](../proposals/operator-activity-feed.md)). The gateway owns visibility rules once; every consumer (chat TUI, HTTP SSE, future bridges) reads the same feed.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

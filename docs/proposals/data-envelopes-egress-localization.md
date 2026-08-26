@@ -13,7 +13,7 @@ serialized into context); this RFC generalizes that property into a first-class,
 gateway-enforced concept: the **data envelope**.
 
 **Related:** `docs/reference/credentials.md` (vault, `credential_env` injection),
-`docs/rfc/llm-preset-inference-profiles.md` (preset registry, routing),
+`docs/archived/llm-preset-inference-profiles.md` (preset registry, routing),
 `docs/internals/approval-cache.md` (session approval grants, declassification
 precedent),
 `docs/constitution/versions/2026.07.19/constitution.md` (§14 Lawful-Executor, I-6, I-11),
@@ -539,7 +539,7 @@ Three rungs, simplest first — the operator picks the coarsest one that fits:
 1. **Whole session private** — `provider_constraint: local_only` (+ optionally
    `default_label: local_only`). One flag: "this room is private." Provider
    *selection* itself is constrained, not just content. Composes with session-room
-   UX (`docs/rfc/session-room-channel-agnostic-timeline.md`): a room marked private.
+   UX (`docs/archived/session-room-channel-agnostic-timeline.md`): a room marked private.
 2. **Named sources private** — session `rules` (§4.2): the email scenario. Code
    generation stays remote; named sources stay local; taint-following routing (§5.3)
    moves turns between providers automatically.

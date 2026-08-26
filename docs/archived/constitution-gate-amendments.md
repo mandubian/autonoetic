@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`enforcement-register.md`](../constitution/enforcement-register.md). Kept as the design record; not source of truth.
+
 # Constitutional Amendments for Unified Gate Abstraction
 
 > Related: [#167](https://github.com/mandubian/autonoetic/issues/167) — HumanGate unification

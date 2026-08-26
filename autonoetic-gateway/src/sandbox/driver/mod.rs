@@ -51,7 +51,7 @@ pub enum SandboxDriverKind {
     Docker,
     MicroVm,
     /// In-process WebAssembly (WASI) tier — the portable execution backend
-    /// (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4). Selected via
+    /// (RFC `docs/archived/portable-wasm-execution-tier.md`, P4). Selected via
     /// `sandbox: "wasm"`; runs declared modules in-process through
     /// [`crate::sandbox::SandboxRunner::run_to_output`] when built with the
     /// `wasm-tier` feature (without it, selecting this driver returns a clear

@@ -1,7 +1,7 @@
 # Packager dependency determinism: resolve → validate → pin-on-promotion
 
 - **Status:** Design (agreed direction; implementation scoped below)
-- **Related:** RFC `docs/rfc/portable-wasm-execution-tier.md` §5.4 (P3), PR #447, constitution P-3.6 (read-only layers), promotion/approval machinery
+- **Related:** RFC `docs/archived/portable-wasm-execution-tier.md` §5.4 (P3), PR #447, constitution P-3.6 (read-only layers), promotion/approval machinery
 - **Supersedes:** the RFC's standalone "bake step" (P3 increment 2/3) — see §1
 
 ## Context

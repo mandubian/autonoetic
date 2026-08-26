@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`credentials.md`](../reference/credentials.md). Kept as the design record; not source of truth.
+
 # RFC: Credential Egress — `allowed_hosts` as a Routing Input, Not a Bypass
 
 **Status:** Implemented. §3 core on

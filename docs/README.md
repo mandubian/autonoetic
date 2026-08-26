@@ -12,17 +12,17 @@ Three entry points, then eight directories sorted by **what you came here for**.
 
 | Directory | Holds | You are |
 |---|---|---|
-| [`start/`](start/) | Tutorials — a first success, in order | new here |
-| [`guide/`](guide/) | How-to, one operator or author task per doc. [`guide/runbooks/`](guide/runbooks/) for procedures with a pass/fail outcome | trying to do something |
-| [`reference/`](reference/) | Contracts you code against: CLI, config keys, HTTP API, SQLite schema, `SKILL.md` fields, tool errors, capabilities | integrating |
-| [`concepts/`](concepts/) | Why it is built this way — philosophy, separation of powers, planner principles | trying to understand |
-| [`internals/`](internals/) | How the runtime does it, by subsystem: [`prompt/`](internals/prompt/) [`sandbox/`](internals/sandbox/) [`storage/`](internals/storage/) [`session/`](internals/session/) [`egress/`](internals/egress/) | changing the runtime |
-| [`constitution/`](constitution/) | The governance corpus: signed versions, the [enforcement register](constitution/enforcement-register.md), signing, key management, roadmap | reading the law |
-| [`wiki/`](wiki/) | Short digests served to **agents** at runtime via `wiki_list` / `wiki_get` — not the human reference | editing what agents read |
-| [`proposals/`](proposals/) | In-flight design and RFC work. [`design/`](design/) and [`rfc/`](rfc/) fold in here as their status is audited | proposing a change |
-| [`reports/`](reports/) | Dated and immutable: audits, validations, [postmortems](reports/postmortems/), comparative studies | looking for evidence |
-| [`archived/`](archived/) | Superseded. Historical record, never source of truth | doing archaeology |
-| [`diagrams/`](diagrams/) | Rendered visual maps (published via GitHub Pages) | looking at pictures |
+| [`start/`](start) | Tutorials — a first success, in order | new here |
+| [`guide/`](guide) | How-to, one operator or author task per doc. [`guide/runbooks/`](guide/runbooks) for procedures with a pass/fail outcome | trying to do something |
+| [`reference/`](reference) | Contracts you code against: CLI, config keys, HTTP API, SQLite schema, `SKILL.md` fields, tool errors, capabilities | integrating |
+| [`concepts/`](concepts) | Why it is built this way — philosophy, separation of powers, planner principles | trying to understand |
+| [`internals/`](internals) | How the runtime does it, by subsystem: [`prompt/`](internals/prompt) [`sandbox/`](internals/sandbox) [`storage/`](internals/storage) [`session/`](internals/session) [`egress/`](internals/egress) | changing the runtime |
+| [`constitution/`](constitution) | The governance corpus: signed versions, the [enforcement register](constitution/enforcement-register.md), signing, key management, roadmap | reading the law |
+| [`wiki/`](wiki) | Short digests served to **agents** at runtime via `wiki_list` / `wiki_get` — not the human reference | editing what agents read |
+| [`proposals/`](proposals) | In-flight design and RFC work, one status table in [`proposals/README.md`](proposals/README.md) — a test asserts every proposal is listed | proposing a change |
+| [`reports/`](reports) | Dated and immutable: audits, validations, [postmortems](reports/postmortems), comparative studies | looking for evidence |
+| [`archived/`](archived) | Superseded. Historical record, never source of truth | doing archaeology |
+| [`diagrams/`](diagrams) | Rendered visual maps (published via GitHub Pages) | looking at pictures |
 
 **This file is a map, not a catalogue.** Per-file lists go stale — the
 directory listing is the catalogue. Each directory's contents are named for
@@ -66,4 +66,4 @@ Two directories have paths the runtime depends on and must not be moved:
 digest-signed), and `wiki/**` with its `index.toml` (read at bootstrap).
 
 The reorganization this layout came from, including what is still to merge, is
-[`design/docs-reorganization-plan.md`](design/docs-reorganization-plan.md).
+[`design/docs-reorganization-plan.md`](proposals/docs-reorganization.md).

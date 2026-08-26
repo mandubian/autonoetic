@@ -169,7 +169,7 @@ impl NativeTool for AbReplayTool {
         //   * `high_blast_radius`                      — reject (never automatable)
         //   * `capability_change_with_strict_holdout`  — allow + maybe coerce holdout
         //
-        // See docs/design/self-improvement-loop-validation.md §8 (P5).
+        // See docs/proposals/self-improvement-loop-validation.md §8 (P5).
         let mut policy_applied = if config.improve.restrict_to_prompt_only {
             // Will be overwritten once we actually evaluate.
             "not_evaluated".to_string()

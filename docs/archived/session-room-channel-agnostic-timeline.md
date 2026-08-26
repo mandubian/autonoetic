@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`room.md`](../internals/session/room.md). Kept as the design record; not source of truth.
+
 # RFC: The Session Room — Channel-Agnostic, Multi-Actor Live Collaboration
 
 **Status:** Draft — 2026-06-03. Supersedes the earlier
@@ -380,7 +382,7 @@ new one is at parity, then retired. Design:
 ## 5. Federation frontier (the ambitious part)
 
 > **Authoritative mechanism: #343** (External CLI agent delegation,
-> `docs/design/external-cli-agent-delegation-plan.md`; parent track #325). P5
+> `docs/proposals/external-cli-agent-delegation.md`; parent track #325). P5
 > does **not** invent a federation system — it is the **room's rendering +
 > attribution layer over #343**. Where this section and #343 disagree on
 > mechanism, **#343 governs**; the Session Room only *shows* what #343 runs.

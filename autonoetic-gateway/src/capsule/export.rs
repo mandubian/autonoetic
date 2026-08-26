@@ -620,7 +620,7 @@ fn require_locked_dependencies_for_hermetic(
             "{}-mode export requires a dependency-locked agent, but its runtime.lock declares \
              runtime-installed (pip) dependencies. Hermetic/Replay capsules import offline, so \
              dependencies must be baked into pinned layers first (locked mode). \
-             See docs/rfc/portable-wasm-execution-tier.md §5.4.1.",
+             See docs/archived/portable-wasm-execution-tier.md §5.4.1.",
             mode_str(mode)
         );
     }

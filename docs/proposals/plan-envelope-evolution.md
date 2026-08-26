@@ -1,7 +1,7 @@
 # Session Capability Envelope — Design
 
 **Status:** Design — 2026-06-14 (revised)
-**Builds on:** [`docs/design/operator-legibility.md`](operator-legibility.md) §6 (Pillar C),
+**Builds on:** [`docs/proposals/operator-legibility.md`](operator-legibility.md) §6 (Pillar C),
 [`docs/reference/capability-grants.md`](../reference/capability-grants.md)
 **Proves out:** session `session-e9436118` (weather forecast agent build, 2026-06-13)
 
@@ -506,7 +506,7 @@ schema change. No new concept.
 
 ## 16. Relationship to existing work
 
-- [`docs/design/operator-legibility.md`](operator-legibility.md) §6 — Pillar C
+- [`docs/proposals/operator-legibility.md`](operator-legibility.md) §6 — Pillar C
   original design (derive from agent capabilities). **Superseded** by this doc's
   discovery-based, session-scoped approach.
 - [`docs/reference/capability-grants.md`](../reference/capability-grants.md) — shipped

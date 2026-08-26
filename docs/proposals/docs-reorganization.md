@@ -170,6 +170,32 @@ The rule this suggests for the remaining merges: **merge information, not
 files.** Two docs with genuinely different audiences should keep their
 separation; what must be single is each *fact*.
 
+### 5.3 What the audit found about self-declared status
+
+Statuses in the docs' own headers were wrong often enough to be useless as an
+input. Measured across the 39 docs:
+
+- `rfc/portable-wasm-execution-tier.md` said "Draft (for review)" while the tier
+  is shipped and documented in `internals/sandbox/wasm-tier.md`;
+- `rfc/session-room-channel-agnostic-timeline.md` said "Draft" while the room
+  and its canonical timeline are live;
+- `design/human-agent-artifact-collaboration-plan.md` said "Not implemented"
+  while PlanFrame + workbench ship in `gateway_store/plan_frames.rs` and are
+  documented in `guide/human-agent-collaboration.md`;
+- `design/promotion-completeness-invariant.md` said "proposed" while the
+  invariant ships as `auditor_critical_veto` in `runtime/tools/promotion.rs`;
+- conversely `design/task-robustness.md` said "Implemented" while two of its
+  parts are described in no live doc at all.
+
+So the audit ignored the headers and probed twice per doc: **is the behaviour in
+the code?** (grep for the named symbol) and **does a live doc have it as a
+subject?** (not merely mention it — `reference/config.md` listing `allow_set`
+is not a description of declared mounts). Only both-yes archives.
+
+That is also why §8.3's `live_reference` invariant matters more than a `status`
+field: a status is a claim its author never has to keep true, while a
+`live_reference` that must resolve is checkable.
+
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 
 A shipped design doc must **not** be archived reflexively. Archiving is correct
@@ -466,7 +492,8 @@ four commands. Hand-written prose (workflows, examples) lives in
 | **1. Guard first** ✅ **done** | Added `docs_link_guard` (§8.1) as a **lib** unit test — PR CI runs `--lib --bins` only, so a guard in `tests/` would not gate a PR — plus `docs/.link-guard-allow`; fixed all 19 dangling citations. **No moves.** | None — pure repair, and it becomes the safety net for everything after |
 | **2. Move, don't edit** ✅ **done** | Guard extended to relative links **first** (§8.1), then 75 `git mv`s and a link rewrite across 138 files. The rewrite is a resolver, not a sed script: a relative link is recomputed whenever *either* endpoint moves, so all four cases (both static, source moved, target moved, both moved) are handled. `docs/README.md` rewritten as the map — pulled forward from PR 5 because every line's path changed anyway and shipping a stale catalogue would be worse | Medium — large diff, mechanically verified by both guard checks |
 | **3. The real merges** ✅ **partly done** | Shipped: #1 CLI union (+ a coverage guard so the omission class cannot recur), #2 budgets, #3 crate map (deduped — §5.2), #4 powers. **Deferred with reasons below:** #6 ARCHITECTURE split, #7 agent-features fold, #8 skill manifest, #9 sentinel, #11 sandbox isolation | Content review needed — one commit per merge |
-| **4. Status audit + `proposals/`** | Verify shipped-vs-open for all 39 design+RFC docs against the code; apply the §5.1 archive/promote/split test to each shipped one; write the single `proposals/README.md` table | Medium — needs judgement per doc. Do not trust the self-declared headers, and **do not archive a shipped doc that is the only description of its subsystem** (§5.1) |
+| **4a. Status audit + `proposals/`** ✅ **done** | All 39 design+RFC docs audited against code and against live-doc coverage. 29 → `proposals/` under one index, 9 → `archived/` each stamped with a pointer to the doc that now describes it, 1 → `concepts/` (a discussion essay, not a proposal). `design/` and `rfc/` are gone. New guard: every proposal must be linked from `proposals/README.md` | Done — judgement per doc, recorded in the index |
+| **4b. Promotions** | Write the four **PROMOTE** docs (§5.1) into `internals/`/`reference/`, then archive their proposals. Unblocks merges #9 and #11 from PR 3 | Content authorship — one doc at a time |
 | **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.

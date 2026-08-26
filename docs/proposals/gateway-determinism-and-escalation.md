@@ -48,7 +48,7 @@ that this RFC treats as law:
   give the context.
 
 **Related:**
-- `docs/rfc/gateway-agent-divergence-robustness.md` — the Sentinel/LoopGuard
+- `docs/proposals/gateway-agent-divergence-robustness.md` — the Sentinel/LoopGuard
   rework. **Overlap is deliberate and bounded:** that RFC owns *retry-bound
   progress-awareness* (its D.4) and the *blocked-vs-divergent* classification;
   this RFC owns *error-class unification*, *escalation context quality*,

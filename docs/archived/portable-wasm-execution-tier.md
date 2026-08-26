@@ -1,3 +1,5 @@
+> **Archived — shipped.** The behaviour this proposed is live and described in [`wasm-tier.md`](../internals/sandbox/wasm-tier.md). Kept as the design record; not source of truth.
+
 # RFC: Portable WASM Execution Tier
 
 - **Status:** Draft (for review)

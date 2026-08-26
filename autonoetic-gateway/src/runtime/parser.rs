@@ -408,7 +408,7 @@ pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
 ///
 /// Inference proposes narrow capabilities only; it may never mint a
 /// wildcard capability from third-party frontmatter text (RFC Part C,
-/// docs/design/agent-genesis-one-door.md — "capability is never inferred
+/// docs/proposals/agent-genesis-one-door.md — "capability is never inferred
 /// into wildcards from untrusted text"). Wildcard power must always be an
 /// explicit, visible declaration under `metadata.autonoetic.capabilities`
 /// that the promotion gate can weigh — a grant minted from a tool-name

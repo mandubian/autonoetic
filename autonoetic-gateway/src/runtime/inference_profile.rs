@@ -1,6 +1,6 @@
 //! Resolve agent inference profiles from preset names, mapping, and session overrides.
 //!
-//! See `docs/rfc/llm-preset-inference-profiles.md`.
+//! See `docs/archived/llm-preset-inference-profiles.md`.
 
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmConfig, LlmOverrides};
 use autonoetic_types::capability::Capability;

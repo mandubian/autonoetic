@@ -10,7 +10,7 @@
 > P5 [#250](https://github.com/mandubian/autonoetic/issues/250),
 > P6 [#251](https://github.com/mandubian/autonoetic/issues/251),
 > P7 [#252](https://github.com/mandubian/autonoetic/issues/252).
-> Related: [`divergence-sentinel-design.md`](./divergence-sentinel-design.md) (in-session
+> Related: [`divergence-sentinel-design.md`](./divergence-sentinel.md) (in-session
 > divergence detection; this doc is its post-session counterpart).
 
 ## 1. Problem Statement
@@ -399,7 +399,7 @@ high-divergence agent over many sessions is a candidate for improvement.
 
 ## 11. References
 
-- `docs/design/divergence-sentinel-design.md` — sister design (in-session)
+- `docs/proposals/divergence-sentinel.md` — sister design (in-session)
 - `docs/guide/cognitive-capsule.md` — capsule format used
   for replay determinism (Phase 4 is the last piece for full replay)
 - `docs/archived/sealed-network-evaluation-plan.md` — fixture replay

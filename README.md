@@ -270,7 +270,7 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 - [`docs/reference/schema-enforcement.md`](docs/reference/schema-enforcement.md): Schema coercion for agent.spawn payloads
 
 - [`docs/guide/cognitive-capsule.md`](docs/guide/cognitive-capsule.md): Portable agent capsule export/import
-- [`docs/design/README.md`](docs/design/README.md): Active design plans with open work
+- [`docs/proposals/README.md`](docs/proposals/README.md): In-flight design and RFC work, with a status per doc
 - [`docs/archived/architecture-summary.md`](docs/archived/architecture-summary.md): What's kept vs externalized
 - [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities, and why the gateway stays a narrow rule enforcer rather than a workflow engine
 
@@ -381,7 +381,7 @@ Governance is built alongside the runtime: the current constitution
 (`2026.07.30`) has 18 enforced rights and 182 rules, 179 of them enforced — see
 [`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md)
 for what is `ENFORCED` vs `PARTIAL` / `MISSING` / `DESIGN DEBT`. Active and
-archived design plans are tracked under [`docs/design/`](docs/design/README.md)
+archived design plans are tracked under [`docs/archived/`](docs/archived/)
 and [`docs/archived/`](docs/archived/) respectively.
 
 ## Quickstart Example

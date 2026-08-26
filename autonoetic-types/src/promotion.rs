@@ -134,7 +134,7 @@ pub struct PromotionRecord {
     /// the versions the validated, approved run actually used, frozen here so the
     /// pin is earned by validation rather than demanded up front. Empty until
     /// blessed, or for agents with no dependency layers.
-    /// See `docs/design/packager-dependency-determinism.md`.
+    /// See `docs/proposals/packager-dependency-determinism.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blessed_packages: Vec<crate::layer::ResolvedPackage>,
 
