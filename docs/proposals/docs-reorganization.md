@@ -248,7 +248,7 @@ and each one was invisible to the checks that already existed:
 | link labels match targets | review caught 5 | 24 total |
 | every proposal indexed | the old index missed 11 of 27 | — |
 | anchors resolve | merge #6 cannot be done safely without it | 0 (preventive) |
-| documented symbols exist | review caught a **`ToolErrorKind` that does not exist** | 10 candidates, all legitimate |
+| documented symbols exist | review caught a **`ToolErrorKind` that does not exist** | 10 candidates, all legitimate — then review caught the check itself being vacuous (§5.7) |
 
 The pattern worth keeping: each guard was cheap only because the defect had
 already been paid for. The ordering discipline that made it work is *guard
@@ -258,6 +258,32 @@ PR 2 and PR 5 both did that; the label defect is what happens when you don't.
 Two of these came from a reviewer, not from me. The symbol check exists because
 review noticed I had documented a type that was never in the codebase — in the
 same commit whose §5.5 argued that promotions must follow the code.
+
+### 5.7 A guard can be vacuous, and only a negative test shows it
+
+Review on PR 5 pointed out that `documented_symbols_exist` checked only the
+last `::` segment: `NoSuchType::run` would pass on the strength of some
+unrelated `run`. Correct, and tightening it (literal token first, then **every**
+segment as a whole word) cost nothing — measured: 63 qualified citations, 0
+newly failing.
+
+Fixing it exposed something worse. The negative test still passed — because the
+haystack was built from whole Rust files, and this guard's **own unit-test
+fixture** contains the string `NoSuchType::run`. The check was defining its
+counter-example into existence. Any symbol named in any test fixture anywhere in
+the workspace counted as real.
+
+The fix was already in the module: `production_prefix`, written for the citation
+check so test fixture *paths* would not be treated as citations. The same
+reasoning applies to symbols and I did not apply it — the haystack now uses it.
+
+Two lessons, both cheap and both learned late:
+
+- **Assert the failure, not just the pass.** Every guard here was negative-tested
+  by injection, which is the only reason this surfaced.
+- **A guard that reads the whole repo will read its own fixtures.** Self-scanning
+  tools need to exclude their own test data, or they answer "yes" to everything
+  they were built to catch.
 
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 

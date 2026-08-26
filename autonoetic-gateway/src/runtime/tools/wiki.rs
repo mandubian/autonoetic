@@ -549,9 +549,16 @@ mod tests {
         let mut oversized = Vec::new();
         for page in &index.pages {
             let path = dir.join(&page.file);
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
+            // Read failures are not skipped: an indexed page that cannot be
+            // read is a corpus defect (bad path, encoding, permissions), and
+            // silently continuing inside a guard is how such a defect survives.
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "indexed wiki page '{}' could not be read at {}: {e}",
+                    page.id,
+                    path.display()
+                )
+            });
             let lines = text.lines().count();
             if lines > MAX_LINES {
                 oversized.push(format!(

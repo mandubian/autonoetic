@@ -368,6 +368,49 @@ fn extract_symbol_citations(line: &str) -> Vec<String> {
     out
 }
 
+/// Does a documented symbol resolve against the source haystack?
+///
+/// Literal first: `GatewayStore::contract_health` written exactly is the
+/// strongest evidence. Falling back to **every** segment existing (not just
+/// the last) is required because Rust defines `Type::method` inside
+/// `impl Type`, so the qualified string never appears for 22 of the 63
+/// qualified citations in the current corpus — while checking only the last
+/// segment would accept `NoSuchType::run` on the strength of some unrelated
+/// `run` elsewhere, which is the permissiveness this guard exists to avoid.
+fn symbol_resolves(sym: &str, haystack: &str) -> bool {
+    if haystack.contains(sym) {
+        return true;
+    }
+    // Whole-word per segment, so a documented `Foo` is not satisfied by an
+    // unrelated `FooBarBaz`. Measured against the current corpus: zero
+    // citations rely on the looser substring behaviour.
+    sym.split("::").all(|seg| contains_word(haystack, seg))
+}
+
+/// Whole-word containment: `Foo` must not be satisfied by `FooBarBaz`.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        from = start + 1;
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Parse a `— reason`-annotated allow file into its bare entries.
 fn load_allow_entries(root: &Path, name: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -650,7 +693,13 @@ mod tests {
                         matches!(x.to_str(), Some("rs") | Some("py") | Some("ts"))
                     }) {
                         if let Ok(t) = std::fs::read_to_string(&p) {
-                            haystack.push_str(&t);
+                            // Production prefix only. Test modules contain
+                            // fixture strings naming deliberately-absent
+                            // symbols — including this guard's own
+                            // `NoSuchType::run` fixture, which otherwise
+                            // defines itself into existence and makes the
+                            // check vacuous for exactly the drift it targets.
+                            haystack.push_str(production_prefix(&t));
                             haystack.push('\n');
                         }
                     }
@@ -672,8 +721,7 @@ mod tests {
                     if allow.contains(&sym) {
                         continue;
                     }
-                    let base = sym.rsplit("::").next().unwrap_or(&sym);
-                    if haystack.contains(base) {
+                    if symbol_resolves(&sym, &haystack) {
                         continue;
                     }
                     failures.push(format!(
@@ -846,6 +894,25 @@ mod tests {
         assert!(extract_doc_paths("split across `docs/design/principal-model-and-").is_empty());
         assert!(!is_pointer_file("docs/design/README.md"));
         assert!(is_pointer_file("docs/constitution/CURRENT"));
+    }
+
+    #[test]
+    fn symbol_resolution_is_literal_first_then_all_segments() {
+        let src = "struct GatewayStore; impl GatewayStore { fn contract_health() {} } \
+                   enum SessionRole { Operator } fn run() {}";
+        // Literal qualified form present.
+        assert!(symbol_resolves("SessionRole::Operator", "SessionRole::Operator"));
+        // Not literal, but every segment exists (the `impl Type` case).
+        assert!(symbol_resolves("GatewayStore::contract_health", src));
+        // The permissiveness this replaced: last segment alone must NOT pass.
+        assert!(
+            !symbol_resolves("NoSuchType::run", src),
+            "checking only the last segment would accept this on the strength \
+             of an unrelated `run`"
+        );
+        // Whole-word: a longer identifier must not satisfy a shorter one.
+        assert!(!contains_word("FooBarBaz", "Foo"));
+        assert!(contains_word("a FooBarBaz Foo b", "Foo"));
     }
 
     #[test]
