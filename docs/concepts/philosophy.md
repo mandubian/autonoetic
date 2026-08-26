@@ -16,6 +16,7 @@
 >
 > Companion documents: the constitution (the enforced law),
 > `docs/concepts/separation-of-powers.md` (the power structure),
+> `docs/concepts/ground-concepts.md` (the recurring mechanisms),
 > `docs/proposals/principal-model-and-symmetric-obligations.md` (the citizenship
 > RFC, #359), `docs/start/concepts.md` (the
 > actors-as-citizens framing).
