@@ -12,7 +12,8 @@ the *why*, [`../concepts/philosophy.md`](../concepts/philosophy.md).
 > (the earlier draft pitched the agent-as-threat framing the beginners doc
 > explicitly rejects); fixed the beginners-doc link (renamed to
 > `start/concepts.md`) and corrected the sandbox claim (`allow_set` is shipped
-> but opt-in, not the default).
+> but opt-in, not the default). Feature status cross-checked against
+> [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md).
 
 ---
 
@@ -111,6 +112,9 @@ A planner wakes specialists:
 - a test runner runs it in a no-network sandbox,
 - an auditor reviews risk.
 
+They coordinate through declared, pattern-scoped messaging channels — no
+back-channel; every delegation is on the record.
+
 You wake up to an installed agent. With a full record of who built what.
 
 **The line:** *"It worked while I slept. And I can see every move it made."*
@@ -145,6 +149,10 @@ An agent recognizes a recurring task. It builds a specialist for it.
 
 The new agent's powers are declared, bounded, and gated before it can run. No
 silent privilege escalation. The install is reviewed — sometimes by another agent.
+
+And the loop closes: tactics that work crystallize into skills, a steward
+judges flagged agents — the system improves itself under the same gates.
+(Full closed-loop automation is direction, not shipped.)
 
 **The line:** *"The system grows itself, under the same rules."*
 
@@ -189,8 +197,15 @@ Keep this slide tight. One contrast.
 | Rules bind only the agent | Rules bind the agent; rights bind the gateway |
 | Secrets in context | Secrets gateway-owned |
 | Chat history | Immutable causal chain |
+| Mutable files, silent edits | Content-addressed artifacts — nothing is ever overwritten |
+| One gateway, one operator | Federated peers verify each other's constitution by digest |
 | One agent, one model | Many agents, model-agnostic presets |
 | Built for chat | Built for unattended, multi-agent work |
+
+Underneath it all, one substrate decision: **nothing is ever overwritten.**
+Artifacts, revisions, sessions, the chain itself are content-addressed and
+append-only — history that wasn't attributed can never be re-attributed, so
+attribution happens at write time, forever.
 
 Since June, *all six* headline claims above are shipped and tested:
 the constitution is versioned + signed (every boot verifies the digest),
@@ -218,6 +233,11 @@ So the pitch is not "unbreakable." It is:
 
 - Every action is recorded and attributable — misbehavior is *discoverable*.
 - Every denial names its rule — disagreements resolve by facts, not authority.
+- Any actor can report misbehavior — even one holding zero capabilities — and
+  the report cannot be silently dropped; it is owed an adjudication.
+- The gateway reports on itself: `trace contract-health` shows what the law
+  actually enforces, and every place the gateway improvises is counted as a
+  named discretion leak.
 - The law can be amended, by the actors it governs, through a signed process.
 - The machinery that makes correction possible (read your chain, named
   rejections, propose amendments, non-repudiation, the hash-chain itself) is
@@ -266,7 +286,8 @@ cargo run -p autonoetic -- trace sessions  # the receipts (or: autonoetic trace 
 8. **The honest frame** — correctability over perfection; the correction
    machinery is entrenched.
 9. **The bigger idea** — actors as citizens; a community that can evolve its
-   own law, with the people it serves always able to say no.
+   own law; gateways that federate, verifying each other's law by digest
+   before their agents cooperate.
 10. **Call to action** — run the quickstart.
 
 ---
@@ -281,7 +302,7 @@ This is pre-release. Be precise. Over-claiming kills trust faster than modesty.
 - "The LLM never sees the secret." (true, shipped)
 - "Every action is recorded and attributable." (true, shipped)
 - "Capabilities are enforced mechanically, not by prompt." (true, shipped)
-- "Labels follow the content: a private artifact can't leave the machine through any boundary without a gated, audited act." (true, shipped as egress label plane)
+- "An agent may read your emails; their content never reaches a remote model." (true, shipped — egress labels are gateway-enforced at the LLM chokepoint and every off-this-machine boundary; widening takes a gated, audited act. Federation/MCP sinks are phase 4, in flight — scope the claim to this machine.)
 
 **Don't say:**
 - "Unbreakable" / "fully secure." Say **auditable, detectable, accountable**.
@@ -301,6 +322,26 @@ This is pre-release. Be precise. Over-claiming kills trust faster than modesty.
 the design, not a dodge — served-party refusal/audit/exit rights are
 entrenched *before* internal decision power spreads to agents. Power spreads
 inward only as fast as the people it serves keep the ability to say no.
+
+**Federation honesty:** the wire protocol and the constitution-digest
+handshake ship; the gateway-side federation surface is still thin. Show the
+handshake, not a cross-gateway workflow, unless you've rehearsed one.
+
+### If asked (prepared answers)
+
+- **"Can agents vote?"** — Not built. Direction: advisory before binding,
+  standing computed from the non-repudiable ledger, never self-asserted.
+- **"Am I locked in?"** — Voice is fully shipped (amendments); exit is a
+  declared right (Ri-0.17) — cognitive-capsule export ships, cross-gateway
+  portability is partial.
+- **"What stops a runaway?"** — Graduated response: warnings → degraded mode →
+  escalation → emergency stop, each step announced (P-7.18). Never straight
+  to the kill switch.
+- **"Does the law ever change?"** — Constantly, lawfully: repeated friction
+  against a rule mechanically surfaces an amendment invitation; amendments
+  are proposed, reviewed, signed.
+- **"Can I branch a run?"** — Sessions fork; an agent can re-enter and branch
+  its own history.
 
 ---
 
