@@ -73,6 +73,26 @@ is the repo-wide convention for rendering the envelope to a tool-result string.
   `protected_agent_requires_eval_run`, `sentinel_critical_findings_block_promotion`,
   `unresolved_dependencies`, …
 
+## Delegation failure kinds
+
+Three `ToolErrorKind` values exist for failures of *delegated* work, where the
+parent needs to know that retrying the identical call cannot help:
+
+| Kind | Means | Retry |
+|---|---|---|
+| `output_contract_unmet` | The child completed but did not produce the `expected_outputs` its parent declared | **No blind retry** — the contract failed, not the attempt. Re-delegate, decompose, relax the contract, or escalate |
+| `child_gave_up` | The session ended cleanly with no result and no account. Distinct from `unknown`, which is an unclassifiable *error*; this is a child that stopped without explaining | Parent reasons. Counts toward the parent loop guard |
+| `bad_reference` | A name or handle that does not exist in the session — hallucinated or mutated ref | **No retry of the same ref**: a deterministic lookup failure cannot succeed on repetition. Pick a real one |
+
+`retry_advice` carries the policy separately from the kind — `wait`,
+`retry_same_stage`, `retry_after_external_recovery`, `do_not_retry`,
+`escalate_human`. Keeping *what happened* apart from *what may be done about it*
+is what lets a parent branch on one field, and what stops "recoverable" from
+being read as "retry the same thing".
+
+How these are produced and what enforces them is in
+[`../internals/task-survival.md`](../internals/task-survival.md).
+
 ## Rollout
 
 The `error` code field is additive — existing tools keep working without it. New
