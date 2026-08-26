@@ -1,3 +1,5 @@
+> **Archived — shipped and promoted.** The behaviour is described in [`content-patch.md`](../reference/content-patch.md) (the tool contract). Kept as the design record; not source of truth.
+
 # Design: `content_patch` — token-efficient targeted edits on content-store entries
 
 ## Problem

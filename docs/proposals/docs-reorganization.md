@@ -217,6 +217,25 @@ detection got the live doc it never had
 Merge #9 is withdrawn: there is nothing to merge, because the two docs were
 never about the same thing.
 
+### 5.5 Promotions describe as-built, not as-proposed
+
+Writing the four promotions surfaced a pattern worth stating: **the shipped
+design was routinely better than the proposal, and the promoted doc must follow
+the code.**
+
+`task-robustness` proposed a `failure` object with a closed six-value `kind`.
+What shipped is different and better: the delegation cases fold into the existing
+`FailureClass` enum (`OutputContractUnmet`, `ChildGaveUp`, `BadReference`) carried
+on `ToolError.failure_class`, and retry policy moved to a separate `RetryAdvice`. Keeping *what happened* apart from
+*what may be done about it* is what lets a parent branch on one field — a
+distinction the proposal did not draw. A promotion that copied the proposal's
+table would have documented an API that does not exist.
+
+This is also why promotion is authorship rather than a move: the split of
+`task-robustness` across two docs (`internals/task-survival.md` for the runtime
+machinery, `reference/tool-errors.md` for the envelope facts) follows §5.2's rule
+— merge information, not files — and neither half is a copy of the proposal.
+
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 
 A shipped design doc must **not** be archived reflexively. Archiving is correct
@@ -514,7 +533,7 @@ four commands. Hand-written prose (workflows, examples) lives in
 | **2. Move, don't edit** ✅ **done** | Guard extended to relative links **first** (§8.1), then 75 `git mv`s and a link rewrite across 138 files. The rewrite is a resolver, not a sed script: a relative link is recomputed whenever *either* endpoint moves, so all four cases (both static, source moved, target moved, both moved) are handled. `docs/README.md` rewritten as the map — pulled forward from PR 5 because every line's path changed anyway and shipping a stale catalogue would be worse | Medium — large diff, mechanically verified by both guard checks |
 | **3. The real merges** ✅ **partly done** | Shipped: #1 CLI union (+ a coverage guard so the omission class cannot recur), #2 budgets, #3 crate map (deduped — §5.2), #4 powers. **Deferred with reasons below:** #6 ARCHITECTURE split, #7 agent-features fold, #8 skill manifest, #9 sentinel, #11 sandbox isolation | Content review needed — one commit per merge |
 | **4a. Status audit + `proposals/`** ✅ **done** | All 39 design+RFC docs audited against code and against live-doc coverage. 29 → `proposals/` under one index, 9 → `archived/` each stamped with a pointer to the doc that now describes it, 1 → `concepts/` (a discussion essay, not a proposal). `design/` and `rfc/` are gone. New guard: every proposal must be linked from `proposals/README.md` | Done — judgement per doc, recorded in the index |
-| **4b. Promotions** ✅ **2 of 4** | Promoted `sandbox-mount-allow-set` → `internals/sandbox/drivers.md` and `unit-test-runner-divergence-loop` → a new `internals/divergence-detection.md`; both proposals archived with pointers. **Also corrected a PR-2 error — see §5.4.** Remaining: `task-robustness`, `content-patch-tool` | Content authorship — one doc at a time |
+| **4b/4c. Promotions** ✅ **done (4 of 4)** | `sandbox-mount-allow-set` → `internals/sandbox/drivers.md`; `unit-test-runner-divergence-loop` → new `internals/divergence-detection.md`; `task-robustness` → new `internals/task-survival.md` + delegation kinds into `reference/tool-errors.md`; `content-patch-tool` → new `reference/content-patch.md`. All four archived with pointers. 4b also corrected a PR-2 error — see §5.4 | Content authorship — one doc at a time |
 | **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.

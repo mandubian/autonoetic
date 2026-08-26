@@ -276,7 +276,8 @@ pub struct LoopGuard {
     #[serde(default)]
     pub trip_reason: Option<LoopGuardTripReason>,
     /// Trip condition #10 — RFC #776 Part B.4: per-spawn-identity counts.
-    /// Keyed by `hash(agent_id + expected_outputs + message_digest)`.
+    /// Keyed by `"{agent_id}:{hash(agent_id, expected_outputs, message)}"` —
+    /// the spawn message is hashed directly, not pre-digested.
     /// When a count reaches `max_spawn_identity_repeats`, the guard trips
     /// `RepeatedSpawnIdentity` — the parent is stuck re-spawning the same
     /// child with the same contract. 0 disables the detector.
@@ -558,7 +559,8 @@ impl LoopGuard {
     /// emit a causal event and escalate. No-ops when the detector is
     /// disabled (`max_spawn_identity_repeats == 0`) or the guard has tripped.
     ///
-    /// Structural identity = `hash(agent_id + expected_outputs + message)`.
+    /// Structural identity = `hash(agent_id, expected_outputs, message)`, with
+    /// the message hashed directly (no pre-digest).
     /// Start strict (trivial input rewording evades it) — measure evasion
     /// before loosening (RFC open question 3).
     pub fn register_spawn_attempt(

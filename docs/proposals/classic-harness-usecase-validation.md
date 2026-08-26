@@ -128,7 +128,7 @@ own delegation than the research costs.
 must pass." The `patch`-tool + test-loop heart of every coding harness.
 
 **What this case isolates:** `content_patch` (the Hermes `patch`-gap closure:
-two-phase apply, fallback strategies — `docs/proposals/content-patch-tool.md`),
+two-phase apply, fallback strategies — `docs/archived/content-patch-tool.md`),
 workbench review, sandboxed test execution, evaluator promotion gates, and —
 if run against an installed agent — the revision flow
 (`agent_revision`/`content_patch` on a promoted bundle).

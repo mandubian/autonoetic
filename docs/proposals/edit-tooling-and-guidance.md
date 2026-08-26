@@ -3,7 +3,7 @@
 Two intertwined tracks:
 
 - **Track A — `content_patch`** (ship ASAP): the token-efficient targeted-edit
-  tool. Full spec in [`content-patch-tool.md`](./content-patch-tool.md).
+  tool. Full spec in [`content-patch-tool.md`](../archived/content-patch-tool.md).
 - **Track B — Guidance Blocks** (design now, build incrementally): replace the
   "built on the fly" per-SKILL.md prose with composable, *targeted* guidance
   blocks (capability- / tool- / model-family- / role-gated). This is the
@@ -103,7 +103,7 @@ file, later refactored into a tool-contributed block by #4/#6.
 ### Issue 1 — Implement `content_patch` (targeted edits on content-store entries)
 **Track A · depends on: none · ships with #2**
 
-Add a core-tier `content_patch` tool (full spec: `docs/proposals/content-patch-tool.md`).
+Add a core-tier `content_patch` tool (full spec: `docs/archived/content-patch-tool.md`).
 
 - [ ] `runtime/fuzzy_match.rs`: 3 strategies (exact, line-trimmed,
       whitespace-normalized) with indentation handling folded into replacement

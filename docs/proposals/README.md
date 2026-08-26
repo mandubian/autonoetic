@@ -25,19 +25,20 @@ de-facto reference.
 
 ## Promote first (shipped, undescribed)
 
-Shipped in code with **no live doc as their subject** — only passing mentions.
-Such a proposal cannot be archived: it is currently the only description, so
-archiving it would delete the documentation.
+**Empty — the debt is cleared.** All four shipped-but-undescribed proposals have
+been promoted into live docs and archived:
 
-| Proposal | Shipped as | Belongs in |
-|---|---|---|
-| [`task-robustness.md`](task-robustness.md) | `runtime/plan_preflight.rs`, typed failure taxonomy, cross-provider failover, burn-rate attestation. `expected_outputs` appears in `AGENTS.md`/`config.md` as a *field*; the taxonomy and failover are undescribed | `../internals/` (new: task failure model) |
-| [`content-patch-tool.md`](content-patch-tool.md) | `runtime/tools/content.rs` — the tool exists; no doc has it as a subject | [`../reference/`](../reference/) tool contract |
+| Was | Now described in |
+|---|---|
+| `sandbox-mount-allow-set` | [`../internals/sandbox/drivers.md`](../internals/sandbox/drivers.md) § Host-filesystem exposure |
+| `unit-test-runner-divergence-loop` | [`../internals/divergence-detection.md`](../internals/divergence-detection.md) |
+| `task-robustness` | [`../internals/task-survival.md`](../internals/task-survival.md) + delegation kinds in [`../reference/tool-errors.md`](../reference/tool-errors.md) |
+| `content-patch-tool` | [`../reference/content-patch.md`](../reference/content-patch.md) |
 
-**Done:** `sandbox-mount-allow-set` → [`../internals/sandbox/drivers.md`](../internals/sandbox/drivers.md)
-§ Host-filesystem exposure, and `unit-test-runner-divergence-loop` →
-[`../internals/divergence-detection.md`](../internals/divergence-detection.md).
-Both proposals are now archived with pointers.
+The **PROMOTE** status stays in the vocabulary above: it is what a shipped
+proposal gets when no live doc describes it, and the rule that produced these
+four — archiving such a doc would delete the only description — applies to
+whatever ships next.
 
 ## Open and partial
 
@@ -63,8 +64,6 @@ Both proposals are now archived with pointers.
 | [`gateway-determinism-and-escalation.md`](gateway-determinism-and-escalation.md) | Partial | `session_escalate` exists; feedback wanted on the rest |
 | [`agent-singleton-and-spawn-dedup.md`](agent-singleton-and-spawn-dedup.md) | Open | rev. 2 draft; no `singleton_key` / `spawn_dedup` in code |
 | [`agent-wiki-contributions.md`](agent-wiki-contributions.md) | Open | No contribution tool in code (`wiki_list`/`wiki_get` are read-only). #425, #426 |
-| [`content-patch-tool.md`](content-patch-tool.md) | **PROMOTE** | See above |
-| [`task-robustness.md`](task-robustness.md) | **PROMOTE** | See above |
 | [`edit-tooling-and-guidance.md`](edit-tooling-and-guidance.md) | Open | Two intertwined tracks; roadmap |
 | [`error-envelope-homogenization.md`](error-envelope-homogenization.md) | Open | Migration worklist, self-declared TODO |
 | [`external-cli-agent-delegation.md`](external-cli-agent-delegation.md) | Open | Side-plan, not implemented — no `ExternalCli` in code |

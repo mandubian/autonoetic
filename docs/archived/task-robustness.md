@@ -1,3 +1,5 @@
+> **Archived — shipped and promoted.** The behaviour is described in [`task-survival.md`](../internals/task-survival.md) (typed failures, contract enforcement, preflight, burn rate, failover). Kept as the design record; not source of truth.
+
 # Task Robustness: Typed Failures, Honest Contracts, and Fail-at-Plan-Time
 
 > **Status:** Implemented (2026-07-13 / wiring follow-up 2026-07-19). All
