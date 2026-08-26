@@ -225,8 +225,8 @@ the code.**
 
 `task-robustness` proposed a `failure` object with a closed six-value `kind`.
 What shipped is different and better: the delegation cases fold into the existing
-`ToolErrorKind` (`OutputContractUnmet`, `ChildGaveUp`, `BadReference`) and retry
-policy moved to a separate `RetryAdvice` enum. Keeping *what happened* apart from
+`FailureClass` enum (`OutputContractUnmet`, `ChildGaveUp`, `BadReference`) carried
+on `ToolError.failure_class`, and retry policy moved to a separate `RetryAdvice`. Keeping *what happened* apart from
 *what may be done about it* is what lets a parent branch on one field — a
 distinction the proposal did not draw. A promotion that copied the proposal's
 table would have documented an API that does not exist.

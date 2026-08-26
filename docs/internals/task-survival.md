@@ -13,22 +13,23 @@ the parent's reasoning; whether a retry is even permitted is not.
 ## Failures are typed, and typing is what forbids the blind retry
 
 Delegation failures arrive in the standard `ToolError` envelope
-([`../reference/tool-errors.md`](../reference/tool-errors.md)) with a kind that
-says *what shape of thing went wrong*, plus separate retry advice. The
-separation matters: a kind is a fact about the failure, while advice is policy
-over that fact, and mixing them is what produces retry loops.
+([`../reference/tool-errors.md`](../reference/tool-errors.md)) carrying a
+`failure_class` that says *what shape of thing went wrong*, plus a separate
+`retry_advice`. The separation matters: a class is a fact about the failure,
+while advice is policy over that fact, and mixing them is what produces retry
+loops.
 
-Three kinds exist specifically for delegation:
+Three `FailureClass` values exist specifically for delegation:
 
-| Kind | Means | Why retrying identically cannot work |
+| `FailureClass` | Means | Why retrying identically cannot work |
 |---|---|---|
 | `OutputContractUnmet` | The child "succeeded" but did not produce the `expected_outputs` the parent declared | The contract, not the attempt, is what failed. Something structural must change |
 | `ChildGaveUp` | The session ended cleanly with no result and no account | Distinct from `Unknown`: this is not an unclassifiable error, it is a child that stopped without explaining. Counts toward the parent loop guard |
 | `BadReference` | A name or handle that does not exist in the session — hallucinated or mutated | A deterministic lookup failure. The same reference will never resolve; pick a real one |
 
 `RetryAdvice` carries the policy: `Wait`, `RetrySameStage`,
-`RetryAfterExternalRecovery`, `DoNotRetry`, `EscalateHuman`. A parent branches on
-one field instead of parsing prose, and spends reasoning only where reasoning
+`RetryAfterExternalRecovery`, `DoNotRetry`, `EscalateHuman`,
+`FixArtifactThenRetry`. A parent branches on one field instead of parsing prose, and spends reasoning only where reasoning
 helps — deciding *how* to restructure, not *whether* the gateway will let it
 try again.
 
@@ -48,11 +49,14 @@ The dangerous loop is not one failure, it is a parent that responds to
 The LoopGuard detects that directly, keyed on **structural identity**:
 
 ```
-hash(agent_id + expected_outputs + message_digest)
+key = "{agent_id}:{hash(agent_id, expected_outputs, message)}"
 ```
 
-Reaching `max_spawn_identity_repeats` trips `RepeatedSpawnIdentity`
-(`runtime/guard.rs`). Setting the threshold to `0` disables the detector.
+The spawn message is hashed **directly** — there is no precomputed digest — so
+any change to the message produces a different identity. Reaching
+`max_spawn_identity_repeats` trips `RepeatedSpawnIdentity`
+(`LoopGuard::register_spawn_attempt` in `runtime/guard.rs`). Setting the
+threshold to `0` disables the detector.
 
 The hash is deliberately strict — trivially rewording the message evades it. That
 is a known limit, kept on purpose: measure real evasion before loosening, because
