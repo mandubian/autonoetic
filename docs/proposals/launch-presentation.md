@@ -14,7 +14,7 @@ the *why*, [`../concepts/philosophy.md`](../concepts/philosophy.md).
 > `start/concepts.md`) and corrected the sandbox claim (`allow_set` is shipped
 > but opt-in, not the default). Feature status cross-checked against
 > [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md);
-> claims are mapped to the ground concepts (companion doc in #1182).
+> claims are mapped to the [ground concepts](../concepts/ground-concepts.md).
 
 ---
 
@@ -228,7 +228,7 @@ The deeper idea — lead with it, don't save it for the Q&A:
 
 The pitch never asserts; it cites. Each claim rests on a ground concept with
 a mechanical form — the recurring structures every feature is built from
-(full map: the ground-concepts doc, #1182):
+(full map: [`../concepts/ground-concepts.md`](../concepts/ground-concepts.md)):
 
 | Pitch claim | Ground concept behind it |
 |---|---|

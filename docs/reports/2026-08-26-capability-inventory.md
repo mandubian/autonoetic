@@ -19,7 +19,7 @@ the enforcement register and tests won.
 | Agents propose / gateway executes (capability-gated tool dispatch) | Shipped | `runtime/lifecycle.rs`, `policy.rs` |
 | Manifest-declared capabilities, mechanical enforcement | Shipped | `autonoetic-types/src/capability.rs`, `policy.rs` |
 | Reasoning + script execution modes (incl. wasm JS tier via Javy) | Shipped | `docs/AGENTS.md`, `internals/sandbox/wasm-tier.md` |
-| Model-agnostic `llm_presets`; cross-provider failover | Shipped (failover undescribed — PROMOTE) | [`../proposals/task-robustness.md`](../proposals/task-robustness.md) |
+| Model-agnostic `llm_presets`; cross-provider failover | Shipped | [`../internals/task-survival.md`](../internals/task-survival.md) |
 | Turn continuation at approval boundaries (HMAC-signed suspend/resume) | Shipped | `runtime/continuation.rs`, `continuation_hmac_integrity_integration.rs` |
 | Checkpoints, session forking (`trace fork-tree`) | Shipped | `runtime/checkpoint.rs`, `cli/trace.rs` |
 | LoopGuard: per-tool failure budget, no-progress, rotating-polling, child-failure trips (P-7.x) | Shipped | `runtime/guard.rs`, enforcement register P-7 |
