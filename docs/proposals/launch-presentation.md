@@ -13,7 +13,8 @@ the *why*, [`../concepts/philosophy.md`](../concepts/philosophy.md).
 > explicitly rejects); fixed the beginners-doc link (renamed to
 > `start/concepts.md`) and corrected the sandbox claim (`allow_set` is shipped
 > but opt-in, not the default). Feature status cross-checked against
-> [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md).
+> [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md);
+> claims are mapped to the ground concepts (companion doc in #1182).
 
 ---
 
@@ -207,12 +208,14 @@ Artifacts, revisions, sessions, the chain itself are content-addressed and
 append-only — history that wasn't attributed can never be re-attributed, so
 attribution happens at write time, forever.
 
-Since June, *all six* headline claims above are shipped and tested:
+Every claim in that table is shipped and tested today:
 the constitution is versioned + signed (every boot verifies the digest),
 the sandbox `host_fs: allow_set` mode mounts only what the gateway asserts
 (opt-in today; the default flips after the deprecation window, #1002),
 artifacts and sessions carry egress labels that gate every off-machine
-boundary, and the credential vault injects server-side. Tell the egress
+boundary, and the credential vault injects server-side. (Federation row: the
+wire protocol and digest handshake ship; the gateway-side surface is still
+thin — see the honesty note below.) Tell the egress
 story if the room is security-heavy; it is the newest complete arc.
 
 The deeper idea — lead with it, don't save it for the Q&A:
@@ -220,6 +223,27 @@ The deeper idea — lead with it, don't save it for the Q&A:
 > Actors — AI, human, or script — are first-class citizens under one
 > constitution. Same rights. Same rules. They trust each other because they
 > trust the law, not the prompt.
+
+### Every claim names its mechanism
+
+The pitch never asserts; it cites. Each claim rests on a ground concept with
+a mechanical form — the recurring structures every feature is built from
+(full map: the ground-concepts doc, #1182):
+
+| Pitch claim | Ground concept behind it |
+|---|---|
+| Agents propose, the gateway executes | Separation of powers |
+| The law binds the enforcer too | Bind-direction discipline (rules/rights/obligations) |
+| A coder *cannot* touch the network | Declared capability, deny by default |
+| Nothing is ever overwritten | Immutability and content-addressing |
+| The trace answers who / what / why | Non-repudiable attribution on an append-only chain |
+| The agent knows its own standing | Verified self-model (signed per-turn attestation) |
+| Errors are correctable | Correctability over perfection; the entrenched core |
+| Your emails never reach a remote model | Data-locality label lattice (meet, never widen) |
+| It runs while you sleep, and survives restarts | Durability: checkpoints, continuations, typed wake-ups |
+| The community evolves its own law | Exit & voice; advisory before binding; office before occupant |
+
+If a claim can't name its mechanism, cut the claim.
 
 ---
 
@@ -238,6 +262,10 @@ So the pitch is not "unbreakable." It is:
 - The gateway reports on itself: `trace contract-health` shows what the law
   actually enforces, and every place the gateway improvises is counted as a
   named discretion leak.
+- An advisory sentinel watches for approval bypass, capability accretion,
+  prompt injection, sandbox escape — it observes and never blocks, by
+  constitutional design (Ri-0.16): judgment layers earn authority from
+  calibration evidence, never from assertion.
 - The law can be amended, by the actors it governs, through a signed process.
 - The machinery that makes correction possible (read your chain, named
   rejections, propose amendments, non-repudiation, the hash-chain itself) is
