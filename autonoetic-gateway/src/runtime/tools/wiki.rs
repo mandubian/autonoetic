@@ -91,6 +91,18 @@ struct IndexEntry {
     file: String,
     #[serde(default)]
     tags: Vec<String>,
+    /// Repo-relative path of the human doc this page digests.
+    ///
+    /// Seven wiki pages share a basename with a doc under `docs/` — the same
+    /// subject written for two different readers. That is legitimate (a wiki
+    /// page is a short digest served into an agent's context; the doc is the
+    /// human reference) but nothing said which one was authoritative, so both
+    /// drifted. Recording it here rather than in the page body keeps it out of
+    /// the prompt: `index.toml` is parsed, never served.
+    ///
+    /// Validated by `every_page_names_a_canonical_doc_that_exists`.
+    #[serde(default)]
+    canonical: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -482,6 +494,91 @@ mod tests {
             get_page(None, &page.id)
                 .unwrap_or_else(|e| panic!("indexed page '{}' failed to load: {e}", page.id));
         }
+    }
+
+    /// Every page names a canonical human doc, and that doc exists.
+    ///
+    /// Seven wiki pages share a basename with a doc under `docs/`. That is the
+    /// legitimate duplication in this repo — a wiki page is a digest served
+    /// into an agent's context, the doc is the human reference — but with
+    /// nothing recording which is authoritative, both drifted. One of them
+    /// drifted into stating the wrong active constitution version to every
+    /// agent that read it.
+    ///
+    /// `canonical` lives in `index.toml`, not in the page body, so it costs no
+    /// prompt tokens: the index is parsed, never served.
+    #[test]
+    fn every_page_names_a_canonical_doc_that_exists() {
+        let dir = resolve_wiki_dir(None).expect("built-in corpus dir should exist");
+        let index = load_index(&dir).expect("index should parse");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent");
+
+        for page in &index.pages {
+            let canonical = page.canonical.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "wiki page '{}' has no `canonical` in index.toml. Every page \
+                     digests some human doc — name it, so the two cannot drift \
+                     apart unnoticed.",
+                    page.id
+                )
+            });
+            assert!(
+                root.join(canonical).exists(),
+                "wiki page '{}' names canonical doc '{}', which does not exist",
+                page.id,
+                canonical
+            );
+        }
+    }
+
+    /// A wiki page is a digest, and a digest has a size bound.
+    ///
+    /// Without one, a page grows until it is a second reference — at which
+    /// point it is both duplicated and paid for in every agent's context. The
+    /// ceiling is generous against today's corpus (largest page 162 lines);
+    /// hitting it means the material belongs in the canonical doc, with the
+    /// page pointing at it.
+    #[test]
+    fn wiki_pages_stay_digest_sized() {
+        const MAX_LINES: usize = 200;
+        let dir = resolve_wiki_dir(None).expect("built-in corpus dir should exist");
+        let index = load_index(&dir).expect("index should parse");
+
+        let mut oversized = Vec::new();
+        for page in &index.pages {
+            let path = dir.join(&page.file);
+            // Read failures are not skipped: an indexed page that cannot be
+            // read is a corpus defect (bad path, encoding, permissions), and
+            // silently continuing inside a guard is how such a defect survives.
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "indexed wiki page '{}' could not be read at {}: {e}",
+                    page.id,
+                    path.display()
+                )
+            });
+            let lines = text.lines().count();
+            if lines > MAX_LINES {
+                oversized.push(format!(
+                    "{} ({} lines, budget {MAX_LINES}) — canonical: {}",
+                    page.file,
+                    lines,
+                    page.canonical.as_deref().unwrap_or("(none)")
+                ));
+            }
+        }
+
+        assert!(
+            oversized.is_empty(),
+            "{} wiki page(s) over the digest budget. A page this long is a \
+             second reference doc, duplicated and charged to every agent's \
+             context — move the detail into the canonical doc and point at \
+             it.\n\n  {}\n",
+            oversized.len(),
+            oversized.join("\n  ")
+        );
     }
 
     /// Conversely, every `.md` file in the corpus must be indexed — an

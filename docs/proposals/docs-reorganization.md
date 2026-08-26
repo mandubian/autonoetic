@@ -236,6 +236,55 @@ This is also why promotion is authorship rather than a move: the split of
 machinery, `reference/tool-errors.md` for the envelope facts) follows §5.2's rule
 — merge information, not files — and neither half is a copy of the proposal.
 
+### 5.6 Guards came from defects, not from foresight
+
+Every check in `docs_link_guard` was written *after* something slipped through,
+and each one was invisible to the checks that already existed:
+
+| Check | Written because | Found immediately |
+|---|---|---|
+| `docs/…` citations resolve | months of silent rot | 19 dangling, incl. a wiki page telling agents the wrong constitution version |
+| relative links resolve | PR 2 would move 75 files | 8 already broken |
+| link labels match targets | review caught 5 | 24 total |
+| every proposal indexed | the old index missed 11 of 27 | — |
+| anchors resolve | merge #6 cannot be done safely without it | 0 (preventive) |
+| documented symbols exist | review caught a **`ToolErrorKind` that does not exist** | 10 candidates, all legitimate — then review caught the check itself being vacuous (§5.7) |
+
+The pattern worth keeping: each guard was cheap only because the defect had
+already been paid for. The ordering discipline that made it work is *guard
+first* — extend the check before the change that would break things, not after.
+PR 2 and PR 5 both did that; the label defect is what happens when you don't.
+
+Two of these came from a reviewer, not from me. The symbol check exists because
+review noticed I had documented a type that was never in the codebase — in the
+same commit whose §5.5 argued that promotions must follow the code.
+
+### 5.7 A guard can be vacuous, and only a negative test shows it
+
+Review on PR 5 pointed out that `documented_symbols_exist` checked only the
+last `::` segment: `NoSuchType::run` would pass on the strength of some
+unrelated `run`. Correct, and tightening it (literal token first, then **every**
+segment as a whole word) cost nothing — measured: 63 qualified citations, 0
+newly failing.
+
+Fixing it exposed something worse. The negative test still passed — because the
+haystack was built from whole Rust files, and this guard's **own unit-test
+fixture** contains the string `NoSuchType::run`. The check was defining its
+counter-example into existence. Any symbol named in any test fixture anywhere in
+the workspace counted as real.
+
+The fix was already in the module: `production_prefix`, written for the citation
+check so test fixture *paths* would not be treated as citations. The same
+reasoning applies to symbols and I did not apply it — the haystack now uses it.
+
+Two lessons, both cheap and both learned late:
+
+- **Assert the failure, not just the pass.** Every guard here was negative-tested
+  by injection, which is the only reason this surfaced.
+- **A guard that reads the whole repo will read its own fixtures.** Self-scanning
+  tools need to exclude their own test data, or they answer "yes" to everything
+  they were built to catch.
+
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 
 A shipped design doc must **not** be archived reflexively. Archiving is correct
@@ -513,15 +562,34 @@ class of defect found in §1 — two hand-written CLI docs that between them mis
 four commands. Hand-written prose (workflows, examples) lives in
 `guide/`, which the generator never touches.
 
-### 8.3 Status invariants
+### 8.3 Status invariants — what shipped, and one that was wrong
 
-- front-matter `status` is one of the seven values, and matches the directory;
-- a doc in `archived/` is not linked from `reference/`, `internals/`, `guide/`,
-  `start/`, or `concepts/`;
-- a `proposal` whose status says shipped must name a `live_reference` that
-  exists (this alone would have caught the wasm RFC / wasm doc contradiction);
-- `proposals/README.md` lists every file in `proposals/` — no unlisted docs
-  (today: 11 in `design/`, 11 in `rfc/`).
+Shipped:
+
+- **`proposals/README.md` lists every proposal** (PR 4a). The index it replaced
+  missed 11 of 27 and its `rfc/` sibling had none.
+- **Every wiki page names a `canonical` doc that exists**, and pages stay under
+  a 200-line digest budget (PR 5). `canonical` lives in `index.toml`, not the
+  page body, so it costs no prompt tokens.
+- **Anchors resolve** (PR 5) — the third invisible half of a link, and the
+  precondition for merge #6.
+- **Documented symbols exist** (PR 5) — added because review caught three
+  API-accuracy errors no guard could see (§5.6).
+
+**Withdrawn: "an `archived/` doc is not linked from a live doc."** Sound in the
+abstract, wrong here. The promotions in 4b/4c *deliberately* point live docs at
+archived design records as provenance — `internals/task-survival.md` links
+`archived/task-robustness.md` for the open questions and the contract shape's
+origin. That is the archive doing its job. The distinction that matters is
+whether the archived doc is cited *as the description* or *as the record*, and
+that is not mechanically decidable, so the rule cannot be a test. What replaces
+it: promotions stamp the archived doc with a pointer to the live one, so a
+reader who lands there is redirected in one line.
+
+**Not done: front-matter `status` on every doc.** With `proposals/README.md` as
+the single status table, per-file front matter would be a second place to keep
+the same fact true — and §5.2's rule says merge information, not files. Left
+undone deliberately rather than deferred.
 
 ---
 
@@ -534,7 +602,7 @@ four commands. Hand-written prose (workflows, examples) lives in
 | **3. The real merges** ✅ **partly done** | Shipped: #1 CLI union (+ a coverage guard so the omission class cannot recur), #2 budgets, #3 crate map (deduped — §5.2), #4 powers. **Deferred with reasons below:** #6 ARCHITECTURE split, #7 agent-features fold, #8 skill manifest, #9 sentinel, #11 sandbox isolation | Content review needed — one commit per merge |
 | **4a. Status audit + `proposals/`** ✅ **done** | All 39 design+RFC docs audited against code and against live-doc coverage. 29 → `proposals/` under one index, 9 → `archived/` each stamped with a pointer to the doc that now describes it, 1 → `concepts/` (a discussion essay, not a proposal). `design/` and `rfc/` are gone. New guard: every proposal must be linked from `proposals/README.md` | Done — judgement per doc, recorded in the index |
 | **4b/4c. Promotions** ✅ **done (4 of 4)** | `sandbox-mount-allow-set` → `internals/sandbox/drivers.md`; `unit-test-runner-divergence-loop` → new `internals/divergence-detection.md`; `task-robustness` → new `internals/task-survival.md` + delegation kinds into `reference/tool-errors.md`; `content-patch-tool` → new `reference/content-patch.md`. All four archived with pointers. 4b also corrected a PR-2 error — see §5.4 | Content authorship — one doc at a time |
-| **5. Contracts** | `wiki/index.toml` `canonical` field + tests (§6.8), generated CLI ref (§8.2), status invariants (§8.3), point `docs/index.html` at the map (the map itself shipped in PR 2) | Low |
+| **5. Contracts** ✅ **done** | `wiki/index.toml` `canonical` field + digest budget (§6.8), anchor resolution, documented-symbol existence (§5.6), `docs/index.html` pointing at the map. CLI coverage was solved by checking rather than generating in PR 3 (§8.2); one proposed invariant is withdrawn with reasons (§8.3) | Low |
 
 PR 1 and PR 5 are valuable even if 2–4 are never merged.
 
