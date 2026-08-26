@@ -138,7 +138,7 @@ must be merged, not picked.
 | 3 ⚠️ | `gateway-architecture.md` + `MODULES.md` | `internals/crate-map.md` + `internals/gateway.md` | **Done differently — see §5.2.** Deduped the overlap instead of concatenating: the two docs answer different questions and one 1,128-line file would serve neither |
 | 4 ✅ | `gateway-architecture-principles.md` → `separation-of-powers.md` | `concepts/separation-of-powers.md` | **Done.** Folded in as "A narrow rule enforcer, not a workflow engine" — it draws the line by *judgement* where the host doc draws it by *privilege* |
 | 5 | `architecture-summary.md` | archived; ideas into `concepts/philosophy.md` | May essay framed against CCOS; superseded by `ARCHITECTURE.md` + `philosophy.md` |
-| 6 | `ARCHITECTURE.md` **split** | keep overview; move session/storage chapters to `internals/` | 1,608 lines; a pasted Live Digest sample leaks `## Turn 1 — {timestamp}` headings into the document outline |
+| 6 ✅ | `ARCHITECTURE.md` **split** | overview kept; session chapters → `internals/session/lifecycle.md`; storage chapters trimmed to pointers | **Done.** 1,608 → 1,144 lines. The session block moved whole (381 lines); the two storage sections were *trimmed rather than moved*, because `content-store.md` and `store-schema.md` already owned that material (§5.2). The leaked `## Turn 1 — {timestamp}` headings are demoted and out of the outline |
 | 7 | `agent-features.md` | `AGENTS.md`, then archived | `README.md` has called it "partially superseded" since May — finish the merge (middleware / disclosure / background scheduling are the unique parts) |
 | 8 | `agent-skill-frontmatter.md` + `AGENTS.md` SKILL section | `reference/skill-manifest.md` | Three descriptions of one manifest (+ the `wiki/skill-manifest.md` digest). 0 inbound refs on the top-level file |
 | 9 ❌ | ~~`security-sentinel.md` + `divergence-sentinel-design.md`~~ | — | **Withdrawn (§5.4).** Two unrelated subsystems share the word "sentinel"; there was nothing to merge. Divergence detection got the live doc it lacked: `internals/divergence-detection.md` |
@@ -615,7 +615,7 @@ are restructurings or classifications, each with a reason to wait:
 
 | Merge | Why not yet |
 |---|---|
-| #6 `ARCHITECTURE.md` split | 1,608 lines and the highest-fan-in doc in the repo. Splitting moves anchors, so inbound `#section` links break in ways neither guard check can see (an anchor is not a path). Wants an anchor check first — a natural PR 5 addition |
+| #6 `ARCHITECTURE.md` split | ✅ **Done** once PR 5's anchor check existed. It earned its keep immediately: the split broke `reference/cli.md`'s `#contract-health` link and two relative links inside the moved block, and the guards named all three before review saw them |
 | #7 `agent-features.md` → `AGENTS.md` | A 434-line fold into the canonical agent reference, which is also cited from agent bundles and prompt-composition tests. Its unique material (middleware, disclosure, background scheduling) deserves a careful read against current code, not a paste |
 | #8 skill manifest | `reference/skill-manifest.md` already exists post-rename; folding `AGENTS.md`'s SKILL.md section into it touches the doc agents read at runtime, so it belongs with #7 |
 | #9 sentinel | The live doc must absorb `design/divergence-sentinel-design.md`, which is `design/` — that is PR 4's territory, and PR 4 decides whether it is archived or promoted first |
