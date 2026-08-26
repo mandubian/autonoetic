@@ -2,7 +2,7 @@
 
 > Status: **Awaiting operator-side cycles (2026-05-22)**.
 > Tracking: [#249](https://github.com/mandubian/autonoetic/issues/249).
-> Sister design: [`self-improvement-loop-design.md`](./self-improvement-loop.md).
+> Sister design: [`self-improvement-loop.md`](./self-improvement-loop.md).
 
 ## 1. Purpose
 

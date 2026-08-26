@@ -25,15 +25,19 @@ de-facto reference.
 
 ## Promote first (shipped, undescribed)
 
-These four are shipped in code and have **no live doc as their subject** — only
-passing mentions. Verified by probing both the code and the live docs.
+Shipped in code with **no live doc as their subject** — only passing mentions.
+Such a proposal cannot be archived: it is currently the only description, so
+archiving it would delete the documentation.
 
 | Proposal | Shipped as | Belongs in |
 |---|---|---|
-| [`sandbox-mount-allow-set.md`](sandbox-mount-allow-set.md) | `sandbox/driver/bubblewrap.rs` `allow_set` (#1002, landed #1174) — only `reference/config.md` names the key | [`../internals/sandbox/drivers.md`](../internals/sandbox/drivers.md) |
-| [`unit-test-runner-divergence-loop.md`](unit-test-runner-divergence-loop.md) | self-declared Implemented 2026-06-23, all five changes — described nowhere live | [`../internals/divergence-sentinel.md`](../internals/divergence-sentinel.md) |
 | [`task-robustness.md`](task-robustness.md) | `runtime/plan_preflight.rs`, typed failure taxonomy, cross-provider failover, burn-rate attestation. `expected_outputs` appears in `AGENTS.md`/`config.md` as a *field*; the taxonomy and failover are undescribed | `../internals/` (new: task failure model) |
 | [`content-patch-tool.md`](content-patch-tool.md) | `runtime/tools/content.rs` — the tool exists; no doc has it as a subject | [`../reference/`](../reference/) tool contract |
+
+**Done:** `sandbox-mount-allow-set` → [`../internals/sandbox/drivers.md`](../internals/sandbox/drivers.md)
+§ Host-filesystem exposure, and `unit-test-runner-divergence-loop` →
+[`../internals/divergence-detection.md`](../internals/divergence-detection.md).
+Both proposals are now archived with pointers.
 
 ## Open and partial
 
@@ -43,7 +47,7 @@ passing mentions. Verified by probing both the code and the live docs.
 | [`agent-genesis-one-door.md`](agent-genesis-one-door.md) | Partial | Security core shipped (#802/#805); F.3/F.4 birth quality open (#799) |
 | [`data-envelopes-egress-localization.md`](data-envelopes-egress-localization.md) | Partial | The egress master RFC. Phases 1–3 shipped; Phase 4 open — see [`egress-phase4.md`](egress-phase4.md) |
 | [`egress-phase4.md`](egress-phase4.md) | Partial | Federation, MCP, sandbox, declassification (#909) |
-| [`divergence-sentinel.md`](divergence-sentinel.md) | Partial | Layer 1 + manual watchdog shipped; P4 validation open. Live behaviour: [`../internals/divergence-sentinel.md`](../internals/divergence-sentinel.md) |
+| [`divergence-sentinel.md`](divergence-sentinel.md) | Partial | Layer 1 + manual watchdog shipped; P4 validation open. Live behaviour: [`../internals/divergence-detection.md`](../internals/divergence-detection.md) |
 | [`divergence-sentinel-validation.md`](divergence-sentinel-validation.md) | Validation pending | Harness exists (`autonoetic sentinel-experiment`); awaiting operator sign-off |
 | [`self-improvement-loop.md`](self-improvement-loop.md) | Partial | P0–P4 shipped (`autonoetic improve`); P5–P7 open |
 | [`self-improvement-loop-validation.md`](self-improvement-loop-validation.md) | Validation pending | Awaiting a 3-cycle run |
@@ -60,6 +64,7 @@ passing mentions. Verified by probing both the code and the live docs.
 | [`agent-singleton-and-spawn-dedup.md`](agent-singleton-and-spawn-dedup.md) | Open | rev. 2 draft; no `singleton_key` / `spawn_dedup` in code |
 | [`agent-wiki-contributions.md`](agent-wiki-contributions.md) | Open | No contribution tool in code (`wiki_list`/`wiki_get` are read-only). #425, #426 |
 | [`content-patch-tool.md`](content-patch-tool.md) | **PROMOTE** | See above |
+| [`task-robustness.md`](task-robustness.md) | **PROMOTE** | See above |
 | [`edit-tooling-and-guidance.md`](edit-tooling-and-guidance.md) | Open | Two intertwined tracks; roadmap |
 | [`error-envelope-homogenization.md`](error-envelope-homogenization.md) | Open | Migration worklist, self-declared TODO |
 | [`external-cli-agent-delegation.md`](external-cli-agent-delegation.md) | Open | Side-plan, not implemented — no `ExternalCli` in code |

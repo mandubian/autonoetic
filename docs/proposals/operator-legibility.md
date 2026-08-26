@@ -2,8 +2,8 @@
 
 > Status: **Draft RFC** — concept agreement; slicing into PRs.
 > Builds on: [`../archived/human-gate-unification-plan.md`](../archived/human-gate-unification-plan.md) (GateService),
-> [`human-agent-artifact-collaboration-plan.md`](human-agent-artifact-collaboration.md) (PlanFrame + workbench),
-> [`operator-activity-feed-plan.md`](operator-activity-feed.md).
+> [`human-agent-artifact-collaboration.md`](human-agent-artifact-collaboration.md) (PlanFrame + workbench),
+> [`operator-activity-feed.md`](operator-activity-feed.md).
 > Rooted in: [`separation-of-powers.md`](../concepts/separation-of-powers.md).
 
 ## 1. The problem, in one sentence

@@ -1,3 +1,5 @@
+> **Archived — shipped and promoted.** The behaviour is described in [`drivers.md`](../internals/sandbox/drivers.md) (Host-filesystem exposure (`host_fs`)). Kept as the design record; not source of truth.
+
 # RFC: Sandbox host-filesystem mount allow-set (#1002)
 
 Date: 2026-08-24

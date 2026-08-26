@@ -32,7 +32,7 @@ not *trajectories of error→fix*.
 
 **Related:**
 - `docs/proposals/divergence-sentinel.md` — the original Sentinel design (P0 done, P1 done, P2 done)
-- `docs/proposals/unit-test-runner-divergence-loop.md` — the "category error" diagnosis this RFC generalizes
+- `docs/internals/divergence-detection.md` — the "category error" diagnosis this RFC generalizes
 - `docs/reports/postmortems/session-b6d27af2-weather-agent.md` — attribution: "mostly agents not following their own prompts"
 - `../concepts/separation-of-powers.md` — "Dumb Gateway, Smart Agent" tenet
 - `docs/reports/2026-04-24-constitution-audit.md` — §5 flags the egress-validation gap
@@ -98,7 +98,7 @@ deliver what is really passive **information**. D.7 addresses the surface; D.2
 and D.6 reduce how often it fires.
 
 This is a **category error**, the same shape as the one diagnosed in
-`docs/proposals/unit-test-runner-divergence-loop.md` (`ok:false` conflating
+`docs/internals/divergence-detection.md` (`ok:false` conflating
 sandbox-malfunction with domain-failure), but at the loop level. Every signal
 the Sentinel computes today is **count-based over a window**:
 

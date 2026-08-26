@@ -905,7 +905,7 @@ autonoetic mcp expose [--port <PORT>]
 ## Security Commands
 
 Security sentinel: status, findings, triage, and red-team pattern proposals.
-Behaviour is described in [`../internals/divergence-sentinel.md`](../internals/divergence-sentinel.md).
+Behaviour is described in [`../internals/security-sentinel.md`](../internals/security-sentinel.md).
 
 ### `autonoetic security status`
 
@@ -1007,7 +1007,7 @@ autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy --agent-id sea
 
 ## Review Commands
 
-Post-promotion review results. Design: [`../design/post-promotion-review-design.md`](../proposals/post-promotion-review.md).
+Post-promotion review results. Design: [`post-promotion-review.md`](../proposals/post-promotion-review.md).
 
 ```bash
 autonoetic review status
@@ -1066,7 +1066,7 @@ autonoetic sentinel-experiment --corpus corpus.yaml --no-tools --skip-watchdog
 ## Improve Command
 
 Run the self-improvement loop: diagnose, propose, validate, deploy. See
-[`../design/self-improvement-loop-design.md`](../proposals/self-improvement-loop.md).
+[`self-improvement-loop.md`](../proposals/self-improvement-loop.md).
 
 ### `autonoetic improve run`
 

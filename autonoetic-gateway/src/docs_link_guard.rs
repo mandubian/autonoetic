@@ -240,6 +240,40 @@ fn extract_relative_links(line: &str) -> Vec<String> {
     out
 }
 
+/// Extract `(label, target)` for every Markdown link on the line.
+///
+/// Sibling of [`extract_relative_links`], which needs only targets. This one
+/// keeps the label so the two halves of a link can be compared.
+fn extract_labelled_links(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let label_start = i + 1;
+        let Some(label_len) = line[label_start..].find(']') else { break };
+        let label_end = label_start + label_len;
+        // The `](` must be adjacent for this to be a link rather than a
+        // bracketed aside.
+        if line.as_bytes().get(label_end + 1) != Some(&b'(') {
+            i = label_end + 1;
+            continue;
+        }
+        let target_start = label_end + 2;
+        let Some(target_len) = line[target_start..].find(')') else { break };
+        let raw = &line[target_start..target_start + target_len];
+        let target = raw.split_whitespace().next().unwrap_or("").to_string();
+        if !target.is_empty() {
+            out.push((line[label_start..label_end].to_string(), target));
+        }
+        i = target_start + target_len + 1;
+    }
+    out
+}
+
 /// Resolve `link` relative to the directory of `from_rel`, collapsing `..`.
 fn resolve_relative(from_rel: &Path, link: &str) -> PathBuf {
     let mut parts: Vec<String> = Vec::new();
@@ -411,6 +445,71 @@ mod tests {
         assert_eq!(
             resolve_relative(Path::new("dir/from.md"), "./to.md"),
             PathBuf::from("dir/to.md")
+        );
+    }
+
+    /// A link label that names a file must name the file it links to.
+    ///
+    /// Every reference sweep in the docs reorganisation rewrote link
+    /// *targets* and left the visible *labels* alone, so a reader saw
+    /// `[design/post-promotion-review-design.md](../proposals/post-promotion-review.md)`
+    /// — a path that no longer exists, presented as the name of the thing being
+    /// linked. 24 of these accumulated across three PRs before anyone noticed,
+    /// and neither the citation check nor the relative-link check can see them:
+    /// the target resolves, so both pass. Only the human-visible half is wrong,
+    /// which makes greps and mental models stale.
+    ///
+    /// Descriptive labels are untouched; the rule applies only when the label
+    /// itself ends in `.md`, i.e. when it claims to be a filename.
+    #[test]
+    fn link_labels_naming_a_file_match_their_target() {
+        let root = workspace_root();
+        let mut failures: Vec<String> = Vec::new();
+
+        for rel in collect_sources(&root) {
+            if rel.extension().is_some_and(|e| e != "md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for (label, target) in extract_labelled_links(line) {
+                    let core = label.trim_matches(|c| c == '`' || c == '*' || c == ' ');
+                    if !core.ends_with(".md") || target.contains("://") {
+                        continue;
+                    }
+                    let target_base = target
+                        .split('#')
+                        .next()
+                        .unwrap_or(&target)
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    let label_base = core.rsplit('/').next().unwrap_or(core);
+                    if target_base.is_empty() || label_base == target_base {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} label `{}` names a different file than its target `{}`\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        core,
+                        target,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} link label(s) naming a file other than the one linked. A label \
+             that looks like a path is read as one — make it the target's \
+             filename, or write a descriptive label instead.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
 
