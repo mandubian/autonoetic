@@ -374,8 +374,23 @@ autonoetic trace show nightshift-001 --agent planner.default
 invitation (needs 3 same-rule denials in the window — the fleet was too
 well-behaved), `anomaly_flag` (nothing anomalous happened), and the
 agent-decider beat (no bundled agent holds `GateDecider` — patch a manifest
-for that scene). Also observed: `trace sessions` (list) printed "No trace
-sessions found" while `trace show` worked — check before demoing the list.
+for that scene, or see the night-watch proposal below).
+
+### Issues found by this run (and what happened to them)
+
+Running the demo against a live gateway surfaced real operator-facing bugs —
+the demo earned its keep. Status:
+
+| Issue | Symptom | Status |
+|---|---|---|
+| `trace sessions` read stale per-agent JSONL files (predates #1119 DB routing) | list always printed "No trace sessions found" while `trace show` worked | **Fixed** — new `trace.sessions` RPC, DB-backed, verified live on this run's 18-session tree (#1187) |
+| `port: 4100` + default `http_port: 4100` | gateway died with a bare "Address already in use" naming neither listener | **Fixed** — `load_config` rejects port collisions naming the knobs and the fix (#1187) |
+| No way to appoint an agent-decider for a run | two gates parked overnight; the prompt's "tonight's decider" line had nothing to bind to | **Proposal** — run-scoped decider appointment, "name the night watch" (#1188) |
+| Runtime-lock drift kills background tasks after a binary rebuild | `runtime lock drift detected (build_sha256)` on scheduler tasks | By design (durability attestation); the error names `allow_runtime_lock_drift` — set it for dev fleets |
+| `chat` requires a TTY unless `--test-mode`/`--non-interactive` | `os error 6` when piped in CI without flags | Workaround exists (flags); auto-detect of non-TTY stdin would be a small follow-up |
+| Quickstart default model gated by OpenRouter account provider rules | 404 "No allowed providers" for `gemini-3-flash` on restricted accounts | Not a repo bug — the error names the account setting; demo configs should mirror `~/.autonoetic` presets |
+| `[No response]` rendered when the planner yields after spawning | looks like failure in `--test-mode`; the turn actually ended per doctrine (Ri-0.14) | Cosmetic — a "[turn ended — work continues in background]" hint would help first-timers |
+| ContextGovernor "hit message floor" warnings under derived soft budget | warning noise on long planner sessions | Governor tuning; not launch-blocking |
 
 ---
 
