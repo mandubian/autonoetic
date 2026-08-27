@@ -241,10 +241,15 @@ impl SessionReportWriter {
         std::fs::create_dir_all(&dir)?;
         update_latest_session_symlink(gateway_dir, base);
         let report_data_dir = dir.join("report-data");
-        std::fs::create_dir_all(&report_data_dir)?;
-        let payload_counter = std::fs::read_dir(&report_data_dir)
-            .map(|entries| entries.filter_map(|e| e.ok()).count())
-            .unwrap_or(0) as u32;
+        // `report-data/` is intentionally absent for most sessions (lazy
+        // creation) — that's the only error that means "no payloads yet".
+        // Swallowing permission/IO errors here could silently zero the
+        // counter and alias payload numbering.
+        let payload_counter = match std::fs::read_dir(&report_data_dir) {
+            Ok(entries) => entries.filter_map(|e| e.ok()).count() as u32,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
         let content_store = crate::runtime::content_store::ContentStore::new(gateway_dir).ok();
         Ok(Self {
             state_path: dir.join("session_report.live.json"),
@@ -674,7 +679,8 @@ impl SessionReportWriter {
                     "raw_result": result_json,
                 });
                 if let Ok(body) = serde_json::to_string_pretty(&payload) {
-                    let _ = std::fs::write(self.report_data_dir.join(&filename), body);
+                    let _ = std::fs::create_dir_all(&self.report_data_dir)
+                        .and_then(|_| std::fs::write(self.report_data_dir.join(&filename), body));
                 }
             }
         }
@@ -880,7 +886,7 @@ impl SessionReportWriter {
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
         write_string_atomic(&self.live_html_path, &live_html)?;
-        write_json_atomic(&self.final_json_path, &state)?;
+        snapshot_final_json(&self.state_path, &self.final_json_path, &state)?;
         write_string_atomic(&self.final_md_path, &final_md)?;
         write_string_atomic(&self.final_html_path, &final_html)?;
         Ok(())
@@ -3458,6 +3464,34 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
     write_string_atomic(path, &body)
 }
 
+/// The final JSON is byte-identical to the live state at finalize time, so
+/// hardlink it to the live inode instead of writing a second copy. Live
+/// updates rename a fresh inode over `state_path`, which keeps the linked
+/// snapshot frozen if the session resumes afterwards. Falls back to a full
+/// write where hardlinks are unavailable.
+fn snapshot_final_json<T: Serialize>(
+    state_path: &Path,
+    final_path: &Path,
+    state: &T,
+) -> anyhow::Result<()> {
+    // Link/write at a scratch path first, then rename into place: consumers
+    // (the hooks publish path, humans tailing the file) must never observe
+    // `session_report.json` missing or half-written, and a failed hardlink
+    // + fallback write must leave the previous snapshot intact.
+    let tmp = final_path.with_extension("json.snapshot-tmp");
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    match std::fs::hard_link(state_path, &tmp) {
+        Ok(()) => {}
+        Err(_) => write_json_atomic(&tmp, state)?,
+    }
+    std::fs::rename(&tmp, final_path)?;
+    Ok(())
+}
+
 fn write_string_atomic(path: &Path, body: &str) -> anyhow::Result<()> {
     let tmp = path.with_extension(format!(
         "{}.tmp",
@@ -3691,5 +3725,31 @@ mod tests {
         assert!(live.contains("| Status | `completed` |"));
         assert_eq!(state_json.matches("session started").count(), 1);
         assert!(state_json.contains("\"status\": \"completed\""));
+    }
+
+    #[test]
+    fn finalize_links_final_json_to_live_state_and_keeps_it_frozen() {
+        let tmp = tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let mut writer =
+            SessionReportWriter::open(&gateway_dir, "root/planner.default", "planner.default")
+                .unwrap();
+        writer.start_session("Plan something").unwrap();
+        writer.start_turn(Some("turn-1")).unwrap();
+        writer
+            .finish_session(SessionCloseOutcome::ExecuteLoopComplete, Some("done"))
+            .unwrap();
+
+        let session_dir = gateway_dir.join("sessions").join("root");
+        let live_json = std::fs::read_to_string(session_dir.join("session_report.live.json")).unwrap();
+        let final_json = std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
+        assert_eq!(live_json, final_json);
+        assert!(!session_dir.join("report-data").exists());
+
+        writer.start_turn(Some("turn-2")).unwrap();
+        let final_after = std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
+        assert_eq!(final_json, final_after);
     }
 }
