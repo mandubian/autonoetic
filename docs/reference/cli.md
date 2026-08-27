@@ -699,7 +699,7 @@ Standing **contract-health** view: how often each constitutional clause
 causal events and attributes each `P-x.y` / `Ri-x.y` rule/right ID to its owning
 clause via the enforcement register. Rule IDs not present in the register are
 reported as `unattributed` (a visible coverage-gap signal). See
-[Contract Health](../ARCHITECTURE.md#contract-health).
+[Contract Health](../internals/session/lifecycle.md#contract-health).
 
 ```bash
 autonoetic trace contract-health [--since <RFC3339>] [--json]
