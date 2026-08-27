@@ -248,7 +248,7 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): System architecture, design principles, security model, data flow
 - [`docs/internals/crate-map.md`](docs/internals/crate-map.md): Workspace structure, per-crate module reference, SKILL.md format, configuration
 - [`docs/internals/gateway.md`](docs/internals/gateway.md): The gateway crate in depth — module map, request workflow, data-store domains
-- [`docs/AGENTS.md`](docs/AGENTS.md): Roles, routing, capabilities, agent lifecycle, building new agents
+- [`docs/AGENTS.md`](docs/AGENTS.md): Canonical agent reference — roles, routing, `SKILL.md` format, capabilities, lifecycle, middleware hooks, background scheduling, building new agents
 - [`docs/reference/cli.md`](docs/reference/cli.md): Complete CLI command reference with examples
 
 ### Visual Maps
@@ -264,8 +264,6 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 
 - [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md): End-to-end CLI quickstart tutorial
 - [`docs/reference/http-api.md`](docs/reference/http-api.md): HTTP API for remote agents, SDK transport, authentication
-- [`docs/AGENTS.md`](docs/AGENTS.md): Canonical agent reference — roles, routing, capabilities, lifecycle
-- [`docs/AGENTS.md`](docs/AGENTS.md): Agent roles, SKILL.md format, capabilities, middleware hooks, background scheduling
 - [`docs/guide/runbooks/iteration-repair-validation.md`](docs/guide/runbooks/iteration-repair-validation.md): Iterative repair validation steps
 - [`docs/reference/schema-enforcement.md`](docs/reference/schema-enforcement.md): Schema coercion for agent.spawn payloads
 

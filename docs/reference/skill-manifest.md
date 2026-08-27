@@ -1,7 +1,8 @@
 # SKILL.md `capabilities` and `remote_access` — schema reference
 
-The two frontmatter blocks the gateway **validates strictly** at install time
-(`validate_skill_frontmatter_shape`) and parses at runtime. For the rest of the
+This page documents the two frontmatter blocks the gateway **validates
+strictly** at install time (`validate_skill_frontmatter_shape`) and parses at
+runtime: `capabilities` and `remote_access`. For the rest of the
 frontmatter — identity, roles, `llm_config`, `io`, middleware, background —
 see [`../AGENTS.md`](../AGENTS.md) § SKILL.md Format.
 
