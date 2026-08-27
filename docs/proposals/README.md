@@ -71,7 +71,7 @@ whatever ships next.
 | [`remote-access-declarative-patterns.md`](remote-access-declarative-patterns.md) | Open | Phase 4.3/4.4 — move detection policy into agent-declared manifest patterns |
 | [`launch-readiness-priorities.md`](launch-readiness-priorities.md) | Open | Triage view over the above |
 | [`launch-presentation.md`](launch-presentation.md) | Open | Launch pitch/demo/rollout plan (#489) — messaging, not architecture; follows the `../start/concepts.md` framing |
-| [`run-scoped-decider-appointment.md`](run-scoped-decider-appointment.md) | Open | "Name the night watch": appointing an agent-decider for a run (P-2.20 seat exists; appointment record + routing missing) |
+| [`run-scoped-decider-appointment.md`](run-scoped-decider-appointment.md) | Open | "Name the night watch": appointing an agent-decider for a run as a peer principal (P-2.20 seat exists; appointment record, routing, read parity and four blocking defects) |
 | [`classic-harness-usecase-validation.md`](classic-harness-usecase-validation.md) | Validation pending | Study in progress; becomes a [`../reports/`](../reports/) entry when it closes |
 | [`implicit-artifacts-agent-evolution.md`](implicit-artifacts-agent-evolution.md) | Partial | Part 1 shipped; Part 2 (closed-loop evolution automation) open |
 | [`docs-reorganization.md`](docs-reorganization.md) | Partial | This reorganisation. PRs 1–3 and 4a shipped; promotions and contracts open |
