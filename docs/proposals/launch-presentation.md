@@ -302,6 +302,98 @@ cargo run -p autonoetic -- trace sessions  # the receipts (or: autonoetic trace 
 
 ---
 
+## The overnight demo — "The Night Shift" (tested 2026-08-27)
+
+The 5-minute demo shows one gate. This one shows a **constitution of agents
+and humans** over a full night: delegation, gates parked for a sleeping
+operator, and a newborn agent — all on one causal chain. Ran end-to-end
+against the bundled roster on `deepseek-v4-flash`; beats below are observed,
+not scripted.
+
+**Setup (the parts the quickstart doesn't cover):**
+
+```bash
+# Full roster, not the sample agent:
+cargo run -p autonoetic -- --config demo/config.yaml agent bootstrap --from ./agents
+# config.yaml needs: working llm_presets for {smart, research, agentic, coding, budget, haiku},
+# http_port: 0 (or distinct from `port` — http_port defaults to 4100 and collides),
+# allow_runtime_lock_drift: true if you rebuild the binary while the fleet runs,
+# llm_request_timeout_secs: 600 (coder turns die on the 120s default).
+```
+
+**The prompt** (one message to `planner.default`, then walk away):
+
+> Overnight goal: design, build, test, and install a small script agent
+> market-brief.daily that produces a morning market summary from a public,
+> no-key API (for example stooq.com CSV endpoints). Rules of engagement: work
+> through your specialists via delegation; never work around a denial — if
+> the same rule blocks you repeatedly, treat the gateway's amendment
+> invitation as the signal and route a constitutional amendment proposal to
+> governance-author.default. If you observe anything surprising in a sibling
+> agent, report it with anomaly_flag. I am asleep; do not wait for me —
+> anything needing a decision only an operator can make, park it with a clear
+> note in the trace. I will read the receipts in the morning.
+
+**What actually happened (45 min in, still running when sampled):**
+
+- The planner climbed the delegation ladder: no candidate → spawned
+  `agent-factory.default`. Observed spawn tree (from session IDs):
+  planner → agent-factory → {coder ×2, unit_test_runner, auditor,
+  static_evaluator, specialized_builder} + planner → {executor ×2} — the
+  use-case-1 roster, live, plus two self-appointed debuggers.
+- **Typed wake-ups, zero polling** (Ri-0.14): the planner hibernated after
+  spawning, was woken by child state transitions, read `workflow_state` once
+  per wake, yielded again.
+- **The gate, parked for the sleeper:** `apr-02aafd39` — coder's
+  `artifact_exec` of the test suite, gated because the artifact reaches
+  `stooq.com`. The approval card carried the static analysis (5 remote-access
+  patterns incl. the URL literal at line 21) and the agent-stated purpose.
+  One `approvals approve` in the morning → the task re-queued and the
+  pipeline resumed *without re-prompting*.
+- **Mechanical honesty, twice:** a child claimed done with zero
+  `artifact.build` calls — rejected with a typed `artifact_build_evidence`
+  failure and repair hint; later the output contract stamped `failure_class`
+  for unmet expected outputs ("installed agent market-brief.daily",
+  smoke-test result). No self-reported progress accepted.
+- **Self-debugging:** when the smoke test 404'd, `executor.default` probed
+  stooq.com *and* stooq.pl with curl to disambiguate endpoint-vs-egress —
+  second approval card (`apr-764bbd58`), both hosts visible before deciding.
+- **Agents building agents:** `market-brief.daily` was created as a candidate
+  revision (via `agent_revision_create_from_intent`) and smoke-tested in a
+  sandbox twice — promotion still in flight at sample time.
+
+**The morning commands (the receipts):**
+
+```bash
+autonoetic gateway pending --root-session nightshift-001   # everything parked, one list
+autonoetic gateway approvals show apr-02aafd39             # the card: analysis, purpose, risk
+autonoetic trace show nightshift-001 --agent planner.default
+```
+
+**Not yet triggered organically** (don't promise them live): the amendment
+invitation (needs 3 same-rule denials in the window — the fleet was too
+well-behaved), `anomaly_flag` (nothing anomalous happened), and the
+agent-decider beat (no bundled agent holds `GateDecider` — patch a manifest
+for that scene, or see the night-watch proposal below).
+
+### Issues found by this run (and what happened to them)
+
+Running the demo against a live gateway surfaced real operator-facing bugs —
+the demo earned its keep. Status:
+
+| Issue | Symptom | Status |
+|---|---|---|
+| `trace sessions` read stale per-agent JSONL files (predates #1119 DB routing) | list always printed "No trace sessions found" while `trace show` worked | **Fixed** — new `trace.sessions` RPC, DB-backed, verified live on this run's 18-session tree (#1187) |
+| `port: 4100` + default `http_port: 4100` | gateway died with a bare "Address already in use" naming neither listener | **Fixed** — `load_config` rejects port collisions naming the knobs and the fix (#1187) |
+| No way to appoint an agent-decider for a run | two gates parked overnight; the prompt's "tonight's decider" line had nothing to bind to | **Proposal** — run-scoped decider appointment, "name the night watch" (#1188) |
+| Runtime-lock drift kills background tasks after a binary rebuild | `runtime lock drift detected (build_sha256)` on scheduler tasks | By design (durability attestation); the error names `allow_runtime_lock_drift` — set it for dev fleets |
+| `chat` requires a TTY unless `--test-mode`/`--non-interactive` | `os error 6` when piped in CI without flags | Workaround exists (flags); auto-detect of non-TTY stdin would be a small follow-up |
+| Quickstart default model gated by OpenRouter account provider rules | 404 "No allowed providers" for `gemini-3-flash` on restricted accounts | Not a repo bug — the error names the account setting; demo configs should mirror `~/.autonoetic` presets |
+| `[No response]` rendered when the planner yields after spawning | looks like failure in `--test-mode`; the turn actually ended per doctrine (Ri-0.14) | Cosmetic — a "[turn ended — work continues in background]" hint would help first-timers |
+| ContextGovernor "hit message floor" warnings under derived soft budget | warning noise on long planner sessions | Governor tuning; not launch-blocking |
+
+---
+
 ## The launch narrative (slide beats)
 
 1. **Hook** — agents are fast and forgettable.
