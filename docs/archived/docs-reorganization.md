@@ -1,3 +1,19 @@
+> **Archived — complete.** Every item in this plan shipped or was explicitly
+> withdrawn with reasons, across eight PRs (#1172, #1173, #1175, #1178, #1179,
+> #1180, #1181, #1183, #1184). The layout it proposed is live and enforced by 21
+> mechanical checks; `docs/README.md` is the map.
+>
+> Retired rather than left open because its own status table drifted *while the
+> work was in flight* — three rows read "open" for six PRs after shipping (§5.8).
+> Its rows are prose, so nothing could catch that. The lasting content is not the
+> table but §2 (the organizing idea), §5.2 (merge information, not files), §5.1
+> and §5.5 (shipped ≠ archivable; promote as-built), and §5.6–5.8 (how the guards
+> came to exist, and how one of them was vacuous). Those are the parts worth
+> reading if you are about to reorganise something.
+>
+> Not source of truth for the current layout — that is `docs/README.md` and the
+> guards in `autonoetic-gateway/src/docs_link_guard.rs`.
+
 # Documentation reorganization — proposal
 
 Status: **proposed** (2026-08-25) · Scope: `docs/` layout, indexes, and the

@@ -73,7 +73,6 @@ whatever ships next.
 | [`launch-presentation.md`](launch-presentation.md) | Open | Launch pitch/demo/rollout plan (#489) — messaging, not architecture; follows the `../start/concepts.md` framing |
 | [`classic-harness-usecase-validation.md`](classic-harness-usecase-validation.md) | Validation pending | Study in progress; becomes a [`../reports/`](../reports/) entry when it closes |
 | [`implicit-artifacts-agent-evolution.md`](implicit-artifacts-agent-evolution.md) | Partial | Part 1 shipped; Part 2 (closed-loop evolution automation) open |
-| [`docs-reorganization.md`](docs-reorganization.md) | Partial | This reorganisation. PRs 1–3 and 4a shipped; promotions and contracts open |
 
 ## Archived from here
 
