@@ -137,14 +137,14 @@ must be merged, not picked.
 | 2 ✅ | `budget-management.md` + `session-budget.md` | `reference/budgets.md` | **Done.** Both opened by pointing at the other for the missing half |
 | 3 ⚠️ | `gateway-architecture.md` + `MODULES.md` | `internals/crate-map.md` + `internals/gateway.md` | **Done differently — see §5.2.** Deduped the overlap instead of concatenating: the two docs answer different questions and one 1,128-line file would serve neither |
 | 4 ✅ | `gateway-architecture-principles.md` → `separation-of-powers.md` | `concepts/separation-of-powers.md` | **Done.** Folded in as "A narrow rule enforcer, not a workflow engine" — it draws the line by *judgement* where the host doc draws it by *privilege* |
-| 5 | `architecture-summary.md` | archived; ideas into `concepts/philosophy.md` | May essay framed against CCOS; superseded by `ARCHITECTURE.md` + `philosophy.md` |
+| 5 ✅ | `architecture-summary.md` | `archived/` | **Done in PR 2.** Row was left unmarked until the close-out audit — the same stale-status defect this plan exists to fix |
 | 6 ✅ | `ARCHITECTURE.md` **split** | overview kept; session chapters → `internals/session/lifecycle.md`; storage chapters trimmed to pointers | **Done.** 1,608 → 1,144 lines. The session block moved whole (381 lines); the two storage sections were *trimmed rather than moved*, because `content-store.md` and `store-schema.md` already owned that material (§5.2). The leaked `## Turn 1 — {timestamp}` headings are demoted and out of the outline |
-| 7 | `agent-features.md` | `AGENTS.md`, then archived | `README.md` has called it "partially superseded" since May — finish the merge (middleware / disclosure / background scheduling are the unique parts) |
-| 8 | `agent-skill-frontmatter.md` + `AGENTS.md` SKILL section | `reference/skill-manifest.md` | Three descriptions of one manifest (+ the `wiki/skill-manifest.md` digest). 0 inbound refs on the top-level file |
+| 7 ✅ | `agent-features.md` | `AGENTS.md`, then archived | **Done.** Only *two* of the three suspected-unique parts actually were: middleware hooks and background scheduling moved into `AGENTS.md`; disclosure policy was already covered by `ARCHITECTURE.md` + `internals/gateway.md`. Everything else duplicated existing docs |
+| 8 ⚠️ | `skill-manifest.md` + `AGENTS.md` SKILL section | scope split, both ways cross-linked | **Premise was wrong.** They do not describe the same thing: `skill-manifest.md` covers only `capabilities` + `remote_access` — the two blocks validated strictly at install time — while `AGENTS.md` covers the rest of the frontmatter. It was *titled* as the whole schema, which is what looked like duplication. Retitled to its real scope, with pointers both directions |
 | 9 ❌ | ~~`security-sentinel.md` + `divergence-sentinel-design.md`~~ | — | **Withdrawn (§5.4).** Two unrelated subsystems share the word "sentinel"; there was nothing to merge. Divergence detection got the live doc it lacked: `internals/divergence-detection.md` |
-| 10 | `session-room.md` / `session-room-architecture.md` / `rfc/session-room-channel-agnostic-timeline.md` / `design/session-room-conversational-input.md` | `guide/session-room.md` + `internals/session/room.md`; RFC + input plan archived | User guide vs architecture split is *good* — keep it, drop the two shipped design docs |
-| 11 | `spec-capability-driven-sandbox-isolation.md` | `internals/sandbox/isolation.md` (spec archived) | April spec, 97 lines, 23 inbound refs → sweep required |
-| 12 | `plan-egress-phase2-907.md`, `plan-egress-phase3-908.md` | archived; live model → `internals/egress/` | Phases merged. Phase 4 (#909) stays a proposal while slices are open |
+| 10 ✅ | the four session-room docs | `guide/session-room.md` + `internals/session/room.md`; both design docs archived | **Done across PR 2 and PR 4a.** The user-guide/architecture split was kept deliberately — two readers, two docs |
+| 11 ⚠️ | `spec-capability-driven-sandbox-isolation.md` | `archived/`, **not** promoted | **Superseded, not shippable.** Its `sandbox_exec` model is contradicted by the #1022 audit (`share_net` is granted per exec, never inherited). Promoting it would have written a false invariant into a live doc. Archived with pointers; the one live fact it uniquely held — an evaluator applies the *target* agent's approved capabilities — moved into `internals/sandbox/drivers.md` |
+| 12 ✅ | `plan-egress-phase2-907.md`, `plan-egress-phase3-908.md` | `archived/` | **Done in PR 2.** Phase 4 (#909) remains a proposal while its slices are open |
 
 ### 5.2 Deviation: merge #3 deduped rather than concatenated
 
@@ -284,6 +284,27 @@ Two lessons, both cheap and both learned late:
 - **A guard that reads the whole repo will read its own fixtures.** Self-scanning
   tools need to exclude their own test data, or they answer "yes" to everything
   they were built to catch.
+
+### 5.8 Close-out: three rows were done and unmarked
+
+Auditing the merge table at the end found **three rows still reading as open**
+that had shipped in PR 2 (#5 `architecture-summary`, #10 the session-room split,
+#12 the egress phase plans). Verified present on `main` before marking.
+
+That is exactly the defect this plan was written about, sitting in the plan. A
+stale "open" is as misleading as a stale "shipped" — it invites someone to redo
+finished work, and it hid the two rows that *were* genuinely open behind noise.
+
+The lesson is narrow and mechanical: **a tracking table needs the same treatment
+as the docs it tracks.** `proposals/README.md` got a test
+(`every_proposal_is_listed_in_the_index`); this table has none, and its rows are
+prose, so nothing could catch the drift. If this plan outlives its usefulness,
+the right end state is to archive it rather than leave a table nobody re-reads.
+
+Two of the six remaining rows also turned out to rest on **wrong premises**
+(§merge #8, #11), which only reading the files revealed — the same finding as
+§5.5 about promotions, and the reason merges should be verified rather than
+executed from a plan written weeks earlier.
 
 ### 5.1 Shipped ≠ archivable: promote when the plan is the only description
 

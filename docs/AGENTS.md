@@ -12,6 +12,8 @@
 - [Agent, Revision, Eval, and Promotion Tools](#agent-tools)
 - [Agent Lifecycle](#agent-lifecycle)
 - [Script vs Reasoning Agents](#script-vs-reasoning-agents)
+- [Middleware Hooks](#middleware-hooks)
+- [Background Scheduling](#background-scheduling)
 - [Extended Thinking](#extended-thinking)
 - [Building New Agents](#building-new-agents)
   - [Installing a Remote Skill](#installing-a-remote-skill)
@@ -119,6 +121,12 @@ Looping on `workflow_wait` / `workflow_state` to discover progress burns turns a
 ---
 
 ## SKILL.md Format
+
+> The `capabilities` and `remote_access` blocks have their own schema page —
+> [`reference/skill-manifest.md`](reference/skill-manifest.md) — because the
+> gateway validates those two strictly at install time and a misspelling in them
+> used to be dropped silently. This section covers the rest of the frontmatter.
+
 
 ### Frontmatter Structure
 
@@ -745,6 +753,62 @@ llm_config:
 ```
 
 ---
+
+## Middleware Hooks
+
+An agent may declare pre- and post-processing hooks that run **in the sandbox**,
+around the LLM call:
+
+```yaml
+middleware:
+  pre_process: "python3 scripts/normalize.py"
+  post_process: "python3 scripts/format.py"
+```
+
+- **`pre_process`** runs on the user input before it reaches the LLM. Setting
+  `skip_llm: true` in its JSON output bypasses the LLM entirely — which is how a
+  deterministic short-circuit answer avoids paying for a completion. A skipped
+  round also records no token spend and no budget pressure (see
+  [`reference/budgets.md`](reference/budgets.md)).
+- **`post_process`** runs on the LLM output before it returns to the caller, and
+  may transform or filter it.
+
+## Background Scheduling
+
+An agent may run on a schedule rather than only on request. This is distinct
+from [`reference/scheduled-tasks.md`](reference/scheduled-tasks.md), which is
+the cron surface for *tasks*; this is the agent's own wake behaviour.
+
+```yaml
+capabilities:
+  - type: "BackgroundReevaluation"
+    min_interval_secs: 30
+    allow_reasoning: false
+background:
+  enabled: true
+  interval_secs: 60
+  mode: deterministic
+  wake_predicates:
+    timer: true
+    approval_resolved: true
+```
+
+| Mode | Behaviour |
+|------|-----------|
+| `deterministic` | Execute pending scheduled actions directly — no LLM call |
+| `reasoning` | Full LLM-driven execution on each wake |
+
+`allow_reasoning: false` on the capability is the ceiling: an agent cannot
+choose `reasoning` mode that its granted capability forbids.
+
+**Only two wake predicates are active**; every other predicate that once existed
+has been removed, so a manifest naming one is declaring something the gateway
+will not honour.
+
+| Predicate | Wakes on |
+|-----------|----------|
+| `timer` | the interval timer |
+| `approval_resolved` | a pending approval being granted or rejected |
 
 ## Extended Thinking
 

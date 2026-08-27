@@ -137,6 +137,23 @@ Undeclared reach is a decision, not an oversight: under `allow_set` a path
 nobody declared is simply absent, and the exec fails on a missing file rather
 than silently reading something it was never granted.
 
+## Whose capabilities apply when an evaluator runs an artifact
+
+An evaluator executing an artifact passes the **target agent's** manifest
+capabilities, not its own. That looks like privilege inheritance and is not: the
+evaluator's job is to test what the artifact does, the artifact's capabilities
+were already reviewed at install time by `agent.install` (which gates the
+high-risk ones, `NetworkAccess` included), and without this rule a
+network-dependent agent could never be evaluated at all.
+
+The direction matters. This is not the evaluator gaining reach; it is the
+artifact's already-approved reach being applied to the run that tests it.
+
+For `sandbox_exec` this sits *under* the per-exec grant decision — a capability
+is a ceiling, never itself the grant. See
+[`network-grant.md`](network-grant.md), which also lists the sibling exec paths
+where capability-as-grant remains the deliberate policy.
+
 ## Adding a driver
 
 1. **One new file** under `sandbox/driver/` implementing `SandboxDriver`.
