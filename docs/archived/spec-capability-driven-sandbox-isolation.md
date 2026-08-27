@@ -1,3 +1,12 @@
+> **Archived — superseded.** Its `sandbox_exec` model no longer holds: the #1022
+> audit established that `share_net` is granted **per exec and never inherited**,
+> with `NetworkAccess` a ceiling rather than a grant — see
+> [`../internals/sandbox/network-grant.md`](../internals/sandbox/network-grant.md).
+> The still-live invariant it uniquely held (an evaluator applies the *target*
+> agent's approved capabilities) is now in
+> [`../internals/sandbox/drivers.md`](../internals/sandbox/drivers.md).
+> Kept as the design record; not source of truth.
+
 # Spec: Capability-Driven Sandbox Isolation
 
 **Date:** 2026-03-28

@@ -1,3 +1,10 @@
+> **Archived — merged.** Its unique material (middleware hooks, background
+> scheduling) is now in [`AGENTS.md`](../AGENTS.md); the rest duplicated
+> `AGENTS.md` (manifest, capabilities), `ARCHITECTURE.md` (execution modes,
+> I/O schemas, memory tiers, disclosure policy) and
+> [`internals/gateway.md`](../internals/gateway.md). Kept as the design
+> record; not source of truth.
+
 # Agent Features Reference
 
 > **⚠ PARTIALLY SUPERSEDED (2026-07-11).** The canonical reference for

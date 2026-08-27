@@ -265,7 +265,7 @@ Four self-contained HTML maps render the system at different altitudes. **View t
 - [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md): End-to-end CLI quickstart tutorial
 - [`docs/reference/http-api.md`](docs/reference/http-api.md): HTTP API for remote agents, SDK transport, authentication
 - [`docs/AGENTS.md`](docs/AGENTS.md): Canonical agent reference — roles, routing, capabilities, lifecycle
-- [`docs/reference/agent-features.md`](docs/reference/agent-features.md): Detailed agent manifest reference (capabilities, IO, disclosure) — partially superseded by `AGENTS.md`
+- [`docs/AGENTS.md`](docs/AGENTS.md): Agent roles, SKILL.md format, capabilities, middleware hooks, background scheduling
 - [`docs/guide/runbooks/iteration-repair-validation.md`](docs/guide/runbooks/iteration-repair-validation.md): Iterative repair validation steps
 - [`docs/reference/schema-enforcement.md`](docs/reference/schema-enforcement.md): Schema coercion for agent.spawn payloads
 

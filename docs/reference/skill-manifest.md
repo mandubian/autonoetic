@@ -1,8 +1,13 @@
-# Agent SKILL.md frontmatter — schema reference
+# SKILL.md `capabilities` and `remote_access` — schema reference
 
-This is the canonical schema for the YAML frontmatter a `SKILL.md` carries. The
-gateway validates this shape at install time (`validate_skill_frontmatter_shape`)
-and parses it at runtime. Hand-crafted frontmatter that doesn't match is rejected
+The two frontmatter blocks the gateway **validates strictly** at install time
+(`validate_skill_frontmatter_shape`) and parses at runtime. For the rest of the
+frontmatter — identity, roles, `llm_config`, `io`, middleware, background —
+see [`../AGENTS.md`](../AGENTS.md) § SKILL.md Format.
+
+The split is not arbitrary: these two blocks are the ones where a misspelling
+used to fail *silently*, so they get their own schema page and a loud
+install-time rejection. Hand-crafted frontmatter that doesn't match is rejected
 **loudly** — it cannot silently become an empty declaration.
 
 Why strictness matters: `RemoteAccessDeclaration` fields that are misspelled or
