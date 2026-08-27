@@ -840,3 +840,186 @@ fn operator_decider_is_unaffected_by_the_agent_identity_check() -> anyhow::Resul
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// #1193: R-10.7 is a trust boundary, not a direction. A decider spawned *by*
+// the agent whose gate it decides is the same conflict of interest read the
+// other way round.
+// ---------------------------------------------------------------------------
+
+/// The lead spawns its own approver. `R/lead/nightwatch` rules on a gate raised
+/// in `R/lead` — before #1193 this passed, because the spawn-tree check only
+/// refused when the gate sat at or *below* the decider.
+#[test]
+fn decider_spawned_by_the_gate_raiser_is_refused() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "captive.default",
+        &[Capability::GateDecider {
+            kinds: vec!["*".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "captive.default")?;
+
+    // The decider is a *descendant* of the session that raised the gate:
+    // the lead spawned the agent that is now being asked to judge the lead.
+    seed_decider_session(&store, "root-1/lead/nightwatch", "captive.default")?;
+    create_pending_approval(&store, "apr-captive", "lead.default", "root-1/lead")?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-captive",
+        "agent:captive.default",
+        Some("approving my spawner's gate".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("root-1/lead/nightwatch".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("a decider spawned by the gate raiser must not rule on its gate");
+
+    assert!(
+        err.to_string().contains("R-10.7"),
+        "refusal should cite R-10.7: {}",
+        err
+    );
+
+    let after = store
+        .get_approval("apr-captive")?
+        .expect("approval should still exist");
+    assert!(
+        after.decided_by.is_none(),
+        "refused decision must not record a decider, got: {:?}",
+        after.decided_by
+    );
+
+    Ok(())
+}
+
+/// The same inversion, reachable only through recorded spawn lineage rather
+/// than the hierarchical-ID fast path — non-hierarchical session IDs must not
+/// be a way around the check.
+#[test]
+fn decider_spawned_by_the_gate_raiser_is_refused_via_recorded_lineage() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "captive2.default",
+        &[Capability::GateDecider {
+            kinds: vec!["*".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "captive2.default")?;
+
+    // Flat IDs sharing a root: the prefix fast path cannot see the relation,
+    // so only the recorded lineage walk catches it.
+    seed_decider_session(&store, "root-2/watch-9", "captive2.default")?;
+    create_pending_approval(&store, "apr-captive2", "lead.default", "root-2/lead-1")?;
+    store.upsert_session_spawn_lineage(
+        "root-2/watch-9",
+        "root-2/lead-1",
+        "root-2",
+        1,
+        "captive2.default",
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-captive2",
+        "agent:captive2.default",
+        Some("approving my spawner's gate".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("root-2/watch-9".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("recorded spawn lineage must close the same hole as the ID prefix");
+
+    assert!(
+        err.to_string().contains("R-10.7"),
+        "refusal should cite R-10.7: {}",
+        err
+    );
+
+    Ok(())
+}
+
+/// The boundary is ancestry, not co-residence: an unrelated decider in a
+/// different tree still decides. This pins the scope of #1193 so the fix is not
+/// silently widened to "same root session" without a decision.
+#[test]
+fn unrelated_decider_in_another_tree_still_decides() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "free.default",
+        &[Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "free.default")?;
+    seed_decider_session(&store, "other-root/watch-1", "free.default")?;
+    create_pending_approval(&store, "apr-free", "coder.default", "root-3/coder-1")?;
+
+    let decision = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-free",
+        "agent:free.default",
+        Some("approved by an unrelated decider".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("other-root/watch-1".to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    assert_eq!(decision.status, ApprovalStatus::Approved);
+
+    Ok(())
+}

@@ -1645,7 +1645,16 @@ pub fn is_session_in_spawn_tree(
 ///
 /// 1. `decider_session_id` must be present (non-empty).
 /// 2. It must be bound to `agent_id` (the decider's claimed identity).
-/// 3. It must not be in the spawn tree of `gate_session_id`.
+/// 3. The two sessions must not be in an ancestor/descendant relation in
+///    *either* direction (#1193).
+///
+/// Condition 3 was previously one-directional — it refused only when the gate
+/// sat at or below the decider. The inverse relation is the same conflict of
+/// interest read the other way round: a decider *spawned by* the agent whose
+/// gate it decides (`R/lead/nightwatch` ruling on a gate raised in `R/lead`)
+/// has its prompt, model, context and lifetime controlled by the party it is
+/// judging. R-10.7's "itself or a descendant" is about the trust boundary, not
+/// about which way the edge points, so both directions are refused.
 pub fn verify_decider_session_binding(
     decider_session_id: &str,
     agent_id: &str,
@@ -1676,9 +1685,21 @@ pub fn verify_decider_session_binding(
             );
         }
     }
+    // The gate sits at or below the decider — the decider would be ruling on
+    // itself or on something it spawned.
     if is_session_in_spawn_tree(decider_session_id, gate_session_id, store) {
         anyhow::bail!(
             "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+            decider_session_id,
+            gate_session_id
+        );
+    }
+    // #1193: the decider sits at or below the gate — the party that raised the
+    // gate spawned its own judge. Same trust boundary, opposite edge.
+    if is_session_in_spawn_tree(gate_session_id, decider_session_id, store) {
+        anyhow::bail!(
+            "Agent-decider session '{}' was spawned inside gate session '{}'; a decider may not \
+             rule on a gate raised by its own ancestor (R-10.7)",
             decider_session_id,
             gate_session_id
         );
