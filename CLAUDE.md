@@ -136,6 +136,27 @@ Integration tests are in `autonoetic-gateway/tests/` (30+ tests). They use `temp
 Notable suite for approval continuation:
 - `autonoetic-gateway/tests/turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, and parallel-join behavior
 
+**Docs are mechanically guarded.** Editing anything under `docs/` can fail a
+test, so run these before assuming a doc change is free:
+
+```bash
+cargo test -p autonoetic-gateway --lib docs_link_guard   # paths, relative links, anchors, labels, symbols, proposals index
+cargo test -p autonoetic-gateway --lib wiki              # wiki canonical pointers + digest budget + config/env citations
+cargo test -p autonoetic --bins docs_coverage            # every CLI subcommand documented; documented globals exist
+```
+
+What they enforce: a cited `docs/…` path or relative link resolves; a `#anchor`
+matches a real heading; a link label that names a file names *the* file linked; a
+backticked type name exists in Rust or SDK sources; every proposal is listed in
+`docs/proposals/README.md`; every wiki page names a `canonical` doc and stays
+under 200 lines; every `autonoetic` subcommand appears in `docs/reference/cli.md`.
+
+Intentional exceptions go in `docs/.link-guard-allow` / `docs/.symbol-guard-allow`
+with a reason each — prefer rewording over an entry. `docs/archived/**` and
+`docs/constitution/versions/**` are deliberately unscanned (historical records;
+digest-signed bytes). These live in the **lib/bin** targets because PR CI runs
+`--lib --bins` only.
+
 **Ignored (manual) sandbox e2e** — require a host `bwrap` and execute real code, so they are NOT run in CI:
 - `autonoetic-gateway/tests/promotion_gate_mocked_network_e2e.rs` — proves the promotion gate runs a `urllib`-importing but mocked test suite offline (passes) and that a real network call fails offline. Run with:
   ```bash

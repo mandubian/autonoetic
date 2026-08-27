@@ -65,5 +65,6 @@ Two directories have paths the runtime depends on and must not be moved:
 `constitution/versions/**` and `constitution/CURRENT` (loaded at startup,
 digest-signed), and `wiki/**` with its `index.toml` (read at bootstrap).
 
-The reorganization this layout came from, including what is still to merge, is
-[`docs-reorganization.md`](proposals/docs-reorganization.md).
+This layout came from a reorganisation that is now complete; its record, and the
+reasoning worth reusing, is
+[`docs-reorganization.md`](archived/docs-reorganization.md).

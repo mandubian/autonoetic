@@ -49,7 +49,7 @@ without invalidating the lock. So when the surrounding documentation is
 reorganised, citations inside already-signed versions keep pointing at the old
 paths — permanently, by design. They are historical artifacts, not stale files.
 
-The docs reorganisation (`docs/proposals/docs-reorganization.md`) moved four
+The docs reorganisation (`docs/archived/docs-reorganization.md`) moved four
 docs that the signed texts cite:
 
 | Cited in signed versions | Now at |
