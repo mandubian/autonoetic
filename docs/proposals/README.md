@@ -74,6 +74,7 @@ whatever ships next.
 | [`run-scoped-decider-appointment.md`](run-scoped-decider-appointment.md) | Open | "Name the night watch": appointing an agent-decider for a run as a peer principal (P-2.20 seat exists; appointment record, routing, read parity and four blocking defects) |
 | [`classic-harness-usecase-validation.md`](classic-harness-usecase-validation.md) | Validation pending | Study in progress; becomes a [`../reports/`](../reports/) entry when it closes |
 | [`implicit-artifacts-agent-evolution.md`](implicit-artifacts-agent-evolution.md) | Partial | Part 1 shipped; Part 2 (closed-loop evolution automation) open |
+| [`agent-adaptation-composition.md`](agent-adaptation-composition.md) | Open | Adaptation (middleware) vs composition (provenance) split; Phase 0 promotes the dropped `adapter:` block, Phase 1 planner discovery, Phase 2 drift/derivation checks |
 
 ## Archived from here
 
