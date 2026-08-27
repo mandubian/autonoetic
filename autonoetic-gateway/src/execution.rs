@@ -1699,6 +1699,16 @@ impl GatewayExecutionService {
         Ok(serde_json::to_value(&events).map_err(|e| anyhow::anyhow!("encode failure: {}", e))?)
     }
 
+    /// Session listing for `trace sessions` — DB-backed like `trace show`.
+    pub fn causal_session_summaries(
+        &self,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let summaries = store.summarize_causal_sessions(agent_id)?;
+        Ok(serde_json::to_value(&summaries).map_err(|e| anyhow::anyhow!("encode failure: {}", e))?)
+    }
+
     /// User-interaction listing scoped to a session or workflow.
     pub fn user_interactions(
         &self,

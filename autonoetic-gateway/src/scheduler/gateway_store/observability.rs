@@ -93,6 +93,18 @@ pub struct CivicHealth {
     pub by_agent: Vec<CivicHealthEntry>,
 }
 
+/// One row of the `trace sessions` listing: a (agent, session) group over
+/// `causal_events`. See [`GatewayStore::summarize_causal_sessions`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CausalSessionSummary {
+    pub agent_id: String,
+    pub session_id: String,
+    pub first_timestamp: String,
+    pub last_timestamp: String,
+    pub event_count: i64,
+    pub max_event_seq: i64,
+}
+
 impl GatewayStore {
     /// Prune execution_traces older than `days`. 0 = no pruning.
     pub fn prune_execution_traces(&self, days: u32) -> Result<u64> {
@@ -481,6 +493,128 @@ impl GatewayStore {
             results.push(r?);
         }
         Ok(results)
+    }
+
+    /// Grouped session listing over `causal_events` — the DB-backed source for
+    /// `autonoetic trace sessions`. The pre-#1119 implementation read per-agent
+    /// `history/causal_chain.jsonl` files, which the gateway no longer writes
+    /// (events live here), so the list command silently reported "No trace
+    /// sessions found" while `trace show` (already DB-backed) worked.
+    ///
+    /// Aggregation happens in Rust rather than SQL because timestamps are
+    /// free-form RFC3339 TEXT: raw-text `MIN/MAX/ORDER BY` breaks across
+    /// offset forms (`Z` vs `+00:00` vs `+02:00`) — the same trap
+    /// [`Self::contract_health`] avoids by parsing instead of comparing
+    /// bytes. Gateway-written events are canonical UTC
+    /// (`Utc::now().to_rfc3339()`), so this defends against imported or
+    /// legacy rows, not against the live writer.
+    pub fn summarize_causal_sessions(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<CausalSessionSummary>> {
+        use std::collections::HashMap;
+
+        #[derive(Default)]
+        struct GroupAgg {
+            first_ts: String,
+            last_ts: String,
+            first_instant: Option<chrono::DateTime<chrono::FixedOffset>>,
+            last_instant: Option<chrono::DateTime<chrono::FixedOffset>>,
+            event_count: i64,
+            max_event_seq: i64,
+        }
+
+        impl GroupAgg {
+            fn observe(&mut self, timestamp: &str, event_seq: i64) {
+                let instant = chrono::DateTime::parse_from_rfc3339(timestamp).ok();
+                // Earliest/latest prefer parsed-instant comparison; fall back
+                // to text only when neither bound parses.
+                let earlier = match (&self.first_instant, instant) {
+                    (Some(a), Some(b)) => b < *a,
+                    _ => timestamp < self.first_ts.as_str(),
+                };
+                if self.event_count == 0 || earlier {
+                    self.first_ts = timestamp.to_string();
+                    self.first_instant = instant;
+                }
+                let later = match (&self.last_instant, instant) {
+                    (Some(a), Some(b)) => b > *a,
+                    _ => timestamp > self.last_ts.as_str(),
+                };
+                if self.event_count == 0 || later {
+                    self.last_ts = timestamp.to_string();
+                    self.last_instant = instant;
+                }
+                self.event_count += 1;
+                self.max_event_seq = self.max_event_seq.max(event_seq);
+            }
+
+            fn finish(&self, agent_id: String, session_id: String) -> CausalSessionSummary {
+                CausalSessionSummary {
+                    agent_id,
+                    session_id,
+                    first_timestamp: self.first_ts.clone(),
+                    last_timestamp: self.last_ts.clone(),
+                    event_count: self.event_count,
+                    max_event_seq: self.max_event_seq,
+                }
+            }
+        }
+
+        let conn = self.conn.lock().unwrap();
+
+        let (where_clause, params): (&str, Vec<rusqlite::types::Value>) = match agent_id {
+            Some(aid) => (
+                "WHERE agent_id = ?1",
+                vec![rusqlite::types::Value::Text(aid.to_string())],
+            ),
+            None => ("", Vec::new()),
+        };
+
+        let query = format!(
+            "SELECT agent_id, session_id, timestamp, event_seq FROM causal_events {where_clause}"
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let mut groups: HashMap<(String, String), GroupAgg> = HashMap::new();
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+
+        for r in rows {
+            let (agent_id, session_id, timestamp, event_seq) = r?;
+            groups
+                .entry((agent_id, session_id))
+                .or_default()
+                .observe(&timestamp, event_seq);
+        }
+
+        let mut summaries: Vec<CausalSessionSummary> = groups
+            .into_iter()
+            .map(|((agent_id, session_id), agg)| agg.finish(agent_id, session_id))
+            .collect();
+        // Most recent activity first. Groups whose latest timestamp doesn't
+        // parse sort by their raw text instead.
+        summaries.sort_by(|a, b| {
+            let key = |s: &CausalSessionSummary| {
+                chrono::DateTime::parse_from_rfc3339(&s.last_timestamp)
+                    .map_err(|_| ())
+                    .ok()
+            };
+            match (key(a), key(b)) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                _ => b.last_timestamp.cmp(&a.last_timestamp),
+            }
+        });
+        Ok(summaries)
     }
 
     /// Standing **contract-health** view (#302): tally how often each
@@ -2659,5 +2793,112 @@ mod discretion_leak_summary_tests {
             err.to_string().contains("invalid `since` timestamp"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod causal_session_summary_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn event(
+        id: &str,
+        agent: &str,
+        session: &str,
+        seq: u64,
+        ts: &str,
+    ) -> autonoetic_types::causal_chain::CausalEventRecord {
+        autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: id.to_string(),
+            agent_id: agent.to_string(),
+            session_id: session.to_string(),
+            turn_id: None,
+            event_seq: seq,
+            timestamp: ts.to_string(),
+            category: "session".to_string(),
+            action: "wake".to_string(),
+            status: "SUCCESS".to_string(),
+            enforced_rules: vec![],
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn summarize_causal_sessions_groups_by_agent_and_session() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        store
+            .create_causal_event(&event("e1", "planner.default", "s-1", 1, "2026-08-27T08:00:00Z"))
+            .unwrap();
+        store
+            .create_causal_event(&event("e2", "planner.default", "s-1", 2, "2026-08-27T08:05:00Z"))
+            .unwrap();
+        store
+            .create_causal_event(&event("e3", "coder.default", "s-1/child", 1, "2026-08-27T08:01:00Z"))
+            .unwrap();
+
+        let all = store.summarize_causal_sessions(None).unwrap();
+        assert_eq!(all.len(), 2);
+        let planner = all
+            .iter()
+            .find(|s| s.agent_id == "planner.default")
+            .expect("planner group present");
+        assert_eq!(planner.event_count, 2);
+        assert_eq!(planner.max_event_seq, 2);
+        assert_eq!(planner.first_timestamp, "2026-08-27T08:00:00Z");
+        assert_eq!(planner.last_timestamp, "2026-08-27T08:05:00Z");
+
+        let filtered = store
+            .summarize_causal_sessions(Some("coder.default"))
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "s-1/child");
+    }
+
+    #[test]
+    fn summarize_causal_sessions_orders_by_instant_not_raw_text() {
+        // Same instants in different offset forms: raw-text MIN/MAX would
+        // pick the wrong strings ("+02:00" < "Z" lexically regardless of
+        // instant), so first/last must come from parsed instants.
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        store
+            .create_causal_event(&event(
+                "e1",
+                "planner.default",
+                "s-off",
+                1,
+                "2026-08-27T12:00:00+02:00", // = 10:00 UTC — earliest
+            ))
+            .unwrap();
+        store
+            .create_causal_event(&event(
+                "e2",
+                "planner.default",
+                "s-off",
+                2,
+                "2026-08-27T11:00:00Z", // later than 10:00 UTC…
+            ))
+            .unwrap();
+        // …but text-max would say "+02:00" row is last ("12:00" > "11:00").
+        store
+            .create_causal_event(&event(
+                "e3",
+                "planner.default",
+                "s-off",
+                3,
+                "2026-08-27T10:30:00Z",
+            ))
+            .unwrap();
+
+        let summaries = store.summarize_causal_sessions(None).unwrap();
+        assert_eq!(summaries.len(), 1);
+        let s = &summaries[0];
+        assert_eq!(s.first_timestamp, "2026-08-27T12:00:00+02:00");
+        assert_eq!(s.last_timestamp, "2026-08-27T11:00:00Z");
     }
 }

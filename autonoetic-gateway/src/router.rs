@@ -3527,6 +3527,7 @@ impl JsonRpcRouter {
             "trace.contract_health" => handle_trace_contract_health_rpc(&self.execution, req),
             "trace.civic_health" => handle_trace_civic_health_rpc(&self.execution, req),
             "trace.causal_search" => handle_trace_causal_search_rpc(&self.execution, req),
+            "trace.sessions" => handle_trace_sessions_rpc(&self.execution, req),
             "trace.user_interactions" => handle_trace_user_interactions_rpc(&self.execution, req),
             "trace.fork_tree" => handle_trace_fork_tree_rpc(&self.execution, req),
 
@@ -6709,6 +6710,29 @@ fn handle_trace_civic_health_rpc(
         Err(e) => return invalid_egress_params(req.id, "trace.civic_health", e),
     };
     match execution.civic_health(params.since.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.sessions` — grouped session listing for `autonoetic trace sessions`.
+/// DB-backed (the pre-#1119 file reader found nothing once events moved to
+/// `causal_events`).
+#[inline(never)]
+fn handle_trace_sessions_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        agent_id: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.sessions", e),
+    };
+    match execution.causal_session_summaries(params.agent_id.as_deref()) {
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
