@@ -10,6 +10,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
     if path.exists() {
         let contents = std::fs::read_to_string(path)?;
         let mut config: GatewayConfig = serde_yaml::from_str(&contents)?;
+        validate_listen_ports(&config, path)?;
         apply_constitution_version(&mut config)?;
         // Canonicalize agents_dir to absolute path so all components resolve to the same location
         config.agents_dir = config
@@ -46,6 +47,30 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
         apply_llm_ttfb_timeout(&config);
         Ok(config)
     }
+}
+
+/// Fail fast on listen-port collisions. `http_port` defaults to 4100, so a
+/// config that sets `port: 4100` without an explicit `http_port` binds the
+/// JSON-RPC server and the HTTP ingress to the same address — the gateway
+/// then dies at startup with a bare "Address already in use" that names
+/// neither listener. Name the collision and the fix instead.
+fn validate_listen_ports(config: &GatewayConfig, path: &Path) -> anyhow::Result<()> {
+    let jsonrpc = config.port;
+    let http = config.http_port;
+    let ofp = config.ofp_port;
+    anyhow::ensure!(
+        http == 0 || http != jsonrpc,
+        "invalid listen ports in {}: http_port ({http}) collides with the JSON-RPC port ({jsonrpc}). \
+         Set http_port: 0 to disable HTTP ingress, or give it a distinct port.",
+        path.display()
+    );
+    anyhow::ensure!(
+        ofp == 0 || (ofp != jsonrpc && (http == 0 || ofp != http)),
+        "invalid listen ports in {}: ofp_port ({ofp}) collides with another listener \
+         (port: {jsonrpc}, http_port: {http}). Give the OFP server a distinct port.",
+        path.display()
+    );
+    Ok(())
 }
 
 /// Anchor a possibly-relative config path to the directory holding the config
@@ -536,5 +561,41 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod listen_port_tests {
+    use super::*;
+
+    #[test]
+    fn http_port_colliding_with_jsonrpc_port_is_a_named_error() {
+        let mut config = GatewayConfig::default();
+        config.port = 4100;
+        config.http_port = 4100; // the built-in default — the footgun
+        let err = validate_listen_ports(&config, Path::new("config.yaml"))
+            .expect_err("collision must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("http_port"), "names the knob: {msg}");
+        assert!(msg.contains("http_port: 0"), "names the fix: {msg}");
+    }
+
+    #[test]
+    fn disabled_http_ingress_never_collides() {
+        let mut config = GatewayConfig::default();
+        config.port = 4100;
+        config.http_port = 0;
+        validate_listen_ports(&config, Path::new("config.yaml")).expect("http_port: 0 is exempt");
+    }
+
+    #[test]
+    fn ofp_port_colliding_with_jsonrpc_port_is_a_named_error() {
+        let mut config = GatewayConfig::default();
+        config.port = 4300;
+        config.http_port = 0;
+        config.ofp_port = 4300;
+        let err = validate_listen_ports(&config, Path::new("config.yaml"))
+            .expect_err("collision must be rejected");
+        assert!(err.to_string().contains("ofp_port"), "names the knob: {err}");
     }
 }

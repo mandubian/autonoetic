@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::Path;
 
-use super::common::AgentTrace;
+use super::common::{AgentTrace, SessionSummary};
 use autonoetic_gateway::llm::Message;
 use autonoetic_types::background::UserInteraction;
 use autonoetic_types::causal_chain::{CausalChainEntry, CausalEventRecord, EntryStatus};
@@ -88,8 +88,23 @@ pub fn handle_trace_sessions(
     requested_agent: Option<&str>,
     json_output: bool,
 ) -> anyhow::Result<()> {
+    // Preferred source: the gateway's causal_events table over RPC (same as
+    // `trace show`). The file reader below predates #1119 and finds nothing
+    // now that events live in gateway.db — it stays only as an offline
+    // fallback for pre-#1119 workspaces.
+    if let Ok(summaries) = load_session_summaries_from_db(config_path, requested_agent) {
+        if !summaries.is_empty() {
+            return render_session_summaries(&summaries, json_output);
+        }
+    }
+
     let traces = load_agent_traces(config_path, requested_agent)?;
-    let sessions = super::common::collect_session_summaries(&traces);
+    let sessions: Vec<SessionSummary> = super::common::collect_session_summaries(&traces);
+    render_session_summaries(&sessions, json_output)
+}
+
+fn render_session_summaries(sessions: &[SessionSummary], json_output: bool) -> anyhow::Result<()> {
+    let sessions = sessions;
     if json_output {
         let body = sessions
             .iter()
@@ -139,6 +154,32 @@ pub fn handle_trace_sessions(
         );
     }
     Ok(())
+}
+
+/// Session listing from the gateway database (`trace.sessions` RPC).
+fn load_session_summaries_from_db(
+    config_path: &Path,
+    requested_agent: Option<&str>,
+) -> anyhow::Result<Vec<SessionSummary>> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    let result = rpc.call(
+        "trace.sessions",
+        serde_json::json!({ "agent_id": requested_agent }),
+    )?;
+    let rows: Vec<serde_json::Value> = serde_json::from_value(result)?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        summaries.push(SessionSummary {
+            agent_id: row["agent_id"].as_str().unwrap_or_default().to_string(),
+            session_id: row["session_id"].as_str().unwrap_or_default().to_string(),
+            first_timestamp: row["first_timestamp"].as_str().unwrap_or_default().to_string(),
+            last_timestamp: row["last_timestamp"].as_str().unwrap_or_default().to_string(),
+            event_count: row["event_count"].as_u64().unwrap_or(0) as usize,
+            max_event_seq: row["max_event_seq"].as_u64().unwrap_or(0),
+        });
+    }
+    Ok(summaries)
 }
 
 pub fn handle_trace_session(

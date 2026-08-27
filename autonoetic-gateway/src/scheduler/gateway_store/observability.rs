@@ -93,6 +93,18 @@ pub struct CivicHealth {
     pub by_agent: Vec<CivicHealthEntry>,
 }
 
+/// One row of the `trace sessions` listing: a (agent, session) group over
+/// `causal_events`. See [`GatewayStore::summarize_causal_sessions`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CausalSessionSummary {
+    pub agent_id: String,
+    pub session_id: String,
+    pub first_timestamp: String,
+    pub last_timestamp: String,
+    pub event_count: i64,
+    pub max_event_seq: i64,
+}
+
 impl GatewayStore {
     /// Prune execution_traces older than `days`. 0 = no pruning.
     pub fn prune_execution_traces(&self, days: u32) -> Result<u64> {
@@ -472,6 +484,53 @@ impl GatewayStore {
                     payload_ref: row.get(12)?,
                     evidence_ref: row.get(13)?,
                     reason: row.get(14)?,
+                })
+            },
+        )?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    /// Grouped session listing over `causal_events` — the DB-backed source for
+    /// `autonoetic trace sessions`. The pre-#1119 implementation read per-agent
+    /// `history/causal_chain.jsonl` files, which the gateway no longer writes
+    /// (events live here), so the list command silently reported "No trace
+    /// sessions found" while `trace show` (already DB-backed) worked.
+    pub fn summarize_causal_sessions(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<CausalSessionSummary>> {
+        let conn = self.conn.lock().unwrap();
+
+        let (where_clause, params): (&str, Vec<rusqlite::types::Value>) = match agent_id {
+            Some(aid) => (
+                "WHERE agent_id = ?1",
+                vec![rusqlite::types::Value::Text(aid.to_string())],
+            ),
+            None => ("", Vec::new()),
+        };
+
+        let query = format!(
+            "SELECT agent_id, session_id, MIN(timestamp), MAX(timestamp), COUNT(*), MAX(event_seq) \
+             FROM causal_events {where_clause} \
+             GROUP BY agent_id, session_id ORDER BY MAX(timestamp) DESC"
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            |row| {
+                Ok(CausalSessionSummary {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    first_timestamp: row.get(2)?,
+                    last_timestamp: row.get(3)?,
+                    event_count: row.get(4)?,
+                    max_event_seq: row.get(5)?,
                 })
             },
         )?;
@@ -2659,5 +2718,69 @@ mod discretion_leak_summary_tests {
             err.to_string().contains("invalid `since` timestamp"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod causal_session_summary_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn event(
+        id: &str,
+        agent: &str,
+        session: &str,
+        seq: u64,
+        ts: &str,
+    ) -> autonoetic_types::causal_chain::CausalEventRecord {
+        autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: id.to_string(),
+            agent_id: agent.to_string(),
+            session_id: session.to_string(),
+            turn_id: None,
+            event_seq: seq,
+            timestamp: ts.to_string(),
+            category: "session".to_string(),
+            action: "wake".to_string(),
+            status: "SUCCESS".to_string(),
+            enforced_rules: vec![],
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn summarize_causal_sessions_groups_by_agent_and_session() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        store
+            .create_causal_event(&event("e1", "planner.default", "s-1", 1, "2026-08-27T08:00:00Z"))
+            .unwrap();
+        store
+            .create_causal_event(&event("e2", "planner.default", "s-1", 2, "2026-08-27T08:05:00Z"))
+            .unwrap();
+        store
+            .create_causal_event(&event("e3", "coder.default", "s-1/child", 1, "2026-08-27T08:01:00Z"))
+            .unwrap();
+
+        let all = store.summarize_causal_sessions(None).unwrap();
+        assert_eq!(all.len(), 2);
+        let planner = all
+            .iter()
+            .find(|s| s.agent_id == "planner.default")
+            .expect("planner group present");
+        assert_eq!(planner.event_count, 2);
+        assert_eq!(planner.max_event_seq, 2);
+        assert_eq!(planner.first_timestamp, "2026-08-27T08:00:00Z");
+        assert_eq!(planner.last_timestamp, "2026-08-27T08:05:00Z");
+
+        let filtered = store
+            .summarize_causal_sessions(Some("coder.default"))
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "s-1/child");
     }
 }
