@@ -62,6 +62,13 @@ Ordered by urgency.
 2. **#1002** — whole-host `/` ro-bind; replace with explicit mount allow-set.
    The deny-list masking (#1145's mechanism) is acknowledged stopgap for exactly this.
    Fixing both together removes an entire class of "new secret file forgotten in the list".
+   *(resolved 2026-08-27: all four implementation slices merged — mount-set observability
+   (#1160), declared mounts + operator allowlist + tier guard (#1163), artifact_exec
+   mount reporting (#1165), `sandbox.host_fs: allow_set` (#1174). `allow_set` ships
+   opt-in; `legacy` still default with a startup deprecation warning. The only remaining
+   scope is DP-1 — flipping the default after a fleet-validation window — which this
+   RFC deliberately places post-launch. Close the issue at the flip or now with the
+   flip tracked separately.)*
 3. **#988** — no write-side path taint: copying labeled content to a new path launders
    its egress label. Defeats the egress model at its core invariant. *(resolved
    2026-08-24: closed via the durable-object answer in #1001 — the label attaches to
@@ -75,7 +82,8 @@ Ordered by urgency.
    The durable residue is an **acceptance criterion on #1154**: when the outbound
    wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
    label, not session taint alone — plus #988 above, which is real today without
-   any federation.
+   any federation. *(closed 2026-08-27 in that reframed form; #1154 remains the
+   open carrier, Tier 2.)*
 5. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
    one careless match arm away from reintroducing the create→promote loop already
    killed once. Remove the variant. *(resolved 2026-08-24: merged as `84afe3fc`,
@@ -88,6 +96,8 @@ Ordered by urgency.
    divergence fails the repo's own mechanical-enforcement doctrine; fix code or text,
    then re-run lock recompute if the constitution changes. **Blocked on the signing
    key** (`AUTONOETIC_CONSTITUTION_SIGNING_SK_B64`) — cannot ride a normal PR.
+   *(updated 2026-08-27: text-side fix drafted — PR #1177 realigns Ri-0.12 to the
+   code's 12 causes; merge + lock recompute remain. This is the last Tier 0 item.)*
 
 Conditional blocker: **#897 + #815** (federated messaging semantics, outbound OFP stub).
 The 2026-08-24 OFP audit (#1153–#1156) confirmed these are stub-level: listener now
@@ -185,6 +195,18 @@ signal largely served (#1162/#1167/#1169); Week 3's #651 (#1166), #916 (#1168),
 #378 (partially, #1169) done. #988 was resolved out of order (closed 2026-08-24
 via #1001's workspace-level taint). Tier 0 remaining: **#1002** (in progress,
 slices landing) and **#1078** (blocked on the signing key).
+
+Progress log (2026-08-27): **Tier 0 is done pending one merge.** #1002's four
+implementation slices all landed (#1160/#1163/#1165/#1174) — the only residual is
+the DP-1 default flip, deliberately post-launch. #987 closed in its reframed form
+(acceptance criterion carried on #1154, Tier 2). #1078's text-side fix is in
+review as #1177; merging it requires the signing-key lock recompute, which stays
+an operator-side act. **Tier 1 status:** #842 and #378 closed (2026-08-25);
+remaining open: #855, #775, #776, #779, #884 (now scoped to extracting the
+oversized dispatch arms), and the CI-credibility trio #956/#1034/#1134 — eight
+items, none launch-blocking by this RFC's own definition. The federation
+conditional is settled by default: `ofp_port` ships 0, #897/#815 stay open,
+federation is documented experimental.
 
 Tier 0 items are all small-to-medium mechanically verifiable fixes; none requires the
 RFC-amendment machinery except possibly #1078 depending which side wins.
