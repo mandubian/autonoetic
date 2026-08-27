@@ -5,6 +5,12 @@ itself — its own past, its real capabilities, its rights — and that lives
 under the same law as every other actor, human or artificial, can become a
 trusted member of a community instead of a tool that has to be watched.**
 
+> **Status: experimental research infrastructure.** Autonoetic does not
+> compete with interactive harnesses (Hermes, Claude Code, deepseek-harness —
+> for a model-plus-terminal under your eyes, those tools are better). It
+> explores a different territory: what agents need in order to run unwatched,
+> delegate, and self-modify under verifiable law.
+
 The name is from cognitive science. *Autonoetic* means self-knowing across
 time: holding your own past as your own, and projecting yourself into your own
 future. Autonoetic makes no claim about machine consciousness — the claim is
@@ -32,8 +38,11 @@ The rest of the project is the foundation that makes such a community real:
   every turn, replayable and forkable, so an actor's past is a fact it can
   reason from and anyone can audit, not a memory it might confabulate;
 - **boundaries that protect** — secrets injected at execution time and never
-  seen by the model, and data-locality controls that constrain where
-  information is allowed to flow;
+  seen by the model (with one-pass credential + approval preflight via
+  `artifact_prepare`); a **data-egress label plane** enacted as law
+  (constitution v2026.07.30) that constrains where information is allowed to
+  flow; and a gateway-asserted **mount allow-set** that decides exactly which
+  host paths a sandbox can see;
 - **evolution tooling** — agents that build, evaluate, and promote each
   other's code under the same law, behind audited gates.
 
@@ -202,7 +211,7 @@ Where to dig further:
 
 - [`docs/concepts/philosophy.md`](docs/concepts/philosophy.md) — the conceptions behind the design, and their intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
 - [`docs/start/concepts.md`](docs/start/concepts.md) — the same ideas from first principles, for readers coming from direct-code assistants
-- [`docs/constitution/versions/2026.07.08/constitution.md`](docs/constitution/versions/2026.07.08/constitution.md) — the canonical law (current version)
+- [`docs/constitution/versions/2026.07.30/constitution.md`](docs/constitution/versions/2026.07.30/constitution.md) — the canonical law (current version)
 - [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md) — agent vs gateway authority boundary
 
 ## How this differs from a classic agent harness
@@ -320,45 +329,29 @@ To install these into your active runtime directory, run:
 
 ## Current Direction
 
-The current MVP is intentionally narrow:
+The base runtime is proven and self-hosting; the active frontier is making
+governed autonomy operational:
 
-- Gateway daemon with JSON-RPC and HTTP REST APIs
-- `SKILL.md` and `runtime.lock` parsing
-- Bubblewrap sandboxing
-- text-first Tier 1 memory
-- minimal Tier 2 recall
-- content-addressed artifact handles
-- hash-chain causal logging
-- OFP federation listener with HMAC handshake + extension negotiation
-- MCP client/server plumbing (registry, discovery, and agent exposure)
+- the **data-egress label plane** as enforceable law (constitution
+  v2026.07.30) — labels at rest, taint-following routing, operator
+  declassification grants
+- the **sandbox host-fs mount allow-set** — declared host mounts gated by an
+  operator allowlist, replacing the ro-bind-everything stopgap
+- **GateService** — session escalation and profile sharing through a single
+  audited gate
+- the CLI surface fully routed over the gateway's JSON-RPC API, and
+  `runtime_dir` as the single runtime layout
+
+More advanced features like full marketplace workflows, hermetic capsule
+replay, advanced memory substrate, and richer federation polish are deferred
+until the governance machinery above is hardened.
 
 ## HTTP Content API (for Remote Agents)
 
-The gateway exposes REST endpoints for remote agents to access content. See [docs/reference/http-api.md](docs/reference/http-api.md) for full documentation.
-
-**Quick start for remote agents:**
-
-```python
-# On the remote agent machine
-export AUTONOETIC_HTTP_URL="http://gateway-host:8080"
-export AUTONOETIC_SHARED_SECRET="your-secret"
-
-from autonoetic_sdk import Client
-sdk = Client()  # Automatically uses HTTP mode
-sdk.files.write("main.py", "print(42)")
-```
-
-**Endpoints:**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/content/write` | Write content (UTF-8 or base64) |
-| GET | `/api/content/read/{session_id}/{name}` | Read content by name/handle |
-| POST | `/api/content/read` | Read content (body params) |
-| POST | `/api/content/persist` | Mark content as persistent |
-| GET | `/api/content/names?session_id=X` | List content names with handles |
-
-More advanced features like full marketplace workflows, hermetic capsule replay, advanced memory substrate, and richer federation polish are deferred until the base runtime is proven.
+The gateway exposes REST endpoints so remote agents can read, write, and
+persist content over HTTP with a shared secret. See
+[docs/reference/http-api.md](docs/reference/http-api.md) for the endpoint
+reference and a Python SDK quickstart.
 
 ## Lineage
 
