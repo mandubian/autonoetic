@@ -663,3 +663,180 @@ fn escalation_without_gate_decider_capability_fails() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// #1192: a claimed agent identity that does not resolve must be refused, never
+// silently demoted to a human decision.
+// ---------------------------------------------------------------------------
+
+/// An `agent:<id>` decider that was never installed is refused, and the gate
+/// stays pending. Before #1192 the manifest-load error was logged at debug and
+/// the decision committed with P-2.20, R-10.7 and the `agent_decider.*_gate`
+/// causal event all skipped.
+#[test]
+fn unresolvable_agent_decider_is_refused_not_demoted_to_human() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    create_pending_approval(
+        &store,
+        "apr-ghost",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-ghost",
+        "agent:ghost.default",
+        Some("approved by a decider that does not exist".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("other-session".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("an unresolvable agent decider must be refused, not treated as an operator");
+
+    assert!(
+        err.to_string().contains("P-2.20"),
+        "refusal should cite P-2.20: {}",
+        err
+    );
+
+    // The gate must still be pending — a refused decision commits nothing.
+    let after = store
+        .get_approval("apr-ghost")?
+        .expect("approval should still exist");
+    assert!(
+        after.decided_by.is_none(),
+        "refused decision must not record a decider, got: {:?}",
+        after.decided_by
+    );
+    assert!(
+        !matches!(after.status, Some(ApprovalStatus::Approved)),
+        "refused decision must not approve the gate, got: {:?}",
+        after.status
+    );
+
+    Ok(())
+}
+
+/// The revocation shape: an agent whose bundle is on disk but has no promoted
+/// revision does not resolve (#1136 presence check). Its decisions must start
+/// being *refused*, not stop being *checked*.
+#[test]
+fn agent_decider_without_promoted_revision_is_refused() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    // Bundle exists on disk and even declares GateDecider — but it is not
+    // seeded as a promoted revision, so it is not installed.
+    write_agent_dir(
+        &agents_dir,
+        "revoked.default",
+        &[Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_session(&store, "other-session", "revoked.default")?;
+    create_pending_approval(
+        &store,
+        "apr-revoked",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-revoked",
+        "agent:revoked.default",
+        Some("approved by a revoked decider".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("other-session".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("an agent without a promoted revision must be refused");
+
+    assert!(
+        err.to_string().contains("P-2.20"),
+        "refusal should cite P-2.20: {}",
+        err
+    );
+
+    let after = store
+        .get_approval("apr-revoked")?
+        .expect("approval should still exist");
+    assert!(
+        after.decided_by.is_none(),
+        "refused decision must not record a decider, got: {:?}",
+        after.decided_by
+    );
+
+    Ok(())
+}
+
+/// A `decided_by` that never claimed agent identity is unaffected: the human
+/// path still bypasses the P-2.20 check entirely.
+#[test]
+fn operator_decider_is_unaffected_by_the_agent_identity_check() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    create_pending_approval(
+        &store,
+        "apr-operator",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
+
+    let decision = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-operator",
+        "operator",
+        Some("approved by the human operator".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions::default(),
+    )?;
+
+    assert_eq!(decision.status, ApprovalStatus::Approved);
+    assert_eq!(decision.decided_by, "operator");
+
+    Ok(())
+}

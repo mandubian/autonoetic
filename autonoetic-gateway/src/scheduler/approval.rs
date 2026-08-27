@@ -2088,7 +2088,10 @@ fn decide_request_with_options(
     ensure_decidable(&request)?;
 
     // P-2.20 / R-10.7: agent-decider capability and spawn-tree boundary check.
-    // Human operators (decided_by not matching a loaded agent manifest) bypass this.
+    // Only a `decided_by` that never claimed to be an agent takes the human
+    // path — `parse_agent_decider_id` returning `None`. Once the caller has
+    // claimed `agent:<id>`, the claim is load-bearing and must be verified or
+    // refused; it is never downgraded to a human decision (#1192).
     if let Some(store) = gateway_store {
         if let Some(agent_id) = parse_agent_decider_id(decided_by) {
             let gateway_dir = crate::execution::gateway_root_dir(config);
@@ -2150,11 +2153,27 @@ fn decide_request_with_options(
                     let _ = store.create_causal_event(&event);
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    // #1192: previously this logged at debug and fell through,
+                    // committing the decision with P-2.20, R-10.7 and the
+                    // `agent_decider.*_gate` causal event all skipped — so the
+                    // ruling did not even surface as an agent decision in
+                    // contract health. Enforcement must not be conditional on a
+                    // lookup succeeding: an unresolvable agent stops being
+                    // *checked* rather than starting to be *refused*, which is
+                    // the wrong failure direction for a capability gate.
+                    tracing::warn!(
                         target: "approval",
                         decided_by = %decided_by,
                         error = %e,
-                        "Decided_by does not resolve to a loaded agent; treating as human operator"
+                        "Refusing agent-decider decision: claimed agent does not resolve to a loaded manifest"
+                    );
+                    anyhow::bail!(
+                        "Decider '{}' claims agent identity '{}', which does not resolve to a \
+                         loaded agent manifest ({}); the GateDecider capability cannot be \
+                         verified, so the decision is refused (P-2.20)",
+                        decided_by,
+                        agent_id,
+                        e
                     );
                 }
             }

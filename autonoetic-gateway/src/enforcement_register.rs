@@ -418,6 +418,20 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "runtime::guard::tests::test_loop_guard_trips_on_child_failures",
             config: Some("loop_guard.max_child_failures"),
         },
+        // ── P-2.20 (issue #1192) ──
+        // The `agent_decider.{kind}_gate` event carries `enforced_rules:
+        // ["P-2.20"]`, but the rule had no register entry — so every
+        // agent-decider ruling bucketed as `unattributed` in contract health.
+        // Registered here so the seat's use is countable, which is the whole
+        // point of putting an agent in it.
+        EnforcementEntry {
+            clause_id: "P-2",
+            rule_id: "P-2.20",
+            check_id: "agent_decider_capability",
+            code: "scheduler/approval.rs::decide_request_with_options + runtime/human_gate.rs::verify_agent_decider",
+            test: "constitution/gate_decider.rs",
+            config: None,
+        },
         // ── P-2.29 (issue #720) ──
         EnforcementEntry {
             clause_id: "P-2",
@@ -918,6 +932,16 @@ mod tests {
                 o.id
             );
         }
+    }
+
+    #[test]
+    fn agent_decider_rulings_attribute_to_p_2() {
+        // #1192: `agent_decider.{kind}_gate` events carry enforced_rules
+        // ["P-2.20"]. Without a register entry they bucketed as
+        // `unattributed`, so the seat's use was invisible to contract health.
+        let health = contract_health(["P-2.20", "P-2.20"]);
+        assert_eq!(health.unattributed, 0);
+        assert!(health.by_clause.contains(&("P-2".to_string(), 2)));
     }
 
     #[test]
