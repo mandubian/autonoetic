@@ -241,9 +241,15 @@ impl SessionReportWriter {
         std::fs::create_dir_all(&dir)?;
         update_latest_session_symlink(gateway_dir, base);
         let report_data_dir = dir.join("report-data");
-        let payload_counter = std::fs::read_dir(&report_data_dir)
-            .map(|entries| entries.filter_map(|e| e.ok()).count())
-            .unwrap_or(0) as u32;
+        // `report-data/` is intentionally absent for most sessions (lazy
+        // creation) — that's the only error that means "no payloads yet".
+        // Swallowing permission/IO errors here could silently zero the
+        // counter and alias payload numbering.
+        let payload_counter = match std::fs::read_dir(&report_data_dir) {
+            Ok(entries) => entries.filter_map(|e| e.ok()).count() as u32,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
         let content_store = crate::runtime::content_store::ContentStore::new(gateway_dir).ok();
         Ok(Self {
             state_path: dir.join("session_report.live.json"),
@@ -3468,15 +3474,22 @@ fn snapshot_final_json<T: Serialize>(
     final_path: &Path,
     state: &T,
 ) -> anyhow::Result<()> {
-    match std::fs::remove_file(final_path) {
+    // Link/write at a scratch path first, then rename into place: consumers
+    // (the hooks publish path, humans tailing the file) must never observe
+    // `session_report.json` missing or half-written, and a failed hardlink
+    // + fallback write must leave the previous snapshot intact.
+    let tmp = final_path.with_extension("json.snapshot-tmp");
+    match std::fs::remove_file(&tmp) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    match std::fs::hard_link(state_path, final_path) {
-        Ok(()) => Ok(()),
-        Err(_) => write_json_atomic(final_path, state),
+    match std::fs::hard_link(state_path, &tmp) {
+        Ok(()) => {}
+        Err(_) => write_json_atomic(&tmp, state)?,
     }
+    std::fs::rename(&tmp, final_path)?;
+    Ok(())
 }
 
 fn write_string_atomic(path: &Path, body: &str) -> anyhow::Result<()> {
