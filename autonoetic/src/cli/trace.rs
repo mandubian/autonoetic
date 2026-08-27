@@ -92,14 +92,23 @@ pub fn handle_trace_sessions(
     // `trace show`). The file reader below predates #1119 and finds nothing
     // now that events live in gateway.db — it stays only as an offline
     // fallback for pre-#1119 workspaces.
-    if let Ok(summaries) = load_session_summaries_from_db(config_path, requested_agent) {
+    let db_result = load_session_summaries_from_db(config_path, requested_agent);
+    if let Ok(summaries) = &db_result {
         if !summaries.is_empty() {
-            return render_session_summaries(&summaries, json_output);
+            return render_session_summaries(summaries, json_output);
         }
     }
 
     let traces = load_agent_traces(config_path, requested_agent)?;
-    let sessions: Vec<SessionSummary> = super::common::collect_session_summaries(&traces);
+    let sessions = super::common::collect_session_summaries(&traces);
+    if sessions.is_empty() {
+        // Don't dress a gateway/RPC failure up as "no data": when the DB
+        // path errored and the offline fallback has nothing either, the RPC
+        // error is the actionable one ("is it running?").
+        if let Err(e) = db_result {
+            return Err(e);
+        }
+    }
     render_session_summaries(&sessions, json_output)
 }
 
@@ -157,29 +166,42 @@ fn render_session_summaries(sessions: &[SessionSummary], json_output: bool) -> a
 }
 
 /// Session listing from the gateway database (`trace.sessions` RPC).
+///
+/// The response is deserialized strictly: a missing or mistyped field is a
+/// schema mismatch against the running gateway and should fail loudly, not
+/// render as blank rows.
 fn load_session_summaries_from_db(
     config_path: &Path,
     requested_agent: Option<&str>,
 ) -> anyhow::Result<Vec<SessionSummary>> {
+    #[derive(serde::Deserialize)]
+    struct SessionSummaryRow {
+        agent_id: String,
+        session_id: String,
+        first_timestamp: String,
+        last_timestamp: String,
+        event_count: u64,
+        max_event_seq: u64,
+    }
+
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
     let result = rpc.call(
         "trace.sessions",
         serde_json::json!({ "agent_id": requested_agent }),
     )?;
-    let rows: Vec<serde_json::Value> = serde_json::from_value(result)?;
-    let mut summaries = Vec::new();
-    for row in rows {
-        summaries.push(SessionSummary {
-            agent_id: row["agent_id"].as_str().unwrap_or_default().to_string(),
-            session_id: row["session_id"].as_str().unwrap_or_default().to_string(),
-            first_timestamp: row["first_timestamp"].as_str().unwrap_or_default().to_string(),
-            last_timestamp: row["last_timestamp"].as_str().unwrap_or_default().to_string(),
-            event_count: row["event_count"].as_u64().unwrap_or(0) as usize,
-            max_event_seq: row["max_event_seq"].as_u64().unwrap_or(0),
-        });
-    }
-    Ok(summaries)
+    let rows: Vec<SessionSummaryRow> = serde_json::from_value(result)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SessionSummary {
+            agent_id: r.agent_id,
+            session_id: r.session_id,
+            first_timestamp: r.first_timestamp,
+            last_timestamp: r.last_timestamp,
+            event_count: r.event_count as usize,
+            max_event_seq: r.max_event_seq,
+        })
+        .collect())
 }
 
 pub fn handle_trace_session(
