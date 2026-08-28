@@ -151,6 +151,17 @@ impl CausalEventRecord {
                 out.payload_ref = None;
                 out
             }
+            // A decider reads events to judge them; `redact_json_string` is the
+            // same in-place masking the operator path uses, so the payload
+            // stays legible without carrying secrets into a recorded context.
+            super::disclosure::ViewerClass::Decider => {
+                let mut out = self.clone();
+                if let Some(ref payload) = self.payload {
+                    out.payload = Some(redact_json_string(payload));
+                }
+                out.payload_ref = None;
+                out
+            }
             super::disclosure::ViewerClass::Agent => Self {
                 event_id: self.event_id.clone(),
                 agent_id: self.agent_id.clone(),

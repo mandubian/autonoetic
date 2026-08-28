@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use autonoetic_gateway::decider_appointment::{
     active_appointment_for_gate, agent_is_appointed_for_scope, appoint, revoke,
-    AppointmentRequest,
+    viewer_class_for_gate, AppointmentRequest,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::ApprovalRisk;
@@ -394,5 +394,84 @@ fn appointment_pins_the_revision_it_seated() -> anyhow::Result<()> {
         .get_decider_appointment(&a.appointment_id)?
         .expect("readable back");
     assert_eq!(stored.decider_revision, a.decider_revision);
+    Ok(())
+}
+
+// ── Read parity attaches to the seat, not the identity (#1194) ─────────────
+
+#[test]
+fn a_seated_decider_reads_at_decider_class() -> anyhow::Result<()> {
+    use autonoetic_types::disclosure::ViewerClass;
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
+        ViewerClass::Decider,
+        "a seated decider must see the command it is asked to judge"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_same_agent_stays_at_agent_class_outside_its_scope() -> anyhow::Result<()> {
+    use autonoetic_types::disclosure::ViewerClass;
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+
+    // Same identity, different run. Nothing was granted to the agent, so
+    // nothing follows it across scopes — this is what "office before occupant"
+    // means mechanically.
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-2/coder-a"),
+        ViewerClass::Agent
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unseated_agent_reads_at_agent_class() -> anyhow::Result<()> {
+    use autonoetic_types::disclosure::ViewerClass;
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
+        ViewerClass::Agent,
+        "holding GateDecider is not itself a read right"
+    );
+    Ok(())
+}
+
+#[test]
+fn revocation_removes_the_read_right_it_never_granted_to_the_agent() -> anyhow::Result<()> {
+    use autonoetic_types::disclosure::ViewerClass;
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
+        ViewerClass::Decider
+    );
+
+    revoke(&f.store, &a.appointment_id, "operator", None)?;
+
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
+        ViewerClass::Agent,
+        "revocation is real precisely because the right was the seat's, not the agent's"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_expired_appointment_stops_conferring_read_parity() -> anyhow::Result<()> {
+    use autonoetic_types::disclosure::ViewerClass;
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let mut req = request("nightwatch.default", "root-1");
+    req.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+    appoint(&f.cfg, &f.store, req)?;
+    assert_eq!(
+        viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
+        ViewerClass::Agent,
+        "an expired seat confers nothing"
+    );
     Ok(())
 }
