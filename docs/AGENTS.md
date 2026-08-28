@@ -122,10 +122,11 @@ Looping on `workflow_wait` / `workflow_state` to discover progress burns turns a
 
 ## SKILL.md Format
 
-> The `capabilities` and `remote_access` blocks have their own schema page —
-> [`reference/skill-manifest.md`](reference/skill-manifest.md) — because the
-> gateway validates those two strictly at install time and a misspelling in them
-> used to be dropped silently. This section covers the rest of the frontmatter.
+> The `capabilities`, `remote_access` and `messaging` blocks have their own
+> schema page — [`reference/skill-manifest.md`](reference/skill-manifest.md) —
+> because the gateway validates those three strictly at install time and a
+> misspelling in them used to be dropped silently. This section covers the rest
+> of the frontmatter.
 
 
 ### Frontmatter Structure
