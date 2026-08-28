@@ -26,9 +26,9 @@ Four classes, ordered by decreasing redaction:
 
 | Class | Who | What they see |
 |---|---|---|
-| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. `SandboxExec.command` is blanked too (issue #158, fixed by PR #160): shell strings routinely embed secrets, and an approving agent retains the shape it needs via `detected_hosts`, `dependencies` and `requires_approval`. This is exactly what the `Decider` row below relaxes, for an agent that has been seated to judge the command rather than merely to see that one exists. |
+| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted**, and narrower than `Operator` *by construction* — `redact_for_agent` is composed on top of the operator pass and only ever removes more, so a class that reads less can never end up seeing more. Body text, headers, payloads, evidence references blanked. `SandboxExec.command` is blanked too (issue #158, fixed by PR #160): shell strings routinely embed secrets, and an approving agent retains the shape it needs via `detected_hosts`, `dependencies` and `requires_approval`. This is exactly what the `Decider` row below relaxes, for an agent that has been seated to judge the command rather than merely to see that one exists. |
 | `Decider` | An agent holding an **active decider appointment** over the run whose gate it is reading (#1194). | **Operator-shaped, secrets masked in place.** It sees the command it is being asked to judge — which `Agent` blanks — but `redact_embedded_secrets` rewrites bearer tokens, env-var assignments and URL query secrets inside it. Delegates to the `Operator` path, so it can never exceed operator disclosure and is currently identical to it. Kept as its own class because the two mask for independent reasons (see below) — but the variant is a seam for future divergence, not an enforcement of it. Resolved per *gate*, not per caller: the same agent reading a gate outside its appointment is `Agent`. |
-| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings — including `SandboxExec.command`, `WriteFile.content` and the URL on `CredentialRequest` / `WebFetch` / `WebCall` — get precise in-place masking via `redact_embedded_secrets` (Bearer headers, env-var assignments, URL query secrets are masked; surrounding prose preserved). Commands, hosts and request shapes stay visible for triage: **reading the command is not the same as reading the credential inside it.** |
+| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings — including `SandboxExec.command`, `WriteFile.content` and the URL on `CredentialRequest` / `WebFetch` / `WebCall` — get precise in-place masking via `redact_embedded_secrets` (`Authorization` header values, env-var assignments and URL query secrets are masked; surrounding prose preserved). Commands, hosts and request shapes stay visible for triage: **reading the command is not the same as reading the credential inside it.** |
 | `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the P-4.14 redaction-before-write invariant — see [P-4.14 and `RedactedPayload`](#p-414-and-redactedpayload). |
 
 **Why `Decider` exists even though it currently matches `Operator`.** The two
@@ -48,6 +48,12 @@ it.
 The class is conferred by the appointment, never by the agent identity, which is
 what makes revocation real: nothing was held by the agent to take back. See
 `decider_appointment::viewer_class_for_gate`.
+
+> **A note on writing this page.** Avoid the literal phrase `Bearer <word>` in
+> prose. `BEARER_RE` matches it, so any pipeline that runs the catalogue over
+> this file — including review tooling — renders the sentence with the next word
+> masked, and the doc reads as if it contains an editing artifact. Name the
+> header instead.
 
 The default is `Operator` (`ViewerClass::default()`). See [the default-Operator footgun](#the-default-operator-footgun) for what to watch out for.
 
@@ -104,7 +110,11 @@ The redaction shape varies per-variant. The table below uses the most-redacting 
 
 Source: `autonoetic-types/src/background.rs::ScheduledAction::redact_for_viewer`.
 
-> **Issue #158 (open, fixed in PR #160).** `SandboxExec.command` is currently preserved verbatim for the `Agent` class — a command embedding a Bearer token in `curl -H 'Authorization: …'` leaks to any agent-class consumer of the approval (e.g. an approver agent reading `approval_summary`). Pinned by `agent_viewer_sandbox_exec_command_currently_preserves_secrets`. PR #160 changes the behaviour to `"***REDACTED***"` and flips that pin.
+> **Issue #158 (closed by PR #160).** `SandboxExec.command` is blanked for
+> the `Agent` class. A command embedding an `Authorization` credential would
+> otherwise leak to any agent-class consumer of the approval. Since #1219 the
+> `Agent` view is composed on top of the `Operator` view, so it is narrower
+> than the operator's by construction rather than by enumeration.
 
 > Variants in the fall-through set carry no fields with raw secret material today (agent IDs, summaries, request IDs). If a future variant adds a body field, the `agent_viewer_falls_through_for_agent_install_today` regression pin will fail and prompt the author to add an explicit redaction arm rather than silently leaking.
 
@@ -156,9 +166,9 @@ Public functions:
 | Function | Purpose |
 |---|---|
 | `is_sensitive_key(k)` | True when a JSON object key matches the credential-shaped substring catalogue (`secret`, `token`, `password`, `api_key`, `apikey`, `authorization`, `access_key`, `access_token`, `refresh_token`, `client_secret`). |
-| `looks_like_secret_value(t)` | True when free-form text smells secret-bearing (Bearer prefix, `sk-` prefix, PEM marker, env-var-name regex, long hex, JWT shape). Used by free-text classification, not by JSON-value redaction. |
+| `looks_like_secret_value(t)` | True when free-form text smells secret-bearing (`Authorization` scheme prefixes, `sk-` prefix, vendor token prefixes, PEM marker, env-var-name regex, long hex, JWT shape). Used by free-text classification, not by JSON-value redaction. |
 | `looks_like_secret_collection_prompt(t)` | True when text appears to *solicit* a secret from a human ("paste your API key…"). |
-| `redact_embedded_secrets(t)` | In-place masking via the regex catalogue (env-var assignments, URL query params, Bearer headers, raw `sk-` prefix). Preserves surrounding prose. |
+| `redact_embedded_secrets(t)` | In-place masking via the regex catalogue (env-var assignments, URL query params, `Authorization` header values, vendor token prefixes, URL userinfo, PEM blocks, bare `sk-` values). Preserves surrounding prose. |
 | `redact_json_value(v)` | Recursive JSON redaction: object keys via `is_sensitive_key` → wholesale value redact; string values via `redact_embedded_secrets`; **narrow PEM fallback** for values that can't be masked locally. |
 | `redact_text_for_logs(t)` | Top-level entry: JSON parse → `redact_json_value`; otherwise `redact_embedded_secrets`. |
 
@@ -203,7 +213,7 @@ They cooperate; neither subsumes the other.
 ### What this protects against
 
 - **Cross-agent secret leakage via observability tools.** A specialist agent invoking `execution_search` to learn from another session sees only metadata, not stdout/stderr/headers/bodies. Even if the source agent had `NetworkAccess` and made a credential-bearing request, the credential-in-body never reaches the curious agent. (One known gap: `approval_summary` for `ScheduledAction::SandboxExec` currently exposes the command verbatim — issue #158, fixed by PR #160.)
-- **Operator-class triage with redacted secrets.** Operators inspecting payloads see structural fields (host, method, path, JSON keys) but secret-named keys have their values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` — Bearer headers, env-var assignments, and URL query secrets are masked while the surrounding prose is preserved.
+- **Operator-class triage with redacted secrets.** Operators inspecting payloads see structural fields (host, method, path, JSON keys) but secret-named keys have their values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` — `Authorization` header values, env-var assignments, and URL query secrets are masked while the surrounding prose is preserved.
 - **Inadvertent exposure through reports.** The HTML and JSON session reports go through `redact_text_for_logs` before being written to the content store (commit 7f8525d, closes part of issue #4).
 
 ### What this does NOT protect against

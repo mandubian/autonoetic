@@ -627,17 +627,28 @@ impl ScheduledAction {
         self.redact_for_operator()
     }
 
+    /// Strictly narrower than the operator view, **by construction**.
+    ///
+    /// Composed on top of `redact_for_operator` rather than matching on the
+    /// original. Written as an independent match, this function silently
+    /// missed every variant it did not name — `WebFetch`, `WebCall` and even
+    /// `CredentialRequest.url` fell through to identity, so once the operator
+    /// path learned to mask URLs the *least* trusted class was seeing more
+    /// than the most trusted one. Composition makes that inversion
+    /// unrepresentable: whatever the operator masks is already masked here,
+    /// and this function only ever removes more.
     fn redact_for_agent(&self) -> Self {
-        match self {
+        match self.redact_for_operator() {
             Self::CredentialRequest {
                 credential_id,
                 url,
                 method,
                 ..
             } => Self::CredentialRequest {
-                credential_id: credential_id.clone(),
-                url: url.clone(),
-                method: method.clone(),
+                credential_id,
+                // Already secret-masked by the operator pass above.
+                url,
+                method,
                 headers: Some(std::collections::HashMap::new()),
                 body: None,
                 inject_secret_as: None,
@@ -650,31 +661,31 @@ impl ScheduledAction {
                 intent,
                 ..
             } => Self::SandboxExec {
-                // Command is blanked for the Agent class because shell strings
-                // routinely embed secrets — `Authorization: Bearer …`, env-var
-                // assignments, URL query params. Consistent with the Agent
-                // redaction of `ExecutionTraceRecord::command` (commit 7f8525d).
-                // Approving agents retain shape via `detected_hosts`,
-                // `dependencies`, and `requires_approval`; operators see the
-                // raw command (Operator class is identity for SandboxExec).
+                // Blanked entirely for the Agent class, not merely
+                // secret-masked: shell strings embed credentials in shapes the
+                // catalogue does not recognise, and an approving agent retains
+                // what it needs via `detected_hosts`, `dependencies` and
+                // `requires_approval`. Consistent with the Agent redaction of
+                // `ExecutionTraceRecord::command` (commit 7f8525d).
                 command: Self::REDACTED.to_string(),
-                dependencies: dependencies.clone(),
-                requires_approval: *requires_approval,
+                dependencies,
+                requires_approval,
                 evidence_ref: None,
-                detected_hosts: detected_hosts.clone(),
-                intent: intent.clone(),
+                detected_hosts,
+                intent,
             },
             Self::WriteFile {
                 path,
                 requires_approval,
                 ..
             } => Self::WriteFile {
-                path: path.clone(),
+                path,
                 content: Self::REDACTED.to_string(),
-                requires_approval: *requires_approval,
+                requires_approval,
                 evidence_ref: None,
             },
-            other => other.clone(),
+            // Anything else keeps the operator-level masking and no more.
+            other => other,
         }
     }
 
@@ -1638,6 +1649,153 @@ mod redaction_tests {
             panic!("expected SandboxExec");
         };
         assert_eq!(command, "ls -la /tmp");
+    }
+
+    // ── Ordering invariant across all classes ───────────────────────────
+
+    #[test]
+    fn agent_never_sees_a_secret_the_operator_has_masked() {
+        // The inversion this pins: `redact_for_agent` used to match on the
+        // original action, so any variant it did not name fell through to
+        // identity. Once the operator path learned to mask URLs, an ordinary
+        // agent saw a raw `?token=…` that the operator did not — the least
+        // trusted class seeing the most. Composition closed it; this keeps it
+        // closed for variants nobody has thought of yet.
+        let secret = "abc123supersecret";
+        let actions = vec![
+            ScheduledAction::WebFetch {
+                url: format!("https://api.example.com/v1?token={secret}&page=2"),
+                timeout_secs: None,
+                max_chars: None,
+                detected_hosts: None,
+                payload: None,
+            },
+            ScheduledAction::CredentialRequest {
+                credential_id: "gh".into(),
+                url: format!("https://api.github.com/user?access_token={secret}"),
+                method: Some("GET".into()),
+                headers: None,
+                body: None,
+                inject_secret_as: None,
+                payload: None,
+            },
+            sandbox_exec_with_secret_bearing_command(),
+            write_file_with_secrets(),
+        ];
+
+        for action in actions {
+            let kind = action.kind();
+            for class in [ViewerClass::Agent, ViewerClass::Decider, ViewerClass::Operator] {
+                let blob = serde_json::to_string(&action.redact_for_viewer(class)).unwrap();
+                assert!(
+                    !blob.contains(secret),
+                    "{kind}: {class:?} leaked the token — {blob}"
+                );
+                assert!(
+                    !blob.contains("eyJhbGc.foo") && !blob.contains("hunter2"),
+                    "{kind}: {class:?} leaked a fixture secret — {blob}"
+                );
+            }
+        }
+    }
+
+    /// Recursive "no wider than" check on two serialized views of the same
+    /// action.
+    ///
+    /// A flat comparison (equal, or blanked at the top level) was too coarse to
+    /// mean much: it would reject a legitimate future narrowing *inside* a
+    /// nested object, and would miss `[]` or `""` as narrowing shapes. This
+    /// descends, so the invariant holds for structures nobody has written yet
+    /// — which is the point, since the bug it guards came from an unnamed
+    /// variant.
+    fn is_narrower_or_equal(agent: &serde_json::Value, operator: &serde_json::Value) -> bool {
+        use serde_json::Value;
+        if agent == operator {
+            return true;
+        }
+        match (agent, operator) {
+            // Explicit removal is always narrower.
+            (Value::Null, _) => true,
+            (Value::String(s), _) if s == ScheduledAction::REDACTED || s.is_empty() => true,
+            // Descend. Every key the agent kept must be no wider than the
+            // operator's, and a key the operator does not have at all is the
+            // inversion this whole test exists to catch.
+            (Value::Object(a), Value::Object(o)) => a
+                .iter()
+                .all(|(k, av)| o.get(k).is_some_and(|ov| is_narrower_or_equal(av, ov))),
+            (Value::Array(a), Value::Array(o)) => {
+                a.len() <= o.len()
+                    && a.iter().zip(o.iter()).all(|(av, ov)| is_narrower_or_equal(av, ov))
+            }
+            // An emptied collection is narrower than whatever it replaced.
+            (Value::Array(a), _) if a.is_empty() => true,
+            (Value::Object(a), _) if a.is_empty() => true,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn agent_disclosure_is_a_subset_of_operator_disclosure() {
+        // Structural, not per-variant: whatever the agent can read, the
+        // operator must be able to read at least as much of. Composition makes
+        // this true by construction; this asserts the guarantee actually holds.
+        // The fixture set must include the variants that had no explicit arm —
+        // this test was vacuous until it did. Verified by mutation: reverting
+        // `redact_for_agent` to `match self` has to make this fail, and with
+        // only the four hand-written arms represented, it did not.
+        for action in [
+            sandbox_exec_benign(),
+            sandbox_exec_with_secret_bearing_command(),
+            write_file_with_secrets(),
+            credential_request_with_secrets(),
+            agent_install_payload(),
+            ScheduledAction::WebFetch {
+                url: "https://api.example.com/v1?token=abc123supersecret&page=2".into(),
+                timeout_secs: None,
+                max_chars: None,
+                detected_hosts: None,
+                payload: None,
+            },
+            ScheduledAction::CredentialRequest {
+                credential_id: "gh".into(),
+                url: "https://api.github.com/user?access_token=abc123supersecret".into(),
+                method: Some("GET".into()),
+                headers: None,
+                body: None,
+                inject_secret_as: None,
+                payload: None,
+            },
+        ] {
+            let agent = serde_json::to_value(action.redact_for_viewer(ViewerClass::Agent)).unwrap();
+            let operator =
+                serde_json::to_value(action.redact_for_viewer(ViewerClass::Operator)).unwrap();
+            assert!(
+                is_narrower_or_equal(&agent, &operator),
+                "{}: agent view is not a narrowing of the operator view\n  agent:    {agent}\n  operator: {operator}",
+                action.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn the_narrowing_predicate_rejects_a_widening() {
+        use serde_json::json;
+        // Guard the guard: a predicate that accepts everything would make the
+        // subset test vacuous.
+        assert!(is_narrower_or_equal(&json!(null), &json!("x")));
+        assert!(is_narrower_or_equal(&json!({}), &json!({"a": 1})));
+        assert!(is_narrower_or_equal(&json!({"a": null}), &json!({"a": "secret"})));
+        assert!(is_narrower_or_equal(&json!([]), &json!([1, 2])));
+        // Wider: a value the operator does not have.
+        assert!(!is_narrower_or_equal(&json!({"a": "raw"}), &json!({"a": null})));
+        assert!(!is_narrower_or_equal(&json!({"b": 1}), &json!({"a": 1})));
+        assert!(!is_narrower_or_equal(&json!("raw"), &json!("***REDACTED***")));
+        assert!(!is_narrower_or_equal(&json!([1, 2, 3]), &json!([1, 2])));
+        // Nested narrowing is accepted where the flat check would have failed.
+        assert!(is_narrower_or_equal(
+            &json!({"outer": {"keep": 1, "drop": null}}),
+            &json!({"outer": {"keep": 1, "drop": "secret"}})
+        ));
     }
 
     // ── ViewerClass::Decider (#1194) ────────────────────────────────────
