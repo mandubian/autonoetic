@@ -237,6 +237,9 @@
           <button id="tab-btn-grants" onclick="switchRightTab('grants')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>🔑</span> Grants <span id="grants-tab-badge" class="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
           </button>
+          <button id="tab-btn-evolution" onclick="switchRightTab('evolution')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>🧬</span> Evolution
+          </button>
         </div>
 
         <!-- Tab 1: Visual Workflow & Plan DAG -->
@@ -259,6 +262,16 @@
 
         <!-- Tab 2: Drafts & Active Workbenches Checklist -->
         <div id="tab-content-checklist" class="flex-1 flex flex-col overflow-hidden hidden">
+          <!-- Pending Plan Approvals (mirrors TUI /plan list + y approve) -->
+          <div id="pending-plans-section" class="hidden shrink-0 border-b border-slate-850 max-h-[45%] flex flex-col overflow-hidden">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-accentAmber/5 flex items-center justify-between">
+              <h2 class="font-display font-semibold text-xs text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
+                <span>📋</span> Pending Plan Approvals
+              </h2>
+              <button onclick="fetchPendingPlans()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+            </div>
+            <div id="pending-plans" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs"></div>
+          </div>
           <!-- Active Plan Steps -->
           <div class="h-1/2 flex flex-col overflow-hidden border-b border-slate-850">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-slate-950 bg-opacity-40 flex items-center justify-between">
@@ -342,6 +355,38 @@
               <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
             </div>
             <div id="labels-panel-body" class="hidden space-y-2 border-t border-slate-800 pt-4"></div>
+          </div>
+        </div>
+
+        <!-- Tab 6: Evolution, Curation & Cron (mirrors TUI /skills /crystallize /curate /cron) -->
+        <div id="tab-content-evolution" class="flex-1 flex flex-col overflow-hidden hidden">
+          <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between gap-2">
+            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <span>🧬</span> Evolution &amp; Scheduled Work
+            </h2>
+            <div class="flex items-center gap-2 shrink-0">
+              <span id="evolution-counts-badge" class="bg-slate-800 text-slate-400 text-[9px] font-mono px-2 py-0.5 rounded-full">—</span>
+              <button onclick="fetchEvolution(); fetchCronJobs();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+            </div>
+          </div>
+          <div class="px-5 py-2 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center gap-2 shrink-0">
+            <button onclick="runCrystallize()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[10px] px-3 py-1.5 rounded uppercase transition-all">⚒ Crystallize session</button>
+            <button onclick="runCuration()" class="bg-accentCyan/15 border border-accentCyan/30 hover:bg-accentCyan/30 text-accentCyan font-bold text-[10px] px-3 py-1.5 rounded uppercase transition-all">🧹 Run curation</button>
+            <span id="evolution-status" class="text-[10px] font-mono text-slate-500 truncate"></span>
+          </div>
+          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+            <div>
+              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Proposed Skill Work</h3>
+              <div id="evolution-pending" class="space-y-1.5">
+                <div class="text-center text-slate-500 py-4">Connect to a session to load.</div>
+              </div>
+            </div>
+            <div class="border-t border-slate-800 pt-3">
+              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Scheduled Jobs (cron)</h3>
+              <div id="cron-jobs" class="space-y-1.5">
+                <div class="text-center text-slate-500 py-4">Connect to a session to load.</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -676,6 +721,12 @@
       document.getElementById('labels-panel-body').classList.add('hidden');
       document.getElementById('labels-panel-body').innerHTML = '';
       document.getElementById('grants-tab-badge').classList.add('hidden');
+      document.getElementById('pending-plans-section').classList.add('hidden');
+      document.getElementById('pending-plans').innerHTML = '';
+      document.getElementById('evolution-pending').innerHTML = '<div class="text-center text-slate-500 py-4">Loading…</div>';
+      document.getElementById('cron-jobs').innerHTML = '<div class="text-center text-slate-500 py-4">Loading…</div>';
+      document.getElementById('evolution-status').innerText = '';
+      document.getElementById('evolution-counts-badge').innerText = '—';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -704,6 +755,11 @@
 
       // 4. Fetch content drafts
       await fetchContentList(baseURL, sid, secret);
+
+      // 5. Pending plan approvals + evolution/cron standing views
+      await fetchPendingPlans();
+      fetchEvolution();
+      fetchCronJobs();
 
       if (statusText.innerText !== 'Connecting...') return;
 
@@ -782,6 +838,14 @@
       document.getElementById('labels-panel-body').innerHTML = '';
       document.getElementById('grants-tab-badge').classList.add('hidden');
       pollFailures.grants = pollFailures.labels = pollFailures.activity = 0;
+      // Same fail-clean rule for the workflow panels: no previous-session
+      // plans/evolution/cron data survives a disconnect or session switch.
+      document.getElementById('pending-plans-section').classList.add('hidden');
+      document.getElementById('pending-plans').innerHTML = '';
+      document.getElementById('evolution-pending').innerHTML = '<div class="text-center text-slate-500 py-4">Connect to a session to load.</div>';
+      document.getElementById('cron-jobs').innerHTML = '<div class="text-center text-slate-500 py-4">Connect to a session to load.</div>';
+      document.getElementById('evolution-status').innerText = '';
+      document.getElementById('evolution-counts-badge').innerText = '—';
       
       eventList = [];
       activityList = [];
@@ -1246,6 +1310,278 @@
       } catch (e) { alert(`Connection error: ${e.message}`); }
     }
 
+    // ── Pending plan approvals (mirrors TUI /plan list + y approve, #873) ──
+
+    async function fetchPendingPlans() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'plans-pending', method: 'planframes.list_pending',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        renderPendingPlans((json.result && json.result.plans) || []);
+      } catch (e) {
+        renderPanelError('pending-plans', `planframes.list_pending failed: ${e.message}`);
+        document.getElementById('pending-plans-section').classList.remove('hidden');
+      }
+    }
+
+    function renderPendingPlans(plans) {
+      const section = document.getElementById('pending-plans-section');
+      const div = document.getElementById('pending-plans');
+      if (!plans.length) { section.classList.add('hidden'); div.innerHTML = ''; return; }
+      section.classList.remove('hidden');
+      div.innerHTML = plans.map(p => {
+        const steps = (p.steps || []).slice(0, 6);
+        const more = (p.steps || []).length - steps.length;
+        const ownerBadge = o => ({ planner: 'text-accentViolet', agent: 'text-accentIndigo', operator: 'text-accentAmber', shared: 'text-accentCyan' }[o] || 'text-slate-400');
+        // plan_id lands in an inline handler — only safe ids get a live button.
+        const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(p.plan_id));
+        const approveBtn = safeId
+          ? `<button onclick="approvePlan('${p.plan_id}')" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[10px] px-3 py-1 rounded uppercase shrink-0 transition-all">✓ Approve</button>`
+          : '<button disabled class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[10px] px-3 py-1 rounded uppercase shrink-0 cursor-not-allowed" title="non-standard plan id — approve via CLI">✓ Approve</button>';
+        return `
+          <div class="p-3 rounded-xl border border-accentAmber/30 bg-accentAmber/5 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-display font-bold text-slate-100 text-xs truncate" title="${escapeHTML(p.title)}">${escapeHTML(p.title)}</span>
+              ${approveBtn}
+            </div>
+            <div class="text-[9px] font-mono text-slate-500">${escapeHTML(p.plan_id)} · v${p.version} · by ${escapeHTML(p.created_by_agent_id || '?')}${p.status === 'stale' ? ' · <span class="text-accentRed">STALE</span>' : ''}${p.expires_at ? ` · exp ${escapeHTML(p.expires_at)}` : ''}</div>
+            ${p.objective ? `<p class="text-slate-300 leading-relaxed">${escapeHTML(p.objective.length > 220 ? p.objective.slice(0, 220) + '…' : p.objective)}</p>` : ''}
+            <div class="space-y-0.5">
+              ${steps.map((s, i) => `<div class="flex items-center gap-1.5 text-[10px]"><span class="text-slate-600 font-mono">${i + 1}.</span><span class="font-mono text-[8px] uppercase ${ownerBadge(s.owner)}">${escapeHTML(s.owner || '?')}</span><span class="text-slate-300 truncate">${escapeHTML(s.title)}${s.agent_id ? ` <span class="text-slate-500 font-mono">→ ${escapeHTML(s.agent_id)}</span>` : ''}</span></div>`).join('')}
+              ${more > 0 ? `<div class="text-[9px] text-slate-500 italic">+${more} more step${more > 1 ? 's' : ''}</div>` : ''}
+            </div>
+            ${(p.capability_envelope || []).length ? `<div class="text-[9px] font-mono text-accentViolet">envelope: ${p.capability_envelope.length} capabilit${p.capability_envelope.length === 1 ? 'y' : 'ies'} — approval locks it for the session</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Port of plan_frame.rs infer_agent_id_from_step_title (wake hint only).
+    function inferAgentIdFromStepTitle(title) {
+      const t = (title || '').toLowerCase();
+      if (t.includes('research') || t.includes('data source') || t.includes('market data') ||
+          (t.includes('api') && (t.includes('source') || t.includes('survey')))) return 'researcher.default';
+      if (t.includes('architect') || t.includes('architecture') || t.includes('design') || t.includes('data flow')) return 'architect.default';
+      if (t.includes('implement') || t.includes('coding') || t.includes('build') || t.includes('develop')) return 'coder.default';
+      if (t.includes('federation') || t.includes('audit') || t.includes('evaluat') || t.includes('promotion')) return 'auditor.default';
+      return null;
+    }
+
+    // Port of PlanFrame::execution_wake_hint + the TUI fallback message.
+    function planWakeMessage(plan) {
+      if (plan && plan.status === 'approved') {
+        const step = (plan.steps || []).find(s => s.owner === 'agent' || s.owner === 'shared');
+        const explicit = step && step.agent_id && step.agent_id.trim() ? step.agent_id.trim() : null;
+        const agentId = step ? (explicit || inferAgentIdFromStepTitle(step.title)) : null;
+        if (step && agentId) {
+          return `Start approved plan ${plan.plan_id} v${plan.version} at step ${step.step_id} (${step.title}): call agent_spawn on \`${agentId}\` with a task message drawn from the plan objective. Do not call agent_list or agent_discover — agent_id is already known.`;
+        }
+      }
+      const pid = plan ? plan.plan_id : '?';
+      const title = plan ? plan.title : '';
+      const version = plan ? plan.version : '?';
+      return `[Operator approved plan ${pid}] "${title}" (v${version}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.`;
+    }
+
+    async function approvePlan(planId) {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !planId) return;
+      if (!confirm(`Approve plan '${planId}'?\n\nThis materializes the plan envelope as session grants and wakes the planner to start execution.`)) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'plan-approve', method: 'planframes.approve',
+            params: { plan_id: planId, approved_by: 'operator' }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Plan approval failed: ${json.error.message}`); return; }
+        // Mirror the TUI's approve-and-wake: an operator message resumes the
+        // planner turn that ended at awaiting_approval.
+        const plan = (json.result && json.result.plan) || null;
+        await fetchWithTimeout(`${baseURL}/api/event/ingest`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            event_type: 'chat', message: planWakeMessage(plan), session_id: sid,
+            async_mode: true, metadata: { source: 'web_cockpit' }
+          })
+        });
+        fetchPendingPlans();
+        fetchPlanFrame(baseURL, sid, secret);
+        fetchGrants();
+      } catch (e) { alert(`Connection error: ${e.message}`); }
+    }
+
+    // ── Evolution, curation & cron (mirrors TUI /skills /crystallize /curate /cron) ──
+
+    async function fetchEvolution() {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'evo-pending', method: 'evolution.list_pending', params: { limit: 30 }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        renderEvolution(json.result || {});
+      } catch (e) {
+        renderPanelError('evolution-pending', `evolution.list_pending failed: ${e.message}`);
+      }
+    }
+
+    function renderEvolution(data) {
+      const entries = data.pending || [];
+      const counts = data.counts || {};
+      const badge = document.getElementById('evolution-counts-badge');
+      badge.innerText = `${counts.crystallizations || 0} cryst · ${counts.graduations || 0} grad · ${counts.awaiting_promotion || 0} awaiting promotion`;
+      const div = document.getElementById('evolution-pending');
+      if (!entries.length) { div.innerHTML = '<div class="text-center text-slate-500 py-4">No proposed skill work in flight.</div>'; return; }
+      const kindBadge = k => ({ crystallization: ['cryst', 'bg-accentViolet/10 text-accentViolet border-accentViolet/20'], graduation: ['graduate', 'bg-accentCyan/10 text-accentCyan border-accentCyan/20'], graduation_skipped: ['skipped', 'bg-slate-800 text-slate-500 border-slate-700'] }[k] || [k, 'bg-slate-800 text-slate-400 border-slate-700']);
+      const stageCls = s => ({ proposed: 'text-accentAmber border-accentAmber/30 bg-accentAmber/10', judged: 'text-accentIndigo border-accentIndigo/30 bg-accentIndigo/10', declined: 'text-slate-500 border-slate-700 bg-slate-800/40', skipped: 'text-slate-500 border-slate-700 bg-slate-800/40' }[s] || 'text-slate-400 border-slate-700');
+      div.innerHTML = entries.map(e => {
+        const [kLabel, kCls] = kindBadge(e.kind);
+        return `
+          <div class="p-2 rounded border border-slate-800 bg-slate-900/40">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="${kCls} border text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">${kLabel}</span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border ${stageCls(e.stage)} shrink-0">${escapeHTML(e.stage)}${e.outcome ? ` · ${escapeHTML(e.outcome)}` : ''}</span>
+                ${e.verdict ? `<span class="text-[9px] font-mono text-slate-500 shrink-0">verdict: ${escapeHTML(e.verdict)}</span>` : ''}
+              </div>
+              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(e.recorded_at)}</span>
+            </div>
+            <div class="text-slate-200 text-[11px] mt-1 leading-snug">${escapeHTML(e.summary)}</div>
+            <div class="text-[9px] font-mono text-slate-500 mt-0.5">
+              ${e.target_agent ? `target: ${escapeHTML(e.target_agent)}` : ''}${(e.target_agent_candidates || []).length ? ` · ${e.target_agent_candidates.length} candidate revision(s) held at gate` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function runCrystallize() {
+      const notes = prompt('Focus notes for the crystallizer (optional):');
+      if (notes === null) return;
+      await runEvolutionAction('skill.crystallize_from_session', '⚒ crystallization', notes);
+    }
+
+    async function runCuration() {
+      const notes = prompt('Focus notes for the curator (optional):');
+      if (notes === null) return;
+      await runEvolutionAction('curation.run_for_session', '🧹 curation', notes);
+    }
+
+    async function runEvolutionAction(method, label, focusNotes) {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      const status = document.getElementById('evolution-status');
+      status.innerText = `${label}: enqueueing…`;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'evo-run', method,
+            params: { root_session_id: sid, focus_notes: (focusNotes || '').trim() || null }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { status.innerText = `✗ ${label}: ${json.error.message}`; return; }
+        const r = json.result || {};
+        status.innerText = r.status === 'deduplicated'
+          ? `⏳ ${label} already in flight (task ${String(r.task_id || '?').slice(0, 12)})`
+          : `✓ ${label} queued (task ${String(r.task_id || '?').slice(0, 12)}) — verdict will land on the timeline`;
+        fetchEvolution();
+      } catch (e) { status.innerText = `✗ ${label}: ${e.message}`; }
+    }
+
+    async function fetchCronJobs() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      const div = document.getElementById('cron-jobs');
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'cron-list', method: 'scheduled_jobs.list',
+            params: { root_session_id: sid, limit: 50 }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        renderCronJobs((json.result && json.result.jobs) || []);
+      } catch (e) {
+        renderPanelError('cron-jobs', `scheduled_jobs.list failed: ${e.message}`);
+      }
+    }
+
+    function renderCronJobs(jobs) {
+      const div = document.getElementById('cron-jobs');
+      if (!jobs.length) { div.innerHTML = '<div class="text-center text-slate-500 py-4">No scheduled jobs for this root session.</div>'; return; }
+      const statusCls = s => ({ active: 'text-accentGreen border-accentGreen/30 bg-accentGreen/10', paused: 'text-accentAmber border-accentAmber/30 bg-accentAmber/10', cancelled: 'text-slate-500 border-slate-700 bg-slate-800/40' }[s] || 'text-slate-400 border-slate-700');
+      div.innerHTML = jobs.map(j => {
+        const numId = j.job_id;
+        const safe = /^[A-Za-z0-9_.\-]+$/.test(String(numId));
+        return `
+          <div class="p-2 rounded border border-slate-800 bg-slate-900/40">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <code class="text-slate-200 text-[10px] truncate" title="${escapeHTML(String(numId))}">${escapeHTML(String(numId))}</code>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border ${statusCls(j.status)} shrink-0">${escapeHTML(j.status)}</span>
+              </div>
+              ${safe && j.status === 'active'
+                ? `<button onclick="triggerCronJob('${escapeHTML(String(numId))}', this)" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">▶ Fire</button>`
+                : ''}
+            </div>
+            <div class="text-[9px] font-mono text-slate-500 mt-1">${escapeHTML(j.owner_agent_id || '?')} → ${escapeHTML(j.target_agent_id || '?')} · <span class="text-accentCyan">${escapeHTML(j.cron_expr)}</span> (${escapeHTML(j.timezone || 'UTC')})</div>
+            <div class="text-[9px] font-mono text-slate-500">next: ${escapeHTML(j.next_run_at || '—')}${j.last_run_at ? ` · last: ${escapeHTML(j.last_run_at)}` : ''}</div>
+            ${j.last_error ? `<div class="text-[9px] font-mono text-accentRed/80 mt-0.5">⚠ ${escapeHTML(j.last_error)}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function triggerCronJob(jobId, btn) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !jobId) return;
+      if (!confirm(`Fire scheduled job '${jobId}' now?\n\nIt runs the agent the normal way — all constitution/approval gates stay in effect.`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'cron-fire', method: 'scheduled_jobs.trigger',
+            params: { job_id: jobId }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Trigger failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        const r = json.result || {};
+        if (r.status === 'trigger_skipped') {
+          alert(`Job already in flight (task ${r.existing_task_id}) — not double-fired.`);
+        }
+        fetchCronJobs();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
     function renderContentList(files, sid) {
       const listDiv = document.getElementById('workbench-list');
       if (!files || files.length === 0) {
@@ -1326,6 +1662,10 @@
       const info = getConnectInfo();
       if (fresh.some(e => e.event_type.startsWith('plan.')) && isConnected) {
         fetchPlanFrame(info.baseURL, info.sid, info.secret);
+        fetchPendingPlans();
+      }
+      if (fresh.some(e => e.event_type.startsWith('scheduled_job.')) && isConnected) {
+        fetchCronJobs();
       }
       if (fresh.some(e => e.event_type === 'content_write') && isConnected) {
         fetchContentList(info.baseURL, info.sid, info.secret);
@@ -2545,7 +2885,7 @@
     }
 
     function switchRightTab(tabId) {
-      const tabs = ['workflow', 'checklist', 'constitution', 'wiki', 'grants'];
+      const tabs = ['workflow', 'checklist', 'constitution', 'wiki', 'grants', 'evolution'];
       tabs.forEach(t => {
         document.getElementById(`tab-content-${t}`).classList.add('hidden');
         const btn = document.getElementById(`tab-btn-${t}`);
@@ -2560,6 +2900,7 @@
       if (tabId === 'constitution' && isConnected) fetchConstitution(info.baseURL, info.secret);
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
       if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); }
+      if (tabId === 'evolution' && isConnected) { fetchEvolution(); fetchCronJobs(); }
     }
 
     async function fetchRecentSessions() {
