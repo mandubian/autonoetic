@@ -5700,8 +5700,8 @@ pub(crate) fn derived_from_payload(
     };
     serde_json::json!({
         "base_agent_id": provenance.base_agent_id,
-        "claimed_base_revision": provenance.base_revision_digest,
-        "base_current_revision": base_current_revision,
+        "claimed_base_revision_digest": provenance.base_revision_digest,
+        "base_current_revision_id": base_current_revision,
         "stale_base": stale_base,
         "added_vs_base": added_vs_base,
         "removed_vs_base": removed_vs_base,
@@ -6360,7 +6360,7 @@ agent:
         let out = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:aaaa")), &wrapper_caps());
         assert_eq!(out["base_agent_id"], "base.agent");
         assert_eq!(out["stale_base"], false);
-        assert_eq!(out["base_current_revision"], "rev_sha256:aaaa");
+        assert_eq!(out["base_current_revision_id"], "rev_sha256:aaaa");
         assert_eq!(out["base_capabilities_unknown"], false);
         assert_eq!(out["added_vs_base"], serde_json::json!(["CodeExecution"]));
         assert_eq!(out["removed_vs_base"], serde_json::json!(["NetworkAccess"]));
@@ -6379,7 +6379,7 @@ agent:
 
         let out = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:old")), &wrapper_caps());
         assert_eq!(out["stale_base"], true);
-        assert_eq!(out["base_current_revision"], "rev_sha256:new");
+        assert_eq!(out["base_current_revision_id"], "rev_sha256:new");
     }
 
     /// Base gone → stale + capabilities unknown (never an empty diff that
@@ -6394,7 +6394,7 @@ agent:
 
         let gone = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:gone")), &wrapper_caps());
         assert_eq!(gone["stale_base"], true);
-        assert_eq!(gone["base_current_revision"], serde_json::Value::Null);
+        assert_eq!(gone["base_current_revision_id"], serde_json::Value::Null);
         assert_eq!(gone["base_capabilities_unknown"], true);
 
         let unclaimed = derived_from_payload(&store, &gateway_dir, &provenance(None), &wrapper_caps());

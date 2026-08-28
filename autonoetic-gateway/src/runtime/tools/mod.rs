@@ -779,9 +779,10 @@ pub(crate) fn message_format_hint(io_accepts: Option<&serde_json::Value>) -> &'s
 /// revision. Surfaced on the roster (`agent_list` / `agent_inspect`) as
 /// `stale_base`, and on the P-2.25 promotion card as `derived_from`.
 ///
-/// - `None` — no provenance, or the provenance claims no digest (generated
-///   against an unknown base revision): staleness is **unknown**, not false.
-///   Under-claim, never guess.
+/// - `None` — no provenance, the provenance claims no digest (generated
+///   against an unknown base revision), or the base could not be resolved
+///   (store error): staleness is **unknown**, not false. Never treat `None`
+///   as current. Under-claim, never guess.
 /// - `Some(true)` — the base is gone, or its promoted digest differs: the
 ///   wrapper's mapping was computed against a revision that no longer runs.
 /// - `Some(false)` — the wrapper is current against its base.
