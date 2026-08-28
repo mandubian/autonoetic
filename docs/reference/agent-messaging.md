@@ -166,11 +166,11 @@ in two different formats, only one of which matched the documented block below.
 ## Auto-Injection
 
 Rather than making the recipient pull from an inbox tool, delivery is
-**auto-injected**. At each **wake** — the start of a session run, before the turn
-loop, in `AgentExecutor::execute_with_history` — the gateway queries
-`agent_message_deliveries` where `target_session_id = <current_session>` and
-`delivered_at IS NULL`. Each undelivered message is appended to history as user
-text:
+**auto-injected**. At the top of **every turn** — and once more at wake, before
+`log_wake` counts the history — `AgentExecutor::drain_pending_agent_messages`
+queries `agent_message_deliveries` where `target_session_id = <current_session>`
+and `delivered_at IS NULL`. Each undelivered message is appended to history as
+user text:
 
 ```
 [Direct Message from Agent '<sender_agent_id>' (Session: <sender_session_id>)]
@@ -179,9 +179,28 @@ text:
 
 and then marked delivered, with an `agent_message`/`received` causal event.
 
-Note this is per **wake**, not per turn within a run: a message that arrives
-while the receiver is mid-loop is queued and injected when it next wakes. The
-pump's `event.ingest` is what causes that wake in the normal case.
+The drain is idempotent, so a turn with nothing pending costs one indexed
+`SELECT` returning zero rows.
+
+### Why per turn and not per wake
+
+This used to run **once**, before the turn loop. That is only reachable for a
+session that is *asleep* when the message is sent. A session already inside the
+loop never revisited the drain, so its delivery row sat with `delivered_at`
+NULL until the session finished — and a finished session never wakes again, so
+the row was stranded permanently.
+
+The failure was silent in the worst direction: `agent_message` answered
+`{"ok": true, "status": "delivered", "recipients_count": 1}`, because the send
+path proves only that the recipient was unfinished at send time, never that it
+would ingest. The busiest recipients — the ones actually running — were the
+least reachable, and the sender was told the opposite. It also contradicted the
+tool's own guidance, which promises the block arrives "at the start of your
+turn".
+
+Draining every turn makes the wake notice an *optimisation* rather than the
+delivery mechanism: the pump's `event.ingest` still wakes a sleeping recipient
+promptly, but a running one no longer depends on waking at all.
 
 ## Tool Implementation
 
