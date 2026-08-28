@@ -261,10 +261,13 @@ pub fn redact_embedded_secrets(text: &str) -> String {
     let masked_vendor = VENDOR_TOKEN_RE
         .replace_all(&masked_userinfo, REDACTED)
         .to_string();
-    // A short `sk-…` that is the entire string falls below the vendor rule's
-    // length floor, and there is no delimiter to mask around — so the whole
-    // string goes. Retained from the original implementation.
-    if masked_vendor.starts_with("sk-") {
+    // A short `sk-…` falls below the vendor rule's length floor and has no
+    // delimiter to mask around, so the whole value goes — but only when the
+    // value *is* the token. `starts_with` alone would eat `sk-tools --help`
+    // and any prose beginning `sk-`, which is exactly the over-masking the
+    // catalogue is built to avoid.
+    let single_token = masked_vendor.trim();
+    if single_token.starts_with("sk-") && !single_token.contains(char::is_whitespace) {
         return REDACTED.to_string();
     }
     masked_vendor
@@ -551,6 +554,38 @@ mod tests {
                 "over-masked a benign command: {text}"
             );
         }
+    }
+
+    #[test]
+    fn the_short_sk_fallback_only_fires_on_a_bare_token() {
+        // The fallback exists for a value that *is* a short `sk-` token.
+        assert_eq!(redact_embedded_secrets("sk-abc12345"), REDACTED);
+        // It must not swallow a command that merely starts with those bytes.
+        for text in ["sk-tools --help", "sk-learn is not a package"] {
+            assert_eq!(
+                redact_embedded_secrets(text),
+                text,
+                "whole-string fallback over-masked: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sk_length_floor_is_calibrated_to_real_keys() {
+        // Issued OpenAI/Anthropic keys carry 40+ characters after the prefix,
+        // so the 16-char floor masks them wherever they appear in a command.
+        let real_shape = format!("{}-{}", "sk", "proj0123456789abcdefghijklmnopqrstuvwxyz");
+        let masked = redact_embedded_secrets(&format!("run --key {real_shape} --verbose"));
+        assert!(!masked.contains(&real_shape), "a realistic key must be masked: {masked}");
+        assert!(masked.ends_with(" --verbose"), "the command must survive: {masked}");
+
+        // The cost of that floor, stated rather than hidden: a *sub-floor*
+        // `sk-` fragment embedded mid-command is not masked. No issued key is
+        // that short, and lowering the floor would start eating hyphenated
+        // English — `sk-learn-model` and friends. Coverage is bounded here by
+        // choice, not by oversight.
+        let short = "deploy sk-abc123 --dry-run";
+        assert_eq!(redact_embedded_secrets(short), short);
     }
 
     #[test]
