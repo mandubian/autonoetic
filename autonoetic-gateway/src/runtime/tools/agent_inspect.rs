@@ -221,6 +221,13 @@ impl NativeTool for AgentInspectTool {
                     "io_returns": io_returns,
                     "open_web": m.open_web,
                     "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
+                    // Composition provenance (#1202): wrappers report their base
+                    // and whether the base has drifted since generation.
+                    "adapter": serde_json::to_value(&m.adapter).unwrap_or(serde_json::Value::Null),
+                    "stale_base": crate::runtime::tools::adapter_base_stale(
+                        store.as_ref(),
+                        m.adapter.as_ref(),
+                    ),
                 })
             } else {
                 serde_json::json!(null)

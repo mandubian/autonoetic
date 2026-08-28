@@ -1461,6 +1461,7 @@ impl NativeTool for AgentRevisionCreateTool {
             "script_input_mode": serde_json::to_value(&bundle_manifest.script_input_mode).ok(),
             "script_entry": bundle_manifest.script_entry,
             "io": bundle_manifest.io,
+            "adapter": bundle_manifest.adapter,
         });
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
@@ -2350,6 +2351,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             "script_input_mode": serde_json::to_value(&target_manifest.script_input_mode).ok(),
             "script_entry": target_manifest.script_entry,
             "io": target_manifest.io,
+            "adapter": target_manifest.adapter,
         });
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
@@ -3370,16 +3372,36 @@ do not re-issue."
                 // bundle's own output restriction, surfaced in the promotion
                 // approval so an operator can see they are admitting a
                 // local-only bundle. Parsed from the same SKILL.md whose body is
-                // previewed above.
-                let output_label = crate::runtime::parser::SkillParser::parse(&skill_text)
+                // previewed above — alongside composition provenance (#1202).
+                let candidate_manifest = crate::runtime::parser::SkillParser::parse(&skill_text)
                     .ok()
-                    .and_then(|(m, _)| m.egress.and_then(|e| e.output_label));
+                    .map(|(m, _)| m);
+                let output_label = candidate_manifest
+                    .as_ref()
+                    .and_then(|m| m.egress.as_ref().and_then(|e| e.output_label.clone()));
+                // "Derived from" section for wrapper candidates (#1202): base
+                // identity, drift verdict, and the capability delta *vs the
+                // base*. Advisory only — nothing here gates; a fork gaining
+                // power relative to its base becomes a visible line item.
+                let derived_from = candidate_manifest
+                    .as_ref()
+                    .and_then(|m| m.adapter.as_ref())
+                    .map(|prov| {
+                        derived_from_payload(
+                            &gateway_store,
+                            gateway_dir,
+                            prov,
+                            &current_capabilities,
+                        )
+                    })
+                    .unwrap_or(serde_json::Value::Null);
                 let payload = serde_json::json!({
                     "added": added_capabilities,
                     "broadened": broadened_structured,
                     "reassignment": reassignment_payload,
                     "skill_preview": skill_preview,
                     "output_label": output_label.map(|n| n.as_str()),
+                    "derived_from": derived_from,
                 });
 
                 let reass_suffix = reassignment_signal
@@ -3453,8 +3475,18 @@ do not re-issue."
                         "Approve only if you acknowledge every added/broadened capability by name and accept the reassignment (if any)",
                     )
                     .with_analysis(format!(
-                        "Reassignment details: {}\n\nWhat this revision instructs \
+                        "{}Reassignment details: {}\n\nWhat this revision instructs \
                          the agent to do{}:\n{}",
+                        if derived_from.is_null() {
+                            String::new()
+                        } else {
+                            format!(
+                                "Composition provenance — this agent is a wrapper derived \
+                                 from another agent: {}\n\n",
+                                serde_json::to_string_pretty(&derived_from)
+                                    .unwrap_or_default()
+                            )
+                        },
                         reassignment_payload,
                         if skill_preview
                             .get("truncated")
@@ -5612,6 +5644,73 @@ pub(crate) fn check_capability_delta(
     Ok(Some(delta))
 }
 
+/// The "derived from" section of the P-2.25 promotion card (#1202, proposal
+/// `agent-adaptation-composition`). For a wrapper carrying composition
+/// provenance, the operator sees: the base agent's identity, whether the
+/// wrapper is current against the base's promoted revision, and the capability
+/// delta *vs the base* — the derivation context the wrapper's own delta omits.
+///
+/// Advisory only: nothing here gates or rejects. A fork gaining power relative
+/// to its base becomes a visible line item, not a blocked one. An unreadable
+/// base (missing revision dir, malformed manifest) is reported as
+/// `base_capabilities_unknown: true` — under-claim, never an empty diff that
+/// reads as "identical".
+pub(crate) fn derived_from_payload(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    gateway_dir: &Path,
+    provenance: &autonoetic_types::agent::AdapterProvenance,
+    current_capabilities: &[Capability],
+) -> serde_json::Value {
+    let base_alias = gateway_store
+        .resolve_alias(&provenance.base_agent_id)
+        .ok()
+        .flatten();
+    let base_current_revision = base_alias.as_ref().map(|a| a.revision_id.clone());
+    let stale_base = crate::runtime::tools::adapter_base_stale(gateway_store, Some(provenance));
+    let base_capabilities: Option<Vec<Capability>> = base_alias.as_ref().and_then(|alias| {
+        let skill_path = crate::agent::agent_revision_dir(
+            gateway_dir,
+            &provenance.base_agent_id,
+            &alias.revision_id,
+        )
+        .join("SKILL.md");
+        let text = std::fs::read_to_string(&skill_path).ok()?;
+        let frontmatter =
+            crate::runtime::install_contract::extract_frontmatter_raw(&text).ok()?;
+        parse_frontmatter_capabilities(&frontmatter).ok()
+    });
+    // Sorted for determinism: the payload rides inside an `ExactPayload` gate
+    // action, so a hash-ordered diff would re-gate on every retry.
+    let (added_vs_base, removed_vs_base) = match &base_capabilities {
+        Some(base_caps) => {
+            let current: std::collections::BTreeSet<String> = current_capabilities
+                .iter()
+                .map(crate::runtime::tools::capability_type_name)
+                .collect();
+            let base: std::collections::BTreeSet<String> = base_caps
+                .iter()
+                .map(crate::runtime::tools::capability_type_name)
+                .collect();
+            (
+                current.difference(&base).cloned().collect::<Vec<_>>(),
+                base.difference(&current).cloned().collect::<Vec<_>>(),
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    serde_json::json!({
+        "base_agent_id": provenance.base_agent_id,
+        "claimed_base_revision_digest": provenance.base_revision_digest,
+        "base_current_revision_id": base_current_revision,
+        "stale_base": stale_base,
+        "added_vs_base": added_vs_base,
+        "removed_vs_base": removed_vs_base,
+        "base_capabilities_unknown": base_capabilities.is_none(),
+        "generated_at": provenance.generated_at,
+        "generator": provenance.generator,
+    })
+}
+
 /// Load the declared capabilities from an artifact bundle's `SKILL.md`.
 /// Used by `federation_escalate` when the proposed revision has not been
 /// seeded yet (new-agent escalate-before-install flow): the promote gate
@@ -5863,6 +5962,7 @@ mod derive_requested_by_tests {
 mod capability_lenient_deser_tests {
     use super::*;
     use serde::Deserialize;
+    use tempfile::tempdir;
 
     #[derive(Debug, Deserialize)]
     struct CapsOnly {
@@ -6147,6 +6247,158 @@ mod capability_lenient_deser_tests {
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
             egress: None,
         }
+    }
+
+    fn insert_and_promote_revision(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        gateway_dir: &Path,
+        agent_id: &str,
+        revision_id: &str,
+        skill_md: &str,
+    ) {
+        let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: agent_id.to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{}", &revision_id[(revision_id.find(':').map(|i| i + 1).unwrap_or(0))..]),
+            runtime_lock_hash: "sha256:0".to_string(),
+            manifest_hash: "sha256:0".to_string(),
+            created_at: "2026-08-28T00:00:00Z".to_string(),
+            created_by_type: "test".to_string(),
+            created_by_id: "test".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "test-node".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
+            metadata_json: serde_json::json!({}),
+            short_id: revision_id[(revision_id.len() - 8)..].to_string(),
+            detected_network_hosts: None,
+            signature: None,
+            signer_id: None,
+        };
+        store.insert_agent_revision_transactional(&rev).unwrap();
+        let dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), skill_md).unwrap();
+        store
+            .atomic_promote(
+                agent_id,
+                revision_id,
+                &format!("promo-{revision_id}"),
+                "test",
+                "test",
+                Some("unit test"),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    fn base_skill_md(agent_id: &str, read_only: bool) -> String {
+        let caps = if read_only {
+            "capabilities:\n  - type: \"ReadAccess\"\n    scopes: [\"self.*\"]\n"
+        } else {
+            "capabilities:\n  - type: \"ReadAccess\"\n    scopes: [\"self.*\"]\n  - type: \"NetworkAccess\"\n    hosts: [\"api.example.com\"]\n"
+        };
+        format!(
+            r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "{agent_id}"
+  name: "{agent_id}"
+  description: "base"
+{caps}---
+# Base
+"#
+        )
+    }
+
+    fn provenance(digest: Option<&str>) -> autonoetic_types::agent::AdapterProvenance {
+        autonoetic_types::agent::AdapterProvenance {
+            base_agent_id: "base.agent".to_string(),
+            base_revision_digest: digest.map(|s| s.to_string()),
+            generated_at: None,
+            schema_notes: vec![],
+            generator: Some("agent-adapter.default".to_string()),
+        }
+    }
+
+    fn wrapper_caps() -> Vec<Capability> {
+        vec![
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+            Capability::CodeExecution {
+                patterns: vec!["python3 *".to_string()],
+                commands: vec![],
+            },
+        ]
+    }
+
+    /// Current wrapper: claimed digest matches the base's promoted revision —
+    /// `stale_base: false`, and the delta vs base names the capability the
+    /// fork gained (`CodeExecution`) plus the one it dropped (`NetworkAccess`).
+    #[test]
+    fn derived_from_reports_current_wrapper_and_delta_vs_base() {
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        insert_and_promote_revision(&store, &gateway_dir, "base.agent", "rev_sha256:aaaa", &base_skill_md("base.agent", false));
+
+        let out = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:aaaa")), &wrapper_caps());
+        assert_eq!(out["base_agent_id"], "base.agent");
+        assert_eq!(out["stale_base"], false);
+        assert_eq!(out["base_current_revision_id"], "rev_sha256:aaaa");
+        assert_eq!(out["base_capabilities_unknown"], false);
+        assert_eq!(out["added_vs_base"], serde_json::json!(["CodeExecution"]));
+        assert_eq!(out["removed_vs_base"], serde_json::json!(["NetworkAccess"]));
+    }
+
+    /// Base re-promoted after generation → the drift verdict flips to stale.
+    #[test]
+    fn derived_from_flags_wrapper_after_base_repromotion() {
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        insert_and_promote_revision(&store, &gateway_dir, "base.agent", "rev_sha256:old", &base_skill_md("base.agent", true));
+        // Base moves on (alias re-promoted).
+        insert_and_promote_revision(&store, &gateway_dir, "base.agent", "rev_sha256:new", &base_skill_md("base.agent", false));
+
+        let out = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:old")), &wrapper_caps());
+        assert_eq!(out["stale_base"], true);
+        assert_eq!(out["base_current_revision_id"], "rev_sha256:new");
+    }
+
+    /// Base gone → stale + capabilities unknown (never an empty diff that
+    /// reads as "identical to nothing"). No claimed digest → `stale_base:
+    /// null`: unknown, not false.
+    #[test]
+    fn derived_from_underclaims_when_base_gone_or_digest_unclaimed() {
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let gone = derived_from_payload(&store, &gateway_dir, &provenance(Some("rev_sha256:gone")), &wrapper_caps());
+        assert_eq!(gone["stale_base"], true);
+        assert_eq!(gone["base_current_revision_id"], serde_json::Value::Null);
+        assert_eq!(gone["base_capabilities_unknown"], true);
+
+        let unclaimed = derived_from_payload(&store, &gateway_dir, &provenance(None), &wrapper_caps());
+        assert_eq!(unclaimed["stale_base"], serde_json::Value::Null);
     }
 
     #[test]

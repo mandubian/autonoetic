@@ -1234,7 +1234,7 @@ impl NativeTool for AgentListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), io_accepts / io_returns JSON schemas when declared, and a `message_format` hint. Use `message_format` to shape the `message` you pass to agent.spawn: `\"free_text\"` means the target is a reasoning agent that takes a plain natural-language task — spawn it directly, no schema needed (`io_accepts` is null for these and that is expected, not missing data); `\"json_schema\"` means emit `message` as a JSON string whose parsed value matches `io_accepts`. Returns a plain directory — no semantic scoring. This is a read-only directory: one call gives you everything; calling it repeatedly will not surface new fields. If you already know the agent_id (e.g. a foundational specialist or a plan step's agent_id), skip this and spawn directly.".to_string(),
+            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), io_accepts / io_returns JSON schemas when declared, a `message_format` hint, and — for wrapper agents derived from a base agent — `adapter` composition provenance with a computed `stale_base` flag (`true`: the base was re-promoted since the wrapper was generated or is gone — regenerate via agent-adapter.default; `null`: unknown — the provenance claims no digest or the base could not be resolved; never treat `null` as current). Use `message_format` to shape the `message` you pass to agent.spawn: `\"free_text\"` means the target is a reasoning agent that takes a plain natural-language task — spawn it directly, no schema needed (`io_accepts` is null for these and that is expected, not missing data); `\"json_schema\"` means emit `message` as a JSON string whose parsed value matches `io_accepts`. Returns a plain directory — no semantic scoring. This is a read-only directory: one call gives you everything; calling it repeatedly will not surface new fields. If you already know the agent_id (e.g. a foundational specialist or a plan step's agent_id), skip this and spawn directly.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1364,6 +1364,21 @@ impl NativeTool for AgentListTool {
                                 }
                             }
 
+                            // Composition provenance (#1202): wrappers carry an
+                            // `adapter` block; `stale_base` compares the digest
+                            // claimed at generation against the base's currently
+                            // promoted revision. Pre-#1204 summary rows have no
+                            // `adapter` key — null, not an error.
+                            let adapter = meta.get("adapter").cloned();
+                            let adapter_prov: Option<autonoetic_types::agent::AdapterProvenance> =
+                                adapter
+                                    .as_ref()
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                            let stale_base = crate::runtime::tools::adapter_base_stale(
+                                store.as_ref(),
+                                adapter_prov.as_ref(),
+                            );
+
                             agents.push(serde_json::json!({
                                 "agent_id": alias.agent_id,
                                 "description": description,
@@ -1373,6 +1388,8 @@ impl NativeTool for AgentListTool {
                                 "io_accepts": io_accepts,
                                 "io_returns": io_returns,
                                 "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
+                                "adapter": adapter,
+                                "stale_base": stale_base,
                             }));
                         } else {
                             // Fallback: no manifest metadata in SQLite — read the
@@ -1425,6 +1442,11 @@ impl NativeTool for AgentListTool {
                                         "io_accepts": io_accepts,
                                         "io_returns": io_returns,
                                         "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
+                                        "adapter": serde_json::to_value(&manifest.adapter).unwrap_or(serde_json::Value::Null),
+                                        "stale_base": crate::runtime::tools::adapter_base_stale(
+                                            store.as_ref(),
+                                            manifest.adapter.as_ref(),
+                                        ),
                                     }));
                                 }
                             }

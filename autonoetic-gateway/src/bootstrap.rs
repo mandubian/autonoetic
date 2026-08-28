@@ -477,6 +477,9 @@ fn bootstrap_agent_inner(
                 "script_input_mode": serde_json::to_value(&parsed_manifest.script_input_mode).ok(),
                 "script_entry": parsed_manifest.script_entry,
                 "io": parsed_manifest.io,
+                // Composition provenance (#1202): wrappers must be identifiable
+                // from the stored summary alone (agent_list Path A).
+                "adapter": parsed_manifest.adapter,
             },
         }),
         short_id: String::new(),
