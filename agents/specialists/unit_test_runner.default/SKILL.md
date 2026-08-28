@@ -16,6 +16,13 @@ metadata:
       name: "Unit Test Runner Default"
       description: "Discovers and runs deterministic, hermetic unit tests in a no-network promotion sandbox (P-3.10). Network/integration tests → unable_to_evaluate. If no tests exist, skips without recording a verdict."
       singleton: true
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # its test results feed the promotion gate — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: coding
     sandbox_network: normal
     loop_guard:

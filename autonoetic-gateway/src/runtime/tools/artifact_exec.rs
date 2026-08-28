@@ -1747,6 +1747,7 @@ mod tests {
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1809,6 +1810,7 @@ mod tests {
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1876,6 +1878,7 @@ mod tests {
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1943,6 +1946,7 @@ mod tests {
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),

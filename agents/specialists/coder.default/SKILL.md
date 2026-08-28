@@ -24,8 +24,13 @@ metadata:
         scopes: ["self.*", "skills/*", "scripts/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*", "scripts/*"]
+      # Directional, not universal. A coder coordinates with sibling coders and
+      # reports up to the lead that delegated to it; it has no business
+      # addressing the roles that evaluate its output. Those roles also refuse
+      # inbound peer mail (`messaging.accepts_from: []`) — this narrows the
+      # grant at the source rather than relying on the receiver alone.
       - type: "AgentMessage"
-        patterns: ["*"]
+        patterns: ["coder.*", "planner.*", "debugger.*"]
     excluded_tools:
       - "planframe_*"
       - "scheduler_*"

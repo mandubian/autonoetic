@@ -62,6 +62,7 @@ impl TestManifest {
                 open_web: false,
                 sandbox_network: SandboxNetworkPolicy::default(),
                 egress: None,
+                messaging: None,
             },
         }
     }

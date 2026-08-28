@@ -228,6 +228,60 @@ pub struct ResourceLimits {
     pub token_budget_monthly: Option<u64>,
 }
 
+/// Receiver-side consent for inbound peer messages (`agent_message`).
+///
+/// `Capability::AgentMessage` is a **sender-side** grant: it asks only whether
+/// the sender may address the target. The receiver had no say, so a role whose
+/// verdict gates other agents was addressable by the very parties it judges —
+/// and an inbound message lands in its context as user text, under guidance
+/// that tells it not to discard peer traffic.
+///
+/// This is the messaging analogue of R-10.7, which refuses a gate decider
+/// entangled with the party whose gate it decides. R-10.7 can reason from the
+/// spawn tree because a gate names its session; messaging has no such subject,
+/// and — decisively — the adjudicating bundles (`sealed_evaluator`,
+/// `static_evaluator`, `outcome-grader`, `security_sentinel`) declare *no*
+/// adjudicating capability at all. Their authority comes from where they sit
+/// in the promotion flow, not from anything the gateway can infer at send
+/// time. So consent is **declared by the receiver** rather than derived.
+///
+/// Declared under `metadata.autonoetic.messaging` in `SKILL.md`.
+///
+/// Absent from a manifest ⇒ open, preserving the behaviour every existing
+/// bundle relies on. `accepts_from: []` closes the inbox to every agent
+/// principal. Patterns follow the same matching rule as `AgentMessage`
+/// patterns (see `patterns_match_agent_id`): a trailing `*` is a prefix, a
+/// bare pattern is exact.
+///
+/// Only *agent* principals are filtered. The gateway's own notices (Ri-0.9)
+/// and operator-initiated traffic are not peers and are never subject to this.
+/// `deny_unknown_fields` is load-bearing, not tidiness. Every other field here
+/// fails toward *less* access when it is misread; this one fails toward more.
+/// A typo (`accept_from:`, `accepts:`) would otherwise be ignored by serde,
+/// leave `accepts_from` at its `["*"]` default, and silently publish an inbox
+/// its author believed they had closed. `install_contract` validates the block
+/// at install time so the typo is a hard error there too.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessagingPolicy {
+    /// Agent ids permitted to send to this agent. Defaults to open so that
+    /// declaring `messaging:` for one reason does not silently close the inbox.
+    #[serde(default = "default_accepts_from_all")]
+    pub accepts_from: Vec<String>,
+}
+
+fn default_accepts_from_all() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+impl Default for MessagingPolicy {
+    fn default() -> Self {
+        Self {
+            accepts_from: default_accepts_from_all(),
+        }
+    }
+}
+
 /// Per-agent egress (data-localization) manifest — RFC data-envelopes §4.1 path 2.
 ///
 /// Declares the bundle-wide **output floor**: the most restrictive label the
@@ -349,6 +403,10 @@ pub struct AgentManifest {
     /// into every label resolution in this session, alongside operator rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<AgentEgressManifest>,
+    /// Receiver-side consent for inbound `agent_message` traffic (P-11.5).
+    /// `None` ⇒ open, which is what every bundle predating this field means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messaging: Option<MessagingPolicy>,
     /// Declarative network targets for outbound access (#1110). Parsed from
     /// the frontmatter and re-emitted by canonicalization so an installed
     /// revision KEEPS its declaration: previously this block existed only as

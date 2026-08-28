@@ -3532,6 +3532,7 @@ mod declared_mount_gate_tests {
         use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
         let mut m = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

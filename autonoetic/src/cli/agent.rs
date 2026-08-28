@@ -706,6 +706,7 @@ fn list_alias_rows_from_registry(
 fn admin_revision_manifest() -> AgentManifest {
     AgentManifest {
         remote_access: None,
+        messaging: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             mounts: Vec::new(),
@@ -2129,6 +2130,10 @@ pub fn handle_agent_import_skill(
 
     let target_manifest = autonoetic_types::agent::AgentManifest {
         remote_access: None,
+        // Carried forward, unlike `remote_access` above: `messaging` is
+        // receiver-side consent, so dropping it on import would reopen an
+        // inbox the imported bundle had deliberately closed.
+        messaging: parsed_manifest.messaging.clone(),
         version: parsed_manifest.version.clone(),
         runtime: parsed_manifest.runtime.clone(),
         agent: autonoetic_types::agent::AgentIdentity {

@@ -16,6 +16,13 @@ metadata:
       name: "Static Evaluator Default"
       description: "Reviews artifact source code for correctness, behavioral contracts, credential flow, and URL pattern analysis. No sandbox execution, no network."
       singleton: true
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # it renders the verdict that gates promotion — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"

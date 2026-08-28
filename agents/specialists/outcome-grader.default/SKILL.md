@@ -16,6 +16,13 @@ metadata:
       name: "Outcome Grader"
       description: "Independent judge of session completion. Reads a structured SessionOverview and emits a single Completion verdict (achieved | partially_achieved | failed | aborted). Observer-only — no tools, no side effects."
       singleton: true
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # it grades the outcome of work other agents produced — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: coding
     llm_overrides:
       temperature: 0.0

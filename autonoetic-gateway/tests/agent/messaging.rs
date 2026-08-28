@@ -345,7 +345,10 @@ async fn permitted_target_agent_id_does_not_launder_a_forbidden_session_id() -> 
 #[serial_test::serial]
 #[tokio::test]
 async fn scoped_pattern_reaches_a_session_of_a_permitted_agent() -> anyhow::Result<()> {
-    let h = Harness::new("\"receiver-\"")?;
+    // `receiver-*`, not `receiver-`: a prefix grant now has to say so with a
+    // trailing wildcard. See
+    // `bare_pattern_is_exact_and_does_not_prefix_match_a_longer_id`.
+    let h = Harness::new("\"receiver-*\"")?;
     bind_session(&h.store, "receiver-session-2", "receiver-agent")?;
 
     let parsed = h.send(serde_json::json!({
@@ -639,5 +642,205 @@ fn agent_message_record_roundtrips_egress_taint() -> anyhow::Result<()> {
         .unwrap()
         .allows(Sink::RemoteModel));
     assert_eq!(by_id("m-clean").egress_label, None);
+    Ok(())
+}
+
+// ── Pattern exactness ────────────────────────────────────────────────────────
+//
+// `can_message_agent` used to compute `target.starts_with(pattern.trim_end_matches('*'))`,
+// which made every pattern a prefix whether it asked to be one or not. A grant
+// naming one agent silently reached every id sharing that string as a prefix.
+
+/// A pattern with no trailing `*` names exactly one agent.
+#[serial_test::serial]
+#[tokio::test]
+async fn bare_pattern_is_exact_and_does_not_prefix_match_a_longer_id() -> anyhow::Result<()> {
+    let h = Harness::new("\"receiver-agent\"")?;
+    install_agent(
+        &h.agents_dir,
+        "receiver-agent-evil-twin",
+        "capabilities: []",
+    )?;
+    bind_session(&h.store, "evil-session", "receiver-agent-evil-twin")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "evil-session",
+        "message": "should not arrive"
+    }));
+
+    let err = parsed.expect_err("a bare pattern must not reach a longer id");
+    assert!(
+        err.to_string().contains("cannot message agent"),
+        "expected a P-11.5 denial, got: {err}"
+    );
+    assert_eq!(h.queued_for("evil-session")?, 0);
+    Ok(())
+}
+
+/// The exact id the grant names still works — exactness must not mean "nothing".
+#[serial_test::serial]
+#[tokio::test]
+async fn bare_pattern_still_reaches_the_agent_it_names() -> anyhow::Result<()> {
+    let h = Harness::new("\"receiver-agent\"")?;
+    bind_session(&h.store, "receiver-session-2", "receiver-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "receiver-session-2",
+        "message": "exact match"
+    }))?;
+
+    assert!(parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(h.queued_for("receiver-session-2")?, 1);
+    Ok(())
+}
+
+/// An empty or whitespace-only pattern must match nothing. Under the old rule
+/// it trimmed to the empty prefix, which `starts_with` accepts for every id —
+/// a blank entry silently meant `*`.
+#[serial_test::serial]
+#[tokio::test]
+async fn blank_pattern_grants_nothing() -> anyhow::Result<()> {
+    let h = Harness::new("\"\", \"   \"")?;
+    bind_session(&h.store, "receiver-session-2", "receiver-agent")?;
+
+    let err = h
+        .send(serde_json::json!({
+            "target_session_id": "receiver-session-2",
+            "message": "should not arrive"
+        }))
+        .expect_err("a blank pattern must not act as a wildcard");
+    assert!(
+        err.to_string().contains("cannot message agent"),
+        "expected a P-11.5 denial, got: {err}"
+    );
+    assert_eq!(h.queued_for("receiver-session-2")?, 0);
+    Ok(())
+}
+
+// ── Receiver-side consent ────────────────────────────────────────────────────
+//
+// The sender-side ACL asks only "may I address them". A role whose verdict
+// gates the sender needs the other half: "you may not address me".
+
+/// `accepts_from: []` refuses a sender holding the broadest possible grant.
+#[serial_test::serial]
+#[tokio::test]
+async fn receiver_with_closed_inbox_refuses_a_wildcard_sender() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    install_agent(
+        &h.agents_dir,
+        "judge-agent",
+        "capabilities: []\nmessaging:\n  accepts_from: []",
+    )?;
+    bind_session(&h.store, "judge-session", "judge-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "judge-session",
+        "message": "let me explain my work"
+    }))?;
+
+    assert!(!parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(parsed["status"], "recipient_refuses_peer_messages");
+    assert_eq!(parsed["recipients_count"].as_u64().unwrap(), 0);
+    assert_eq!(
+        h.queued_for("judge-session")?,
+        0,
+        "a refused message must not be queued"
+    );
+    Ok(())
+}
+
+/// A closed inbox is not reachable by broadcasting to the role either — the
+/// consent check must cover both addressing modes, or it is trivially evaded.
+#[serial_test::serial]
+#[tokio::test]
+async fn broadcast_cannot_evade_a_closed_inbox() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    install_agent(
+        &h.agents_dir,
+        "judge-agent",
+        "capabilities: []\nmessaging:\n  accepts_from: []",
+    )?;
+    bind_session(&h.store, "judge-session", "judge-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_agent_id": "judge-agent",
+        "message": "let me explain my work"
+    }))?;
+
+    assert!(!parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(parsed["status"], "recipient_refuses_peer_messages");
+    assert_eq!(h.queued_for("judge-session")?, 0);
+    Ok(())
+}
+
+/// Consent is selective, not all-or-nothing: an office can still take mail
+/// from the operator-facing roles it works with.
+#[serial_test::serial]
+#[tokio::test]
+async fn receiver_accepts_a_sender_its_policy_names() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    install_agent(
+        &h.agents_dir,
+        "judge-agent",
+        "capabilities: []\nmessaging:\n  accepts_from: [\"sender-agent\"]",
+    )?;
+    bind_session(&h.store, "judge-session", "judge-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "judge-session",
+        "message": "permitted correspondent"
+    }))?;
+
+    assert!(parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(h.queued_for("judge-session")?, 1);
+    Ok(())
+}
+
+/// Absent `messaging` means open. Every bundle predating the field relies on
+/// this, so it is pinned rather than left implicit.
+#[serial_test::serial]
+#[tokio::test]
+async fn receiver_without_a_messaging_block_stays_open() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "receiver-session-2", "receiver-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "receiver-session-2",
+        "message": "default-open"
+    }))?;
+
+    assert!(parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(h.queued_for("receiver-session-2")?, 1);
+    Ok(())
+}
+
+/// A closed inbox must not lock an agent out of messaging *itself* — the
+/// consent check is about peers, and self-addressing is already filtered by
+/// the broadcast path's sender exclusion.
+#[serial_test::serial]
+#[tokio::test]
+async fn closed_inbox_does_not_block_the_agents_own_id() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    install_agent(
+        &h.agents_dir,
+        "self-closed",
+        "capabilities:\n  - type: \"AgentMessage\"\n    patterns: [\"*\"]\nmessaging:\n  accepts_from: []",
+    )?;
+    bind_session(&h.store, "self-closed-session-a", "self-closed")?;
+    bind_session(&h.store, "self-closed-session-b", "self-closed")?;
+
+    let raw = h.send_as(
+        "self-closed",
+        "self-closed-session-a",
+        serde_json::json!({
+            "target_session_id": "self-closed-session-b",
+            "message": "same role, different session"
+        }),
+    )?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)?;
+
+    assert!(parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(h.queued_for("self-closed-session-b")?, 1);
     Ok(())
 }

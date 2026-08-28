@@ -586,6 +586,31 @@ pub fn validate_skill_frontmatter_shape(frontmatter: &serde_yaml::Value) -> Vec<
         }
     }
 
+    // Same treatment for `messaging`, and for a sharper reason: this block is
+    // receiver-side consent, so a silently-dropped declaration fails *open*.
+    // `accept_from: []` (singular, a plausible typo) would be ignored by serde,
+    // leave `accepts_from` at its `["*"]` default, and publish an inbox the
+    // author believed closed. `MessagingPolicy` carries `deny_unknown_fields`,
+    // so this reports the offending key at install time instead.
+    let msg_key = serde_yaml::Value::String("messaging".into());
+    let messaging_value = obj.get(&msg_key).cloned().or_else(|| {
+        obj.get(&serde_yaml::Value::String("metadata".into()))
+            .and_then(|m| m.as_mapping())
+            .and_then(|m| m.get(&serde_yaml::Value::String("autonoetic".into())))
+            .and_then(|a| a.as_mapping())
+            .and_then(|a| a.get(&msg_key))
+            .cloned()
+    });
+    if let Some(msg) = messaging_value {
+        if let Err(e) =
+            serde_yaml::from_value::<autonoetic_types::agent::MessagingPolicy>(msg)
+        {
+            missing.push(format!(
+                "messaging (invalid declaration: {e}. Valid fields: accepts_from)"
+            ));
+        }
+    }
+
     missing
 }
 
@@ -1197,6 +1222,74 @@ pub fn format_install_validation_error(
 mod tests {
     use super::*;
 
+    /// A closed inbox must survive canonicalization.
+    ///
+    /// Same failure shape as #1110's `remote_access`: the block only exists on
+    /// the installed agent if `AgentManifest` carries it, because
+    /// `render_skill_document` serializes the struct. A dropped `messaging`
+    /// block fails *open* — the installed agent would accept peer mail its
+    /// source refused.
+    #[test]
+    fn render_skill_document_round_trips_messaging_consent() {
+        let skill = r#"---
+name: "judge.agent"
+description: "test"
+metadata:
+  autonoetic:
+    agent:
+      id: "judge.agent"
+      name: "Judge"
+      description: "test"
+    messaging:
+      accepts_from: []
+---
+# Judge
+"#;
+        let (manifest, body) = crate::runtime::parser::SkillParser::parse(skill).unwrap();
+        assert!(manifest
+            .messaging
+            .as_ref()
+            .expect("parsed")
+            .accepts_from
+            .is_empty());
+
+        let rendered = render_skill_document(&manifest, &body).unwrap();
+        let (reparsed, _) = crate::runtime::parser::SkillParser::parse(&rendered).unwrap();
+        assert!(
+            reparsed
+                .messaging
+                .as_ref()
+                .expect("messaging must survive canonicalization")
+                .accepts_from
+                .is_empty(),
+            "canonical SKILL.md dropped the closed inbox: {rendered}"
+        );
+    }
+
+    /// A misspelled key is reported at install time rather than silently
+    /// leaving the inbox at its `["*"]` default.
+    #[test]
+    fn frontmatter_shape_flags_a_malformed_messaging_block() {
+        let raw: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+metadata:
+  autonoetic:
+    agent:
+      id: "typo.agent"
+      name: "Typo"
+      description: "test"
+    messaging:
+      accept_from: []
+"#,
+        )
+        .unwrap();
+        let missing = validate_skill_frontmatter_shape(&raw);
+        assert!(
+            missing.iter().any(|m| m.starts_with("messaging (invalid")),
+            "expected a messaging validation error, got: {missing:?}"
+        );
+    }
+
     #[test]
     fn render_skill_document_round_trips_remote_access_declaration() {
         // #1110 root cause: AgentManifest had no remote_access field, so
@@ -1712,6 +1805,7 @@ agent:
     fn test_render_skill_document_round_trip() {
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: default_runtime_declaration(),
             agent: autonoetic_types::agent::AgentIdentity {
@@ -2102,6 +2196,7 @@ agent:
     fn test_render_skill_document_omits_null_optional_fields() {
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: default_runtime_declaration(),
             agent: autonoetic_types::agent::AgentIdentity {

@@ -303,6 +303,7 @@ mod tests {
     fn manifest(network: bool) -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),

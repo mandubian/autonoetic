@@ -6152,6 +6152,7 @@ mod tests {
 
         let manifest = autonoetic_types::agent::AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -6826,6 +6827,7 @@ mod tests {
     ) -> AgentExecutor {
         let manifest = autonoetic_types::agent::AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
