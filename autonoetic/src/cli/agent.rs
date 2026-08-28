@@ -2334,31 +2334,50 @@ pub fn handle_agent_import_skill(
         if let Some(ref mw) = target_manifest.middleware {
             if mw.pre_process.is_some() || mw.post_process.is_some() {
                 lines.push("    middleware:".to_string());
+                // JSON strings are valid YAML scalars and escape `"`/newlines.
                 if let Some(ref p) = mw.pre_process {
-                    lines.push(format!("      pre_process: \"{}\"", p));
+                    lines.push(format!(
+                        "      pre_process: {}",
+                        serde_json::to_string(p).unwrap_or_default()
+                    ));
                 }
                 if let Some(ref p) = mw.post_process {
-                    lines.push(format!("      post_process: \"{}\"", p));
+                    lines.push(format!(
+                        "      post_process: {}",
+                        serde_json::to_string(p).unwrap_or_default()
+                    ));
                 }
             }
         }
         if let Some(ref ad) = target_manifest.adapter {
             lines.push("    adapter:".to_string());
-            lines.push(format!("      base_agent_id: \"{}\"", ad.base_agent_id));
+            lines.push(format!(
+                "      base_agent_id: {}",
+                serde_json::to_string(&ad.base_agent_id).unwrap_or_default()
+            ));
             if let Some(ref d) = ad.base_revision_digest {
-                lines.push(format!("      base_revision_digest: \"{}\"", d));
+                lines.push(format!(
+                    "      base_revision_digest: {}",
+                    serde_json::to_string(d).unwrap_or_default()
+                ));
             }
             if let Some(ref g) = ad.generated_at {
-                lines.push(format!("      generated_at: \"{}\"", g));
+                lines.push(format!(
+                    "      generated_at: {}",
+                    serde_json::to_string(g).unwrap_or_default()
+                ));
             }
             if !ad.schema_notes.is_empty() {
-                lines.push("      schema_notes:".to_string());
-                for note in &ad.schema_notes {
-                    lines.push(format!("        - \"{}\"", note));
-                }
+                lines.push(format!(
+                    "      schema_notes: {}",
+                    serde_json::to_string(&ad.schema_notes).unwrap_or_default()
+                ));
             }
             if let Some(ref g) = ad.generator {
-                lines.push(format!("      generator: \"{}\"", g));
+                lines.push(format!(
+                    "      generator: {}",
+                    serde_json::to_string(g).unwrap_or_default()
+                ));
             }
         }
         lines.push(format!(
@@ -2369,7 +2388,10 @@ pub fn handle_agent_import_skill(
             }
         ));
         if let Some(ref se) = target_manifest.script_entry {
-            lines.push(format!("    script_entry: \"{}\"", se));
+            lines.push(format!(
+                "    script_entry: {}",
+                serde_json::to_string(se).unwrap_or_default()
+            ));
         }
         if !target_manifest.allowed_tool_tiers.is_empty() {
             lines.push("    allowed_tool_tiers:".to_string());

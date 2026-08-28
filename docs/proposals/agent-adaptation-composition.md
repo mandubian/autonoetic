@@ -21,7 +21,7 @@ because one is implemented and the other is silently dropped.
 | Granularity | Per turn — runs around **every** LLM completion | Once — written at generation time, immutable with the revision |
 | Executes? | Yes — sandboxed scripts (`runtime/middleware.rs:50-207`) | **No** — never interpreted at runtime; consumed by gates, roster, and audit tooling |
 | Answers | "How does this agent transform its I/O?" | "Where did this agent come from, against which base revision, and why?" |
-| Parser status | Fully parsed (`runtime/parser.rs:33-52`) | **Silently dropped** — no `AgentManifest` field exists (`autonoetic-types/src/agent.rs:278-279`) |
+| Parser status | Fully parsed (`runtime/parser.rs:33-52`) | First-class since Phase 0: `AgentManifest.adapter` → `AdapterProvenance` (#1204) |
 | Failure mode | None known — feature works | Lost lineage, undetectable staleness, uncheckable capability derivation |
 
 The dependency runs one way only:
@@ -59,13 +59,14 @@ onto it. The base agent need not even be installed at wrapper runtime.
 
 ## 3. Gaps
 
-1. **Composition metadata is dropped.** `generate_wrapper.py:170-173` emits an
-   `adapter:` block (`base_agent_id`, `generated_at`, `schema_notes`); the parser
-   silently discards it (`AgentManifest` has no `deny_unknown_fields`).
+1. ~~Composition metadata is dropped~~ — **resolved by Phase 0 (#1204).**
+   The `adapter:` block now parses as `AgentManifest.adapter`
+   (`AdapterProvenance`) and survives install (see §4.1). Before Phase 0,
+   `generate_wrapper.py:170-173` emitted an `adapter:` block that the parser
+   silently discarded — the lineage/audit claims in
    [`../reference/agent-adapter-contract.md`](../reference/agent-adapter-contract.md)
-   §Wrapper Traceability claims lineage, debugging, and audit are "enabled" by this
-   block — none of that is true of any *parsed* manifest today; the data survives
-   only as raw SKILL.md bytes.
+   §Wrapper Traceability were not true of any parsed manifest; the data
+   survived only as raw SKILL.md bytes.
 
 2. **Forks go stale invisibly.** The wrapper freezes the base's capabilities and a
    2000-char instruction excerpt at generation time. When the base is promoted to a
@@ -101,7 +102,9 @@ onto it. The base agent need not even be installed at wrapper runtime.
 
 ### Phase 0 — First-class provenance (bug fix)
 
-Promote the dropped block to a typed field:
+**[x] shipped (#1204).** Promote the dropped block to a typed field (shipped
+shape: `generated_at`/`generator`/`base_revision_digest` are `Option` — absent
+information parses and under-claims):
 
 ```rust
 pub struct AdapterProvenance {
