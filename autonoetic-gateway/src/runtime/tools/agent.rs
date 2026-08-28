@@ -1003,14 +1003,14 @@ the single join already does that."
                 "session_id": child_delegation_path,
                 "message": "Task queued for async execution. Use workflow_wait with task_ids to check completion status."
             });
-if let Some(rev_id) = args.revision_id {
-    resp["revision_id"] = serde_json::json!(rev_id);
-    resp["smoke_test"] = serde_json::json!(true);
-}
-if let Some(ref note) = stale_wrapper_note {
-    // Truncation-exempt key — the advisory survives result truncation.
-    resp["gateway_note"] = serde_json::json!(note);
-}
+            if let Some(rev_id) = args.revision_id.as_deref() {
+                resp["revision_id"] = serde_json::json!(rev_id);
+                resp["smoke_test"] = serde_json::json!(true);
+            }
+            if let Some(ref note) = stale_wrapper_note {
+                // Truncation-exempt key — the advisory survives result truncation.
+                resp["gateway_note"] = serde_json::json!(note);
+            }
             serde_json::to_string(&resp)
             .map_err(Into::into)
         })();

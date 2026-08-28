@@ -801,10 +801,11 @@ pub(crate) fn adapter_base_stale(
 
 /// Spawn-time stale-wrapper advisory (#1221, proposal Phase 3): the target is
 /// a wrapper whose base has been re-promoted (or removed) since the wrapper's
-/// mapping was generated. Returns a caller-facing note, or `None` when the
-/// wrapper is current, the provenance under-claims (no digest), or the base
-/// cannot be resolved. Advisory only — never a refusal: an intentional pin to
-/// an older base is legitimate (`agent@rev-*` semantics).
+/// mapping was generated. Returns a caller-facing note when the base moved on
+/// OR is no longer installed; `None` when the wrapper is current, the
+/// provenance under-claims (no digest), or the base cannot be verified
+/// (store error). Advisory only — never a refusal: an intentional pin to an
+/// older base is legitimate (`agent@rev-*` semantics).
 pub(crate) fn stale_wrapper_note(
     store: &crate::scheduler::gateway_store::GatewayStore,
     wrapper_agent_id: &str,
