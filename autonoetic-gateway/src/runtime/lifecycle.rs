@@ -2124,6 +2124,89 @@ impl AgentExecutor {
         }
     }
 
+    /// Append every peer message queued for this session to `history` as a
+    /// `[Direct Message from Agent '<sender>' (Session: <sid>)]` block, then
+    /// mark it delivered.
+    ///
+    /// Idempotent: `mark_message_delivered` clears each row it consumes, so
+    /// calling this on a turn with nothing pending costs one indexed `SELECT`
+    /// returning zero rows. That is what lets it run at the top of every turn
+    /// as well as at wake, which is the only way a message sent to an
+    /// *already-running* session is ever ingested.
+    fn drain_pending_agent_messages(
+        &mut self,
+        session_id: &str,
+        history: &mut Vec<Message>,
+        tracer: &mut SessionTracer,
+        ri_0_9_notice_message_ids: &mut Vec<String>,
+    ) {
+        let Some(store) = self.gateway_store.as_ref() else {
+            return;
+        };
+        let Ok(msgs) = store.fetch_undelivered_messages(session_id) else {
+            return;
+        };
+        for msg in msgs {
+            if msg.sender_agent_id == "gateway"
+                && msg.message.contains("[Gateway Notice Ri-0.9]")
+            {
+                ri_0_9_notice_message_ids.push(msg.message_id.clone());
+            }
+            let text = format!(
+                "[Direct Message from Agent '{}' (Session: {})]\n{}",
+                msg.sender_agent_id, msg.sender_session_id, msg.message
+            );
+            // Cross-agent taint apply (RFC §5.5, slice 4b): if the sender
+            // stamped the payload with a restrictive taint, label this
+            // ingested message so the chokepoint withholds it from a sink
+            // the taint excludes — a tainted sibling's content can't reach
+            // a remote-pinned recipient. Mint a stable msg id (§3.4) as
+            // the label's join key.
+            let mut user_msg = Message::user(text.clone());
+            if let Some(label) = msg.egress_label.as_ref().filter(|l| !l.is_unrestricted()) {
+                let mid = autonoetic_types::id_format::short_random_id("msg_");
+                user_msg.id = Some(mid.clone());
+                self.egress_labels.insert(mid, label.clone());
+            }
+            history.push(user_msg);
+
+            let _ = tracer.log_event(
+                "agent_message",
+                "received",
+                autonoetic_types::causal_chain::EntryStatus::Success,
+                Some(serde_json::json!({
+                    "message_id": msg.message_id,
+                    "sender_agent_id": msg.sender_agent_id,
+                    "sender_session_id": msg.sender_session_id,
+                })),
+            );
+
+            // Surface peer traffic to the operator (#896). The causal
+            // event above is the audit record; without a timeline row an
+            // agent-to-agent message reads as anonymous user text in the
+            // room, indistinguishable from something the operator typed.
+            // Emitted here rather than at the ingest, because this is
+            // where the sender and body are both known.
+            let event = crate::runtime::session_timeline::peer_message_event(
+                session_id,
+                &msg.sender_agent_id,
+                &msg.sender_session_id,
+                &msg.message_id,
+                &crate::log_redaction::redact_text_for_logs(&msg.message),
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    message_id = %msg.message_id,
+                    "peer message timeline emit failed"
+                );
+            }
+
+            let _ = store.mark_message_delivered(&msg.message_id, session_id);
+        }
+    }
+
     /// Continue execution from an existing conversation history.
     pub async fn execute_with_history(
         &mut self,
@@ -2548,73 +2631,16 @@ impl AgentExecutor {
                 }
             }
         }
-        // --- Auto-inject Agent Messages ---
-        if let Some(store) = self.gateway_store.as_ref() {
-            if let Ok(msgs) = store.fetch_undelivered_messages(&session_id) {
-                for msg in msgs {
-                    if msg.sender_agent_id == "gateway" && msg.message.contains("[Gateway Notice Ri-0.9]")
-                    {
-                        ri_0_9_notice_message_ids.push(msg.message_id.clone());
-                    }
-                    let text = format!(
-                        "[Direct Message from Agent '{}' (Session: {})]\n{}",
-                        msg.sender_agent_id, msg.sender_session_id, msg.message
-                    );
-                    // Cross-agent taint apply (RFC §5.5, slice 4b): if the sender
-                    // stamped the payload with a restrictive taint, label this
-                    // ingested message so the chokepoint withholds it from a sink
-                    // the taint excludes — a tainted sibling's content can't reach
-                    // a remote-pinned recipient. Mint a stable msg id (§3.4) as
-                    // the label's join key.
-                    let mut user_msg = Message::user(text.clone());
-                    if let Some(label) = msg
-                        .egress_label
-                        .as_ref()
-                        .filter(|l| !l.is_unrestricted())
-                    {
-                        let mid = autonoetic_types::id_format::short_random_id("msg_");
-                        user_msg.id = Some(mid.clone());
-                        self.egress_labels.insert(mid, label.clone());
-                    }
-                    history.push(user_msg);
-
-                    let _ = tracer.log_event(
-                        "agent_message",
-                        "received",
-                        autonoetic_types::causal_chain::EntryStatus::Success,
-                        Some(serde_json::json!({
-                            "message_id": msg.message_id,
-                            "sender_agent_id": msg.sender_agent_id,
-                            "sender_session_id": msg.sender_session_id,
-                        })),
-                    );
-
-                    // Surface peer traffic to the operator (#896). The causal
-                    // event above is the audit record; without a timeline row an
-                    // agent-to-agent message reads as anonymous user text in the
-                    // room, indistinguishable from something the operator typed.
-                    // Emitted here rather than at the ingest, because this is
-                    // where the sender and body are both known.
-                    let event = crate::runtime::session_timeline::peer_message_event(
-                        &session_id,
-                        &msg.sender_agent_id,
-                        &msg.sender_session_id,
-                        &msg.message_id,
-                        &crate::log_redaction::redact_text_for_logs(&msg.message),
-                    );
-                    if let Err(e) = store.create_live_digest_event(&event) {
-                        tracing::debug!(
-                            target: "session_timeline",
-                            error = %e,
-                            message_id = %msg.message_id,
-                            "peer message timeline emit failed"
-                        );
-                    }
-
-                    let _ = store.mark_message_delivered(&msg.message_id, &session_id);
-                }
-            }
-        }
+        // Drain peer messages that arrived while this session was asleep, so
+        // they are in `history` before `log_wake` counts it. The same drain
+        // runs again at the top of every turn — see the call site in the loop
+        // below for why once-at-wake is not enough.
+        self.drain_pending_agent_messages(
+            &session_id,
+            history,
+            &mut tracer,
+            &mut ri_0_9_notice_message_ids,
+        );
 
         tracer.log_wake(history.len(), evidence_mode);
 
@@ -2683,6 +2709,32 @@ impl AgentExecutor {
         });
 
         loop {
+            // Drain peer messages at the top of EVERY turn, not just at wake.
+            //
+            // Delivery used to happen once, before this loop. That is only
+            // reachable for a session that is *asleep* when the message is
+            // sent: a session already inside this loop never re-entered the
+            // pre-loop drain, so a message addressed to it sat in
+            // `agent_message_deliveries` with `delivered_at` NULL until the
+            // session finished — and a finished session never wakes again, so
+            // the row was stranded permanently. `agent_message` still answered
+            // `{"ok":true,"status":"delivered"}`, because the send path only
+            // proves the recipient was unfinished, not that it would ever
+            // ingest. The busiest recipients were the least reachable, and the
+            // sender was told the opposite.
+            //
+            // Draining here restores the contract the tool guidance already
+            // states — the receiver finds the `[Direct Message ...]` block "at
+            // the start of their next turn" — for a live session as well as a
+            // waking one. The drain is idempotent (`mark_message_delivered`),
+            // so the first iteration after a wake-time drain is a no-op query.
+            self.drain_pending_agent_messages(
+                &session_id,
+                history,
+                &mut tracer,
+                &mut ri_0_9_notice_message_ids,
+            );
+
             // Hot-reload MCP servers whose registry file changed since the
             // last turn (#1121): added servers join the advertised surface
             // below; removed servers' tools fail closed at dispatch. A broken
