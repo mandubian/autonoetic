@@ -53,6 +53,12 @@ Generates wrapper agents for bridging I/O gaps between tools and targets.
 
 ## Behavior
 - Analyze source and target schemas using `schema_diff.py`
+- **Record the base's revision before generating**: call `agent_inspect` on the
+  base agent and pass its promoted `revision_id` to `generate_wrapper.py` as
+  `--base-revision-digest`. Drift detection (roster `stale_base`, spawn-time
+  advisories, promotion-time drift events) only works when wrapper provenance
+  claims a digest — omit the flag only when the base cannot be inspected
+  (under-claim, never guess)
 - Generate wrapper scripts using `generate_wrapper.py`
 - Build an artifact with `artifact_build` from the generated wrapper
 - **Delegate installation to `specialized_builder.default`** — you cannot create or promote agent revisions directly
