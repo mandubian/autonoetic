@@ -412,15 +412,14 @@ mod redaction_tests {
     }
 
     #[test]
-    fn is_sensitive_key_misses_hyphenated_api_key() {
-        // KNOWN GAP: `X-API-Key` (hyphenated) does NOT match — the substring
-        // catalogue uses `api_key` (underscore). Hyphenated `*-Token` does
-        // match via the `token` substring. This pin documents the gap.
-        assert!(
-            !crate::redaction::is_sensitive_key("X-API-Key"),
-            "regression: X-API-Key now matches — update is_sensitive_key in \
-             autonoetic-types::redaction and this pin together"
-        );
+    fn is_sensitive_key_matches_hyphenated_header_names() {
+        // Formerly a pinned gap: `X-API-Key` did not match because the
+        // catalogue carried only the underscore spelling. Closed in #1212 —
+        // a JSON body carrying HTTP headers uses the hyphenated form, so both
+        // spellings are now in the catalogue.
+        assert!(crate::redaction::is_sensitive_key("X-API-Key"));
+        assert!(crate::redaction::is_sensitive_key("x-access-key"));
+        assert!(crate::redaction::is_sensitive_key("Client-Secret"));
         assert!(crate::redaction::is_sensitive_key("X-Auth-Token"));
         assert!(crate::redaction::is_sensitive_key("X-Access-Token"));
     }
