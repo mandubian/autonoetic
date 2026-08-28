@@ -1699,38 +1699,103 @@ mod redaction_tests {
         }
     }
 
+    /// Recursive "no wider than" check on two serialized views of the same
+    /// action.
+    ///
+    /// A flat comparison (equal, or blanked at the top level) was too coarse to
+    /// mean much: it would reject a legitimate future narrowing *inside* a
+    /// nested object, and would miss `[]` or `""` as narrowing shapes. This
+    /// descends, so the invariant holds for structures nobody has written yet
+    /// — which is the point, since the bug it guards came from an unnamed
+    /// variant.
+    fn is_narrower_or_equal(agent: &serde_json::Value, operator: &serde_json::Value) -> bool {
+        use serde_json::Value;
+        if agent == operator {
+            return true;
+        }
+        match (agent, operator) {
+            // Explicit removal is always narrower.
+            (Value::Null, _) => true,
+            (Value::String(s), _) if s == ScheduledAction::REDACTED || s.is_empty() => true,
+            // Descend. Every key the agent kept must be no wider than the
+            // operator's, and a key the operator does not have at all is the
+            // inversion this whole test exists to catch.
+            (Value::Object(a), Value::Object(o)) => a
+                .iter()
+                .all(|(k, av)| o.get(k).is_some_and(|ov| is_narrower_or_equal(av, ov))),
+            (Value::Array(a), Value::Array(o)) => {
+                a.len() <= o.len()
+                    && a.iter().zip(o.iter()).all(|(av, ov)| is_narrower_or_equal(av, ov))
+            }
+            // An emptied collection is narrower than whatever it replaced.
+            (Value::Array(a), _) if a.is_empty() => true,
+            (Value::Object(a), _) if a.is_empty() => true,
+            _ => false,
+        }
+    }
+
     #[test]
     fn agent_disclosure_is_a_subset_of_operator_disclosure() {
-        // Structural, not per-variant: for every action shape we have, any
-        // field the agent can read must also be readable by the operator.
-        // Composition guarantees it; this asserts the guarantee holds.
+        // Structural, not per-variant: whatever the agent can read, the
+        // operator must be able to read at least as much of. Composition makes
+        // this true by construction; this asserts the guarantee actually holds.
+        // The fixture set must include the variants that had no explicit arm —
+        // this test was vacuous until it did. Verified by mutation: reverting
+        // `redact_for_agent` to `match self` has to make this fail, and with
+        // only the four hand-written arms represented, it did not.
         for action in [
             sandbox_exec_benign(),
             sandbox_exec_with_secret_bearing_command(),
             write_file_with_secrets(),
             credential_request_with_secrets(),
             agent_install_payload(),
+            ScheduledAction::WebFetch {
+                url: "https://api.example.com/v1?token=abc123supersecret&page=2".into(),
+                timeout_secs: None,
+                max_chars: None,
+                detected_hosts: None,
+                payload: None,
+            },
+            ScheduledAction::CredentialRequest {
+                credential_id: "gh".into(),
+                url: "https://api.github.com/user?access_token=abc123supersecret".into(),
+                method: Some("GET".into()),
+                headers: None,
+                body: None,
+                inject_secret_as: None,
+                payload: None,
+            },
         ] {
-            let agent = action.redact_for_viewer(ViewerClass::Agent);
-            let operator = action.redact_for_viewer(ViewerClass::Operator);
-            let a = serde_json::to_value(&agent).unwrap();
-            let o = serde_json::to_value(&operator).unwrap();
-            if let (Some(ao), Some(oo)) = (a.as_object(), o.as_object()) {
-                for (k, av) in ao {
-                    let ov = oo.get(k).unwrap_or(&serde_json::Value::Null);
-                    // Equal, or the agent's copy is blanked/emptied further.
-                    let narrowed = av == &serde_json::json!(ScheduledAction::REDACTED)
-                        || av.is_null()
-                        || av == &serde_json::json!({})
-                        || av == ov;
-                    assert!(
-                        narrowed,
-                        "{}: agent field `{k}` is neither equal to nor narrower than the operator's\n  agent:    {av}\n  operator: {ov}",
-                        action.kind()
-                    );
-                }
-            }
+            let agent = serde_json::to_value(action.redact_for_viewer(ViewerClass::Agent)).unwrap();
+            let operator =
+                serde_json::to_value(action.redact_for_viewer(ViewerClass::Operator)).unwrap();
+            assert!(
+                is_narrower_or_equal(&agent, &operator),
+                "{}: agent view is not a narrowing of the operator view\n  agent:    {agent}\n  operator: {operator}",
+                action.kind()
+            );
         }
+    }
+
+    #[test]
+    fn the_narrowing_predicate_rejects_a_widening() {
+        use serde_json::json;
+        // Guard the guard: a predicate that accepts everything would make the
+        // subset test vacuous.
+        assert!(is_narrower_or_equal(&json!(null), &json!("x")));
+        assert!(is_narrower_or_equal(&json!({}), &json!({"a": 1})));
+        assert!(is_narrower_or_equal(&json!({"a": null}), &json!({"a": "secret"})));
+        assert!(is_narrower_or_equal(&json!([]), &json!([1, 2])));
+        // Wider: a value the operator does not have.
+        assert!(!is_narrower_or_equal(&json!({"a": "raw"}), &json!({"a": null})));
+        assert!(!is_narrower_or_equal(&json!({"b": 1}), &json!({"a": 1})));
+        assert!(!is_narrower_or_equal(&json!("raw"), &json!("***REDACTED***")));
+        assert!(!is_narrower_or_equal(&json!([1, 2, 3]), &json!([1, 2])));
+        // Nested narrowing is accepted where the flat check would have failed.
+        assert!(is_narrower_or_equal(
+            &json!({"outer": {"keep": 1, "drop": null}}),
+            &json!({"outer": {"keep": 1, "drop": "secret"}})
+        ));
     }
 
     // ── ViewerClass::Decider (#1194) ────────────────────────────────────
