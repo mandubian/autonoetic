@@ -825,6 +825,161 @@ pub async fn handle_gateway_approvals(
     Ok(())
 }
 
+pub async fn handle_gateway_deciders(
+    config_path: &Path,
+    command: &super::common::GatewayDeciderCommands,
+) -> anyhow::Result<()> {
+    use super::common::GatewayDeciderCommands;
+    use crate::cli::rpc::GatewayRpc;
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let rpc = GatewayRpc::from_config(&config)?;
+
+    match command {
+        GatewayDeciderCommands::Appoint {
+            agent,
+            scope,
+            kinds,
+            ceiling,
+            expires_at,
+            max_gates,
+            appointed_by,
+            json,
+        } => {
+            let mut params = serde_json::json!({
+                "decider_agent": agent,
+                "scope_root_session": scope,
+                "appointed_by": appointed_by,
+            });
+            if !kinds.is_empty() {
+                params["kinds"] = serde_json::json!(kinds);
+            }
+            if let Some(c) = ceiling {
+                params["risk_ceiling"] = serde_json::json!(c);
+            }
+            if let Some(e) = expires_at {
+                params["expires_at"] = serde_json::json!(e);
+            }
+            if let Some(m) = max_gates {
+                params["max_gates"] = serde_json::json!(m);
+            }
+            let result = rpc.call("deciders.appoint", params)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let a = &result["appointment"];
+                println!(
+                    "Appointed {} as decider for run {}",
+                    a["decider_agent"].as_str().unwrap_or("?"),
+                    a["scope_root_session"].as_str().unwrap_or("?")
+                );
+                println!("  appointment: {}", a["appointment_id"].as_str().unwrap_or("?"));
+                println!(
+                    "  kinds:       {}",
+                    a["kinds"]
+                        .as_array()
+                        .map(|v| v
+                            .iter()
+                            .filter_map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                );
+                println!("  ceiling:     {}", a["risk_ceiling"].as_str().unwrap_or("?"));
+                // Say the advisory stage out loud: an operator who believes
+                // they just automated the gate away would be wrong, and the
+                // morning would be the wrong time to find out.
+                if a["advice_only"].as_bool().unwrap_or(true) {
+                    println!(
+                        "  mode:        advisory — the verdict is recorded, the gate still parks for you"
+                    );
+                }
+                match (a["expires_at"].as_str(), a["max_gates"].as_u64()) {
+                    (Some(exp), Some(m)) => {
+                        println!("  expires:     {} or after {} gates", exp, m)
+                    }
+                    (Some(exp), None) => println!("  expires:     {}", exp),
+                    (None, Some(m)) => println!("  expires:     after {} gates", m),
+                    (None, None) => println!(
+                        "  expires:     never — this is a standing grant, not a run-scoped one"
+                    ),
+                }
+            }
+        }
+        GatewayDeciderCommands::List {
+            root_session,
+            include_revoked,
+            json,
+        } => {
+            let mut params = serde_json::json!({ "include_revoked": include_revoked });
+            if let Some(r) = root_session {
+                params["root_session_id"] = serde_json::json!(r);
+            }
+            let result = rpc.call("deciders.list", params)?;
+            let rows = result["appointments"].as_array().cloned().unwrap_or_default();
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("No decider appointments");
+            } else {
+                println!(
+                    "{:<40} {:<22} {:<28} {:<9} {:<10} {}",
+                    "APPOINTMENT", "AGENT", "SCOPE", "CEILING", "MODE", "STATE"
+                );
+                for a in &rows {
+                    let state = if a["revoked_at"].as_str().is_some() {
+                        "revoked".to_string()
+                    } else if a["expired"].as_bool().unwrap_or(false) {
+                        "expired".to_string()
+                    } else if a["standing"].as_bool().unwrap_or(false) {
+                        "active (standing)".to_string()
+                    } else {
+                        "active".to_string()
+                    };
+                    let mode = if a["advice_only"].as_bool().unwrap_or(true) {
+                        "advisory"
+                    } else {
+                        "binding"
+                    };
+                    println!(
+                        "{:<40} {:<22} {:<28} {:<9} {:<10} {}",
+                        a["appointment_id"].as_str().unwrap_or("?"),
+                        a["decider_agent"].as_str().unwrap_or("?"),
+                        a["scope_root_session"].as_str().unwrap_or("?"),
+                        a["risk_ceiling"].as_str().unwrap_or("?"),
+                        mode,
+                        state
+                    );
+                }
+            }
+        }
+        GatewayDeciderCommands::Revoke {
+            appointment_id,
+            reason,
+            revoked_by,
+        } => {
+            let result = rpc.call(
+                "deciders.revoke",
+                serde_json::json!({
+                    "appointment_id": appointment_id,
+                    "reason": reason,
+                    "revoked_by": revoked_by,
+                }),
+            )?;
+            if result["revoked"].as_bool().unwrap_or(false) {
+                println!("Revoked appointment {}", appointment_id);
+                println!("Takes effect on the next gate; verdicts already attributed stay attributed.");
+            } else {
+                println!(
+                    "Appointment {} was not active (already revoked, or no such appointment)",
+                    appointment_id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_gateway_grants(
     config_path: &Path,
     command: &super::common::GatewayGrantCommands,

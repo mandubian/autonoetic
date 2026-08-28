@@ -487,6 +487,14 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayApprovalCommands,
     },
+    /// Appoint, list, or revoke run-scoped gate deciders — "name the night
+    /// watch". An appointment seats an agent that already holds `GateDecider`
+    /// (P-2.20) for one run; it never widens capabilities, and phase 1 is
+    /// advisory-only, so the verdict is recorded but the gate still parks.
+    Deciders {
+        #[command(subcommand)]
+        command: GatewayDeciderCommands,
+    },
     /// Manage session approval grants (revoke, list).
     Grants {
         #[command(subcommand)]
@@ -968,6 +976,68 @@ pub enum GatewayGrantCommands {
         /// Reason for revocation (recorded in audit trail).
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayDeciderCommands {
+    /// Seat a decider for a run. The agent must already hold `GateDecider`
+    /// covering every named kind — an appointment names a capability holder,
+    /// it does not create one.
+    Appoint {
+        /// Agent to seat (e.g. nightwatch.default).
+        #[arg(long)]
+        agent: String,
+        /// Root session (the run) the appointment decides for.
+        #[arg(long)]
+        scope: String,
+        /// Gate kinds to route: approval, escalation. Repeatable.
+        #[arg(long = "kind", value_parser = ["approval", "escalation"])]
+        kinds: Vec<String>,
+        /// Highest risk class the decider may rule on: standard or high.
+        /// Critical gates (agent promotion, credential registration) are not
+        /// appointable at all. Defaults to standard.
+        #[arg(long, value_parser = ["standard", "high"])]
+        ceiling: Option<String>,
+        /// RFC3339 timestamp after which the appointment stops routing.
+        #[arg(long)]
+        expires_at: Option<String>,
+        /// Stop routing after this many gates. Independent of --expires-at;
+        /// whichever is reached first ends the appointment.
+        #[arg(long)]
+        max_gates: Option<u32>,
+        /// Operator principal recorded as the appointer.
+        #[arg(long, default_value = "operator")]
+        appointed_by: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List appointments. Without --root-session, lists active appointments
+    /// across all runs — which is how an appointment pointing at a finished
+    /// run becomes visible.
+    List {
+        /// Limit to one run.
+        #[arg(long)]
+        root_session: Option<String>,
+        /// Include revoked appointments.
+        #[arg(long)]
+        include_revoked: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Vacate a seat. Takes effect on the next gate; verdicts already
+    /// attributed stay attributed.
+    Revoke {
+        /// Appointment identifier.
+        appointment_id: String,
+        /// Reason for revocation (recorded on the causal chain).
+        #[arg(long)]
+        reason: Option<String>,
+        /// Operator principal recorded as the revoker.
+        #[arg(long, default_value = "operator")]
+        revoked_by: String,
     },
 }
 

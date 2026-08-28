@@ -1647,6 +1647,16 @@ pub fn is_session_in_spawn_tree(
 /// 2. It must be bound to `agent_id` (the decider's claimed identity).
 /// 3. The two sessions must not be in an ancestor/descendant relation in
 ///    *either* direction (#1193).
+/// 4. The agent must hold an active appointment over the gate's run (#1195).
+///
+/// Condition 4 is #1193's second half, which could not ship until appointments
+/// existed. Lineage answers "is this decider entangled with the gate?"; it
+/// cannot answer "was this decider *seated* here?". Without it, any installed
+/// `GateDecider` holder in an unrelated session could rule on any gate — the
+/// capability would be a standing licence rather than an eligibility to be
+/// appointed. It also closes the sibling case ancestry misses: two agents
+/// spawned by the same lead are in no ancestor/descendant relation, yet the
+/// lead controls both.
 ///
 /// Condition 3 was previously one-directional — it refused only when the gate
 /// sat at or below the decider. The inverse relation is the same conflict of
@@ -1702,6 +1712,21 @@ pub fn verify_decider_session_binding(
              rule on a gate raised by its own ancestor (R-10.7)",
             decider_session_id,
             gate_session_id
+        );
+    }
+
+    // #1195: provenance, not lineage. A clean spawn tree only proves the
+    // decider is not entangled with the gate; it does not prove anyone seated
+    // it. The appointment record is the authority, so `GateDecider` stays
+    // inert until an operator has used it.
+    let gate_root = crate::runtime::content_store::root_session_id(gate_session_id);
+    if !crate::decider_appointment::agent_is_appointed_for_scope(store, agent_id, gate_root)? {
+        anyhow::bail!(
+            "Agent-decider '{}' holds no active appointment over run '{}', so it may not decide \
+             its gates (P-2.20). The GateDecider capability is an eligibility to be appointed, \
+             not a standing licence; an operator must seat it for this run",
+            agent_id,
+            gate_root
         );
     }
     Ok(())

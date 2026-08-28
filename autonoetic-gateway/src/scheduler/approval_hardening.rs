@@ -1,11 +1,10 @@
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalRisk {
-    Standard,
-    High,
-    Critical,
-}
+// `ApprovalRisk` moved to `autonoetic_types::background` in #1195 so a decider
+// appointment's `risk_ceiling` can reuse this vocabulary instead of inventing a
+// parallel notion of gate altitude. Re-exported so existing callers are
+// unaffected.
+pub use autonoetic_types::background::ApprovalRisk;
 
 pub struct ApprovalHardening {
     pub min_dwell_ms: i64,

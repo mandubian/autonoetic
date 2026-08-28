@@ -162,6 +162,9 @@ async fn async_main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Approvals { command } => {
                 cli::gateway::handle_gateway_approvals(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::Deciders { command } => {
+                cli::gateway::handle_gateway_deciders(&config_path, command).await?;
+            }
             cli::common::GatewayCommands::Grants { command } => {
                 cli::gateway::handle_gateway_grants(&config_path, command).await?;
             }

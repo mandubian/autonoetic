@@ -13,6 +13,7 @@ pub mod causal_chain;
 pub mod channel;
 pub mod config;
 pub mod constitution;
+pub mod decider_appointment;
 pub mod disclosure;
 pub mod egress;
 pub mod escalation;

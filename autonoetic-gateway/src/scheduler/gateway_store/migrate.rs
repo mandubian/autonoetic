@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 81;
+const SCHEMA_VERSION_LATEST: i64 = 82;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -566,6 +566,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_workspace_egress_labels_v79(conn)?;
     apply_carry_forward_lineage_v80(conn)?;
     apply_execution_trace_mount_set_v81(conn)?;
+    apply_decider_appointments_v82(conn)?;
 
     Ok(())
 }
@@ -603,6 +604,54 @@ fn apply_execution_trace_mount_set_v81(conn: &mut Connection) -> Result<()> {
         params![
             81_i64,
             "execution_trace_mount_set",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_decider_appointments_v82(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 82 {
+        return Ok(());
+    }
+
+    // Rows are never hard-deleted: revocation sets `revoked_at`, so who held
+    // the seat and when survives the seat being vacated (#1195).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS decider_appointments (
+            appointment_id TEXT PRIMARY KEY,
+            decider_agent TEXT NOT NULL,
+            decider_revision TEXT,
+            kinds TEXT NOT NULL,
+            scope_root_session TEXT NOT NULL,
+            decider_session TEXT,
+            risk_ceiling TEXT NOT NULL,
+            advice_only INTEGER NOT NULL DEFAULT 1,
+            expires_at TEXT,
+            max_gates INTEGER,
+            gates_decided INTEGER NOT NULL DEFAULT 0,
+            appointed_by TEXT NOT NULL,
+            appointed_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_by TEXT,
+            revoked_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_decider_appointments_scope
+            ON decider_appointments (scope_root_session, revoked_at);
+        CREATE INDEX IF NOT EXISTS idx_decider_appointments_agent
+            ON decider_appointments (decider_agent, revoked_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            82_i64,
+            "decider_appointments",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
