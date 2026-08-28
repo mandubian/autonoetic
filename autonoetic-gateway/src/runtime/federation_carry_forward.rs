@@ -76,6 +76,12 @@ const CONTRACT_FRONTMATTER_FIELDS: &[&str] = &[
     // `middleware` names a script (e.g. pre_process) that runs on input —
     // executable code by reference.
     "middleware",
+    // `adapter` is composition provenance (base identity + generation-time
+    // digests, proposal `agent-adaptation-composition`). It never executes,
+    // but it names *what the gates verified against*: a wrapper re-based onto
+    // a different base revision is a different derivation, so a change voids
+    // the carry — same rule as `middleware`, same reasoning.
+    "adapter",
     "disclosure",
     // `egress` block: output_label + session policies.
     "egress",

@@ -123,19 +123,28 @@ Conditionally (when mapping is needed):
 
 ### Wrapper Traceability
 
-Generated `SKILL.md` includes an `adapter` metadata section:
+Generated `SKILL.md` includes an `adapter` metadata section (parsed as
+`AgentManifest.adapter` — `AdapterProvenance` in `autonoetic-types/src/agent.rs`;
+proposal `docs/proposals/agent-adaptation-composition.md`):
 
 ```yaml
 adapter:
   base_agent_id: "researcher.default"
+  base_revision_digest: "rev_sha256:..."   # optional — base revision at generation time
   generated_at: "2024-03-12T10:30:00Z"
   schema_notes: ["accepts: compatible", "returns: target requires additional fields"]
+  generator: "agent-adapter.default"
 ```
 
 This enables:
 - Lineage tracking: find all wrappers derived from a base agent
 - Debugging: understand why a wrapper was created
 - Audit: timestamp and schema diff summary for governance
+
+The block is **contract-classified** for federation carry-forward (like
+`middleware`): changing provenance voids a carry, because it names what the
+gates verified against. An absent `base_revision_digest` means unknown at
+generation time — provenance under-claims, never guesses.
 
 ### LLMConfig Design
 

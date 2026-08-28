@@ -1,6 +1,6 @@
 # Agent Adaptation vs Composition — Wrapper Provenance, Drift, and Discovery
 
-**Status:** Open — 2026-08-27
+**Status:** Partial — 2026-08-27 (Phase 0 shipped; Phases 1–3 open)
 **Builds on:** [`../reference/agent-adapter-contract.md`](../reference/agent-adapter-contract.md),
 middleware hooks (`autonoetic-gateway/src/runtime/middleware.rs`),
 federation carry-forward (`autonoetic-gateway/src/runtime/federation_carry_forward.rs`),

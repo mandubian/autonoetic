@@ -277,6 +277,11 @@ pub struct AgentManifest {
     pub io: Option<AgentIO>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub middleware: Option<Middleware>,
+    /// Composition provenance (proposal `agent-adaptation-composition`):
+    /// present when this agent is a wrapper derived from a base agent.
+    /// Contract-classified for carry-forward, like `middleware`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterProvenance>,
     /// Execution mode: Script (fast path, no LLM) or Reasoning (default, LLM-driven).
     #[serde(default)]
     pub execution_mode: ExecutionMode,
@@ -514,6 +519,33 @@ pub struct Middleware {
     /// Script/command to run on LLM output before returning to the user.
     #[serde(default)]
     pub post_process: Option<String>,
+}
+
+/// Composition provenance for a wrapper agent derived from a base agent
+/// (proposal `docs/proposals/agent-adaptation-composition.md`).
+///
+/// This is the *relationship* half of the adapter story — `Middleware` is the
+/// *behavior* half. This metadata never executes: it is consumed by roster
+/// inspection, drift detection, and the promotion card. It is classified as a
+/// contract field for federation carry-forward (changing provenance voids a
+/// carry, matching `middleware`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterProvenance {
+    /// The agent this wrapper derives from.
+    pub base_agent_id: String,
+    /// Promoted revision digest of the base at generation time. `None` means
+    /// unknown at generation — under-claim, never guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision_digest: Option<String>,
+    /// When the wrapper was generated (RFC 3339 string; opaque here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<String>,
+    /// Schema-diff notes captured at generation time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_notes: Vec<String>,
+    /// The specialist that generated the wrapper (e.g. `agent-adapter.default`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
 }
 
 /// Execution mode for an agent: script-only or LLM-driven reasoning.

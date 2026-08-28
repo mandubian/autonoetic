@@ -297,7 +297,7 @@ pub fn install_schema_description() -> String {
 
 **Agent-provided (semantic intent):**
 - agent.id, description, execution_mode, script_entry, llm_preset (+ optional llm_overrides), capabilities
-- Optional: io (including io.output_policy), middleware
+- Optional: io (including io.output_policy), middleware, adapter (composition provenance)
 
 **Gateway-owned (canonicalized):**
 - SKILL.md metadata shape and field types
@@ -1730,6 +1730,7 @@ agent:
             disclosure: None,
             io: None,
             middleware: None,
+            adapter: None,
             execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
             script_entry: None,
             script_input_mode: Default::default(),
@@ -2119,6 +2120,7 @@ agent:
             disclosure: None,
             io: None,
             middleware: None,
+            adapter: None,
             execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
             script_entry: None,
             script_input_mode: Default::default(),
