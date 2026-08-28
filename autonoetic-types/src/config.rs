@@ -2215,6 +2215,16 @@ pub struct RetentionConfig {
     /// Days to retain causal_events. 0 = forever. Default: 90.
     #[serde(default = "default_retention_causal_events_days")]
     pub causal_events_days: u32,
+    /// Days to retain decided `approvals`. 0 = forever. Default: 90.
+    ///
+    /// Approvals were outside the retention policy entirely (#1213), so an
+    /// `action_payload` — which is the *raw proposed command*, kept raw because
+    /// it is the execution input — persisted for the life of the database. Only
+    /// decided rows are pruned; a pending gate is never reaped by retention,
+    /// because an approval nobody has answered is not stale data, it is
+    /// outstanding work.
+    #[serde(default = "default_retention_approvals_days")]
+    pub approvals_days: u32,
     /// Days to retain post_promotion_reviews. 0 = forever. Default: 90.
     ///
     /// Matches `causal_events_days`, because these rows *are* the drift trend
@@ -2227,6 +2237,7 @@ pub struct RetentionConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
+            approvals_days: 90,
             execution_traces_days: 30,
             causal_events_days: 90,
             post_promotion_reviews_days: 90,
@@ -2237,6 +2248,10 @@ impl Default for RetentionConfig {
 fn default_retention_execution_traces_days() -> u32 {
     30
 }
+fn default_retention_approvals_days() -> u32 {
+    90
+}
+
 fn default_retention_causal_events_days() -> u32 {
     90
 }

@@ -1101,7 +1101,20 @@ Controls pruning of historical data. Values are in days; `0` means retain foreve
 |-------|------|---------|-------------|
 | `retention.execution_traces_days` | u32 | `30` | Days to retain `execution_traces` (full code execution results: stdout, stderr, exit_code). |
 | `retention.causal_events_days` | u32 | `90` | Days to retain `causal_events` (hash-chained audit trail in SQLite). |
+| `retention.approvals_days` | u32 | `90` | Days to retain **decided** `approvals`. Pending gates are never pruned at any age — an unanswered approval is outstanding work, not stale data. Bounds how long a raw `action_payload` survives; see the note below. |
 | `retention.post_promotion_reviews_days` | u32 | `90` | Days to retain `post_promotion_reviews`. Matches `causal_events_days`: these rows *are* the drift trend derived from those events, so outliving their evidence would leave unauditable numbers behind. |
+
+> **Why `approvals` needs a retention bound at all (#1213).** An approval's
+> `action_payload` is the *raw proposed action* — it is the scheduler's
+> execution input, not merely a record, so it cannot be redacted at write time
+> without breaking the command it describes. An agent that inlines a credential
+> therefore causes that credential to be stored verbatim. Two things bound it:
+> a gate that is rejected, cancelled or stale has its payload replaced with the
+> operator-class projection as soon as it is decided (its turn is dead, so the
+> raw form has nothing left to be raw for), and everything else is pruned by
+> this setting. Approved payloads stay raw until pruned because they remain
+> resumable — a crash between the decision and its execution would otherwise
+> resume a command with `***REDACTED***` where a token belongs.
 
 Example:
 
@@ -1109,6 +1122,7 @@ Example:
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+  approvals_days: 90
   post_promotion_reviews_days: 90
 ```
 

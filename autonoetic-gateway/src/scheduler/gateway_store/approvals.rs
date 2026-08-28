@@ -1,6 +1,7 @@
 use anyhow::Result;
 use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, GrantScope, GrantTarget, SessionApprovalGrant,
+    ApprovalLevel, ApprovalRequest, GrantScope, GrantTarget, ScheduledAction,
+    SessionApprovalGrant,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -290,6 +291,51 @@ impl GatewayStore {
     pub fn get_approval(&self, request_id: &str) -> Result<Option<ApprovalRequest>> {
         let conn = self.conn.lock().unwrap();
         Self::get_approval_with_conn(&conn, request_id)
+    }
+
+    /// Replace a dead approval's stored `action_payload` with its
+    /// operator-class projection (#1213).
+    ///
+    /// `action_payload` is kept raw while an approval is live because it *is*
+    /// the execution input — the scheduler deserializes it and runs it. Once a
+    /// gate is rejected, cancelled or gone stale, its turn is dead (the bound
+    /// checkpoint is reaped in `apply_decision`), so the raw command will never
+    /// be executed and there is nothing left to keep it raw for.
+    ///
+    /// The projection is the operator view, so the record keeps everything a
+    /// human reviewing history would look at — binary, flags, destination host
+    /// — and drops only the credential values. Approved rows are deliberately
+    /// left alone: they remain resumable, and a crash between the decision and
+    /// its execution would otherwise resume a command with `***REDACTED***`
+    /// where a token belongs.
+    pub fn scrub_dead_approval_payload(&self, request_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT action_payload FROM approvals WHERE request_id = ?1",
+                params![request_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let Ok(action) = serde_json::from_str::<ScheduledAction>(&raw) else {
+            // An unparseable payload cannot be projected. Leave it rather than
+            // guessing — retention still bounds how long it survives.
+            return Ok(false);
+        };
+        let scrubbed = serde_json::to_string(
+            &action.redact_for_viewer(autonoetic_types::disclosure::ViewerClass::Operator),
+        )?;
+        if scrubbed == raw {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE approvals SET action_payload = ?1 WHERE request_id = ?2",
+            params![scrubbed, request_id],
+        )?;
+        Ok(true)
     }
 
     pub fn record_decision(

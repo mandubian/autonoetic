@@ -557,6 +557,11 @@ retention:
   execution_traces_days: 30
   causal_events_days: 90
   post_promotion_reviews_days: 90
+  # Decided approvals only. A pending gate is never pruned at any age — an
+  # unanswered approval is outstanding work, not stale data. This bounds how
+  # long a raw `action_payload` (the scheduler's execution input, so it cannot
+  # be redacted at write time) survives on disk. See docs/reference/config.md.
+  approvals_days: 90
 
 # ── Cognitive Capsules ────────────────────────────────────────────────
 # Controls the agent-portability capsule export/import pipeline.

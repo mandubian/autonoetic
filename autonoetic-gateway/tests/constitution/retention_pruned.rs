@@ -17,6 +17,8 @@ fn r_plus_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
 
     let retention = RetentionConfig {
+        // 0 = never prune approvals, preserving these tests' original scope.
+        approvals_days: 0,
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 0,
@@ -60,6 +62,8 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
     })?;
 
     let retention = RetentionConfig {
+        // 0 = never prune approvals, preserving these tests' original scope.
+        approvals_days: 0,
         execution_traces_days: 0,
         causal_events_days: 1,
         post_promotion_reviews_days: 0,
@@ -127,6 +131,8 @@ fn r_plus_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
     })?;
 
     let retention = RetentionConfig {
+        // 0 = never prune approvals, preserving these tests' original scope.
+        approvals_days: 0,
         execution_traces_days: 0,
         causal_events_days: 1,
         post_promotion_reviews_days: 0,
@@ -176,6 +182,8 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
     })?;
 
     let retention = RetentionConfig {
+        // 0 = never prune approvals, preserving these tests' original scope.
+        approvals_days: 0,
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 0,
@@ -210,6 +218,8 @@ fn r_plus_17_post_promotion_reviews_are_pruned_and_reported() -> anyhow::Result<
     assert_eq!(store.list_post_promotion_reviews(None, 100)?.len(), 2);
 
     let retention = RetentionConfig {
+        // 0 = never prune approvals, preserving these tests' original scope.
+        approvals_days: 0,
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 90,
