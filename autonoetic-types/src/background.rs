@@ -627,17 +627,28 @@ impl ScheduledAction {
         self.redact_for_operator()
     }
 
+    /// Strictly narrower than the operator view, **by construction**.
+    ///
+    /// Composed on top of `redact_for_operator` rather than matching on the
+    /// original. Written as an independent match, this function silently
+    /// missed every variant it did not name — `WebFetch`, `WebCall` and even
+    /// `CredentialRequest.url` fell through to identity, so once the operator
+    /// path learned to mask URLs the *least* trusted class was seeing more
+    /// than the most trusted one. Composition makes that inversion
+    /// unrepresentable: whatever the operator masks is already masked here,
+    /// and this function only ever removes more.
     fn redact_for_agent(&self) -> Self {
-        match self {
+        match self.redact_for_operator() {
             Self::CredentialRequest {
                 credential_id,
                 url,
                 method,
                 ..
             } => Self::CredentialRequest {
-                credential_id: credential_id.clone(),
-                url: url.clone(),
-                method: method.clone(),
+                credential_id,
+                // Already secret-masked by the operator pass above.
+                url,
+                method,
                 headers: Some(std::collections::HashMap::new()),
                 body: None,
                 inject_secret_as: None,
@@ -650,31 +661,31 @@ impl ScheduledAction {
                 intent,
                 ..
             } => Self::SandboxExec {
-                // Command is blanked for the Agent class because shell strings
-                // routinely embed secrets — `Authorization: Bearer …`, env-var
-                // assignments, URL query params. Consistent with the Agent
-                // redaction of `ExecutionTraceRecord::command` (commit 7f8525d).
-                // Approving agents retain shape via `detected_hosts`,
-                // `dependencies`, and `requires_approval`; operators see the
-                // raw command (Operator class is identity for SandboxExec).
+                // Blanked entirely for the Agent class, not merely
+                // secret-masked: shell strings embed credentials in shapes the
+                // catalogue does not recognise, and an approving agent retains
+                // what it needs via `detected_hosts`, `dependencies` and
+                // `requires_approval`. Consistent with the Agent redaction of
+                // `ExecutionTraceRecord::command` (commit 7f8525d).
                 command: Self::REDACTED.to_string(),
-                dependencies: dependencies.clone(),
-                requires_approval: *requires_approval,
+                dependencies,
+                requires_approval,
                 evidence_ref: None,
-                detected_hosts: detected_hosts.clone(),
-                intent: intent.clone(),
+                detected_hosts,
+                intent,
             },
             Self::WriteFile {
                 path,
                 requires_approval,
                 ..
             } => Self::WriteFile {
-                path: path.clone(),
+                path,
                 content: Self::REDACTED.to_string(),
-                requires_approval: *requires_approval,
+                requires_approval,
                 evidence_ref: None,
             },
-            other => other.clone(),
+            // Anything else keeps the operator-level masking and no more.
+            other => other,
         }
     }
 
@@ -1638,6 +1649,88 @@ mod redaction_tests {
             panic!("expected SandboxExec");
         };
         assert_eq!(command, "ls -la /tmp");
+    }
+
+    // ── Ordering invariant across all classes ───────────────────────────
+
+    #[test]
+    fn agent_never_sees_a_secret_the_operator_has_masked() {
+        // The inversion this pins: `redact_for_agent` used to match on the
+        // original action, so any variant it did not name fell through to
+        // identity. Once the operator path learned to mask URLs, an ordinary
+        // agent saw a raw `?token=…` that the operator did not — the least
+        // trusted class seeing the most. Composition closed it; this keeps it
+        // closed for variants nobody has thought of yet.
+        let secret = "abc123supersecret";
+        let actions = vec![
+            ScheduledAction::WebFetch {
+                url: format!("https://api.example.com/v1?token={secret}&page=2"),
+                timeout_secs: None,
+                max_chars: None,
+                detected_hosts: None,
+                payload: None,
+            },
+            ScheduledAction::CredentialRequest {
+                credential_id: "gh".into(),
+                url: format!("https://api.github.com/user?access_token={secret}"),
+                method: Some("GET".into()),
+                headers: None,
+                body: None,
+                inject_secret_as: None,
+                payload: None,
+            },
+            sandbox_exec_with_secret_bearing_command(),
+            write_file_with_secrets(),
+        ];
+
+        for action in actions {
+            let kind = action.kind();
+            for class in [ViewerClass::Agent, ViewerClass::Decider, ViewerClass::Operator] {
+                let blob = serde_json::to_string(&action.redact_for_viewer(class)).unwrap();
+                assert!(
+                    !blob.contains(secret),
+                    "{kind}: {class:?} leaked the token — {blob}"
+                );
+                assert!(
+                    !blob.contains("eyJhbGc.foo") && !blob.contains("hunter2"),
+                    "{kind}: {class:?} leaked a fixture secret — {blob}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_disclosure_is_a_subset_of_operator_disclosure() {
+        // Structural, not per-variant: for every action shape we have, any
+        // field the agent can read must also be readable by the operator.
+        // Composition guarantees it; this asserts the guarantee holds.
+        for action in [
+            sandbox_exec_benign(),
+            sandbox_exec_with_secret_bearing_command(),
+            write_file_with_secrets(),
+            credential_request_with_secrets(),
+            agent_install_payload(),
+        ] {
+            let agent = action.redact_for_viewer(ViewerClass::Agent);
+            let operator = action.redact_for_viewer(ViewerClass::Operator);
+            let a = serde_json::to_value(&agent).unwrap();
+            let o = serde_json::to_value(&operator).unwrap();
+            if let (Some(ao), Some(oo)) = (a.as_object(), o.as_object()) {
+                for (k, av) in ao {
+                    let ov = oo.get(k).unwrap_or(&serde_json::Value::Null);
+                    // Equal, or the agent's copy is blanked/emptied further.
+                    let narrowed = av == &serde_json::json!(ScheduledAction::REDACTED)
+                        || av.is_null()
+                        || av == &serde_json::json!({})
+                        || av == ov;
+                    assert!(
+                        narrowed,
+                        "{}: agent field `{k}` is neither equal to nor narrower than the operator's\n  agent:    {av}\n  operator: {ov}",
+                        action.kind()
+                    );
+                }
+            }
+        }
     }
 
     // ── ViewerClass::Decider (#1194) ────────────────────────────────────
