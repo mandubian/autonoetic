@@ -48,6 +48,7 @@ impl TestManifest {
                 disclosure: None,
                 io: None,
                 middleware: None,
+                adapter: None,
                 execution_mode: ExecutionMode::default(),
                 script_entry: None,
                 script_input_mode: ScriptInputMode::default(),

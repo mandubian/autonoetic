@@ -6,7 +6,7 @@ use crate::runtime::promotion_governor::GovernorRejection;
 use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
-    AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,
+    AgentIO, AgentIdentity, AgentManifest, AdapterProvenance, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,
 };
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactKind};
 use autonoetic_types::capability::Capability;
@@ -617,6 +617,10 @@ struct RevisionCreateFromIntentArgs {
     io: Option<AgentIO>,
     #[serde(default)]
     middleware: Option<Middleware>,
+    /// Composition provenance: present when the candidate is a wrapper
+    /// derived from a base agent (proposal `agent-adaptation-composition`).
+    #[serde(default)]
+    adapter: Option<AdapterProvenance>,
     #[serde(default, alias = "base_ref")]
     base_revision_id: Option<String>,
     #[serde(default, alias = "change_summary")]
@@ -1808,6 +1812,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                         "description": "I/O contract. Declare accepts (input JSON schema), returns (output JSON schema), and optional output_policy (runtime output constraints). REQUIRED for execution_mode: \"script\": io.accepts must describe the stdin payload (use {\"type\":\"string\"} only if the script genuinely consumes raw free text) — creation is rejected without it, because undeclared input contracts surface as runtime JSON-parse crashes that promotion gates cannot catch. Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"},\"output_policy\":{\"max_reply_length_chars\":2000}}"
                     },
                     "middleware": { "type": "object" },
+                    "adapter": { "type": "object", "description": "Composition provenance for a wrapper agent derived from a base agent: { base_agent_id (required), base_revision_digest?, generated_at?, schema_notes?, generator? }. Static metadata — never executed; surfaced on the roster and the promotion card, and contract-classified for carry-forward." },
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" },
                     "replace": { "type": "boolean", "description": "Set to true when updating an already-installed agent. The existing active revision is archived automatically at promote time — atomically, when the new revision becomes active — not at create time, so a candidate that is never promoted (smoke-test failure / operator reject / eval gate) leaves the live revision untouched. Required when updating an already-installed agent." },
@@ -2290,6 +2295,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             disclosure: None,
             io: args.io.clone(),
             middleware: args.middleware.clone(),
+            adapter: args.adapter.clone(),
             execution_mode: resolved_mode,
             script_entry: resolved_script_entry.clone(),
             script_input_mode: args.script_input_mode.unwrap_or_default(),
@@ -2773,6 +2779,7 @@ fn direct_install_intent_digest(args: &RevisionCreateFromIntentArgs) -> String {
         "llm_config": args.llm_config,
         "io": args.io,
         "middleware": args.middleware,
+        "adapter": args.adapter,
         "base_revision_id": args.base_revision_id,
         "replace": args.replace,
         "credential_services": args.credential_services,
@@ -6125,6 +6132,7 @@ mod capability_lenient_deser_tests {
             disclosure: None,
             io: None,
             middleware: None,
+            adapter: None,
             execution_mode: ExecutionMode::Reasoning,
             script_entry: None,
             script_input_mode: ScriptInputMode::default(),

@@ -465,6 +465,7 @@ mod tests {
             disclosure: None,
             io: None,
             middleware: None,
+            adapter: None,
             execution_mode: Default::default(),
             script_entry: None,
             script_input_mode: Default::default(),

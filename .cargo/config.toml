@@ -8,3 +8,13 @@ xtask = "run -p xtask --"
 # clang needed.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Test-thread stack headroom. Several router/lifecycle tests drive deep async
+# futures whose debug-mode stack usage sits just under libtest's default 2 MiB
+# test-thread limit — adding a field to a core type (e.g. `AgentManifest`)
+# grows every future that embeds it and overflows the marginal ones
+# (observed: `router::tests::test_signal_delivery_idempotency_deduplicates_by_request_id`
+# SIGABRT stack-overflow when `AgentManifest.adapter` landed, #1204). 16 MiB
+# is virtual reservation only; untouched pages cost nothing.
+[env]
+RUST_MIN_STACK = "16777216"

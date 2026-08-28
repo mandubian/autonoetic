@@ -327,6 +327,92 @@ fn test_generated_wrapper_manifest_carries_inherited_preset() {
     );
 }
 
+/// Composition provenance (#1204): the `adapter:` block the generator emits
+/// must survive the parser as a first-class `AgentManifest.adapter` — it used
+/// to be silently dropped, so lineage existed only as raw SKILL.md bytes.
+#[test]
+fn test_generated_wrapper_provenance_parses_with_base_digest() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let target_spec = serde_json::json!({
+        "accepts": { "type": "object", "required": ["query"] },
+        "returns": { "type": "object", "required": ["summary"] }
+    });
+    let base_manifest = serde_json::json!({ "capabilities": [] });
+    let wrapper_dir = generate_wrapper(
+        &temp,
+        "base.agent.adapter.prov",
+        &target_spec,
+        &base_manifest,
+        &serde_json::json!({ "type": "object", "required": ["query"] }),
+        &serde_json::json!({ "type": "object", "required": ["summary"] }),
+    );
+    let skill_content =
+        std::fs::read_to_string(wrapper_dir.join("SKILL.md")).expect("wrapper skill should read");
+    let (manifest, _instructions) =
+        SkillParser::parse(&skill_content).expect("wrapper should parse");
+
+    let adapter = manifest
+        .adapter
+        .expect("adapter provenance should parse — the block must not be dropped");
+    assert_eq!(adapter.base_agent_id, "base.agent");
+    assert_eq!(adapter.generator.as_deref(), Some("agent-adapter.default"));
+    assert!(
+        adapter.base_revision_digest.is_none(),
+        "generator was not given a digest — provenance must under-claim, not guess"
+    );
+    assert!(!adapter.schema_notes.is_empty());
+    assert!(adapter.generated_at.is_some());
+}
+
+/// Same, but with `--base-revision-digest` supplied: the digest must round-trip
+/// into the parsed manifest so Phase 2 drift detection has something to compare.
+#[test]
+fn test_generated_wrapper_provenance_records_base_revision_digest() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let base_skill_path = temp.path().join("base.SKILL.md");
+    std::fs::write(
+        &base_skill_path,
+        "---\nname: \"base.agent\"\ndescription: \"base\"\n---\n# Base\n",
+    )
+    .expect("base skill should write");
+    let output_dir = temp.path().join("wrapper");
+    let out = Command::new("python3")
+        .arg(script_path("generate_wrapper.py"))
+        .arg("--base-skill")
+        .arg(base_skill_path.to_string_lossy().to_string())
+        .arg("--base-agent-id")
+        .arg("base.agent")
+        .arg("--wrapper-id")
+        .arg("base.agent.adapter.digest")
+        .arg("--target-spec-json")
+        .arg(r#"{"accepts":{"type":"object","required":["query"]},"returns":{"type":"object","required":["summary"]}}"#)
+        .arg("--schema-diff-json")
+        .arg(r#"{"accepts_compatible":true,"returns_compatible":true,"requires_input_mapping":false,"requires_output_mapping":false,"input_mappings":[],"output_mappings":[],"notes":[]}"#)
+        .arg("--base-revision-digest")
+        .arg("rev_sha256:deadbeef")
+        .arg("--output-dir")
+        .arg(output_dir.to_string_lossy().to_string())
+        .output()
+        .expect("generator should execute");
+    assert!(
+        out.status.success(),
+        "generate_wrapper.py failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let skill_content =
+        std::fs::read_to_string(output_dir.join("SKILL.md")).expect("wrapper skill should read");
+    let (manifest, _instructions) =
+        SkillParser::parse(&skill_content).expect("wrapper should parse");
+    let adapter = manifest
+        .adapter
+        .expect("adapter provenance should parse — the block must not be dropped");
+    assert_eq!(
+        adapter.base_revision_digest.as_deref(),
+        Some("rev_sha256:deadbeef")
+    );
+}
+
 struct EchoSummaryConfidenceDriver;
 
 #[async_trait::async_trait]

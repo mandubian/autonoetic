@@ -296,6 +296,7 @@ impl NativeTool for SkillInstallTool {
             disclosure: parsed_manifest.disclosure.clone(),
             io: parsed_manifest.io.clone(),
             middleware: parsed_manifest.middleware.clone(),
+            adapter: parsed_manifest.adapter.clone(),
             execution_mode: parsed_manifest.execution_mode,
             script_entry: parsed_manifest.script_entry.clone(),
             script_input_mode: parsed_manifest.script_input_mode,
