@@ -1,6 +1,6 @@
 # Agent Adaptation vs Composition — Wrapper Provenance, Drift, and Discovery
 
-**Status:** Partial — 2026-08-28 (Phases 0–1 shipped; Phases 2–3 open)
+**Status:** Partial — 2026-08-28 (Phases 0–2 shipped; Phase 3 open)
 **Builds on:** [`../reference/agent-adapter-contract.md`](../reference/agent-adapter-contract.md),
 middleware hooks (`autonoetic-gateway/src/runtime/middleware.rs`),
 federation carry-forward (`autonoetic-gateway/src/runtime/federation_carry_forward.rs`),
@@ -68,17 +68,16 @@ onto it. The base agent need not even be installed at wrapper runtime.
    §Wrapper Traceability were not true of any parsed manifest; the data
    survived only as raw SKILL.md bytes.
 
-2. **Forks go stale invisibly.** The wrapper freezes the base's capabilities and a
-   2000-char instruction excerpt at generation time. When the base is promoted to a
-   new revision — new instructions, new capabilities, new `io` contract — nothing
-   detects, reports, or routes regeneration. A caller keeps using a wrapper that
-   maps onto a schema the base no longer has.
+2. ~~Forks go stale invisibly~~ — **resolved by Phase 2 (#1202).** The roster
+   (`agent_list` both paths, `agent_inspect`) computes `stale_base` against the
+   base's currently promoted revision, and the P-2.25 promotion card gained a
+   `derived_from` section. The planner decision flow carries the regenerate-on-stale
+   rule.
 
-3. **Capability derivation is unchecked.** Wholesale inheritance means the wrapper's
-   envelope equals the base's — governed only by the generic P-2.25
-   capability-delta approval at install. Nothing relates the wrapper's capability
-   set to its derivation: a fork *gaining* power relative to its base is not even
-   surfaced on the promotion card.
+3. ~~Capability derivation is unchecked~~ — **resolved by Phase 2 (#1202),
+   advisory.** `derived_from_payload` surfaces `added_vs_base` /
+   `removed_vs_base` on the promotion card. A hard reject remains out of scope
+   by design (§5: composition metadata never grants or blocks power).
 
 4. ~~The planner cannot know adaptation exists~~ — **resolved by Phase 1 (#1203).**
    `planner.default` now carries an `agent-adapter.default` row in its Foundational
@@ -155,6 +154,8 @@ pub struct AdapterProvenance {
   new `adapter` row) to the key-field table in `docs/AGENTS.md`.
 
 ### Phase 2 — Composition-aware checks (all advisory, nothing new executes)
+
+**[x] shipped (#1202).**
 
 - **Drift signal**: `agent_inspect` / `agent_list` gain `adapter` provenance plus a
   computed `stale_base: true` when `base_revision_digest` differs from the base's

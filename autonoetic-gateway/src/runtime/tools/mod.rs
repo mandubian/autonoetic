@@ -774,6 +774,30 @@ pub(crate) fn message_format_hint(io_accepts: Option<&serde_json::Value>) -> &'s
     }
 }
 
+/// Composition drift for wrapper provenance (#1202): compare the base revision
+/// digest claimed at generation time against the base's *currently promoted*
+/// revision. Surfaced on the roster (`agent_list` / `agent_inspect`) as
+/// `stale_base`, and on the P-2.25 promotion card as `derived_from`.
+///
+/// - `None` — no provenance, or the provenance claims no digest (generated
+///   against an unknown base revision): staleness is **unknown**, not false.
+///   Under-claim, never guess.
+/// - `Some(true)` — the base is gone, or its promoted digest differs: the
+///   wrapper's mapping was computed against a revision that no longer runs.
+/// - `Some(false)` — the wrapper is current against its base.
+pub(crate) fn adapter_base_stale(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    adapter: Option<&autonoetic_types::agent::AdapterProvenance>,
+) -> Option<bool> {
+    let provenance = adapter?;
+    let claimed = provenance.base_revision_digest.as_deref()?;
+    match store.resolve_alias(&provenance.base_agent_id) {
+        Ok(Some(alias)) => Some(alias.revision_id != claimed),
+        Ok(None) => Some(true),
+        Err(_) => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecDependencies {
     #[serde(default)]

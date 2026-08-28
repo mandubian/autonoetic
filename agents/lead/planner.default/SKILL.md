@@ -278,6 +278,11 @@ On wake, the gateway injects the child's typed state (status, outcome, summary) 
        schemas, and the adaptation intent)
      → Take its wrapper `artifact_ref` to `agent-factory.default` for install
        (standard gates — one door; the adapter cannot create or promote revisions).
+     → `agent_list`/`agent_inspect` report a wrapper's `adapter` provenance and a
+       computed `stale_base`. When `stale_base: true` the base was re-promoted
+       (or removed) since the wrapper was generated — do NOT keep delegating
+       through it; route regeneration to `agent-adapter.default` against the
+       current base.
      → Do NOT build a new agent from scratch for an I/O mismatch, and do NOT
        keep hand-remapping the payload on every spawn.
 

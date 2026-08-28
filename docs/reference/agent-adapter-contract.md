@@ -141,6 +141,12 @@ This enables:
 - Debugging: understand why a wrapper was created
 - Audit: timestamp and schema diff summary for governance
 
+Consumers (#1202): `agent_list` and `agent_inspect` surface the provenance plus a
+computed `stale_base` verdict (the base was re-promoted or removed since
+generation — regenerate the wrapper); `agent_revision_promote`'s P-2.25 card
+gains a `derived_from` section with the capability delta *vs the base*. All
+advisory — nothing blocks a spawn or promotion on these signals.
+
 The block is **contract-classified** for federation carry-forward (like
 `middleware`): changing provenance voids a carry, because it names what the
 gates verified against. An absent `base_revision_digest` means unknown at
