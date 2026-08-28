@@ -27,17 +27,23 @@ Four classes, ordered by decreasing redaction:
 | Class | Who | What they see |
 |---|---|---|
 | `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. `SandboxExec.command` is blanked too (issue #158, fixed by PR #160): shell strings routinely embed secrets, and an approving agent retains the shape it needs via `detected_hosts`, `dependencies` and `requires_approval`. This is exactly what the `Decider` row below relaxes, for an agent that has been seated to judge the command rather than merely to see that one exists. |
-| `Decider` | An agent holding an **active decider appointment** over the run whose gate it is reading (#1194). | **Operator-shaped, secrets masked in place.** It sees the command it is being asked to judge — which `Agent` blanks — but `redact_embedded_secrets` rewrites bearer tokens, env-var assignments and URL query secrets inside it. Composed on top of the `Operator` path, so it can never exceed operator disclosure. Resolved per *gate*, not per caller: the same agent reading a gate outside its appointment is `Agent`. |
-| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` (Bearer headers, env-var assignments, URL query secrets are masked; surrounding prose preserved). Commands, hosts, request shapes are visible for triage. |
+| `Decider` | An agent holding an **active decider appointment** over the run whose gate it is reading (#1194). | **Operator-shaped, secrets masked in place.** It sees the command it is being asked to judge — which `Agent` blanks — but `redact_embedded_secrets` rewrites bearer tokens, env-var assignments and URL query secrets inside it. Delegates to the `Operator` path, so it can never exceed operator disclosure and is currently identical to it. Kept as its own class because the two mask for independent reasons (see below) — but the variant is a seam for future divergence, not an enforcement of it. Resolved per *gate*, not per caller: the same agent reading a gate outside its appointment is `Agent`. |
+| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings — including `SandboxExec.command`, `WriteFile.content` and the URL on `CredentialRequest` / `WebFetch` / `WebCall` — get precise in-place masking via `redact_embedded_secrets` (Bearer headers, env-var assignments, URL query secrets are masked; surrounding prose preserved). Commands, hosts and request shapes stay visible for triage: **reading the command is not the same as reading the credential inside it.** |
 | `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the P-4.14 redaction-before-write invariant — see [P-4.14 and `RedactedPayload`](#p-414-and-redactedpayload). |
 
-**Why `Decider` masks what `Operator` does not.** It is not a hedge against
-the appointee; it follows from a property the seat already has. A decider's
-reads are recorded on the causal chain — that is what makes an agent occupant
+**Why `Decider` exists even though it currently matches `Operator`.** The two
+mask for independent reasons. The operator, so a human reviewing a gate is not
+shown credentials they have no need for. The decider, because its reads are
+recorded on the causal chain — that is what makes an agent occupant
 interrogable at all, and it is the argument for letting one hold the seat — and
 its context is checkpointed and replayable. A human operator holding a secret in
-their eyes leaves no copy; an LLM holding one leaves several. So the seat gets
-parity on *what it must judge* without parity on *what it need not retain*.
+their eyes leaves no copy; an LLM holding one leaves several.
+
+Today `redact_for_decider` delegates to the operator path, so the two are
+identical and a relaxation of one would relax the other. The separate variant is
+a **seam, not an enforcement**: it marks where a divergence would be written if
+the operator view is ever widened. Nothing holds them apart until someone uses
+it.
 
 The class is conferred by the appointment, never by the agent identity, which is
 what makes revocation real: nothing was held by the agent to take back. See
