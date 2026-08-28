@@ -143,18 +143,13 @@ impl CausalEventRecord {
     pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
         match viewer {
             super::disclosure::ViewerClass::Admin => self.clone(),
-            super::disclosure::ViewerClass::Operator => {
-                let mut out = self.clone();
-                if let Some(ref payload) = self.payload {
-                    out.payload = Some(redact_json_string(payload));
-                }
-                out.payload_ref = None;
-                out
-            }
-            // A decider reads events to judge them; `redact_json_string` is the
-            // same in-place masking the operator path uses, so the payload
-            // stays legible without carrying secrets into a recorded context.
-            super::disclosure::ViewerClass::Decider => {
+            // A decider reads events to judge them, and `redact_json_string`
+            // is already the in-place masking the operator gets — so the two
+            // share an arm rather than two identical ones that could drift.
+            // (`ScheduledAction` does *not* share: there the decider needs the
+            // extra text masking the operator does not.)
+            super::disclosure::ViewerClass::Operator
+            | super::disclosure::ViewerClass::Decider => {
                 let mut out = self.clone();
                 if let Some(ref payload) = self.payload {
                     out.payload = Some(redact_json_string(payload));

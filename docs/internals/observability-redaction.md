@@ -4,7 +4,6 @@ How the gateway controls what shows up in observability surfaces — execution t
 
 This doc covers `ViewerClass` (the per-actor mechanism introduced in PR #143). It is distinct from, and composes with, the older `DisclosureClass` mechanism (which controls what an LLM may quote back to a user). See [Relationship to `DisclosureClass`](#relationship-to-disclosureclass) below.
 
-> **Status note.** One in-flight item: PR #160 fixes the `SandboxExec.command` leak to `ViewerClass::Agent` (issue #158). Until it lands, the `Agent` cell for that field reads "identity" — the table below calls this out inline.
 
 ---
 
@@ -27,7 +26,7 @@ Four classes, ordered by decreasing redaction:
 
 | Class | Who | What they see |
 |---|---|---|
-| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. *Note: `SandboxExec.command` for approval subjects is currently preserved verbatim — see issue #158, fixed by PR #160.* |
+| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. `SandboxExec.command` is blanked too (issue #158, fixed by PR #160): shell strings routinely embed secrets, and an approving agent retains the shape it needs via `detected_hosts`, `dependencies` and `requires_approval`. This is exactly what the `Decider` row below relaxes, for an agent that has been seated to judge the command rather than merely to see that one exists. |
 | `Decider` | An agent holding an **active decider appointment** over the run whose gate it is reading (#1194). | **Operator-shaped, secrets masked in place.** It sees the command it is being asked to judge — which `Agent` blanks — but `redact_embedded_secrets` rewrites bearer tokens, env-var assignments and URL query secrets inside it. Composed on top of the `Operator` path, so it can never exceed operator disclosure. Resolved per *gate*, not per caller: the same agent reading a gate outside its appointment is `Agent`. |
 | `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` (Bearer headers, env-var assignments, URL query secrets are masked; surrounding prose preserved). Commands, hosts, request shapes are visible for triage. |
 | `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the P-4.14 redaction-before-write invariant — see [P-4.14 and `RedactedPayload`](#p-414-and-redactedpayload). |

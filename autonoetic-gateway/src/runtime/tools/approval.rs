@@ -109,27 +109,26 @@ impl NativeTool for ApprovalListTool {
         let root_sid = crate::runtime::content_store::root_session_id(sid);
 
         let pending = store.get_pending_approvals_for_root(root_sid)?;
-        // A seated decider is listing the gates it was appointed to rule on,
-        // which are by definition *other agents'* gates — so the own-gates
-        // filter would show it nothing. R-10.7 still applies at decide time;
-        // this only widens what it can read.
-        let seated = crate::decider_appointment::agent_is_appointed_for_scope(
+        // Every approval on this path belongs to `root_sid`, so the class is
+        // the same for all of them — resolved once rather than re-queried per
+        // row (which would also re-log per row on a store error). `seated` is
+        // derived from the class rather than queried separately, keeping
+        // `viewer_class_for_gate` the single source of truth for what an
+        // appointment confers.
+        let viewer = crate::decider_appointment::viewer_class_for_gate(
             store.as_ref(),
             &manifest.agent.id,
             root_sid,
-        )
-        .unwrap_or(false);
+        );
+        // A seated decider is listing the gates it was appointed to rule on,
+        // which are by definition *other agents'* gates — so the own-gates
+        // filter would show it nothing. R-10.7 and the appointment-provenance
+        // condition still gate deciding; this only widens what it can read.
+        let seated = viewer == autonoetic_types::disclosure::ViewerClass::Decider;
         let mine: Vec<_> = pending
             .iter()
             .filter(|r| seated || r.agent_id == manifest.agent.id)
-            .map(|r| {
-                let viewer = crate::decider_appointment::viewer_class_for_gate(
-                    store.as_ref(),
-                    &manifest.agent.id,
-                    &r.session_id,
-                );
-                approval_summary_for_viewer(r, viewer)
-            })
+            .map(|r| approval_summary_for_viewer(r, viewer))
             .collect();
 
         let decision_info = match store.get_approved_approvals_for_session(sid) {
@@ -139,14 +138,7 @@ impl NativeTool for ApprovalListTool {
                     (seated || r.agent_id == manifest.agent.id) && r.decided_at.is_some()
                 })
                 .take(5)
-                .map(|r| {
-                    let viewer = crate::decider_appointment::viewer_class_for_gate(
-                        store.as_ref(),
-                        &manifest.agent.id,
-                        &r.session_id,
-                    );
-                    approval_summary_for_viewer(r, viewer)
-                })
+                .map(|r| approval_summary_for_viewer(r, viewer))
                 .collect(),
             Err(_) => Vec::new(),
         };
