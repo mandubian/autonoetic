@@ -530,6 +530,7 @@ impl ScheduledAction {
         match viewer {
             super::disclosure::ViewerClass::Admin => self.clone(),
             super::disclosure::ViewerClass::Operator => self.redact_for_operator(),
+            super::disclosure::ViewerClass::Decider => self.redact_for_decider(),
             super::disclosure::ViewerClass::Agent => self.redact_for_agent(),
         }
     }
@@ -554,6 +555,48 @@ impl ScheduledAction {
                 payload: payload.as_ref().map(|p| Self::redact_json_value(p, super::disclosure::ViewerClass::Operator)),
             },
             other => other.clone(),
+        }
+    }
+
+    /// Operator-shaped, then embedded secrets masked in the free-text fields
+    /// the operator class passes through raw.
+    ///
+    /// Composed on top of `redact_for_operator` rather than restated, so it
+    /// cannot drift *below* operator disclosure if that path tightens later.
+    /// The masking is `redact_embedded_secrets`, which rewrites bearer tokens,
+    /// env-var assignments and URL query secrets in place — the command stays
+    /// judgeable, which is the whole reason the seat needs more than `Agent`.
+    fn redact_for_decider(&self) -> Self {
+        match self.redact_for_operator() {
+            Self::SandboxExec {
+                command,
+                dependencies,
+                requires_approval,
+                evidence_ref,
+                detected_hosts,
+                intent,
+            } => Self::SandboxExec {
+                command: super::redaction::redact_embedded_secrets(&command),
+                dependencies,
+                requires_approval,
+                evidence_ref,
+                detected_hosts,
+                intent,
+            },
+            Self::WriteFile {
+                path,
+                content,
+                requires_approval,
+                evidence_ref,
+            } => Self::WriteFile {
+                path,
+                content: super::redaction::redact_embedded_secrets(&content),
+                requires_approval,
+                evidence_ref,
+            },
+            // Every other variant either carries no free text of its own or
+            // was already masked by the operator path (CredentialRequest).
+            other => other,
         }
     }
 
@@ -1485,6 +1528,69 @@ mod redaction_tests {
     }
 
     // ── Helper visibility ────────────────────────────────────────────────
+
+    // ── ViewerClass::Decider (#1194) ────────────────────────────────────
+
+    #[test]
+    fn decider_class_sees_the_command_agent_class_blanks() {
+        // The whole reason the seat needs more than Agent: judging
+        // "***REDACTED***" is not judging.
+        let agent = sandbox_exec_benign().redact_for_viewer(ViewerClass::Agent);
+        let decider = sandbox_exec_benign().redact_for_viewer(ViewerClass::Decider);
+        let ScheduledAction::SandboxExec { command: agent_cmd, .. } = agent else {
+            panic!("expected SandboxExec");
+        };
+        let ScheduledAction::SandboxExec { command: decider_cmd, .. } = decider else {
+            panic!("expected SandboxExec");
+        };
+        assert_eq!(agent_cmd, ScheduledAction::REDACTED);
+        assert_eq!(decider_cmd, "ls -la /tmp");
+    }
+
+    #[test]
+    fn decider_class_masks_secrets_inside_the_command_it_can_read() {
+        // Parity on what it must judge, not on what it need not retain: a
+        // decider's reads are causal-chained and its context is checkpointed,
+        // so a bearer token in view is a bearer token on the record.
+        let decider =
+            sandbox_exec_with_secret_bearing_command().redact_for_viewer(ViewerClass::Decider);
+        let ScheduledAction::SandboxExec { command, .. } = decider else {
+            panic!("expected SandboxExec");
+        };
+        assert!(
+            command.contains("curl"),
+            "the shape of the command must survive: {command}"
+        );
+        assert!(
+            !command.contains("eyJhbGc.foo"),
+            "the bearer token must not: {command}"
+        );
+    }
+
+    #[test]
+    fn decider_class_masks_secrets_in_written_content() {
+        let decider = write_file_with_secrets().redact_for_viewer(ViewerClass::Decider);
+        let ScheduledAction::WriteFile { content, path, .. } = decider else {
+            panic!("expected WriteFile");
+        };
+        assert_eq!(path, "/tmp/keys.txt");
+        assert!(!content.contains("hunter2"), "secret leaked: {content}");
+    }
+
+    #[test]
+    fn decider_class_never_exceeds_operator_on_credentials() {
+        // Composed on top of the operator path, so credential material stays
+        // masked exactly as it is for the human it stands in for.
+        let decider = credential_request_with_secrets().redact_for_viewer(ViewerClass::Decider);
+        let operator = credential_request_with_secrets().redact_for_viewer(ViewerClass::Operator);
+        // Compared as values, not as serialized strings: `headers` is a
+        // HashMap, so JSON key order is not stable between two independently
+        // built maps and a string compare flakes under parallel test runs.
+        assert_eq!(
+            decider, operator,
+            "credential disclosure must match the operator's"
+        );
+    }
 
     #[test]
     fn looks_like_secret_value_recognises_documented_patterns() {

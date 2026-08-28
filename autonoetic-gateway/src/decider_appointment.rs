@@ -225,6 +225,38 @@ pub fn agent_is_appointed_for_scope(
         .any(|a| a.decider_agent == agent_id && !a.is_expired(&now)))
 }
 
+/// The disclosure class an agent gets when viewing a gate in `gate_session_id`.
+///
+/// `Decider` when the agent holds an active appointment over that run,
+/// `Agent` otherwise. Resolved per *gate*, not per caller: the same agent
+/// listing gates from two runs gets two different classes, because the read
+/// right belongs to the seat and not to the identity. That is also what makes
+/// revocation real — nothing was ever held by the agent to take back.
+///
+/// Errors resolve to `Agent`: a store failure must widen nobody's view.
+pub fn viewer_class_for_gate(
+    store: &GatewayStore,
+    agent_id: &str,
+    gate_session_id: &str,
+) -> autonoetic_types::disclosure::ViewerClass {
+    use autonoetic_types::disclosure::ViewerClass;
+    let root = crate::runtime::content_store::root_session_id(gate_session_id);
+    match agent_is_appointed_for_scope(store, agent_id, root) {
+        Ok(true) => ViewerClass::Decider,
+        Ok(false) => ViewerClass::Agent,
+        Err(e) => {
+            tracing::warn!(
+                target: "decider_appointment",
+                agent_id = %agent_id,
+                gate_session_id = %gate_session_id,
+                error = %e,
+                "Failed to resolve appointment for disclosure; falling back to agent class"
+            );
+            ViewerClass::Agent
+        }
+    }
+}
+
 fn held_gate_kinds(capabilities: &[Capability]) -> Vec<String> {
     capabilities
         .iter()

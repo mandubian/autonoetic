@@ -26,6 +26,22 @@ use serde::{Deserialize, Serialize};
 pub enum ViewerClass {
     /// Agent viewing via observability/approval tools.
     Agent,
+    /// An agent holding an **active decider appointment** over the run it is
+    /// viewing (#1194). Operator-shaped disclosure — it sees the command it is
+    /// being asked to judge, which `Agent` blanks — but with embedded secrets
+    /// masked in place.
+    ///
+    /// The masking is not a hedge against the decider; it follows from a
+    /// property the seat already has. A decider's reads are recorded on the
+    /// causal chain (that is what makes an agent occupant interrogable at all),
+    /// and its context is checkpointed and replayable. A human operator holding
+    /// a secret in their eyes leaves no copy; an LLM holding one leaves several.
+    /// So the seat gets parity on *what it must judge* without parity on *what
+    /// it need not retain*.
+    ///
+    /// Ranks between `Agent` and `Operator`: strictly more than an ordinary
+    /// agent, strictly less than the human it stands in for.
+    Decider,
     /// Human operator via CLI / chat TUI.
     #[default]
     Operator,
