@@ -671,8 +671,11 @@
       activeGrants.clear();
       activePlanData = null;
       lastGrantsData = null;
+      pollFailures.grants = pollFailures.labels = pollFailures.activity = 0;
       document.getElementById('grants-panel-body').innerHTML = '<div class="text-center text-slate-500 py-6">Loading live grants...</div>';
       document.getElementById('labels-panel-body').classList.add('hidden');
+      document.getElementById('labels-panel-body').innerHTML = '';
+      document.getElementById('grants-tab-badge').classList.add('hidden');
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -767,10 +770,18 @@
       document.getElementById('estop-btn').classList.add('hidden');
       document.getElementById('header-gate-alert').classList.add('hidden');
       document.getElementById('llm-activity-strip').classList.add('hidden');
+      document.getElementById('llm-activity-strip').innerHTML = '';
       credentialPromptCtx = null;
       sessionPaused = false;
       updatePauseBtn();
       lastGrantsData = null;
+      // Drop the previous session's grants/labels views — stale taint data
+      // must never survive a disconnect or session switch.
+      document.getElementById('grants-panel-body').innerHTML = '<div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>';
+      document.getElementById('labels-panel-body').classList.add('hidden');
+      document.getElementById('labels-panel-body').innerHTML = '';
+      document.getElementById('grants-tab-badge').classList.add('hidden');
+      pollFailures.grants = pollFailures.labels = pollFailures.activity = 0;
       
       eventList = [];
       activityList = [];
@@ -872,6 +883,20 @@
 
     // ── Live grants (mirrors the TUI G panel: grants.list + per-row revoke) ──
 
+    // Fail-visible panel state: a read error must never look like "no
+    // grants / no labels" and must not keep stale data rendered as current.
+    // One transient blip keeps the last render (TUI parity: a gateway blip
+    // never crashes the view); two consecutive failures replace it with an
+    // explicit error state.
+    function renderPanelError(divId, msg) {
+      const div = document.getElementById(divId);
+      if (!div) return;
+      div.innerHTML = `<div class="p-2.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed font-mono text-[10px]">⚠ ${escapeHTML(msg)} — data hidden, retrying on next refresh</div>`;
+      div.classList.remove('hidden');
+    }
+
+    const pollFailures = { grants: 0, labels: 0, activity: 0 };
+
     async function fetchGrants() {
       const { sid, secret, baseURL } = getConnectInfo();
       if (!sid || !secret) return;
@@ -885,13 +910,18 @@
           })
         });
         const json = await resp.json();
-        if (json.error) { console.warn('grants.list failed:', json.error.message); return; }
-        if (json && json.result) {
-          lastGrantsData = json.result;
-          renderGrantsPanel(json.result);
+        if (json.error) throw new Error(json.error.message);
+        pollFailures.grants = 0;
+        lastGrantsData = json.result;
+        renderGrantsPanel(json.result);
+        updateHUD();
+      } catch (e) {
+        if (++pollFailures.grants >= 2) {
+          lastGrantsData = null;
+          renderPanelError('grants-panel-body', `grants.list failed: ${e.message}`);
           updateHUD();
         }
-      } catch (e) {}
+      }
     }
 
     function sinksLabelName(sinks) {
@@ -1071,9 +1101,14 @@
           })
         });
         const json = await resp.json();
-        if (json.error) { console.warn('labels.list failed:', json.error.message); return; }
-        if (json && json.result) renderLabelsPanel(json.result);
-      } catch (e) {}
+        if (json.error) throw new Error(json.error.message);
+        pollFailures.labels = 0;
+        renderLabelsPanel(json.result);
+      } catch (e) {
+        if (++pollFailures.labels >= 2) {
+          renderPanelError('labels-panel-body', `labels.list failed: ${e.message}`);
+        }
+      }
     }
 
     function labelRowHTML(id, summary, labelName, detail) {
@@ -1136,8 +1171,19 @@
           })
         });
         const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        pollFailures.activity = 0;
         if (json && json.result) renderLlmActivity(json.result.streams || []);
-      } catch (e) {}
+      } catch (e) {
+        // The strip is a "right now" view: a single blip keeps the last
+        // render (streams vanish on their own), but two consecutive
+        // failures must not keep presenting stale streams as live.
+        if (++pollFailures.activity >= 2) {
+          const strip = document.getElementById('llm-activity-strip');
+          strip.innerHTML = `<div class="text-[10px] font-mono text-accentRed/80">⚠ llm.activity unavailable (${escapeHTML(e.message)}) — stream state hidden</div>`;
+          strip.classList.remove('hidden');
+        }
+      }
     }
 
     function renderLlmActivity(streams) {
