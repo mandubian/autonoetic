@@ -14,6 +14,7 @@ mod remote_access_any_preapproval;
 mod inspect;
 mod install_approval_e2e;
 mod install_smoke_test_gate;
+mod message_midturn_delivery;
 mod messaging;
 mod singleton_dedup;
 mod suspend_rpc;
