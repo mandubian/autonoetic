@@ -703,7 +703,6 @@
       document.getElementById('estop-btn').classList.remove('hidden');
       sessionPaused = false;
       updatePauseBtn();
-      document.getElementById('pause-btn').classList.remove('hidden');
 
       // Live grants bootstrap + polling (mirrors the TUI G panel refresh loop)
       fetchGrants();
@@ -748,7 +747,6 @@
       document.getElementById('connect-btn').innerText = 'Connect';
       document.getElementById('send-btn').disabled = true;
       document.getElementById('estop-btn').classList.add('hidden');
-      document.getElementById('pause-btn').classList.add('hidden');
       document.getElementById('header-gate-alert').classList.add('hidden');
       sessionPaused = false;
       updatePauseBtn();
@@ -922,6 +920,14 @@
     }
 
     function grantRowHTML(kind, id, summary, detail, agentId) {
+      // Coerce the server-provided id: it is embedded in an inline handler,
+      // so only a non-negative integer is accepted. Anything else renders the
+      // row without a working revoke (the CLI `gateway grants revoke` remains
+      // the fallback) rather than injecting raw values into the attribute.
+      const numId = Number(id);
+      const revokeBtn = (Number.isInteger(numId) && numId >= 0)
+        ? `<button onclick="revokeGrant('${kind}', ${numId}, this)" class="bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/25 text-accentRed font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">Revoke</button>`
+        : '<button disabled title="non-numeric grant id — revoke via CLI" class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 cursor-not-allowed">Revoke</button>';
       return `
         <div class="p-2.5 rounded-lg border border-slate-800 bg-slate-900/40 flex items-center justify-between gap-3">
           <div class="flex-1 min-w-0">
@@ -931,7 +937,7 @@
             </div>
             <div class="text-[9px] font-mono text-slate-500 mt-1">${escapeHTML(detail)}${agentId ? ` · agent ${escapeHTML(agentId)}` : ''}</div>
           </div>
-          <button onclick="revokeGrant('${kind}', ${id}, this)" class="bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/25 text-accentRed font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">Revoke</button>
+          ${revokeBtn}
         </div>
       `;
     }
@@ -1035,12 +1041,16 @@
     function updatePauseBtn() {
       const btn = document.getElementById('pause-btn');
       if (!btn) return;
+      // Visibility is derived from the connection state, never baked into the
+      // style branch — otherwise resuming (or resume-on-message) would hide
+      // the button again while still connected.
+      const vis = isConnected ? '' : ' hidden';
       if (sessionPaused) {
         btn.innerHTML = '<span>⏵</span> Resume';
-        btn.className = 'bg-accentGreen/90 hover:bg-accentGreen active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5';
+        btn.className = 'bg-accentGreen/90 hover:bg-accentGreen active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
       } else {
         btn.innerHTML = '<span>⏸</span> Pause';
-        btn.className = 'bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5';
+        btn.className = 'bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
       }
     }
 
