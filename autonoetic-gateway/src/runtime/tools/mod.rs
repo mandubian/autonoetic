@@ -1494,6 +1494,7 @@ mod tests {
     ) -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1732,6 +1733,7 @@ mod tests {
         let registry = default_registry();
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1830,6 +1832,7 @@ mod tests {
         let registry = default_registry();
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1970,6 +1973,7 @@ mod tests {
     fn test_dependency_plan_from_args_or_lock_explicit_deps_override() {
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -2027,6 +2031,7 @@ mod tests {
     fn test_dependency_plan_from_args_or_lock_no_lock_file_returns_none() {
         let manifest = AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),

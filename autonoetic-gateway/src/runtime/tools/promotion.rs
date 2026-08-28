@@ -741,6 +741,7 @@ mod promotion_gate_exec_tests {
     fn base_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),

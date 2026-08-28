@@ -619,6 +619,7 @@ async fn handle_propose_code_fix(
     // Build shared manifest, policy, and tool once (constant across sessions)
     let manifest = AgentManifest {
         remote_access: None,
+        messaging: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             mounts: Vec::new(),
@@ -798,6 +799,7 @@ fn run_ab_replay(
 ) -> anyhow::Result<serde_json::Value> {
     let manifest = AgentManifest {
         remote_access: None,
+        messaging: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             mounts: Vec::new(),
@@ -915,6 +917,7 @@ fn run_ab_replay(
 fn promote_manifest() -> AgentManifest {
     AgentManifest {
         remote_access: None,
+        messaging: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             mounts: Vec::new(),

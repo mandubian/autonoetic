@@ -562,6 +562,34 @@ impl SecurityAnalyzer {
     }
 }
 
+/// Match an agent id against a list of agent-id patterns.
+///
+/// A trailing `*` makes the pattern a prefix (`watchdog.*` reaches
+/// `watchdog.default`); `*` alone matches everything. A pattern with **no**
+/// trailing `*` is **exact**.
+///
+/// That last clause is the fix. The previous rule was
+/// `target.starts_with(pattern.trim_end_matches('*'))`, which made every
+/// pattern a prefix whether or not it asked to be: `["auditor"]` reached
+/// `auditorX.malicious`, and `["coder.default"]` reached `coder.default.evil`.
+/// A grant that names one agent must mean that agent — the wildcard is how you
+/// ask for a family, and the codebase already draws this line for authority
+/// grants (`AuthorityOp::patterns_allow`, which refuses `*` and prefixes
+/// outright). Empty and whitespace-only patterns match nothing rather than
+/// collapsing to the empty prefix, which would silently mean "all".
+fn patterns_match_agent_id(patterns: &[String], target_agent: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return false;
+        }
+        match pattern.strip_suffix('*') {
+            Some(prefix) => target_agent.starts_with(prefix),
+            None => pattern == target_agent,
+        }
+    })
+}
+
 /// Validates requested actions against the Agent's configured capabilities.
 pub struct PolicyEngine {
     manifest: AgentManifest,
@@ -742,19 +770,38 @@ impl PolicyEngine {
         })
     }
 
-    /// Check if the agent is allowed to message a target agent.
+    /// Check if the agent is allowed to message a target agent (sender side).
     pub fn can_message_agent(&self, target_agent: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::AgentMessage { patterns } = cap {
-                for pattern in patterns {
-                    let prefix = pattern.trim_end_matches('*');
-                    if target_agent.starts_with(prefix) {
-                        return PolicyDecision::allow("P-11.5");
-                    }
+                if patterns_match_agent_id(patterns, target_agent) {
+                    return PolicyDecision::allow("P-11.5");
                 }
             }
         }
         PolicyDecision::deny("P-11.5")
+    }
+
+    /// Whether *this* manifest's owner accepts an inbound peer message from
+    /// `sender_agent_id` (receiver side of P-11.5).
+    ///
+    /// The sender-side ACL above asks only "may I address them". It cannot
+    /// express "they may not be addressed by me", which is the boundary that
+    /// matters for a role whose verdict gates the sender. Callers must
+    /// evaluate this against the *receiving* agent's manifest — a
+    /// `PolicyEngine` built from the sender proves nothing here.
+    ///
+    /// A manifest with no `messaging` section is open, so every bundle that
+    /// predates the field behaves exactly as before.
+    pub fn accepts_peer_message_from(&self, sender_agent_id: &str) -> PolicyDecision {
+        let Some(messaging) = self.manifest.messaging.as_ref() else {
+            return PolicyDecision::allow("P-11.5");
+        };
+        if patterns_match_agent_id(&messaging.accepts_from, sender_agent_id) {
+            PolicyDecision::allow("P-11.5")
+        } else {
+            PolicyDecision::deny("P-11.5")
+        }
     }
 
     pub fn can_agent_revision(&self, target: &str) -> PolicyDecision {
@@ -988,6 +1035,7 @@ mod tests {
     fn manifest_with_caps(capabilities: Vec<Capability>) -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),
@@ -1494,5 +1542,76 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
         assert!(!policy.can_decide_gate("approval").is_allowed());
+    }
+
+    // ── agent-id pattern matching (P-11.5) ──────────────────────────────────
+    //
+    // The old rule was `target.starts_with(pattern.trim_end_matches('*'))`, so
+    // every pattern behaved as a prefix and a blank one meant "all".
+
+    #[test]
+    fn bare_pattern_matches_only_that_exact_agent() {
+        assert!(patterns_match_agent_id(
+            &["auditor.default".to_string()],
+            "auditor.default"
+        ));
+        assert!(!patterns_match_agent_id(
+            &["auditor.default".to_string()],
+            "auditor.default.evil"
+        ));
+        assert!(!patterns_match_agent_id(&["auditor".to_string()], "auditorX"));
+        assert!(!patterns_match_agent_id(
+            &["auditor".to_string()],
+            "auditor.default"
+        ));
+    }
+
+    #[test]
+    fn trailing_star_is_a_prefix_and_bare_star_is_everything() {
+        assert!(patterns_match_agent_id(
+            &["watchdog.*".to_string()],
+            "watchdog.default"
+        ));
+        assert!(!patterns_match_agent_id(
+            &["watchdog.*".to_string()],
+            "watchdog-fast.default"
+        ));
+        assert!(patterns_match_agent_id(&["*".to_string()], "anything.at.all"));
+    }
+
+    #[test]
+    fn blank_patterns_match_nothing() {
+        for bad in ["", "   "] {
+            assert!(
+                !patterns_match_agent_id(&[bad.to_string()], "any.agent"),
+                "blank pattern {bad:?} must not act as a wildcard"
+            );
+        }
+        assert!(!patterns_match_agent_id(&[], "any.agent"));
+    }
+
+    #[test]
+    fn receiver_consent_defaults_open_and_honours_an_empty_list() {
+        let mut manifest = AgentManifest::default();
+        assert!(
+            PolicyEngine::new(manifest.clone())
+                .accepts_peer_message_from("anyone")
+                .is_allowed(),
+            "a manifest with no messaging block must stay open"
+        );
+
+        manifest.messaging = Some(autonoetic_types::agent::MessagingPolicy {
+            accepts_from: vec![],
+        });
+        assert!(!PolicyEngine::new(manifest.clone())
+            .accepts_peer_message_from("anyone")
+            .is_allowed());
+
+        manifest.messaging = Some(autonoetic_types::agent::MessagingPolicy {
+            accepts_from: vec!["planner.*".to_string()],
+        });
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.accepts_peer_message_from("planner.default").is_allowed());
+        assert!(!policy.accepts_peer_message_from("coder.default").is_allowed());
     }
 }

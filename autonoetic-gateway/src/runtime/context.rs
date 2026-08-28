@@ -1207,6 +1207,7 @@ mod agentskills_bridging_tests {
     fn default_test_manifest() -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 mounts: Vec::new(),

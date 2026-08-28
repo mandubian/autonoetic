@@ -278,6 +278,9 @@ impl NativeTool for SkillInstallTool {
             // the parsed manifest now carries it, and canonicalization
             // re-emits it into the installed SKILL.md.
             remote_access: parsed_manifest.remote_access.clone(),
+            // Same carry-forward reasoning as `remote_access` above: a dropped
+            // `messaging` block silently reopens a closed inbox at install time.
+            messaging: parsed_manifest.messaging.clone(),
             version: parsed_manifest.version.clone(),
             runtime: parsed_manifest.runtime.clone(),
             agent: AgentIdentity {

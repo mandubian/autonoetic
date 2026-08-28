@@ -173,6 +173,7 @@ mod tests {
     fn minimal_manifest() -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 mounts: Vec::new(),

@@ -276,7 +276,7 @@ agents declare; constitution-named capabilities (cited by `P-*` / `Ri-*` in
 | `CodeExecution` | `patterns: [string]` | Execute command strings through `sandbox_exec` |
 | `ArtifactExecution` | none | Execute immutable artifact entrypoints through `artifact_exec` / `artifact_prepare` |
 | `AgentSpawn` | `max_children`, … | Create child agent sessions (P-1.7, P-7.9) |
-| `AgentMessage` | `patterns: [string]` | Send messages to other agents (P-11.5) |
+| `AgentMessage` | `patterns: [string]` | Send messages to other agents (P-11.5). Trailing `*` is a prefix; a bare pattern is exact. The receiver's `messaging.accepts_from` is the other half of the check — see [agent-messaging.md](reference/agent-messaging.md#receiver-side-consent) |
 | `BackgroundReevaluation` | `min_interval_secs`, `allow_reasoning` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
 | `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill_install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |

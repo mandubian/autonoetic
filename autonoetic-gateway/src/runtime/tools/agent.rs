@@ -1518,12 +1518,21 @@ no unfinished session other than yours), `target_session_finished` (that session
 ended — it will not wake again, so nothing was queued), `target_agent_not_found` (no agent with \
 that id is installed), `target_agent_unavailable` (the agent is installed but its manifest could \
 not be loaded — a broken bundle, not a missing one), `target_session_not_found` (that session id \
-has no agent binding, so the gateway cannot tell who owns it).\n\n\
+has no agent binding, so the gateway cannot tell who owns it), \
+`recipient_refuses_peer_messages` (that agent's manifest declines peer mail from you — see \
+below), `recipient_consent_unverifiable` (its manifest could not be read, so consent could not \
+be checked and nothing was queued).\n\n\
 A child session you spawned is usually finished by the time you would message it. If you need work \
 done, `agent_spawn`; `agent_message` only reaches a session that is still running.\n\n\
 Your `AgentMessage` capability `patterns` are enforced on the receiving agent's id in both \
 addressing modes — with `target_session_id` the gateway resolves the session's bound agent and \
-checks that. A session id does not widen your grant."
+checks that. A session id does not widen your grant. A pattern ending in `*` is a prefix \
+(`watchdog.*`); a pattern without one names exactly that agent.\n\n\
+Your grant is only half the check. The receiving agent's manifest declares who may write to it \
+(`messaging.accepts_from`), and a role whose verdict gates your work — evaluators, the security \
+sentinel, the auditor, the ombudsman — refuses peer mail outright. That is a boundary, not a \
+bug to route around: raise the point through the workflow or the operator, and do not retry the \
+send or look for another id that reaches the same office."
                     .to_string(),
             },
             GuidanceBlock {
@@ -1753,6 +1762,67 @@ important signals (progress reports, divergence findings, status updates from sp
             }
         }
 
+        // Receiver-side consent (P-11.5, R-10.7 analogue).
+        //
+        // The sender-side ACL cannot express "this role may not be addressed by
+        // you" — the boundary that matters for an evaluator, sentinel, auditor
+        // or ombudsman whose verdict gates the sender. Both addressing modes
+        // converge on `acl_target_agent_id`, so one check covers a direct send
+        // and a role broadcast alike.
+        //
+        // Evaluated against the *receiving* agent's manifest: `policy` here
+        // belongs to the sender and proves nothing about consent.
+        //
+        // Deliberately placed AFTER target resolution. Run earlier, it
+        // pre-empted the existing diagnostics — a message to a nonexistent or
+        // broken agent came back "consent unverifiable" instead of
+        // `target_agent_not_found` / `target_agent_unavailable`, which is a
+        // strictly worse answer to a different question. By here the recipient
+        // is known to exist and to have at least one live session, so a load
+        // failure really is a consent problem.
+        if sender_agent_id != acl_target_agent_id {
+            match load_receiving_agent_policy(&acl_target_agent_id, config, &store) {
+                Ok(target_policy) => {
+                    let consent = target_policy.accepts_peer_message_from(&sender_agent_id);
+                    if !consent.is_allowed() {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "status": "recipient_refuses_peer_messages",
+                            "target_agent_id": acl_target_agent_id,
+                            "recipients_count": 0,
+                            "message": format!(
+                                "Agent '{}' does not accept peer messages from '{}' \
+                                 (its manifest declares `messaging.accepts_from`). Nothing was \
+                                 queued. A role whose verdict gates other agents is not \
+                                 addressable by the parties it judges — route through the \
+                                 operator or the workflow instead.",
+                                acl_target_agent_id, sender_agent_id
+                            ),
+                        })
+                        .to_string());
+                    }
+                }
+                Err(e) => {
+                    // Fail closed. Consent is unverifiable, and the alternative
+                    // is to deliver into a manifest that may well be the one
+                    // refusing. The sender is told plainly rather than getting
+                    // a `delivered` it cannot trust.
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "status": "recipient_consent_unverifiable",
+                        "target_agent_id": acl_target_agent_id,
+                        "recipients_count": 0,
+                        "message": format!(
+                            "Could not load agent '{}' to check whether it accepts peer \
+                             messages, so nothing was queued: {}",
+                            acl_target_agent_id, e
+                        ),
+                    })
+                    .to_string());
+                }
+            }
+        }
+
         let target_pattern = if let Some(ref s_id) = args.target_session_id {
             format!("session:{}", s_id)
         } else {
@@ -1802,6 +1872,42 @@ important signals (progress reports, divergence findings, status updates from sp
             "recipients_count": target_sessions.len()
         })
         .to_string())
+    }
+}
+
+/// Load the *receiving* agent's manifest so its `messaging.accepts_from` can
+/// be evaluated.
+///
+/// Alias/revision store first, ingest directory second — the same ordering the
+/// broadcast diagnostic below already uses, and for the same #1136 reason: an
+/// alias-installed agent has NO directory under `agents_dir`, so an
+/// ingest-only read reports a fully installed agent as missing. Here that
+/// would mean refusing every message to it.
+///
+/// The store is authoritative whenever an alias exists, which is always true
+/// of an agent with a live session — it had to resolve a revision to run. The
+/// ingest read is the fallback for bundles that were never promoted (dev and
+/// test workspaces seed `agents_dir` directly); it can only supply a manifest
+/// the store did not have, never override one it did.
+fn load_receiving_agent_policy(
+    agent_id: &str,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<PolicyEngine> {
+    let config = config.ok_or_else(|| {
+        anyhow::anyhow!("gateway config is unavailable, so recipient consent cannot be checked")
+    })?;
+    let gateway_dir = crate::execution::gateway_root_dir(config);
+    let repo = crate::agent::AgentRepository::from_config(config);
+    match repo.get_sync_from_store(agent_id, &gateway_dir, Some(store)) {
+        Ok(loaded) => Ok(PolicyEngine::new(loaded.manifest)),
+        Err(store_err) => match repo.load_unvetted_from_ingest_dir(agent_id) {
+            Ok(loaded) => Ok(PolicyEngine::new(loaded.manifest)),
+            Err(ingest_err) => Err(anyhow::anyhow!(
+                "no promoted revision ({store_err}) and no readable bundle in the ingest \
+                 directory ({ingest_err})"
+            )),
+        },
     }
 }
 

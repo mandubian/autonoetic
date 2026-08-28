@@ -2266,14 +2266,20 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         // declaration their designed manifest shipped — every later network
         // denial then read as missing_remote_access_declaration ("no
         // declaration exists") while the source clearly had one.
-        let remote_access_decl = file_map
+        //
+        // `messaging` is inherited from the same parse for the same reason: it
+        // is receiver-side consent, so dropping it at install time reopens an
+        // inbox the designed manifest had deliberately closed.
+        let (remote_access_decl, messaging_decl) = file_map
             .get("SKILL.md")
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|content| crate::runtime::parser::SkillParser::parse(content).ok())
-            .and_then(|(m, _)| m.remote_access);
+            .map(|(m, _)| (m.remote_access, m.messaging))
+            .unwrap_or((None, None));
 
         let target_manifest = AgentManifest {
             remote_access: remote_access_decl,
+            messaging: messaging_decl,
             version: "1.0".to_string(),
             runtime: crate::runtime::install_contract::default_runtime_declaration(),
             agent: AgentIdentity {
@@ -6212,6 +6218,7 @@ mod capability_lenient_deser_tests {
     fn test_manifest() -> AgentManifest {
         AgentManifest {
             remote_access: None,
+            messaging: None,
             version: "1.0".to_string(),
             runtime: crate::runtime::install_contract::default_runtime_declaration(),
             agent: AgentIdentity {

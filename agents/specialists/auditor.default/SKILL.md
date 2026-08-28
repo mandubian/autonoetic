@@ -16,6 +16,13 @@ metadata:
       name: "Auditor Default"
       description: "Reviews for correctness, risks, reproducibility, and serves as promotion gate for agent installs."
       singleton: true
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # it audits the agents that would be messaging it — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"

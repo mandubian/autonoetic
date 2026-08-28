@@ -15,6 +15,13 @@ metadata:
       id: "security_sentinel.default"
       name: "Security Sentinel"
       description: "Audits autonoetic's agents, artifacts, and gateway state for security issues. Produces structured SecurityFinding records. Never modifies state — read-only by capability profile."
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # it sweeps the work of the agents that would be messaging it — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: budget
     llm_overrides:
       temperature: 0.0

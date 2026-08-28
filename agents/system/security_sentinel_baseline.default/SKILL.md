@@ -15,6 +15,13 @@ metadata:
       id: "security_sentinel_baseline.default"
       name: "Security Sentinel Baseline"
       description: "Minimal, deterministic-heavy sentinel frozen in the gateway image. Runs Phase 1 checks only (no LLM). Provides a stable reference for detecting sentinel regression."
+    # Receiver-side consent (P-11.5). Closed to every agent principal because
+    # it sweeps the work of the agents that would be messaging it — an
+    # inbound peer message lands in this agent's context as user text, so an
+    # open inbox is a channel for the judged party to lobby its judge. The
+    # operator and the gateway are not peers and are unaffected.
+    messaging:
+      accepts_from: []
     llm_preset: haiku
     llm_overrides:
       temperature: 0.0

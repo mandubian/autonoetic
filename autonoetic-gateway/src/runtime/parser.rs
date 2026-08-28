@@ -77,6 +77,8 @@ struct AutonoeticMetadata {
     #[serde(default)]
     egress: Option<AgentEgressManifest>,
     #[serde(default)]
+    messaging: Option<autonoetic_types::agent::MessagingPolicy>,
+    #[serde(default)]
     remote_access:
         Option<std::boxed::Box<autonoetic_types::agent::RemoteAccessDeclaration>>,
 }
@@ -292,6 +294,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         open_web: meta.open_web.unwrap_or(false),
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
         egress: meta.egress,
+        messaging: meta.messaging,
         }
 }
 
@@ -1352,6 +1355,80 @@ metadata:
 "#;
         let (manifest, _body) = SkillParser::parse(content).expect("should parse");
         assert!(manifest.egress.is_none());
+    }
+
+    #[test]
+    fn test_parse_messaging_closed_inbox() {
+        let content = r#"---
+name: "judge-agent"
+description: "An adjudicating agent that takes no peer mail"
+metadata:
+  autonoetic:
+    agent:
+      id: "judge-agent"
+      name: "Judge"
+      description: "renders verdicts"
+    messaging:
+      accepts_from: []
+---
+# Judge
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let messaging = manifest.messaging.expect("messaging block should be parsed");
+        assert!(
+            messaging.accepts_from.is_empty(),
+            "an explicitly empty accepts_from must survive parsing as empty — \
+             falling back to the ['*'] default would silently reopen the inbox"
+        );
+    }
+
+    /// Absent ⇒ `None` ⇒ open. Every bundle predating the field depends on it.
+    #[test]
+    fn test_parse_messaging_absent_when_not_declared() {
+        let content = r#"---
+name: "plain-agent"
+description: "No messaging declaration"
+metadata:
+  autonoetic:
+    agent:
+      id: "plain-agent"
+      name: "Plain"
+      description: "no messaging"
+---
+# Plain
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.messaging.is_none());
+    }
+
+    /// A misspelled key must not be ignored into an open inbox.
+    ///
+    /// This is the whole reason `MessagingPolicy` carries `deny_unknown_fields`:
+    /// serde's default behaviour would drop `accept_from`, leave `accepts_from`
+    /// at `["*"]`, and publish an inbox the author believed was closed.
+    #[test]
+    fn test_parse_messaging_rejects_a_misspelled_key() {
+        let content = r#"---
+name: "typo-agent"
+description: "Meant to close its inbox but misspelled the key"
+metadata:
+  autonoetic:
+    agent:
+      id: "typo-agent"
+      name: "Typo"
+      description: "typo"
+    messaging:
+      accept_from: []
+---
+# Typo
+"#;
+        let err = SkillParser::parse(content)
+            .err()
+            .expect("a misspelled messaging key must be a hard parse error, not a silent default");
+        assert!(
+            err.to_string().contains("accept_from"),
+            "the error should name the offending key: {err}"
+        );
     }
 }
 

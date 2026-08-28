@@ -202,6 +202,65 @@ Draining every turn makes the wake notice an *optimisation* rather than the
 delivery mechanism: the pump's `event.ingest` still wakes a sleeping recipient
 promptly, but a running one no longer depends on waking at all.
 
+## Receiver-Side Consent
+
+`Capability::AgentMessage` is a **sender-side** grant. It answers "may I address
+them" and cannot express the other half — "you may not address me" — which is
+the half that matters for a role whose verdict gates the sender. An inbound
+message lands in the recipient's context as user text, under guidance telling it
+not to discard peer traffic, so an open inbox on an evaluator is a channel for
+the judged party to lobby its judge.
+
+A manifest declares who may write to it:
+
+```yaml
+metadata:
+  autonoetic:
+    messaging:
+      accepts_from: []          # closed to every agent principal
+      # accepts_from: ["planner.*"]   # or a specific correspondent set
+```
+
+Absent ⇒ open, which is what every bundle predating the field means. The
+gateway's own notices and operator-initiated traffic are not peers and are never
+filtered. An agent messaging another session of its **own** role is not subject
+to the check.
+
+Enforced in `AgentMessageTool` against the *receiving* agent's manifest —
+resolved alias-first, ingest-dir second (#1136) — after target resolution, so a
+nonexistent or broken recipient still reports `target_agent_not_found` /
+`target_agent_unavailable` rather than a consent error. Refusal is
+`recipient_refuses_peer_messages`; an unreadable recipient manifest is
+`recipient_consent_unverifiable`, and neither queues anything.
+
+`MessagingPolicy` carries `deny_unknown_fields`, and
+`validate_skill_frontmatter_shape` rejects a malformed block at install time.
+This is deliberate: every neighbouring manifest field fails toward *less* access
+when misread, but a dropped `messaging` block leaves `accepts_from` at its
+`["*"]` default and publishes an inbox its author believed was closed. A typo
+(`accept_from:`) is a hard error rather than a silent reopening.
+
+### Why declared, not inferred
+
+R-10.7 refuses a gate decider entangled with the party whose gate it decides,
+reasoning from the spawn tree because a gate names its session. Messaging has no
+such subject to reason from — and, decisively, the adjudicating bundles
+(`sealed_evaluator.default`, `static_evaluator.default`, `outcome-grader.default`,
+`security_sentinel.default`) declare **no** adjudicating capability at all. Their
+authority comes from where they sit in the promotion flow, not from anything the
+gateway can infer at send time, so a capability-derived rule would miss exactly
+the roles that need protecting.
+
+### Pattern matching
+
+Shared by both sides (`patterns_match_agent_id`): a trailing `*` is a prefix
+(`watchdog.*`), `*` alone matches everything, and a pattern **without** a
+trailing `*` is exact. Previously every pattern was a prefix whether it asked to
+be or not — `["auditor"]` reached `auditorX.malicious` and `["coder.default"]`
+reached `coder.default.evil` — and a blank entry trimmed to the empty prefix,
+silently meaning `*`. This mirrors the line `AuthorityOp::patterns_allow`
+already draws for authority grants.
+
 ## Tool Implementation
 
 `AgentMessageTool` (`agent_message`) is registered in the native tool registry
