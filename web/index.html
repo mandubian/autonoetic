@@ -157,6 +157,10 @@
         Connect
       </button>
 
+      <button id="pause-btn" onclick="togglePause()" class="bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
+        <span>⏸</span> Pause
+      </button>
+
       <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed/90 hover:bg-accentRed active:scale-95 text-white font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
         <span>🚨</span> E-Stop
       </button>
@@ -226,6 +230,9 @@
           </button>
           <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>📖</span> Wiki
+          </button>
+          <button id="tab-btn-grants" onclick="switchRightTab('grants')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>🔑</span> Grants <span id="grants-tab-badge" class="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
           </button>
         </div>
 
@@ -312,6 +319,23 @@
             <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-xs">
               <div class="text-center text-slate-500 py-4">No pages found.</div>
             </div>
+          </div>
+        </div>
+
+        <!-- Tab 5: Live Grants & Egress Posture (mirrors TUI G panel) -->
+        <div id="tab-content-grants" class="flex-1 flex flex-col overflow-hidden hidden">
+          <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between">
+            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <span>🔑</span> Live Grants & Egress Posture
+            </h2>
+            <div class="flex items-center gap-2">
+              <span id="grants-taint-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" title="Root session egress taint (absence ⇒ unrestricted)">taint: —</span>
+              <span id="grants-provider-badge" class="bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full hidden" title="Provider constraint (rung 1)">provider: —</span>
+              <button onclick="fetchGrants()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+            </div>
+          </div>
+          <div id="grants-panel-body" class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+            <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
           </div>
         </div>
       </div>
@@ -570,6 +594,9 @@
     let currentModalGateType = null;
     let activeGrants = new Set();
     let activePlanData = null;
+    let sessionPaused = false;
+    let lastGrantsData = null;
+    let grantsPollTimer = null;
 
     function getConnectInfo() {
       const sid = document.getElementById('session-input').value.trim();
@@ -635,6 +662,8 @@
       closedGates.clear();
       activeGrants.clear();
       activePlanData = null;
+      lastGrantsData = null;
+      document.getElementById('grants-panel-body').innerHTML = '<div class="text-center text-slate-500 py-6">Loading live grants...</div>';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -672,6 +701,13 @@
       connectBtn.innerText = 'Disconnect';
       document.getElementById('send-btn').disabled = false;
       document.getElementById('estop-btn').classList.remove('hidden');
+      sessionPaused = false;
+      updatePauseBtn();
+
+      // Live grants bootstrap + polling (mirrors the TUI G panel refresh loop)
+      fetchGrants();
+      if (grantsPollTimer) clearInterval(grantsPollTimer);
+      grantsPollTimer = setInterval(fetchGrants, 10000);
 
       // Timeline SSE Stream
       let lastEventId = eventList.length > 0 ? eventList[eventList.length - 1].event_id : null;
@@ -703,6 +739,7 @@
     function disconnect() {
       if (sseSource) { sseSource.close(); sseSource = null; }
       if (sseActivitySource) { sseActivitySource.close(); sseActivitySource = null; }
+      if (grantsPollTimer) { clearInterval(grantsPollTimer); grantsPollTimer = null; }
       isConnected = false;
       
       document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
@@ -711,6 +748,9 @@
       document.getElementById('send-btn').disabled = true;
       document.getElementById('estop-btn').classList.add('hidden');
       document.getElementById('header-gate-alert').classList.add('hidden');
+      sessionPaused = false;
+      updatePauseBtn();
+      lastGrantsData = null;
       
       eventList = [];
       activityList = [];
@@ -810,6 +850,230 @@
       } catch(e) {}
     }
 
+    // ── Live grants (mirrors the TUI G panel: grants.list + per-row revoke) ──
+
+    async function fetchGrants() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'grants-list', method: 'grants.list',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { console.warn('grants.list failed:', json.error.message); return; }
+        if (json && json.result) {
+          lastGrantsData = json.result;
+          renderGrantsPanel(json.result);
+          updateHUD();
+        }
+      } catch (e) {}
+    }
+
+    function sinksLabelName(sinks) {
+      // Mirrors tui.rs sinks_label_name: named display for common sink sets,
+      // fail-closed ("blocked") on an empty set.
+      if (!Array.isArray(sinks) || sinks.length === 0) return 'blocked';
+      const has = s => sinks.includes(s);
+      if (sinks.length === 7) return 'unrestricted';
+      if (!has('remote_model') && has('local_model') && has('network')) return 'no_remote_model';
+      if (!has('remote_model') && has('local_model') && !has('network') && sinks.length === 4) return 'local_only';
+      return `restricted(${sinks.length} sinks)`;
+    }
+
+    function renderGrantTargets(targets) {
+      // GrantTarget tagged enum: {"kind":"exact_host","value":"x"};
+      // host_and_port carries an object value {"host":…,"port":…}.
+      const parts = (targets || []).map(t => {
+        let value = typeof t.value === 'string' ? t.value
+          : (t.value && t.value.host ? `${t.value.host}:${t.value.port}` : '');
+        switch (t.kind) {
+          case 'any': return '*';
+          case 'exact_host': return value;
+          case 'host_suffix': return `*.${value}`;
+          case 'host_and_port': return value;
+          case 'url_prefix': return value;
+          default: return `${t.kind}:${value}`;
+        }
+      });
+      return parts.length ? parts.join(', ') : '—';
+    }
+
+    function envelopeIdFromSource(sourceApprovalId) {
+      if (sourceApprovalId && sourceApprovalId.startsWith('session-envelope:')) {
+        const n = parseInt(sourceApprovalId.split(':')[1], 10);
+        if (!Number.isNaN(n)) return n;
+      }
+      return null;
+    }
+
+    function formatGrantDetail(g) {
+      const env = envelopeIdFromSource(g.source_approval_id);
+      let s = env ? `envelope #${env} · ${g.scope} · by ${g.granted_by}`
+                  : `${g.scope} · by ${g.granted_by}`;
+      if (g.expires_at) s += ` · exp ${g.expires_at}`;
+      return s;
+    }
+
+    function grantRowHTML(kind, id, summary, detail, agentId) {
+      // Coerce the server-provided id: it is embedded in an inline handler,
+      // so only a non-negative integer is accepted. Anything else renders the
+      // row without a working revoke (the CLI `gateway grants revoke` remains
+      // the fallback) rather than injecting raw values into the attribute.
+      const numId = Number(id);
+      const revokeBtn = (Number.isInteger(numId) && numId >= 0)
+        ? `<button onclick="revokeGrant('${kind}', ${numId}, this)" class="bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/25 text-accentRed font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">Revoke</button>`
+        : '<button disabled title="non-numeric grant id — revoke via CLI" class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 cursor-not-allowed">Revoke</button>';
+      return `
+        <div class="p-2.5 rounded-lg border border-slate-800 bg-slate-900/40 flex items-center justify-between gap-3">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="bg-accentViolet/10 text-accentViolet border border-accentViolet/20 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">${kind === 'session_approval' ? 'approval' : 'declass'}</span>
+              <code class="text-slate-200 font-semibold text-[11px] break-all">${escapeHTML(summary)}</code>
+            </div>
+            <div class="text-[9px] font-mono text-slate-500 mt-1">${escapeHTML(detail)}${agentId ? ` · agent ${escapeHTML(agentId)}` : ''}</div>
+          </div>
+          ${revokeBtn}
+        </div>
+      `;
+    }
+
+    function renderGrantsPanel(data) {
+      const bodyDiv = document.getElementById('grants-panel-body');
+      const taintBadge = document.getElementById('grants-taint-badge');
+      const providerBadge = document.getElementById('grants-provider-badge');
+      const tabBadge = document.getElementById('grants-tab-badge');
+
+      const sessGrants = data.session_approval_grants || [];
+      const declassGrants = data.egress_declassification_grants || [];
+      const childTaints = data.child_taints || [];
+
+      // Root taint: null ⇒ unrestricted; otherwise a sink-set array.
+      if (data.current_taint === null || data.current_taint === undefined) {
+        taintBadge.innerText = 'taint: unrestricted';
+        taintBadge.className = 'bg-accentGreen/10 text-accentGreen border border-accentGreen/25 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full';
+      } else {
+        const label = Array.isArray(data.current_taint) ? sinksLabelName(data.current_taint) : 'restricted';
+        taintBadge.innerText = `taint: ${label}`;
+        taintBadge.className = 'bg-accentAmber/10 text-accentAmber border border-accentAmber/25 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full';
+      }
+
+      if (data.provider_constraint) {
+        providerBadge.innerText = `provider: ${data.provider_constraint}`;
+        providerBadge.classList.remove('hidden');
+      } else {
+        providerBadge.classList.add('hidden');
+      }
+
+      const total = sessGrants.length + declassGrants.length;
+      if (total > 0) { tabBadge.innerText = total; tabBadge.classList.remove('hidden'); }
+      else tabBadge.classList.add('hidden');
+
+      let html = '';
+      html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Session Approval Grants (${sessGrants.length})</h3>`;
+      html += sessGrants.length
+        ? `<div class="space-y-2">${sessGrants.map(g => grantRowHTML('session_approval', g.id, renderGrantTargets(g.targets), formatGrantDetail(g), g.agent_id)).join('')}</div>`
+        : '<div class="text-slate-600 italic">None active.</div>';
+      html += `</div>`;
+
+      html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Egress Declassification Grants (${declassGrants.length})</h3>`;
+      html += declassGrants.length
+        ? `<div class="space-y-2">${declassGrants.map(g => {
+            const kind = (g.target && g.target.kind) || '?';
+            const value = (g.target && g.target.value) ?? '?';
+            return grantRowHTML('egress_declassification', g.id, `${kind}:${value} → ${g.allowed_sink || '?'}`, formatGrantDetail(g), g.agent_id);
+          }).join('')}</div>`
+        : '<div class="text-slate-600 italic">None active.</div>';
+      html += `</div>`;
+
+      if (childTaints.length > 0) {
+        html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Child Session Taints (${childTaints.length})</h3><div class="space-y-1.5">`;
+        html += childTaints.map(c => `
+          <div class="p-2 rounded border border-accentAmber/20 bg-accentAmber/5 flex items-center justify-between gap-2">
+            <code class="text-slate-300 text-[10px] break-all">${escapeHTML(c.session_id)}</code>
+            <span class="text-accentAmber font-mono font-bold text-[10px] shrink-0">${escapeHTML(Array.isArray(c.label) ? sinksLabelName(c.label) : 'restricted')}</span>
+          </div>
+        `).join('');
+        html += `</div></div>`;
+      }
+
+      bodyDiv.innerHTML = html;
+    }
+
+    async function revokeGrant(kind, id, btn) {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid) return;
+      const label = kind === 'session_approval' ? 'session-approval' : 'egress-declassification';
+      if (!confirm(`Revoke ${label} grant #${id}?\n\nRevocation blocks FUTURE uses of this grant (in-flight operations are not cancelled).`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'grant-revoke', method: 'grants.revoke',
+            params: {
+              root_session_id: sid, grant_kind: kind, grant_id: id,
+              reason: 'Revoked from web cockpit', revoked_by: 'operator'
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Revoke failed: ${json.error.message}`);
+          if (btn) btn.disabled = false;
+        } else {
+          fetchGrants();
+          fetchTimelineHistory(baseURL, sid, secret);
+        }
+      } catch (e) {
+        alert(`Connection error: ${e.message}`);
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    // ── Cooperative operator pause (mirrors TUI `p`, #1026) ──
+
+    function updatePauseBtn() {
+      const btn = document.getElementById('pause-btn');
+      if (!btn) return;
+      // Visibility is derived from the connection state, never baked into the
+      // style branch — otherwise resuming (or resume-on-message) would hide
+      // the button again while still connected.
+      const vis = isConnected ? '' : ' hidden';
+      if (sessionPaused) {
+        btn.innerHTML = '<span>⏵</span> Resume';
+        btn.className = 'bg-accentGreen/90 hover:bg-accentGreen active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
+      } else {
+        btn.innerHTML = '<span>⏸</span> Pause';
+        btn.className = 'bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
+      }
+    }
+
+    async function togglePause() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid) return;
+      const method = sessionPaused ? 'root_session.resume' : 'root_session.pause';
+      const params = sessionPaused
+        ? { root_session_id: sid }
+        : { root_session_id: sid, reason: 'Operator pause from web cockpit' };
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'pause-toggle', method, params })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`${method} failed: ${json.error.message}`); return; }
+        sessionPaused = !sessionPaused;
+        updatePauseBtn();
+      } catch (e) { alert(`Connection error: ${e.message}`); }
+    }
+
     function renderContentList(files, sid) {
       const listDiv = document.getElementById('workbench-list');
       if (!files || files.length === 0) {
@@ -893,6 +1157,9 @@
       }
       if (fresh.some(e => e.event_type === 'content_write') && isConnected) {
         fetchContentList(info.baseURL, info.sid, info.secret);
+      }
+      if (fresh.some(e => e.event_type.startsWith('egress.') || e.event_type.startsWith('grant_revocation')) && isConnected) {
+        fetchGrants();
       }
     }
 
@@ -1092,6 +1359,20 @@
               ${escapeHTML(payload?.message || payload?.text || extractSummary(e))}
             </div>
           `;
+        } else if (eventType.startsWith('egress.')) {
+          const sentence = summarizeEgress(eventType, payload);
+          const severe = ['egress.envelope_withheld', 'egress.assertion_violation', 'egress.boundary_refused'].includes(eventType);
+          const notable = ['egress.declassified', 'egress.session_policy'].includes(eventType);
+          const cardCls = severe
+            ? 'border-accentRed/40 bg-accentRed/10'
+            : (notable ? 'border-accentAmber/40 bg-accentAmber/10' : 'border-slate-800 bg-slate-950/60');
+          const txtCls = severe ? 'text-accentRed' : (notable ? 'text-accentAmber' : 'text-slate-300');
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border ${cardCls} flex items-center gap-2 text-xs">
+              <span class="${txtCls} text-sm shrink-0">🛡️</span>
+              <span class="${txtCls} font-mono">${escapeHTML(sentence)}</span>
+            </div>
+          `;
         } else if (payload && Object.keys(payload).length > 0) {
           const keys = Object.keys(payload).slice(0, 4);
           const fields = keys.map(k => `<span class="text-slate-400">${k}:</span> <span class="text-slate-200 font-semibold">${escapeHTML(String(payload[k]))}</span>`).join(' │ ');
@@ -1149,7 +1430,12 @@
         body: JSON.stringify({ event_type: 'chat', message: text, session_id: sid, async_mode: true })
       })
       .then(res => res.json())
-      .then(() => { input.disabled = false; input.focus(); })
+      .then(() => {
+        input.disabled = false; input.focus();
+        // A new operator message resumes a parked (paused) session — drop the
+        // local paused reflection so the next click requests a fresh pause.
+        if (sessionPaused) { sessionPaused = false; updatePauseBtn(); }
+      })
       .catch(e => { alert("Send failed: " + e.message); input.disabled = false; });
     }
 
@@ -1653,6 +1939,67 @@
       });
     }
 
+    function egressLabelDisplay(p, key) {
+      const v = p && p[key];
+      if (typeof v === 'string') return v;
+      if (Array.isArray(v)) return sinksLabelName(v);
+      return '?';
+    }
+
+    // Mirrors room TUI render.rs `summarize` for the ten egress.* causal
+    // events (#972) — content-free metadata-only sentences.
+    function summarizeEgress(eventType, p) {
+      p = p || {};
+      switch (eventType) {
+        case 'egress.session_policy': {
+          const d = p.detail || {};
+          let head;
+          if (p.operation === 'clear') head = 'egress policy cleared';
+          else if (p.operation === 'set') {
+            const rules = d.rule_count || 0;
+            const sources = Array.isArray(d.rule_sources) ? d.rule_sources.join(', ') : '';
+            head = `egress policy set (${rules} rule${rules === 1 ? '' : 's'})`;
+            if (sources) head += `: ${sources}`;
+            if (d.default_label) head += ` · default ${d.default_label}`;
+          } else head = 'egress policy change';
+          return p.set_by ? `${head} — ${p.set_by}` : head;
+        }
+        case 'egress.envelope_labeled': {
+          let s = `${p.tool_name || 'tool'} labeled → ${egressLabelDisplay(p, 'label')}`;
+          if (Array.isArray(p.matched_rules) && p.matched_rules.length) s += ` (${p.matched_rules.join(', ')})`;
+          return s;
+        }
+        case 'egress.envelope_withheld':
+          return `content withheld from ${p.target_sink || '?'}: ${p.tool_call_id || '?'} (${egressLabelDisplay(p, 'label')})`;
+        case 'egress.request_filtered':
+        case 'egress.request_forwarded': {
+          const suffix = p.model ? ` (forwarded to ${p.model})` : '';
+          return `egress filter${suffix}: ${p.withheld_count || 0} withheld, ${p.included_count || 0} included (${p.target_sink || '?'})`;
+        }
+        case 'egress.assertion_violation':
+          return `egress assertion violation: ${p.tool_call_id || '?'} aborted before ${p.target_sink || '?'}`;
+        case 'egress.boundary_refused': {
+          let s = `egress boundary refused: ${p.surface || '?'} (${p.label_name || p.band_label_name || '?'})`;
+          if (p.preset_class) s += ` — ${p.preset_class} not cleared`;
+          return s;
+        }
+        case 'egress.declassified': {
+          let target = '?';
+          if (typeof p.target === 'string') target = p.target;
+          else if (p.target) target = `${p.target.kind || '?'}:${p.target.value ?? '?'}`;
+          return `egress widened: ${target} → ${p.allowed_sink || '?'}`;
+        }
+        case 'egress.relabel':
+          return `egress relabeled: ${p.kind || '?'} → ${p.new_label_name || '?'}`;
+        case 'egress.provider_selected':
+          return p.no_eligible_provider
+            ? `egress routing refused: no provider cleared for ${p.batch_label_name || '?'}`
+            : `egress routing: ${p.batch_label_name || '?'} → ${p.chosen_preset || '?'}`;
+        default:
+          return eventType.replace(/\./g, ' ').replace(/_/g, ' ');
+      }
+    }
+
     function extractSummary(e) {
       let payload = null;
       try { if (e.payload) payload = JSON.parse(e.payload); } catch(err) {}
@@ -1729,8 +2076,12 @@
       });
 
       const totalTokens = inputTokens + outputTokens;
+      const grantCount = lastGrantsData
+        ? ((lastGrantsData.session_approval_grants || []).length +
+           (lastGrantsData.egress_declassification_grants || []).length)
+        : activeGrants.size;
       document.getElementById('hud-llm-calls').innerText = llmCalls;
-      document.getElementById('hud-grants-count').innerText = activeGrants.size;
+      document.getElementById('hud-grants-count').innerText = grantCount;
       document.getElementById('hud-tokens-total').innerText = totalTokens.toLocaleString();
       document.getElementById('hud-tokens-in').innerText = `in: ${inputTokens.toLocaleString()}`;
       document.getElementById('hud-tokens-out').innerText = `out: ${outputTokens.toLocaleString()}`;
@@ -1843,7 +2194,7 @@
     }
 
     function switchRightTab(tabId) {
-      const tabs = ['workflow', 'checklist', 'constitution', 'wiki'];
+      const tabs = ['workflow', 'checklist', 'constitution', 'wiki', 'grants'];
       tabs.forEach(t => {
         document.getElementById(`tab-content-${t}`).classList.add('hidden');
         const btn = document.getElementById(`tab-btn-${t}`);
@@ -1857,6 +2208,7 @@
       const info = getConnectInfo();
       if (tabId === 'constitution' && isConnected) fetchConstitution(info.baseURL, info.secret);
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
+      if (tabId === 'grants' && isConnected) fetchGrants();
     }
 
     async function fetchRecentSessions() {
