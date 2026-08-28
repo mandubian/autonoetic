@@ -554,20 +554,11 @@ impl ScheduledAction {
                 inject_secret_as: inject_secret_as.clone(),
                 payload: payload.as_ref().map(|p| Self::redact_json_value(p, super::disclosure::ViewerClass::Operator)),
             },
-            other => other.clone(),
-        }
-    }
-
-    /// Operator-shaped, then embedded secrets masked in the free-text fields
-    /// the operator class passes through raw.
-    ///
-    /// Composed on top of `redact_for_operator` rather than restated, so it
-    /// cannot drift *below* operator disclosure if that path tightens later.
-    /// The masking is `redact_embedded_secrets`, which rewrites bearer tokens,
-    /// env-var assignments and URL query secrets in place — the command stays
-    /// judgeable, which is the whole reason the seat needs more than `Agent`.
-    fn redact_for_decider(&self) -> Self {
-        match self.redact_for_operator() {
+            // An operator must be able to *read* the command to triage it —
+            // that is the whole point of the class — but reading the command
+            // is not the same as reading the credential inside it. Values are
+            // masked in place; the structure that makes a command judgeable
+            // (binary, flags, host, which header is being set) survives.
             Self::SandboxExec {
                 command,
                 dependencies,
@@ -576,12 +567,12 @@ impl ScheduledAction {
                 detected_hosts,
                 intent,
             } => Self::SandboxExec {
-                command: super::redaction::redact_embedded_secrets(&command),
-                dependencies,
-                requires_approval,
-                evidence_ref,
-                detected_hosts,
-                intent,
+                command: super::redaction::redact_embedded_secrets(command),
+                dependencies: dependencies.clone(),
+                requires_approval: *requires_approval,
+                evidence_ref: evidence_ref.clone(),
+                detected_hosts: detected_hosts.clone(),
+                intent: intent.clone(),
             },
             Self::WriteFile {
                 path,
@@ -589,15 +580,27 @@ impl ScheduledAction {
                 requires_approval,
                 evidence_ref,
             } => Self::WriteFile {
-                path,
-                content: super::redaction::redact_embedded_secrets(&content),
-                requires_approval,
-                evidence_ref,
+                path: path.clone(),
+                content: super::redaction::redact_embedded_secrets(content),
+                requires_approval: *requires_approval,
+                evidence_ref: evidence_ref.clone(),
             },
-            // Every other variant either carries no free text of its own or
-            // was already masked by the operator path (CredentialRequest).
-            other => other,
+            other => other.clone(),
         }
+    }
+
+    /// The class an appointed decider reads at. Delegates to the operator
+    /// path, which is what "read parity" means: the seat sees what the human
+    /// it stands in for sees.
+    ///
+    /// Kept as its own variant even though it is currently identical, because
+    /// the two classes mask for *independent reasons*: the operator, so a
+    /// human reviewing a gate is not shown credentials they have no need for;
+    /// the decider, because its reads are causal-chained and its context is
+    /// checkpointed, so what it sees is what the record keeps. If the operator
+    /// path is ever relaxed, the decider must not follow it.
+    fn redact_for_decider(&self) -> Self {
+        self.redact_for_operator()
     }
 
     fn redact_for_agent(&self) -> Self {
@@ -1528,6 +1531,48 @@ mod redaction_tests {
     }
 
     // ── Helper visibility ────────────────────────────────────────────────
+
+    // ── Operators read commands, not credentials ────────────────────────
+
+    #[test]
+    fn operator_class_masks_secrets_inside_a_command_it_can_read() {
+        // The operator must be able to triage the command — binary, flags,
+        // host, which header is being set — without being shown the token.
+        // Before this, `redact_for_operator` was identity for SandboxExec and
+        // handed the bearer token over verbatim.
+        let op = sandbox_exec_with_secret_bearing_command().redact_for_viewer(ViewerClass::Operator);
+        let ScheduledAction::SandboxExec { command, detected_hosts, .. } = op else {
+            panic!("expected SandboxExec");
+        };
+        assert!(command.contains("curl"), "command must stay readable: {command}");
+        assert!(command.contains("Authorization"), "the header being set must stay visible: {command}");
+        assert!(command.contains("https://x"), "the destination must stay visible: {command}");
+        assert!(
+            !command.contains("eyJhbGc.foo"),
+            "the operator must not be shown the token: {command}"
+        );
+        assert_eq!(detected_hosts, Some(vec!["x.example.com".to_string()]));
+    }
+
+    #[test]
+    fn operator_class_masks_secrets_in_written_content() {
+        let op = write_file_with_secrets().redact_for_viewer(ViewerClass::Operator);
+        let ScheduledAction::WriteFile { content, path, .. } = op else {
+            panic!("expected WriteFile");
+        };
+        assert_eq!(path, "/tmp/keys.txt", "the path stays visible for triage");
+        assert!(!content.contains("hunter2"), "password shown to operator: {content}");
+    }
+
+    #[test]
+    fn a_benign_command_is_untouched_for_the_operator() {
+        // Masking must not degrade the ordinary case into unreadability.
+        let op = sandbox_exec_benign().redact_for_viewer(ViewerClass::Operator);
+        let ScheduledAction::SandboxExec { command, .. } = op else {
+            panic!("expected SandboxExec");
+        };
+        assert_eq!(command, "ls -la /tmp");
+    }
 
     // ── ViewerClass::Decider (#1194) ────────────────────────────────────
 
