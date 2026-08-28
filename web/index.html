@@ -1394,7 +1394,7 @@
 
     async function approvePlan(planId) {
       const { sid, secret, baseURL } = getConnectInfo();
-      if (!sid || !planId) return;
+      if (!sid || !secret || !planId) return;
       if (!confirm(`Approve plan '${planId}'?\n\nThis materializes the plan envelope as session grants and wakes the planner to start execution.`)) return;
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
@@ -1408,16 +1408,25 @@
         const json = await resp.json();
         if (json.error) { alert(`Plan approval failed: ${json.error.message}`); return; }
         // Mirror the TUI's approve-and-wake: an operator message resumes the
-        // planner turn that ended at awaiting_approval.
+        // planner turn that ended at awaiting_approval. A failed wake is
+        // surfaced, not swallowed — the plan is approved but nobody resumed.
         const plan = (json.result && json.result.plan) || null;
-        await fetchWithTimeout(`${baseURL}/api/event/ingest`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
-          body: JSON.stringify({
-            event_type: 'chat', message: planWakeMessage(plan), session_id: sid,
-            async_mode: true, metadata: { source: 'web_cockpit' }
-          })
-        });
+        let wakeOk = true;
+        try {
+          const wakeResp = await fetchWithTimeout(`${baseURL}/api/event/ingest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+            body: JSON.stringify({
+              event_type: 'chat', message: planWakeMessage(plan), session_id: sid,
+              async_mode: true, metadata: { source: 'web_cockpit' }
+            })
+          });
+          const wakeJson = wakeResp.ok ? await wakeResp.json().catch(() => null) : null;
+          wakeOk = wakeResp.ok && !(wakeJson && wakeJson.error);
+        } catch (e) { wakeOk = false; }
+        if (!wakeOk) {
+          alert(`Plan '${planId}' is approved, but the wake message could not be delivered — send a message in the composer to resume the planner.`);
+        }
         fetchPendingPlans();
         fetchPlanFrame(baseURL, sid, secret);
         fetchGrants();
