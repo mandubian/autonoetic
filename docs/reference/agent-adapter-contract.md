@@ -147,6 +147,11 @@ generation — regenerate the wrapper); `agent_revision_promote`'s P-2.25 card
 gains a `derived_from` section with the capability delta *vs the base*. All
 advisory — nothing blocks a spawn or promotion on these signals.
 
+Re-adapt loop (#1221): a base promotion that stales installed wrappers emits one
+`revision.adapter_drift_detected` causal event listing them, and `agent_spawn`
+on a stale wrapper attaches a `gateway_note` proposing regeneration (or a
+deliberate pin). Still advisory — staleness never blocks.
+
 The block is **contract-classified** for federation carry-forward (like
 `middleware`): changing provenance voids a carry, because it names what the
 gates verified against. An absent `base_revision_digest` means unknown at
