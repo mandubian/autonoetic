@@ -44,10 +44,13 @@ pub struct DeciderAppointment {
     /// the instructions, the capabilities and — the reason this field exists —
     /// the model. Calibration evidence (#1198) is a property of the closure
     /// that produced the verdicts, not of the name on the seat, so an
-    /// appointment records which closure it seated. `None` only for records
-    /// written before this field existed.
-    #[serde(default)]
-    pub decider_revision: Option<String>,
+    /// appointment records which closure it seated.
+    ///
+    /// Deliberately **not** optional. An appointment that cannot say which
+    /// revision it seated cannot support the agreement rate it is meant to
+    /// justify, so failing to resolve one is an error at appointment time
+    /// rather than a `None` written into the record.
+    pub decider_revision: String,
 
     /// Gate kinds routed to the appointee — a subset of the agent's capability.
     pub kinds: Vec<String>,
@@ -96,6 +99,16 @@ pub struct DeciderAppointment {
 impl DeciderAppointment {
     /// True when the appointment has been revoked or has reached either expiry.
     /// `now` is caller-supplied so this stays a pure function.
+    ///
+    /// Timestamps are *parsed* rather than compared as strings: RFC3339 admits
+    /// `Z` and `+00:00` for the same instant and arbitrary offsets besides, so
+    /// lexical order is not chronological order. `expires_at` comes from
+    /// operator input, so the mismatch is reachable — an `…T08:00:00+02:00`
+    /// expiry against a `…+00:00` clock sorts wrong in both directions.
+    ///
+    /// Parse failure **fails closed** (expired). A seat whose validity cannot
+    /// be established should not be deciding gates; the alternative would let
+    /// a malformed timestamp read as "never expires".
     pub fn is_expired(&self, now: &str) -> bool {
         if self.revoked_at.is_some() {
             return true;
@@ -105,9 +118,15 @@ impl DeciderAppointment {
                 return true;
             }
         }
-        match &self.expires_at {
-            Some(exp) => exp.as_str() <= now,
-            None => false,
+        let Some(exp) = &self.expires_at else {
+            return false;
+        };
+        match (
+            chrono::DateTime::parse_from_rfc3339(exp),
+            chrono::DateTime::parse_from_rfc3339(now),
+        ) {
+            (Ok(exp_dt), Ok(now_dt)) => exp_dt <= now_dt,
+            _ => true,
         }
     }
 
@@ -203,7 +222,7 @@ mod tests {
         DeciderAppointment {
             appointment_id: "apt-1".into(),
             decider_agent: "nightwatch.default".into(),
-            decider_revision: Some("rev_sha256:abc".into()),
+            decider_revision: "rev_sha256:abc".into(),
             kinds: vec![GATE_KIND_APPROVAL.into()],
             scope_root_session: "root-1".into(),
             decider_session: None,
@@ -266,6 +285,49 @@ mod tests {
             ..appointment()
         };
         assert!(!live.is_expired("2099-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn expiry_compares_instants_not_strings() {
+        // Same instant, two spellings: `Z` sorts after `+00:00` lexically, so
+        // a string compare would call this un-expired.
+        let z = DeciderAppointment {
+            expires_at: Some("2026-08-28T06:00:00Z".into()),
+            ..appointment()
+        };
+        assert!(z.is_expired("2026-08-28T06:00:00+00:00"));
+
+        // A non-UTC offset: 08:00+02:00 *is* 06:00Z, so this is expired even
+        // though "08" sorts after "06".
+        let offset = DeciderAppointment {
+            expires_at: Some("2026-08-28T08:00:00+02:00".into()),
+            ..appointment()
+        };
+        assert!(offset.is_expired("2026-08-28T06:00:00+00:00"));
+
+        // And the converse must still be live.
+        let later = DeciderAppointment {
+            expires_at: Some("2026-08-28T09:00:00+02:00".into()),
+            ..appointment()
+        };
+        assert!(!later.is_expired("2026-08-28T06:00:00+00:00"));
+    }
+
+    #[test]
+    fn an_unparseable_timestamp_fails_closed() {
+        let bad = DeciderAppointment {
+            expires_at: Some("tonight".into()),
+            ..appointment()
+        };
+        assert!(
+            bad.is_expired("2026-08-28T06:00:00+00:00"),
+            "a seat whose validity cannot be established must not be deciding"
+        );
+        let bad_now = DeciderAppointment {
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+            ..appointment()
+        };
+        assert!(bad_now.is_expired("not-a-time"));
     }
 
     #[test]

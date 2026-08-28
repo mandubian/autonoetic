@@ -118,11 +118,29 @@ pub fn appoint(
     // (#1198) is a property of what actually produced the verdicts, so the
     // record says which revision was seated. A later promotion changes the
     // agent without silently changing what this appointment seated.
+    // Not best-effort: an appointment that cannot name its revision cannot
+    // support the agreement rate it exists to justify. `get_sync_from_store`
+    // above already resolved through the promoted alias, so a miss here is an
+    // inconsistency, not a normal case — surface it rather than writing a
+    // record that quietly lacks the pin.
     let decider_revision = store
         .get_agent_alias(&req.decider_agent)
-        .ok()
-        .flatten()
-        .map(|a| a.revision_id);
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot appoint '{}': failed to read its promoted revision ({}); \
+                 an appointment must record the revision it seated",
+                req.decider_agent,
+                e
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot appoint '{}': it has no promoted revision to seat; \
+                 an appointment must record the revision it seated",
+                req.decider_agent
+            )
+        })?
+        .revision_id;
 
     let appointment = DeciderAppointment {
         appointment_id: format!("apt_{}", uuid::Uuid::new_v4()),

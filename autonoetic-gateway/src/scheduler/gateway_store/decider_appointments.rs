@@ -152,6 +152,10 @@ fn row_to_appointment(
             )),
         )
     })?;
+    // Saturating rather than `as`: a wrapping cast on a hand-edited or
+    // future-widened column would silently produce a *smaller* ceiling or
+    // tally, which for `gates_decided` means a spent appointment reading as
+    // live. Saturation errs toward expired in both directions.
     let max_gates: Option<i64> = row.get(9)?;
     let gates_decided: i64 = row.get(10)?;
     Ok(DeciderAppointment {
@@ -169,12 +173,17 @@ fn row_to_appointment(
         risk_ceiling,
         advice_only: row.get::<_, i64>(7)? != 0,
         expires_at: row.get(8)?,
-        max_gates: max_gates.map(|m| m.max(0) as u32),
-        gates_decided: gates_decided.max(0) as u32,
+        max_gates: max_gates.map(saturating_u32),
+        gates_decided: saturating_u32(gates_decided),
         appointed_by: row.get(11)?,
         appointed_at: row.get(12)?,
         revoked_at: row.get(13)?,
         revoked_by: row.get(14)?,
         revoked_reason: row.get(15)?,
     })
+}
+
+/// Clamp a stored SQLite integer into `u32` without wrapping.
+fn saturating_u32(v: i64) -> u32 {
+    v.clamp(0, u32::MAX as i64) as u32
 }

@@ -383,19 +383,16 @@ fn appointment_pins_the_revision_it_seated() -> anyhow::Result<()> {
     // what this appointment seated.
     let f = fixture("nightwatch.default", &approval_decider())?;
     let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
-    let pinned = a
-        .decider_revision
-        .as_deref()
-        .expect("the seated revision must be recorded");
     assert!(
-        pinned.starts_with("rev_sha256:"),
-        "expected a revision id, got {pinned}"
+        a.decider_revision.starts_with("rev_sha256:"),
+        "expected a revision id, got {}",
+        a.decider_revision
     );
 
     let stored = f
         .store
         .get_decider_appointment(&a.appointment_id)?
         .expect("readable back");
-    assert_eq!(stored.decider_revision.as_deref(), Some(pinned));
+    assert_eq!(stored.decider_revision, a.decider_revision);
     Ok(())
 }

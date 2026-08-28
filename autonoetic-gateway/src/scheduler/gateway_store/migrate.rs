@@ -626,7 +626,7 @@ fn apply_decider_appointments_v82(conn: &mut Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS decider_appointments (
             appointment_id TEXT PRIMARY KEY,
             decider_agent TEXT NOT NULL,
-            decider_revision TEXT,
+            decider_revision TEXT NOT NULL,
             kinds TEXT NOT NULL,
             scope_root_session TEXT NOT NULL,
             decider_session TEXT,

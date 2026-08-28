@@ -165,7 +165,7 @@ fn seed_appointment(
     store.insert_decider_appointment(&DeciderAppointment {
         appointment_id: format!("apt-test-{}-{}", agent_id, scope_root).replace('/', "_"),
         decider_agent: agent_id.to_string(),
-        decider_revision: None,
+        decider_revision: "rev-test".to_string(),
         kinds: vec!["approval".to_string(), "escalation".to_string()],
         scope_root_session: scope_root.to_string(),
         decider_session: None,
