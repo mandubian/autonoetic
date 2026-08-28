@@ -799,6 +799,44 @@ pub(crate) fn adapter_base_stale(
     }
 }
 
+/// Spawn-time stale-wrapper advisory (#1221, proposal Phase 3): the target is
+/// a wrapper whose base has been re-promoted (or removed) since the wrapper's
+/// mapping was generated. Returns a caller-facing note, or `None` when the
+/// wrapper is current, the provenance under-claims (no digest), or the base
+/// cannot be resolved. Advisory only — never a refusal: an intentional pin to
+/// an older base is legitimate (`agent@rev-*` semantics).
+pub(crate) fn stale_wrapper_note(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    wrapper_agent_id: &str,
+    adapter: Option<&autonoetic_types::agent::AdapterProvenance>,
+) -> Option<String> {
+    let provenance = adapter?;
+    let claimed = provenance.base_revision_digest.as_deref()?;
+    match store.resolve_alias(&provenance.base_agent_id) {
+        Ok(Some(alias)) => {
+            if alias.revision_id == claimed {
+                return None;
+            }
+            Some(format!(
+                "stale wrapper: '{wrapper_agent_id}' was generated against base '{}' \
+                 at revision '{}', but the base's promoted revision is now '{}'. \
+                 Consider regenerating via agent-adapter.default against the current \
+                 base — or proceed deliberately: an intentional pin to an older base \
+                 is legitimate.",
+                provenance.base_agent_id, claimed, alias.revision_id
+            ))
+        }
+        Ok(None) => Some(format!(
+            "stale wrapper: '{wrapper_agent_id}' was generated against base '{}' at \
+             revision '{}', but that base is no longer installed. Consider \
+             regenerating via agent-adapter.default against a current base — or \
+             proceed deliberately: an intentional pin is legitimate.",
+            provenance.base_agent_id, claimed
+        )),
+        Err(_) => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecDependencies {
     #[serde(default)]
@@ -1360,6 +1398,101 @@ pub fn registry_for_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawn-time advisory (#1221): note fires only when the base moved on
+    /// (or is gone); current, unclaimed-digest, and unverifiable cases stay
+    /// silent — advisory, never a refusal.
+    #[test]
+    fn stale_wrapper_note_fires_only_on_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        fn insert_and_promote(
+            store: &crate::scheduler::gateway_store::GatewayStore,
+            agent_id: &str,
+            revision_id: &str,
+        ) {
+            let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+                revision_id: revision_id.to_string(),
+                agent_id: agent_id.to_string(),
+                base_revision_id: None,
+                artifact_id: None,
+                content_digest: format!("sha256:{}", &revision_id[10..]),
+                runtime_lock_hash: "sha256:0".to_string(),
+                manifest_hash: "sha256:0".to_string(),
+                created_at: "2026-08-28T00:00:00Z".to_string(),
+                created_by_type: "test".to_string(),
+                created_by_id: "test".to_string(),
+                requested_by_type: None,
+                requested_by_id: None,
+                source_kind: "test".to_string(),
+                source_ref: None,
+                origin_node_id: "test-node".to_string(),
+                trust_domain: "local".to_string(),
+                status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
+                metadata_json: serde_json::json!({}),
+                short_id: revision_id[10..18].to_string(),
+                detected_network_hosts: None,
+                signature: None,
+                signer_id: None,
+            };
+            store.insert_agent_revision_transactional(&rev).unwrap();
+            store
+                .atomic_promote(
+                    agent_id,
+                    revision_id,
+                    &format!("promo-{revision_id}"),
+                    "test",
+                    "test",
+                    Some("note test"),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        fn provenance(claimed: Option<&str>) -> autonoetic_types::agent::AdapterProvenance {
+            autonoetic_types::agent::AdapterProvenance {
+                base_agent_id: "base.agent".to_string(),
+                base_revision_digest: claimed.map(|s| s.to_string()),
+                generated_at: None,
+                schema_notes: vec![],
+                generator: None,
+            }
+        }
+
+        insert_and_promote(&store, "base.agent", "rev_sha256:old0000000000000000000000000000000000000000000000000000000000");
+        insert_and_promote(&store, "wrapper.agent", "rev_sha256:wrap000000000000000000000000000000000000000000000000000000000");
+
+        // Current wrapper → silent.
+        let claimed = "rev_sha256:old0000000000000000000000000000000000000000000000000000000000";
+        assert!(stale_wrapper_note(&store, "wrapper.agent", Some(&provenance(Some(claimed)))).is_none());
+
+        // Base moves on → note names both revisions and the adapter route.
+        insert_and_promote(&store, "base.agent", "rev_sha256:new0000000000000000000000000000000000000000000000000000000000");
+        let note = stale_wrapper_note(&store, "wrapper.agent", Some(&provenance(Some(claimed))))
+            .expect("stale wrapper should produce a note");
+        assert!(note.contains("wrapper.agent"));
+        assert!(note.contains("agent-adapter.default"));
+        assert!(note.contains(claimed));
+        assert!(note.contains("rev_sha256:new0000000000000000000000000000000000000000000000000000000000"));
+
+        // Base gone → note (pin-or-regenerate advice).
+        let store2 = crate::scheduler::gateway_store::GatewayStore::open(
+            &dir.path().join(".gateway2"),
+        )
+        .unwrap();
+        insert_and_promote(&store2, "wrapper.agent", "rev_sha256:wrap000000000000000000000000000000000000000000000000000000000");
+        let gone = stale_wrapper_note(&store2, "wrapper.agent", Some(&provenance(Some(claimed))))
+            .expect("missing base should produce a note");
+        assert!(gone.contains("no longer installed"), "{gone}");
+
+        // Under-claim (no digest) → silent; unknown is not stale.
+        assert!(stale_wrapper_note(&store, "wrapper.agent", Some(&provenance(None))).is_none());
+        assert!(stale_wrapper_note(&store, "wrapper.agent", None).is_none());
+    }
 
     /// The root-wide grant sentinel must never be installable as an agent id —
     /// `grants_cover_targets` reads it as "covers every agent under the root".

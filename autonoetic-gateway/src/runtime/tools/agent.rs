@@ -579,6 +579,35 @@ the single join already does that."
             )
         });
 
+        // Spawn-time stale-wrapper advisory (#1221, proposal Phase 3): when the
+        // target is a wrapper whose base moved on since generation, tell the
+        // caller in the result. Reads the promoted revision's stored manifest
+        // summary — no disk walk — and under-claims (no note) when the summary
+        // predates provenance or cannot be parsed.
+        let stale_wrapper_note = gateway_store.as_deref().and_then(|store| {
+            let target_rev = if let Some(pinned) = args.revision_id.as_deref() {
+                store.get_agent_revision(pinned).ok().flatten()
+            } else {
+                store
+                    .resolve_alias(&target_agent_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|alias| store.get_agent_revision(&alias.revision_id).ok().flatten())
+            };
+            let adapter = target_rev.and_then(|rev| {
+                rev.metadata_json
+                    .get("manifest")
+                    .and_then(|m| m.get("adapter"))
+                    .and_then(|a| {
+                        serde_json::from_value::<autonoetic_types::agent::AdapterProvenance>(
+                            a.clone(),
+                        )
+                        .ok()
+                    })
+            });
+            crate::runtime::tools::stale_wrapper_note(store, &target_agent_id, adapter.as_ref())
+        });
+
         let durable_operation = crate::scheduler::single_flight::durable_operation_for_spawn(
             &workflow_id,
             &target_agent_id,
@@ -617,7 +646,7 @@ the single join already does that."
                         },
                     )?;
 
-                    return serde_json::to_string(&serde_json::json!({
+                    let mut coalesced_resp = serde_json::json!({
                         "ok": true,
                         "accepted": true,
                         "status": "coalesced",
@@ -628,8 +657,11 @@ the single join already does that."
                         "dedupe_key": existing.dedupe_key,
                         "retry_advice": "wait",
                         "message": "Equivalent durable operation is already active. Wait for the existing task instead."
-                    }))
-                    .map_err(Into::into);
+                    });
+                    if let Some(ref note) = stale_wrapper_note {
+                        coalesced_resp["gateway_note"] = serde_json::json!(note);
+                    }
+                    return serde_json::to_string(&coalesced_resp).map_err(Into::into);
                 }
             }
         }
@@ -685,7 +717,7 @@ the single join already does that."
                 },
             )?;
 
-            return serde_json::to_string(&serde_json::json!({
+            let mut dedup_resp = serde_json::json!({
                 "ok": true,
                 "accepted": true,
                 "status": "deduplicated",
@@ -696,8 +728,11 @@ the single join already does that."
                 "task_id": existing_task_id,
                 "agent_id": target_agent_id,
                 "message": "Singleton agent already has an active task in this workflow. Returning the existing task."
-            }))
-            .map_err(Into::into);
+            });
+            if let Some(ref note) = stale_wrapper_note {
+                dedup_resp["gateway_note"] = serde_json::json!(note);
+            }
+            return serde_json::to_string(&dedup_resp).map_err(Into::into);
         }
 
         // Run on the operator's actual config. This used to fabricate one from
@@ -968,10 +1003,14 @@ the single join already does that."
                 "session_id": child_delegation_path,
                 "message": "Task queued for async execution. Use workflow_wait with task_ids to check completion status."
             });
-            if let Some(rev_id) = args.revision_id {
-                resp["revision_id"] = serde_json::json!(rev_id);
-                resp["smoke_test"] = serde_json::json!(true);
-            }
+if let Some(rev_id) = args.revision_id {
+    resp["revision_id"] = serde_json::json!(rev_id);
+    resp["smoke_test"] = serde_json::json!(true);
+}
+if let Some(ref note) = stale_wrapper_note {
+    // Truncation-exempt key — the advisory survives result truncation.
+    resp["gateway_note"] = serde_json::json!(note);
+}
             serde_json::to_string(&resp)
             .map_err(Into::into)
         })();

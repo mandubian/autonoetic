@@ -4710,6 +4710,51 @@ do not re-issue."
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
 
+        // Phase 3 re-adapt loop (#1221): a promotion can silently strand
+        // wrappers derived from the previous revision. One causal event per
+        // promotion lists every wrapper the move staled — the only fan-out
+        // (never per-wrapper events). Advisory: the event proposes
+        // regeneration; it gates nothing.
+        let stale_wrappers =
+            find_stale_wrappers_for_base(&gateway_store, &args.agent_id, &args.revision_id);
+        if !stale_wrappers.is_empty() {
+            let drift_event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("adapter-drift-{}", uuid::Uuid::new_v4()),
+                agent_id: args.agent_id.clone(),
+                session_id: session_id.unwrap_or("").to_string(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "revision".to_string(),
+                action: "revision.adapter_drift_detected".to_string(),
+                status: "active".to_string(),
+                enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                target: Some(args.revision_id.clone()),
+                payload: Some(
+                    serde_json::json!({
+                        "base_agent_id": args.agent_id,
+                        "promoted_revision": args.revision_id,
+                        "previous_revision": previous_revision_id,
+                        "stale_wrappers": stale_wrappers,
+                        "note": "these wrappers were generated against an older revision of this base; consider regenerating via agent-adapter.default (advisory)",
+                    })
+                    .to_string(),
+                ),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: args.reason.clone(),
+            };
+            if let Err(e) = gateway_store.create_causal_event(&drift_event) {
+                tracing::warn!(
+                    target: "promotion",
+                    agent_id = %args.agent_id,
+                    revision_id = %args.revision_id,
+                    error = %e,
+                    "failed to record adapter drift event; drift remains visible via agent_list stale_base"
+                );
+            }
+        }
+
         if let Some(art_id) = &rev.artifact_id {
             if let Err(e) = gateway_store.promote_artifact_ref_to_global(art_id) {
                 tracing::warn!(
@@ -5644,6 +5689,55 @@ pub(crate) fn check_capability_delta(
     Ok(Some(delta))
 }
 
+/// One drift event per base promotion (#1221, proposal Phase 3): every
+/// installed wrapper whose provenance names `base_agent_id` and claims a
+/// digest other than the newly promoted revision. Wrappers that under-claim
+/// (no digest) are not listed — unknown is not stale.
+///
+/// Rust-side scan over aliases + revision summaries, consistent with every
+/// other metadata consumer; a `json_extract` store query can replace it if
+/// rosters grow (precedent: `gateway_store/memory.rs`).
+pub(crate) fn find_stale_wrappers_for_base(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    base_agent_id: &str,
+    new_revision_id: &str,
+) -> Vec<serde_json::Value> {
+    let mut stale = Vec::new();
+    let Ok(aliases) = store.list_agent_aliases(None) else {
+        return stale;
+    };
+    for alias in aliases {
+        if alias.agent_id == base_agent_id {
+            continue;
+        }
+        let Ok(Some(rev)) = store.get_agent_revision(&alias.revision_id) else {
+            continue;
+        };
+        let provenance = rev
+            .metadata_json
+            .get("manifest")
+            .and_then(|m| m.get("adapter"))
+            .and_then(|a| {
+                serde_json::from_value::<autonoetic_types::agent::AdapterProvenance>(a.clone())
+                    .ok()
+            });
+        let Some(provenance) = provenance else { continue };
+        if provenance.base_agent_id != base_agent_id {
+            continue;
+        }
+        match provenance.base_revision_digest.as_deref() {
+            Some(claimed) if claimed != new_revision_id => {
+                stale.push(serde_json::json!({
+                    "wrapper_agent_id": alias.agent_id,
+                    "claimed_base_revision_digest": claimed,
+                }));
+            }
+            _ => {}
+        }
+    }
+    stale
+}
+
 /// The "derived from" section of the P-2.25 promotion card (#1202, proposal
 /// `agent-adaptation-composition`). For a wrapper carrying composition
 /// provenance, the operator sees: the base agent's identity, whether the
@@ -6256,6 +6350,24 @@ mod capability_lenient_deser_tests {
         revision_id: &str,
         skill_md: &str,
     ) {
+        insert_and_promote_revision_with_metadata(
+            store,
+            gateway_dir,
+            agent_id,
+            revision_id,
+            skill_md,
+            serde_json::json!({}),
+        );
+    }
+
+    fn insert_and_promote_revision_with_metadata(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        gateway_dir: &Path,
+        agent_id: &str,
+        revision_id: &str,
+        skill_md: &str,
+        manifest_summary: serde_json::Value,
+    ) {
         let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
             revision_id: revision_id.to_string(),
             agent_id: agent_id.to_string(),
@@ -6274,7 +6386,7 @@ mod capability_lenient_deser_tests {
             origin_node_id: "test-node".to_string(),
             trust_domain: "local".to_string(),
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
-            metadata_json: serde_json::json!({}),
+            metadata_json: serde_json::json!({ "manifest": manifest_summary }),
             short_id: revision_id[(revision_id.len() - 8)..].to_string(),
             detected_network_hosts: None,
             signature: None,
@@ -6399,6 +6511,45 @@ agent:
 
         let unclaimed = derived_from_payload(&store, &gateway_dir, &provenance(None), &wrapper_caps());
         assert_eq!(unclaimed["stale_base"], serde_json::Value::Null);
+    }
+
+    /// One drift event per base promotion (#1221): only wrappers naming this
+    /// base with a digest that is no longer current are listed. Current
+    /// wrappers, unrelated agents, and under-claiming wrappers are excluded.
+    #[test]
+    fn find_stale_wrappers_lists_only_drifted_provenance() {
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let skill = base_skill_md("base.agent", true);
+        insert_and_promote_revision(&store, &gateway_dir, "base.agent", "rev_sha256:old", &skill);
+        insert_and_promote_revision(&store, &gateway_dir, "base.agent", "rev_sha256:new", &skill);
+
+        let prov_json = |base: &str, digest: Option<&str>| {
+            // Value of `metadata_json["manifest"]` — the adapter lives here.
+            serde_json::json!({
+                "adapter": {
+                    "base_agent_id": base,
+                    "base_revision_digest": digest,
+                }
+            })
+        };
+        // Stale wrapper (claims the old digest) + current wrapper + unclaimed
+        // wrapper + an unrelated wrapper naming a different base.
+        insert_and_promote_revision_with_metadata(&store, &gateway_dir, "stale.wrapper", "rev_sha256:w1", &skill, prov_json("base.agent", Some("rev_sha256:old")));
+        insert_and_promote_revision_with_metadata(&store, &gateway_dir, "current.wrapper", "rev_sha256:w2", &skill, prov_json("base.agent", Some("rev_sha256:new")));
+        insert_and_promote_revision_with_metadata(&store, &gateway_dir, "unclaimed.wrapper", "rev_sha256:w3", &skill, prov_json("base.agent", None));
+        insert_and_promote_revision_with_metadata(&store, &gateway_dir, "other.wrapper", "rev_sha256:w4", &skill, prov_json("unrelated.base", Some("rev_sha256:old")));
+
+        let stale = find_stale_wrappers_for_base(&store, "base.agent", "rev_sha256:new");
+        assert_eq!(stale.len(), 1, "only the drifted wrapper is listed: {stale:?}");
+        assert_eq!(stale[0]["wrapper_agent_id"], "stale.wrapper");
+        assert_eq!(stale[0]["claimed_base_revision_digest"], "rev_sha256:old");
+
+        // No drift when the promotion is the first for the base.
+        assert!(find_stale_wrappers_for_base(&store, "never.promoted", "rev_sha256:new").is_empty());
     }
 
     #[test]

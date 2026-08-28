@@ -1,6 +1,6 @@
 # Agent Adaptation vs Composition — Wrapper Provenance, Drift, and Discovery
 
-**Status:** Partial — 2026-08-28 (Phases 0–2 shipped; Phase 3 open)
+**Status:** Partial — 2026-08-28 (Phases 0–3 shipped; Phase 3 steward/operator notification follow-up open)
 **Builds on:** [`../reference/agent-adapter-contract.md`](../reference/agent-adapter-contract.md),
 middleware hooks (`autonoetic-gateway/src/runtime/middleware.rs`),
 federation carry-forward (`autonoetic-gateway/src/runtime/federation_carry_forward.rs`),
@@ -170,12 +170,31 @@ pub struct AdapterProvenance {
 - **Lineage enumeration**: the roster surfaces `adapter.base_agent_id`, so "find
   all wrappers derived from X" is one filtered `agent_list`.
 
-### Phase 3 — Re-adapt loop (open)
+### Phase 3 — Re-adapt loop
 
-When a base with known wrappers is promoted, the gateway could file a signal to
-`evolution-steward.default` (or an `anomaly_flag`) proposing re-adaptation. Left
-open: automation shape, and whether staleness should ever escalate from advisory
-to blocking.
+**[x] core shipped (#1221).** When a base is promoted, the gateway now closes
+the loop deterministically — the LLM never has to happen upon staleness:
+
+- **One drift event per promotion** (`revision.adapter_drift_detected` causal
+  event): `find_stale_wrappers_for_base` scans installed wrappers' provenance
+  after `atomic_promote` and lists every wrapper the move staled. One event
+  per promotion, never per wrapper; under-claiming wrappers are not listed
+  (unknown is not stale).
+- **Spawn-time advisory**: `agent_spawn` on a stale wrapper attaches a
+  `gateway_note` (truncation-exempt) naming the claimed vs current digest and
+  the two lawful moves — regenerate via `agent-adapter.default`, or proceed
+  deliberately (an intentional pin to an older base is legitimate; the
+  `agent@rev-*` semantics exist).
+
+**Decided: staleness never blocks.** A wrapper pinned to an older base is a
+feature, not a fault; composition metadata stays visibility-only. Regeneration
+still passes the one door (adapter → artifact → factory → gates) — the loop
+proposes, the gates dispose.
+
+**Open follow-up (#1221):** routing the drift signal to
+`evolution-steward.default` / the operator activity feed as a *proactive*
+notification, instead of relying on the planner reading the spawn note or the
+roster. Deferred until there is evidence the passive surfaces are missed.
 
 ## 5. What is explicitly NOT proposed
 
