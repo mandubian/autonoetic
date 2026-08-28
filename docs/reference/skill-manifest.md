@@ -1,15 +1,15 @@
-# SKILL.md `capabilities` and `remote_access` — schema reference
+# SKILL.md `capabilities`, `remote_access` and `messaging` — schema reference
 
-This page documents the two frontmatter blocks the gateway **validates
+This page documents the three frontmatter blocks the gateway **validates
 strictly** at install time (`validate_skill_frontmatter_shape`) and parses at
-runtime: `capabilities` and `remote_access`. For the rest of the
+runtime: `capabilities`, `remote_access` and `messaging`. For the rest of the
 frontmatter — identity, roles, `llm_config`, `io`, middleware, background —
 see [`../AGENTS.md`](../AGENTS.md) § SKILL.md Format.
 
-The split is not arbitrary: these two blocks are the ones where a misspelling
-used to fail *silently*, so they get their own schema page and a loud
-install-time rejection. Hand-crafted frontmatter that doesn't match is rejected
-**loudly** — it cannot silently become an empty declaration.
+The split is not arbitrary: these blocks are the ones where a misspelling used
+to fail *silently*, so they get their own schema page and a loud install-time
+rejection. Hand-crafted frontmatter that doesn't match is rejected **loudly** —
+it cannot silently become an empty declaration.
 
 Why strictness matters: `RemoteAccessDeclaration` fields that are misspelled or
 invented (e.g. `hosts:`/`patterns:` instead of `targets:`/`function_calls:`) used
@@ -17,6 +17,12 @@ to be silently dropped by serde, leaving an empty declaration. The agent then
 got blocked at runtime with no actionable signal, and agents burned many turns
 guessing at the schema. The declaration is now validated at install time with a
 precise, self-describing error.
+
+`messaging` is on this page for a sharper version of the same reason. A dropped
+`remote_access` declaration fails *closed* — the agent is blocked and complains.
+A dropped `messaging` block fails **open**: `accepts_from` falls back to its
+`["*"]` default and the agent publishes an inbox its author believed was closed,
+silently and with no runtime signal at all.
 
 ## `capabilities` — list of capability objects
 
@@ -135,6 +141,43 @@ targets:
   - kind: url_prefix
     value: "https://api.github.com/public/"
 ```
+
+## `messaging` — receiver-side consent (under `metadata.autonoetic`)
+
+Who may send this agent an `agent_message`. `MessagingPolicy` has exactly one
+field and uses `#[serde(deny_unknown_fields)]` — unknown keys fail install
+validation.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `accepts_from` | list of agent-id patterns | Senders permitted to write to this agent. Defaults to `["*"]` |
+
+```yaml
+metadata:
+  autonoetic:
+    messaging:
+      accepts_from: []                # closed to every agent principal
+      # accepts_from: ["planner.*"]   # or a named correspondent set
+```
+
+Omitting the whole block means open, which is what every bundle predating the
+field means. Declaring the block but misspelling the key (`accept_from:`) is an
+install-time error, not a silent `["*"]`.
+
+The gateway's own notices and operator-initiated traffic are not peers and are
+never filtered. An agent messaging another session of its **own** role is not
+subject to the check.
+
+Pattern matching is shared with the sender-side `AgentMessage` capability: a
+trailing `*` is a prefix (`planner.*`), `*` alone matches everything, and a
+pattern **without** a trailing `*` is exact. A blank entry matches nothing.
+
+This block is only half the check — the sender still needs an `AgentMessage`
+capability whose patterns cover this agent. See
+[`agent-messaging.md`](agent-messaging.md#receiver-side-consent) for why consent
+is declared by the receiver rather than inferred from capabilities, and for the
+refusal statuses (`recipient_refuses_peer_messages`,
+`recipient_consent_unverifiable`).
 
 ## Worked example — IMAP reader agent
 

@@ -51,6 +51,7 @@ Your natural language instructions go here.
 | `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
 | `metadata.autonoetic.script_input_mode` | No | `"stdin"` (default) or `"args"` |
 | `metadata.autonoetic.open_web` | No | Required when `NetworkAccess.hosts` is `["*"]` |
+| `metadata.autonoetic.messaging` | No | `accepts_from`: who may send this agent an `agent_message`. Omitted = open |
 | `metadata.autonoetic.disclosure` | No | Default visibility scopes for outputs |
 | `metadata.autonoetic.middleware` | No | Pre/post-processing hooks |
 
