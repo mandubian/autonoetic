@@ -205,6 +205,8 @@ Markdown body with natural language instructions.
 | `metadata.autonoetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
 | `metadata.autonoetic.script_entry` | For script mode | Entry script path |
 | `metadata.autonoetic.io` | No | JSON Schema for input/output |
+| `metadata.autonoetic.middleware` | No | Pre/post-processing hooks run sandboxed around each LLM completion — see [Middleware Hooks](#middleware-hooks) |
+| `metadata.autonoetic.adapter` | No | Composition provenance for a wrapper agent derived from a base agent: `base_agent_id` plus optional `base_revision_digest` / `generated_at` / `schema_notes` / `generator`. Static metadata — never executed; surfaced on the roster and the promotion card. See [proposal](proposals/agent-adaptation-composition.md). |
 | `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
 | `metadata.autonoetic.egress.output_label` | No | Bundle-wide egress output floor (`unrestricted` / `local_only` / `no_remote_model`). Intersects into every tool-result label resolution for this agent; can only restrict, never widen operator policy. See [RFC: data envelopes](proposals/data-envelopes-egress-localization.md) §4.1 path 2. |
 

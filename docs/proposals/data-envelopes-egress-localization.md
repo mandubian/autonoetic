@@ -158,8 +158,9 @@ lattices or flip providers per turn to get it.
 ### 2.1 Separation of Powers — unchanged
 
 Labels are **declared metadata, manipulated only by the gateway**. Agents never set,
-strip, or read labels; the middleware pre-hook (`lifecycle.rs:2652-2665`) and any
-manifest-declared script operate on content, not on the label plane. This is required
+strip, or read labels; the middleware pre-hook (`lifecycle.rs:3508-3521`) and any
+manifest-declared script operate on content, not on the label plane — the gateway
+re-attaches labels after the pre-hook (`lifecycle.rs:3522-3560`). This is required
 by the Lawful-Executor invariant (§14, I-10): enforcement must be a deterministic
 function of declared inputs — never LLM-inferred content classification.
 

@@ -105,6 +105,13 @@ const CRYSTALLIZATION_PIPELINE: &[&str] = &[
     "agent-factory.default",
 ];
 
+/// The adaptation route (#1203, proposal `agent-adaptation-composition`): a
+/// wrapper around an existing agent whose behavior fits but whose I/O doesn't.
+/// Agent-reachable — any `AgentSpawn` holder can spawn the adapter — but the
+/// wrapper still passes the one door: installation is the factory's, not the
+/// caller's.
+const ADAPTATION_PIPELINE: &[&str] = &["agent-adapter.default", "agent-factory.default"];
+
 /// Every evolution path the runtime may tell an agent about.
 ///
 /// Adding a row here is a claim, and the guard tests below make it a checkable
@@ -127,6 +134,15 @@ const EVOLUTION_PATHS: &[EvolutionPath] = &[
         summary: "Lessons that recur across sessions graduate into your SKILL.md instruction \
                   text through the curator → steward → factory pipeline.",
         enactor: PathEnactor::Pipeline(GRADUATION_PIPELINE),
+    },
+    EvolutionPath {
+        id: "agent_adaptation",
+        summary: "Adapt an existing agent whose behavior fits but whose I/O doesn't: \
+                  agent-adapter.default generates a wrapper with deterministic mapping \
+                  middleware (a mapping, not a judgment); agent-factory.default installs \
+                  it through the standard gates. The adapter inherits the base's envelope \
+                  and records its provenance — it cannot create or promote revisions.",
+        enactor: PathEnactor::Pipeline(ADAPTATION_PIPELINE),
     },
     EvolutionPath {
         id: "skill_crystallization",
@@ -186,7 +202,19 @@ fn describe_path(
             (have_tool, "self", vec![tool.to_string()], reason)
         }
         PathEnactor::Pipeline(agents) => {
-            let reason = pipeline_unavailable_reason(agents, store);
+            // A pipeline route is carried by delegation: a caller without
+            // AgentSpawn cannot start it at all, however complete the pipeline
+            // is on this gateway. Check the caller first — the capability
+            // verdict is the same on every gateway, the install verdict is not.
+            let reason = if !available_tools.contains("agent_spawn") {
+                Some(
+                    "you do not hold the AgentSpawn capability — a pipeline route \
+                     is carried by delegating to the named agents"
+                        .to_string(),
+                )
+            } else {
+                pipeline_unavailable_reason(agents, store)
+            };
             (
                 reason.is_none(),
                 "evolution_pipeline",
@@ -825,7 +853,14 @@ mod tests {
     /// are installed, so it under-claims rather than assuming they are.
     #[test]
     fn pipeline_paths_underclaim_without_a_store() {
-        let path = path_of(&run(&manifest_with(vec![])), "lesson_graduation");
+        // Caller holds AgentSpawn — the store check is the blocker being tested.
+        let path = path_of(
+            &run(&manifest_with(vec![Capability::AgentSpawn {
+                max_children: 1,
+                max_spawn_depth: 0,
+            }])),
+            "lesson_graduation",
+        );
         assert_eq!(path["available"], false);
         assert_eq!(path["enacted_by"], "evolution_pipeline");
         assert!(path["unavailable_reason"]
@@ -842,5 +877,54 @@ mod tests {
                 "agent-factory.default"
             ])
         );
+    }
+
+    /// A pipeline route is carried by delegation — a caller that cannot spawn
+    /// cannot start it, however complete the pipeline is. The verdict must
+    /// name the missing capability, not the install state (which the caller
+    /// could not act on anyway).
+    #[test]
+    fn pipeline_paths_require_agent_spawn() {
+        let path = path_of(&run(&manifest_with(vec![])), "agent_adaptation");
+        assert_eq!(path["available"], false);
+        let reason = path["unavailable_reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("AgentSpawn"),
+            "should name the missing capability, got: {reason}"
+        );
+    }
+
+    /// Adaptation is agent-reachable, unlike crystallization: the route exists
+    /// whenever the adapter + factory are installed. The row must name the
+    /// pipeline and must NOT imply the caller installs anything itself (the
+    /// one door stays the factory's).
+    #[test]
+    fn adaptation_path_is_an_agent_reachable_pipeline() {
+        // Caller holds AgentSpawn — the store under-claim is what's asserted.
+        let path = path_of(
+            &run(&manifest_with(vec![Capability::AgentSpawn {
+                max_children: 1,
+                max_spawn_depth: 0,
+            }])),
+            "agent_adaptation",
+        );
+        assert_eq!(path["enacted_by"], "evolution_pipeline");
+        assert_eq!(
+            path["via"],
+            serde_json::json!(["agent-adapter.default", "agent-factory.default"])
+        );
+        // No store in this context → under-claim, like every pipeline path.
+        assert_eq!(path["available"], false);
+        assert!(path["unavailable_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be verified"));
+        // Operator-started rows carry a trigger; this one must not — an agent
+        // reading it must conclude it can act, not merely ask.
+        assert!(path.get("operator_trigger").is_none());
+        assert!(path["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent-factory.default"));
     }
 }
