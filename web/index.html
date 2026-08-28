@@ -194,6 +194,9 @@
         </div>
       </div>
 
+      <!-- Live LLM Activity Strip (#1082 — mirrors the room's activity line) -->
+      <div id="llm-activity-strip" class="hidden px-5 py-2 border-b border-slate-800/80 bg-slate-950/60 space-y-1"></div>
+
       <!-- Timeline Stream -->
       <div id="timeline-stream" class="flex-1 overflow-y-auto p-5 space-y-3.5">
         <div class="text-center text-slate-500 text-sm mt-12">
@@ -331,11 +334,14 @@
             <div class="flex items-center gap-2">
               <span id="grants-taint-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" title="Root session egress taint (absence ⇒ unrestricted)">taint: —</span>
               <span id="grants-provider-badge" class="bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full hidden" title="Provider constraint (rung 1)">provider: —</span>
-              <button onclick="fetchGrants()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <button onclick="fetchGrants(); fetchLabels();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
             </div>
           </div>
-          <div id="grants-panel-body" class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
-            <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
+          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+            <div id="grants-panel-body" class="space-y-4">
+              <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
+            </div>
+            <div id="labels-panel-body" class="hidden space-y-2 border-t border-slate-800 pt-4"></div>
           </div>
         </div>
       </div>
@@ -597,6 +603,8 @@
     let sessionPaused = false;
     let lastGrantsData = null;
     let grantsPollTimer = null;
+    let llmActivityTimer = null;
+    let credentialPromptCtx = null; // {secretFields, allowedHosts} for the open gate modal
 
     function getConnectInfo() {
       const sid = document.getElementById('session-input').value.trim();
@@ -664,6 +672,7 @@
       activePlanData = null;
       lastGrantsData = null;
       document.getElementById('grants-panel-body').innerHTML = '<div class="text-center text-slate-500 py-6">Loading live grants...</div>';
+      document.getElementById('labels-panel-body').classList.add('hidden');
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -707,7 +716,15 @@
       // Live grants bootstrap + polling (mirrors the TUI G panel refresh loop)
       fetchGrants();
       if (grantsPollTimer) clearInterval(grantsPollTimer);
-      grantsPollTimer = setInterval(fetchGrants, 10000);
+      grantsPollTimer = setInterval(() => {
+        fetchGrants();
+        if (!document.getElementById('tab-content-grants').classList.contains('hidden')) fetchLabels();
+      }, 10000);
+
+      // Live LLM activity strip (#1082) — poll the ephemeral stream registry
+      pollLlmActivity();
+      if (llmActivityTimer) clearInterval(llmActivityTimer);
+      llmActivityTimer = setInterval(pollLlmActivity, 3000);
 
       // Timeline SSE Stream
       let lastEventId = eventList.length > 0 ? eventList[eventList.length - 1].event_id : null;
@@ -740,6 +757,7 @@
       if (sseSource) { sseSource.close(); sseSource = null; }
       if (sseActivitySource) { sseActivitySource.close(); sseActivitySource = null; }
       if (grantsPollTimer) { clearInterval(grantsPollTimer); grantsPollTimer = null; }
+      if (llmActivityTimer) { clearInterval(llmActivityTimer); llmActivityTimer = null; }
       isConnected = false;
       
       document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
@@ -748,6 +766,8 @@
       document.getElementById('send-btn').disabled = true;
       document.getElementById('estop-btn').classList.add('hidden');
       document.getElementById('header-gate-alert').classList.add('hidden');
+      document.getElementById('llm-activity-strip').classList.add('hidden');
+      credentialPromptCtx = null;
       sessionPaused = false;
       updatePauseBtn();
       lastGrantsData = null;
@@ -1036,6 +1056,112 @@
       }
     }
 
+    // ── Per-item taint view (mirrors TUI T panel, #974/#989: labels.list) ──
+
+    async function fetchLabels() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'labels-list', method: 'labels.list',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { console.warn('labels.list failed:', json.error.message); return; }
+        if (json && json.result) renderLabelsPanel(json.result);
+      } catch (e) {}
+    }
+
+    function labelRowHTML(id, summary, labelName, detail) {
+      const taintCls = labelName === 'unrestricted'
+        ? 'text-accentGreen' : (labelName === 'blocked' ? 'text-accentRed' : 'text-accentAmber');
+      return `
+        <div class="p-2 rounded border border-slate-800 bg-slate-900/40">
+          <div class="flex items-center justify-between gap-2">
+            <code class="text-slate-200 text-[10px] break-all">${escapeHTML(summary)}</code>
+            <span class="font-mono font-bold text-[10px] shrink-0 ${taintCls}">${escapeHTML(labelName)}</span>
+          </div>
+          <div class="text-[9px] font-mono text-slate-500 mt-0.5">${escapeHTML(detail)}</div>
+        </div>
+      `;
+    }
+
+    function labelSectionHTML(title, rows, rowFn) {
+      if (!rows || rows.length === 0) return '';
+      return `<div><h4 class="text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1.5">${title} (${rows.length})</h4>
+        <div class="space-y-1.5">${rows.map(rowFn).join('')}</div></div>`;
+    }
+
+    function renderLabelsPanel(data) {
+      const div = document.getElementById('labels-panel-body');
+      const labelName = row => sinksLabelName(Array.isArray(row.label) ? row.label : []);
+      let html = `<h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider flex items-center justify-between">
+        <span>🏷️ Labeled Items (per-item taint)</span></h3>`;
+      html += labelSectionHTML('Envelopes', data.envelopes, r =>
+        labelRowHTML(r.envelope_id, `${r.envelope_id} · ${r.tool_name || '?'}`, labelName(r),
+          `label ${labelName(r)} · ${r.resolution || 'default'} · parents=${(r.parent_envelope_ids || []).length} · taint=${!!r.taint_applied}`));
+      html += labelSectionHTML('Session taints', data.session_taints, r =>
+        labelRowHTML(r.session_id, r.session_id, labelName(r), `label ${labelName(r)}`));
+      html += labelSectionHTML('Memories', data.memories, r =>
+        labelRowHTML(r.memory_id, `${r.memory_id} · ${r.scope || '?'}`, labelName(r), `label ${labelName(r)}`));
+      html += labelSectionHTML('Artifacts', data.artifacts, r =>
+        labelRowHTML(r.artifact_id, `${r.artifact_id} · ${r.ref_id || '—'} @ ${r.scope_id || '?'}`, labelName(r), `label ${labelName(r)}`));
+      html += labelSectionHTML('Execution traces', data.execution_traces, r =>
+        labelRowHTML(r.trace_id, `${r.trace_id} · ${r.tool_name || '?'} @ ${r.session_id || '?'}`, labelName(r), `label ${labelName(r)}`));
+      html += labelSectionHTML('Agent messages', data.agent_messages, r =>
+        labelRowHTML(r.message_id, `${r.message_id} · from ${r.from_agent || '?'}`, labelName(r), `label ${labelName(r)}`));
+      if (data.truncated) html += '<div class="text-[9px] text-slate-500 italic">… list truncated (limit reached)</div>';
+      const empty = !html.match(/<div><h4/);
+      if (empty) html += '<div class="text-slate-600 italic">No labeled items under this root.</div>';
+      div.innerHTML = html;
+      div.classList.remove('hidden');
+    }
+
+    // ── Live LLM activity strip (#1082: llm.activity stream registry) ──
+
+    async function pollLlmActivity() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'llm-activity', method: 'llm.activity',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result) renderLlmActivity(json.result.streams || []);
+      } catch (e) {}
+    }
+
+    function renderLlmActivity(streams) {
+      const strip = document.getElementById('llm-activity-strip');
+      if (!streams.length) { strip.classList.add('hidden'); strip.innerHTML = ''; return; }
+      // Sort stuck-looking first (largest idle gap vs its budget), like the room.
+      const sorted = [...streams].sort((a, b) =>
+        (b.since_last_chunk_ms / Math.max(1, b.idle_budget_ms)) - (a.since_last_chunk_ms / Math.max(1, a.idle_budget_ms)));
+      strip.innerHTML = sorted.map(s => {
+        const phase = s.phase === 'awaiting_first_byte' ? '⏳ waiting first byte' : '💬 streaming';
+        const idlePct = s.idle_budget_ms ? s.since_last_chunk_ms / s.idle_budget_ms : 0;
+        const atRisk = idlePct > 0.8;
+        const idleTxt = s.phase === 'awaiting_first_byte' ? '' :
+          ` · idle ${(s.since_last_chunk_ms / 1000).toFixed(1)}s/${(s.idle_budget_ms / 1000).toFixed(0)}s`;
+        return `
+          <div class="flex items-center justify-between gap-2 text-[10px] font-mono ${atRisk ? 'text-accentRed' : 'text-slate-400'}">
+            <span class="truncate">🧠 <span class="text-slate-200 font-semibold">${escapeHTML(s.agent_id || '?')}</span> · ${escapeHTML(s.model || '?')} · ${phase}${atRisk ? ' · ⚠ near stall budget' : ''}</span>
+            <span class="shrink-0">${(s.elapsed_ms / 1000).toFixed(1)}s · ${s.chunks || 0} chunks${idleTxt}</span>
+          </div>
+        `;
+      }).join('');
+      strip.classList.remove('hidden');
+    }
+
     // ── Cooperative operator pause (mirrors TUI `p`, #1026) ──
 
     function updatePauseBtn() {
@@ -1190,8 +1316,12 @@
       const filtered = eventList.filter(e => {
         const alt = (e.altitude || '').toLowerCase();
         if (altitudeFilter === 'error') return alt === 'error';
-        if (altitudeFilter === 'attention') return alt === 'attention' || alt === 'error';
-        if (altitudeFilter === 'normal') return alt !== 'detail';
+        // Promotion verdicts are Significant in the room (kept individual at
+        // Detail altitude); surface them on the Normal dial, and failed ones on
+        // Attention.
+        const promo = promotionView(e);
+        if (altitudeFilter === 'attention') return alt === 'attention' || alt === 'error' || (promo && !(promo.toolOk && promo.pass));
+        if (altitudeFilter === 'normal') return alt !== 'detail' || !!promo;
         return true;
       });
 
@@ -1359,6 +1489,8 @@
               ${escapeHTML(payload?.message || payload?.text || extractSummary(e))}
             </div>
           `;
+        } else if (promotionView(e)) {
+          richBody = renderPromotionCard(promotionView(e));
         } else if (eventType.startsWith('egress.')) {
           const sentence = summarizeEgress(eventType, payload);
           const severe = ['egress.envelope_withheld', 'egress.assertion_violation', 'egress.boundary_refused'].includes(eventType);
@@ -1446,7 +1578,8 @@
     function detectGates() {
       closedGates.clear();
       eventList.forEach(e => {
-        if (['approval.resolved', 'approval.approved', 'approval.rejected', 'approval.cancelled', 'interaction.resolved'].includes(e.event_type)) {
+        if (['approval.resolved', 'approval.approved', 'approval.rejected', 'approval.cancelled',
+             'interaction.resolved', 'user.ask.resolved', 'user.ask.cancelled', 'user.ask.expired'].includes(e.event_type)) {
           try {
             const p = JSON.parse(e.payload);
             const id = p.request_id || p.interaction_id;
@@ -1500,6 +1633,7 @@
 
       currentModalGateId = gateId;
       currentModalGateType = gate.type;
+      credentialPromptCtx = null;
       
       const modal = document.getElementById('gate-modal');
       const title = document.getElementById('modal-title');
@@ -1595,6 +1729,13 @@
             ${confirmPhraseHTML}
           </div>
         `;
+
+        // CredentialPrompt approvals (#1105/#1000): the card is where secrets
+        // are typed, so the egress scope rides here too. Async inspect —
+        // failures leave the generic approve path (CLI fallback) intact.
+        if ((gate.payload.action || '') === 'credential_prompt') {
+          await renderCredentialPromptSection(gateId, body);
+        }
       } else {
         title.innerText = '❓ Clarification Input Needed';
         subtitle.innerText = 'Agent requires user decision to continue step';
@@ -1629,6 +1770,64 @@
     function closeGateModal() {
       document.getElementById('gate-modal').classList.add('hidden');
       currentModalGateId = null;
+      credentialPromptCtx = null;
+    }
+
+    // CredentialPrompt card (mirrors the TUI secret-entry modal): service,
+    // message, the egress scope this approval also grants (#1105), and the
+    // secret-field inputs (#1000). Values go to the vault with the approval —
+    // never into the agent transcript.
+    async function renderCredentialPromptSection(gateId, bodyEl) {
+      const { secret, baseURL } = getConnectInfo();
+      let insp = null;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'cred-inspect', method: 'approvals.inspect',
+            params: { request_id: gateId }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result) insp = json.result;
+      } catch (e) {}
+      if (!insp) return;
+
+      const fields = Array.isArray(insp.secret_fields) ? insp.secret_fields : [];
+      const hosts = Array.isArray(insp.allowed_hosts) ? insp.allowed_hosts : [];
+      credentialPromptCtx = { fields };
+
+      const sec = document.createElement('div');
+      sec.className = 'mt-1';
+      sec.innerHTML = `
+        <div class="bg-accentViolet/10 border border-accentViolet/30 p-3 rounded-xl text-xs space-y-2.5">
+          <div class="text-accentViolet font-bold uppercase tracking-wide flex items-center gap-1.5">
+            <span>🔐</span> Credential Prompt${insp.service ? `: ${escapeHTML(insp.service)}` : ''}
+            ${insp.credential_id ? `<code class="ml-1 text-slate-400 font-normal normal-case">${escapeHTML(insp.credential_id)}</code>` : ''}
+          </div>
+          ${insp.message ? `<p class="text-slate-300 leading-relaxed">${escapeHTML(insp.message)}</p>` : ''}
+          <div>
+            <span class="text-[10px] text-accentAmber font-bold uppercase block mb-1">Egress scope this approval also grants:</span>
+            ${hosts.length === 0
+              ? '<span class="text-slate-500 text-[10px] italic">(none declared — requests will not be host-bound)</span>'
+              : `<div class="flex flex-wrap gap-1.5">${hosts.map(h => h === '*'
+                  ? '<span class="bg-accentRed/15 text-accentRed border border-accentRed/40 font-mono text-[10px] font-bold px-2 py-0.5 rounded">* — WILDCARD: the secret can be sent to ANY host</span>'
+                  : `<span class="bg-slate-900 text-accentCyan font-mono text-[10px] px-2 py-0.5 rounded border border-slate-800">· ${escapeHTML(h)}</span>`).join('')}</div>`}
+          </div>
+          ${fields.length ? `
+          <div class="space-y-1.5 pt-0.5">
+            <span class="text-[10px] text-slate-400 font-semibold uppercase block">Secret values (stored in the gateway vault — never reach the agent):</span>
+            ${fields.map((f, i) => `
+              <div class="flex items-center gap-2">
+                <span class="w-36 shrink-0 text-slate-300 font-medium text-[11px] truncate" title="${escapeHTML(f.name)}">${escapeHTML(f.label || f.name)}</span>
+                <input id="cred-secret-${i}" type="${f.masked === false ? 'text' : 'password'}" autocomplete="off" placeholder="${escapeHTML(f.name)}${f.masked === false ? '' : ' (masked)'}" class="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-accentViolet font-mono">
+              </div>
+            `).join('')}
+          </div>` : ''}
+        </div>
+      `;
+      bodyEl.appendChild(sec);
     }
 
     async function submitGateAction(isApprove) {
@@ -1653,6 +1852,22 @@
           }
           params.confirm_phrase = gate?.payload?.confirm_phrase || undefined;
           params.acknowledged_capabilities = Array.from(new Set(acknowledged_capabilities));
+
+          // CredentialPrompt: submit the typed secret values alongside the
+          // approval (vault-bound; same [name, value] pairs as the TUI).
+          if (credentialPromptCtx && credentialPromptCtx.fields.length) {
+            const secrets = [];
+            for (let i = 0; i < credentialPromptCtx.fields.length; i++) {
+              const el = document.getElementById(`cred-secret-${i}`);
+              const val = el ? el.value : '';
+              if (!val.trim()) {
+                alert(`Secret value for "${credentialPromptCtx.fields[i].label || credentialPromptCtx.fields[i].name}" is required.`);
+                return;
+              }
+              secrets.push([credentialPromptCtx.fields[i].name, val]);
+            }
+            params.secrets = secrets;
+          }
         }
 
         try {
@@ -1939,6 +2154,96 @@
       });
     }
 
+    // ── Promotion verdict rows (mirrors #41edd519: pass/fail on the timeline) ──
+
+    const PROMO_SLOTS = [
+      ['evaluator', 'evaluator_id', 'evaluator_timestamp', 'evaluator_pass'],
+      ['auditor', 'auditor_id', 'auditor_timestamp', 'auditor_pass'],
+      ['static_evaluator', 'static_evaluator_id', 'static_evaluator_timestamp', 'static_evaluator_pass'],
+      ['unit_test_runner', 'unit_test_runner_id', 'unit_test_runner_timestamp', 'unit_test_runner_pass'],
+      ['sealed_evaluator', 'sealed_evaluator_id', 'sealed_evaluator_timestamp', 'sealed_evaluator_pass'],
+    ];
+
+    // View model for a `promotion_record` tool.completed entry — mirrors
+    // render.rs promotion_record_view (result may be object or JSON string).
+    function promotionView(e) {
+      if (e.event_type !== 'tool.completed') return null;
+      let p = null;
+      try { if (e.payload) p = JSON.parse(e.payload); } catch (err) { return null; }
+      const tool = (p && (p.tool_name || p.tool)) || '';
+      if (tool !== 'promotion_record' && tool !== 'promotion.record') return null;
+      let r = p.result;
+      if (typeof r === 'string') { try { r = JSON.parse(r); } catch (err) { r = null; } }
+      if (!r || typeof r !== 'object') r = {};
+      const rec = (r.promotion_record && typeof r.promotion_record === 'object') ? r.promotion_record : null;
+      const toolOk = r.ok !== false;
+      let pass = false;
+      if (typeof r.pass === 'boolean') pass = r.pass;
+      else if (rec && typeof rec.pass === 'boolean') pass = rec.pass;
+      let role = typeof r.role === 'string' ? r.role : null;
+      if (!role && rec) {
+        let latest = null;
+        for (const [name, idKey, tsKey] of PROMO_SLOTS) {
+          if (rec[idKey]) {
+            const ts = rec[tsKey] || '';
+            if (!latest || ts > latest[1]) latest = [name, ts];
+          }
+        }
+        role = latest ? latest[0] : '';
+      }
+      const findings = Array.isArray(r.findings) ? [...r.findings] : [];
+      if (rec && role && Array.isArray(rec[role + '_findings'])) findings.push(...rec[role + '_findings']);
+      const rolesRecorded = rec
+        ? PROMO_SLOTS.filter(([, idKey]) => rec[idKey]).map(([name, , , passKey]) => [name, rec[passKey] === true])
+        : [];
+      const artifact = (e.refs && e.refs.artifact_id) || (rec && rec.artifact_ref) || r.artifact_id || null;
+      return { toolOk, pass, role: role || '?', findings, rolesRecorded,
+               artifact, trace: r.execution_trace_id || null, error: r.error || null };
+    }
+
+    function promotionFindingCounts(findings) {
+      const c = { critical: 0, error: 0, warning: 0, info: 0 };
+      for (const f of findings) {
+        const sev = f && f.severity;
+        if (sev === 'critical' || sev === 'error' || sev === 'warning') c[sev]++;
+        else c.info++;
+      }
+      const parts = [];
+      if (c.critical) parts.push(`${c.critical} critical`);
+      if (c.error) parts.push(`${c.error} error`);
+      if (c.warning) parts.push(`${c.warning} warning`);
+      if (c.info) parts.push(`${c.info} info`);
+      return parts.length ? parts.join(', ') : 'no findings';
+    }
+
+    function renderPromotionCard(view) {
+      const ok = view.toolOk && view.pass;
+      const headline = !view.toolOk
+        ? '✗ promotion record rejected'
+        : `${ok ? '✓' : '✗'} promotion ${view.pass ? 'PASS' : 'FAIL'} · ${view.role}`;
+      const lines = [];
+      if (view.error) lines.push(`error: ${view.error}`);
+      if (view.artifact) lines.push(`artifact: ${view.artifact}`);
+      if (view.trace) lines.push(`execution trace: ${view.trace}`);
+      if (view.findings.length) {
+        lines.push(`findings: ${promotionFindingCounts(view.findings)}`);
+        for (const f of view.findings.filter(x => ['critical', 'error', 'warning'].includes(x && x.severity)).slice(0, 3)) {
+          lines.push(`  [${f.severity}] ${f.description || '(no description)'}`);
+        }
+      }
+      if (view.rolesRecorded.length) {
+        lines.push(`registry: ${view.rolesRecorded.map(([r, p]) => `${r} ${p ? '✓' : '✗'}`).join(' · ')}`);
+      }
+      const border = ok ? 'border-accentGreen/40 bg-accentGreen/10' : 'border-accentRed/40 bg-accentRed/10';
+      const txt = ok ? 'text-accentGreen' : 'text-accentRed';
+      return `
+        <div class="mt-2 p-3 rounded-lg border ${border} text-xs space-y-1">
+          <div class="font-display font-bold ${txt} uppercase tracking-wide">${escapeHTML(headline)}</div>
+          ${lines.length ? `<div class="font-mono text-[10px] text-slate-300 whitespace-pre-wrap">${escapeHTML(lines.join('\n'))}</div>` : ''}
+        </div>
+      `;
+    }
+
     function egressLabelDisplay(p, key) {
       const v = p && p[key];
       if (typeof v === 'string') return v;
@@ -2208,7 +2513,7 @@
       const info = getConnectInfo();
       if (tabId === 'constitution' && isConnected) fetchConstitution(info.baseURL, info.secret);
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
-      if (tabId === 'grants' && isConnected) fetchGrants();
+      if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); }
     }
 
     async function fetchRecentSessions() {
