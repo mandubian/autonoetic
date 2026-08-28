@@ -547,13 +547,32 @@ impl ScheduledAction {
                 payload,
             } => Self::CredentialRequest {
                 credential_id: credential_id.clone(),
-                url: url.clone(),
                 method: method.clone(),
+                url: super::redaction::redact_embedded_secrets(url),
                 headers: headers.as_ref().map(|h| Self::redact_headers(h, super::disclosure::ViewerClass::Operator)),
                 body: body.as_ref().map(|b| Self::redact_json_value(b, super::disclosure::ViewerClass::Operator)),
                 inject_secret_as: inject_secret_as.clone(),
                 payload: payload.as_ref().map(|p| Self::redact_json_value(p, super::disclosure::ViewerClass::Operator)),
             },
+            // `?token=…` / `&client_secret=…` in a URL is a credential in the
+            // one place an operator is guaranteed to be shown it: the approval
+            // card renders the target. `QUERY_ASSIGN_RE` already knows how to
+            // mask these in place, leaving scheme, host and path — everything
+            // the operator is actually deciding about — intact.
+            Self::WebFetch { url, .. } => {
+                let mut out = self.clone();
+                if let Self::WebFetch { url: u, .. } = &mut out {
+                    *u = super::redaction::redact_embedded_secrets(url);
+                }
+                out
+            }
+            Self::WebCall { url, .. } => {
+                let mut out = self.clone();
+                if let Self::WebCall { url: u, .. } = &mut out {
+                    *u = super::redaction::redact_embedded_secrets(url);
+                }
+                out
+            }
             // An operator must be able to *read* the command to triage it —
             // that is the whole point of the class — but reading the command
             // is not the same as reading the credential inside it. Values are
@@ -593,12 +612,17 @@ impl ScheduledAction {
     /// path, which is what "read parity" means: the seat sees what the human
     /// it stands in for sees.
     ///
-    /// Kept as its own variant even though it is currently identical, because
-    /// the two classes mask for *independent reasons*: the operator, so a
-    /// human reviewing a gate is not shown credentials they have no need for;
-    /// the decider, because its reads are causal-chained and its context is
-    /// checkpointed, so what it sees is what the record keeps. If the operator
-    /// path is ever relaxed, the decider must not follow it.
+    /// **Currently identical to the operator view**, and delegation means a
+    /// change to that path changes this one too — the variant does not by
+    /// itself hold the two apart.
+    ///
+    /// It is kept because the two classes mask for *independent reasons*: the
+    /// operator, so a human reviewing a gate is not shown credentials they
+    /// have no need for; the decider, because its reads are causal-chained and
+    /// its context checkpointed, so what it sees is what the record keeps.
+    /// Should the operator path ever be relaxed, this function is where the
+    /// divergence has to be written explicitly — the seam exists, but nothing
+    /// enforces it until someone uses it.
     fn redact_for_decider(&self) -> Self {
         self.redact_for_operator()
     }
@@ -1562,6 +1586,48 @@ mod redaction_tests {
         };
         assert_eq!(path, "/tmp/keys.txt", "the path stays visible for triage");
         assert!(!content.contains("hunter2"), "password shown to operator: {content}");
+    }
+
+    #[test]
+    fn operator_class_masks_credentials_carried_in_urls() {
+        // The approval card renders the target URL, so `?token=…` is a
+        // credential in the one place the operator is guaranteed to be shown.
+        let action = ScheduledAction::WebFetch {
+            url: "https://api.example.com/v1/items?token=abc123secret&page=2".into(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: None,
+            payload: None,
+        };
+        let op = action.redact_for_viewer(ViewerClass::Operator);
+        let ScheduledAction::WebFetch { url, .. } = op else {
+            panic!("expected WebFetch");
+        };
+        assert!(!url.contains("abc123secret"), "token survived: {url}");
+        assert!(
+            url.starts_with("https://api.example.com/v1/items"),
+            "scheme, host and path are what the operator is deciding about: {url}"
+        );
+        assert!(url.contains("page=2"), "benign params should survive: {url}");
+    }
+
+    #[test]
+    fn operator_class_masks_credential_request_url() {
+        let action = ScheduledAction::CredentialRequest {
+            credential_id: "github_token".into(),
+            url: "https://api.github.com/user?access_token=ghs_abcdefghijklmnop".into(),
+            method: Some("GET".into()),
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: None,
+        };
+        let op = action.redact_for_viewer(ViewerClass::Operator);
+        let ScheduledAction::CredentialRequest { url, .. } = op else {
+            panic!("expected CredentialRequest");
+        };
+        assert!(!url.contains("ghs_abcdefghijklmnop"), "token survived: {url}");
+        assert!(url.starts_with("https://api.github.com/user"), "got: {url}");
     }
 
     #[test]
