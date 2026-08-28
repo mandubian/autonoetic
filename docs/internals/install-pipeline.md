@@ -552,15 +552,15 @@ Low-risk capabilities (`SandboxFunctions`, `ReadAccess`, `WriteAccess`, `Evaluat
 
 **Fix:** This is exactly what Section 3.1 (Promotion Gate) addresses. The existing `required_eval_run_id` parameter becomes redundant for high-risk agents — the gate enforces it mechanically.
 
-### A.4 `skip_llm` in pre-process hooks — Operator-level bypass, not agent-level
+### A.4 `skip_llm` in pre-process hooks — agent-declared, install-gated
 
-**File:** `autonoetic-gateway/src/runtime/lifecycle.rs:1330–1355`
+**File:** `autonoetic-gateway/src/runtime/lifecycle.rs:3508–3521` (pre-hook), `3562–3605` (`skip_llm` branch)
 
-**What it does:** Pre-process hooks (operator-configured shell scripts) can set `metadata.skip_llm: true` and provide a synthetic `assistant_reply`, bypassing the LLM call entirely.
+**What it does:** Pre-process hooks are scripts declared in the agent's **own manifest** (`metadata.autonoetic.middleware.pre_process`), not operator-configured. A hook may set `metadata.skip_llm: true` and provide a synthetic `assistant_reply`, short-circuiting the LLM call for that round (correct budget semantics: a skipped round records no token spend).
 
-**Why this is NOT a Rule Zero violation:** Hooks are operator-configured, not agent-controlled. An agent cannot set `skip_llm` on its own requests. The hook script runs as a separate process configured in gateway settings. This is an operator escape hatch, not an agent escape hatch — it's the operator's system to control.
+**Why this is NOT a Rule Zero violation:** The hook is part of the agent bundle — it ships as code in the artifact and faces the same promotion gates as everything else (auditor / static_evaluator review, one-door install, digest-bound). The bypass is therefore *declared, reviewed, and immutable-with-the-revision*, not improvised at runtime. The egress label plane is additionally hook-proof: the gateway re-attaches labels after the pre-hook (`lifecycle.rs:3522–3560`), so a hook cannot strip labels or forge declassification.
 
-**Status:** Acceptable. Documented for awareness.
+**Status:** Acceptable. *(Correction 2026-08-28: this appendix previously described hooks as "operator-configured" and claimed "an agent cannot set skip_llm on its own requests" — both wrong. Hooks are agent-manifest-declared, and the control is the install gate, not the config surface.)*
 
 ---
 

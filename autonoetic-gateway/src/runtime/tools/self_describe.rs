@@ -105,6 +105,13 @@ const CRYSTALLIZATION_PIPELINE: &[&str] = &[
     "agent-factory.default",
 ];
 
+/// The adaptation route (#1203, proposal `agent-adaptation-composition`): a
+/// wrapper around an existing agent whose behavior fits but whose I/O doesn't.
+/// Agent-reachable — any `AgentSpawn` holder can spawn the adapter — but the
+/// wrapper still passes the one door: installation is the factory's, not the
+/// caller's.
+const ADAPTATION_PIPELINE: &[&str] = &["agent-adapter.default", "agent-factory.default"];
+
 /// Every evolution path the runtime may tell an agent about.
 ///
 /// Adding a row here is a claim, and the guard tests below make it a checkable
@@ -127,6 +134,15 @@ const EVOLUTION_PATHS: &[EvolutionPath] = &[
         summary: "Lessons that recur across sessions graduate into your SKILL.md instruction \
                   text through the curator → steward → factory pipeline.",
         enactor: PathEnactor::Pipeline(GRADUATION_PIPELINE),
+    },
+    EvolutionPath {
+        id: "agent_adaptation",
+        summary: "Adapt an existing agent whose behavior fits but whose I/O doesn't: \
+                  agent-adapter.default generates a wrapper with deterministic mapping \
+                  middleware (a mapping, not a judgment); agent-factory.default installs \
+                  it through the standard gates. The adapter inherits the base's envelope \
+                  and records its provenance — it cannot create or promote revisions.",
+        enactor: PathEnactor::Pipeline(ADAPTATION_PIPELINE),
     },
     EvolutionPath {
         id: "skill_crystallization",
@@ -842,5 +858,32 @@ mod tests {
                 "agent-factory.default"
             ])
         );
+    }
+
+    /// Adaptation is agent-reachable, unlike crystallization: the route exists
+    /// whenever the adapter + factory are installed. The row must name the
+    /// pipeline and must NOT imply the caller installs anything itself (the
+    /// one door stays the factory's).
+    #[test]
+    fn adaptation_path_is_an_agent_reachable_pipeline() {
+        let path = path_of(&run(&manifest_with(vec![])), "agent_adaptation");
+        assert_eq!(path["enacted_by"], "evolution_pipeline");
+        assert_eq!(
+            path["via"],
+            serde_json::json!(["agent-adapter.default", "agent-factory.default"])
+        );
+        // No store in this context → under-claim, like every pipeline path.
+        assert_eq!(path["available"], false);
+        assert!(path["unavailable_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be verified"));
+        // Operator-started rows carry a trigger; this one must not — an agent
+        // reading it must conclude it can act, not merely ask.
+        assert!(path.get("operator_trigger").is_none());
+        assert!(path["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent-factory.default"));
     }
 }

@@ -1,6 +1,6 @@
 # Agent Adaptation vs Composition — Wrapper Provenance, Drift, and Discovery
 
-**Status:** Partial — 2026-08-27 (Phase 0 shipped; Phases 1–3 open)
+**Status:** Partial — 2026-08-28 (Phases 0–1 shipped; Phases 2–3 open)
 **Builds on:** [`../reference/agent-adapter-contract.md`](../reference/agent-adapter-contract.md),
 middleware hooks (`autonoetic-gateway/src/runtime/middleware.rs`),
 federation carry-forward (`autonoetic-gateway/src/runtime/federation_carry_forward.rs`),
@@ -80,23 +80,24 @@ onto it. The base agent need not even be installed at wrapper runtime.
    set to its derivation: a fork *gaining* power relative to its base is not even
    surfaced on the promotion card.
 
-4. **The planner cannot know adaptation exists.** `planner.default`'s foundational
-   table (`agents/lead/planner.default/SKILL.md:152-167`) and decision flow contain
-   no `agent-adapter` row or step; the `adapt` decision rule lives only in
-   `skill-crystallizer.default` (operator-triggered via `/crystallize`) and in
-   operator-facing docs (`docs/guide/human-agent-collaboration.md:331`). The
-   archived design intended the planner to carry the rule
-   (`docs/archived/plan_adapt.md:172-188`); the current SKILL.md lost it.
+4. ~~The planner cannot know adaptation exists~~ — **resolved by Phase 1 (#1203).**
+   `planner.default` now carries an `agent-adapter.default` row in its Foundational
+   Agents table, a Decision Flow step (10a), and a Discovery-section pointer. Before
+   Phase 1 the `adapt` decision rule lived only in `skill-crystallizer.default`
+   (operator-triggered via `/crystallize`) and operator-facing docs
+   (`docs/guide/human-agent-collaboration.md:331`); the archived design had intended
+   the planner to carry the rule (`docs/archived/plan_adapt.md:172-188`).
 
-5. **`self_describe` does not expose the route.** Adaptation appears only nested
-   inside the operator-triggered `skill_crystallization` path
-   (`runtime/tools/self_describe.rs:101-106, 131-140`). An agent asking "how can I
-   adapt an existing agent?" gets no direct answer.
+5. ~~`self_describe` does not expose the route~~ — **resolved by Phase 1 (#1203).**
+   `EVOLUTION_PATHS` now advertises `agent_adaptation` as an agent-reachable
+   pipeline (`agent-adapter.default` → `agent-factory.default`), with availability
+   derived from installed agents like every other path. Before Phase 1, adaptation
+   appeared only nested inside the operator-triggered `skill_crystallization` path.
 
-6. **Stale docs.** `docs/internals/install-pipeline.md:555-563` calls hooks
-   "operator-configured" (they are agent-manifest-declared) with outdated line
-   citations; `docs/proposals/data-envelopes-egress-localization.md:161` cites
-   outdated lifecycle.rs lines.
+6. ~~Stale docs~~ — **resolved by Phase 1 (#1203).** `docs/internals/install-pipeline.md`
+   A.4 corrected (hooks are agent-manifest-declared, not operator-configured; line
+   refs fixed), `data-envelopes-egress-localization.md` pre-hook citation corrected,
+   `docs/AGENTS.md` key-field table gained `middleware` and `adapter` rows.
 
 ## 4. Proposal
 
@@ -133,6 +134,8 @@ pub struct AdapterProvenance {
   artifact → revision → inspect.
 
 ### Phase 1 — Discovery
+
+**[x] shipped (#1203).**
 
 - **`planner.default` SKILL.md**: add an `agent-adapter.default` row to the
   Foundational Agents table and a Decision Flow step mirroring the crystallizer's

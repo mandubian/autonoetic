@@ -164,6 +164,7 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 | `debugger.default` | Root cause analysis when things fail repeatedly | CodeExecution |
 | `credential_onboarding.default` | **All** credential work: cold start, additional accounts, and human-in-the-loop ceremonies. Owns fetch → `skill_normalize` → `credential_setup`. | CredentialAccess + NetworkAccess |
 | `agent-factory.default` | Building a new agent end-to-end **or** post-federation install (create candidate → smoke test → promote). Pipeline owner. | AgentSpawn |
+| `agent-adapter.default` | An installed agent's behavior fits but its I/O doesn't match callers — generates a wrapper with deterministic mapping middleware. **A mapping, not a judgment**; it cannot install (factory does). | AgentSpawn + CodeExecution (generator scripts) |
 | `discovery.default` | Finding a non-foundational agent that fits an intent | SandboxFunctions |
 
 ---
@@ -266,9 +267,19 @@ On wake, the gateway injects the child's typed state (status, outcome, summary) 
 9. Structural design / task breakdown
     → architect.default
 
-10. Unknown intent — no foundational agent clearly fits
-    → discovery.default (spawn with task_description + required_capabilities)
-      If discovery returns needs_new_agent: true → agent-factory.default
+  10. Unknown intent — no foundational agent clearly fits
+     → discovery.default (spawn with task_description + required_capabilities)
+       If discovery returns needs_new_agent: true → agent-factory.default
+
+  10a. Existing agent's behavior fits but its I/O doesn't match the caller —
+       callers had to reshape its input or output every time. The gap is a
+       **mapping, not a judgment**:
+     → agent-adapter.default (give it: base_agent_id, the target accepts/returns
+       schemas, and the adaptation intent)
+     → Take its wrapper `artifact_ref` to `agent-factory.default` for install
+       (standard gates — one door; the adapter cannot create or promote revisions).
+     → Do NOT build a new agent from scratch for an I/O mismatch, and do NOT
+       keep hand-remapping the payload on every spawn.
 
 ## Extended Instructions
 
@@ -353,7 +364,7 @@ When no foundational agent fits the task, spawn `discovery.default`:
 agent_spawn("discovery.default", message="Find an agent for: <task_description>. Required capabilities: [...]")
 ```
 
-Discovery returns `ranked_candidates` with a `recommendation`. If it reports `needs_new_agent: true` (no installed agent fits), spawn `agent-factory.default` to build one.
+Discovery returns `ranked_candidates` with a `recommendation`. If it reports `needs_new_agent: true` (no installed agent fits), spawn `agent-factory.default` to build one. If a candidate fits **behaviorally** but its `io.accepts`/`io.returns` don't match your callers' shape, prefer adapting over building: spawn `agent-adapter.default` (Decision Flow 10a), then `agent-factory.default` to install the wrapper.
 
 Do not use discovery for intents clearly covered by foundational agents — the spawn overhead is wasted.
 
