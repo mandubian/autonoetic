@@ -189,6 +189,79 @@ apr-9e6420c1                          evaluator.defau…     sandbox_exec      e
 
 **Deduplication:** The gateway prevents duplicate approval requests. If an approval is already pending (or already approved) for the same operation, the existing request ID is returned instead of creating a new one.
 
+### `autonoetic gateway deciders`
+
+Appoint, list, or revoke a **run-scoped gate decider** — "name the night
+watch". An unattended run otherwise stops at every gate needing a verdict; an
+appointment seats an agent that already holds the `GateDecider` capability
+(P-2.20) for one run, so those gates get a motivated ruling instead of parking
+until morning.
+
+```bash
+autonoetic gateway deciders appoint --agent <agent_id> --scope <root_session_id> \
+    [--kind approval] [--kind escalation] [--ceiling standard|high] \
+    [--expires-at <rfc3339>] [--max-gates <n>] [--appointed-by <principal>] [--json]
+autonoetic gateway deciders list [--root-session <root_session_id>] [--include-revoked] [--json]
+autonoetic gateway deciders revoke <appointment_id> [--reason TEXT] [--revoked-by <principal>]
+```
+
+**An appointment never widens capabilities.** The appointee must already hold
+`GateDecider` covering every kind named, checked against its promoted revision.
+Appointing an agent that lacks the capability — or holds it for `approval` but
+is appointed for `escalation` — is refused, not silently narrowed.
+
+**Advisory only, for now.** Phase 1 records the agent's verdict but still parks
+the gate for you. Both verdicts land on the record, and the agreement between
+them is what a later binding appointment will be justified by — judgment layers
+earn authority from evidence, not from assertion.
+
+**Risk ceiling.** Gates are classified `standard`, `high`, or `critical` from
+their action. The ceiling is the highest class the decider may rule on;
+anything above parks for you. Two things worth knowing before choosing:
+
+- A `sandbox_exec` with detected network hosts is **high**, not standard — so a
+  `standard` ceiling decides very little in practice.
+- `critical` gates (agent promotion, credential registration) are **not
+  appointable at all**, and are refused when you try rather than sitting above
+  a ceiling a later edit could raise. Promotion and secret delivery should not
+  become delegable by one gesture.
+
+**The appointment pins a revision, not just a name.** What gets seated is the
+agent's *promoted revision* at the moment you appoint — instructions,
+capabilities, and model. Promoting a new revision of the same agent does not
+retroactively change what an existing appointment seated, and calibration
+evidence gathered under one revision does not silently carry to another. If you
+change the night watch's model, re-appoint.
+
+**Expiry is two independent clocks.** `--expires-at` is wall-clock;
+`--max-gates` is a count; whichever is reached first ends the appointment. An
+appointment with neither is a standing grant, and `list` labels it as one
+rather than leaving the column blank.
+
+**Revocation** takes effect on the next gate. Verdicts already attributed stay
+attributed — a ruling that was lawful when made does not become unlawful when
+the seat is vacated.
+
+Example — seat a night watch for an overnight run, network gates included,
+expiring at 8am:
+
+```bash
+autonoetic gateway deciders appoint \
+    --agent nightwatch.default \
+    --scope root-3f2a91c4 \
+    --kind approval \
+    --ceiling high \
+    --expires-at 2026-08-29T08:00:00Z
+```
+
+`list` without `--root-session` shows active appointments across all runs,
+which is how an appointment still pointing at a finished run becomes visible:
+
+```
+APPOINTMENT                              AGENT                  SCOPE                        CEILING   MODE       STATE
+apt_9c1e...                              nightwatch.default     root-3f2a91c4                high      advisory   active
+```
+
 ### `autonoetic gateway approvals interactive`
 
 Interactive TUI for reviewing, approving, and rejecting pending approval requests.

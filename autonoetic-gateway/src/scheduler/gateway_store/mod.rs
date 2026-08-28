@@ -8,6 +8,7 @@ mod artifacts;
 pub mod attack_patterns;
 mod channel_bindings;
 pub mod constitutional_proposals;
+mod decider_appointments;
 mod carry_lineage;
 pub use carry_lineage::CarryLineageRecord;
 mod credentials;
@@ -850,6 +851,80 @@ impl GatewayStore {
     pub fn delete_workbench(&self, workbench_id: &str) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         workbenches::delete_workbench(&mut conn, workbench_id)
+    }
+
+    // ── Decider appointments (#1195) ─────────────────────────────────────
+    //
+    // Storage only: validation (capability containment, Critical refusal,
+    // advisory-only) lives in `crate::decider_appointment` so it is enforced
+    // once, at the appointing act, rather than re-derived by each caller.
+
+    pub fn insert_decider_appointment(
+        &self,
+        appointment: &autonoetic_types::decider_appointment::DeciderAppointment,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::insert_appointment(&conn, appointment)
+    }
+
+    pub fn get_decider_appointment(
+        &self,
+        appointment_id: &str,
+    ) -> Result<Option<autonoetic_types::decider_appointment::DeciderAppointment>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::get_appointment(&conn, appointment_id)
+    }
+
+    pub fn list_decider_appointments_for_scope(
+        &self,
+        scope_root_session: &str,
+        active_only: bool,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderAppointment>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_appointments_for_scope(&conn, scope_root_session, active_only)
+    }
+
+    pub fn list_active_decider_appointments(
+        &self,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderAppointment>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_active_appointments(&conn)
+    }
+
+    /// Returns false when the appointment does not exist or was already
+    /// revoked — idempotent, and a second revoke never rewrites the first
+    /// one's attribution.
+    pub fn revoke_decider_appointment(
+        &self,
+        appointment_id: &str,
+        revoked_by: &str,
+        revoked_at: &str,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::revoke_appointment(
+            &conn,
+            appointment_id,
+            revoked_by,
+            revoked_at,
+            reason,
+        )
+    }
+
+    /// Bind the gateway-created peer-root decider session (#1196).
+    pub fn set_decider_appointment_session(
+        &self,
+        appointment_id: &str,
+        decider_session: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::set_decider_session(&conn, appointment_id, decider_session)
+    }
+
+    /// Increment the decided-gate tally that `max_gates` bounds.
+    pub fn record_decider_gate_decided(&self, appointment_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::record_gate_decided(&conn, appointment_id)
     }
 
     pub fn save_validation_waiver(

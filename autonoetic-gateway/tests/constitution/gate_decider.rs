@@ -50,7 +50,7 @@ fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifes
     }
 }
 
-fn write_agent_dir(agents_dir: &PathBuf, agent_id: &str, capabilities: &[Capability]) {
+pub(crate) fn write_agent_dir(agents_dir: &PathBuf, agent_id: &str, capabilities: &[Capability]) {
     let agent_dir = agents_dir.join(agent_id);
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
@@ -80,7 +80,7 @@ capabilities:
     std::fs::write(agent_dir.join("SKILL.md"), skill).unwrap();
 }
 
-fn seed_decider_revision(
+pub(crate) fn seed_decider_revision(
     agents_dir: &PathBuf,
     gateway_dir: &PathBuf,
     store: &GatewayStore,
@@ -149,6 +149,39 @@ fn sandbox_action() -> ScheduledAction {
     }
 }
 
+/// Seat `agent_id` over `scope_root` so the decide path's provenance condition
+/// (#1195) is satisfied. Inserted directly rather than through
+/// `decider_appointment::appoint` on purpose: these tests exercise the *decide*
+/// path (P-2.20 capability, R-10.7 boundary), and going through the appointing
+/// validator would couple them to its rules as well. Appointment validation has
+/// its own suite in `decider_appointment.rs`.
+fn seed_appointment(
+    store: &GatewayStore,
+    agent_id: &str,
+    scope_root: &str,
+) -> anyhow::Result<()> {
+    use autonoetic_types::background::ApprovalRisk;
+    use autonoetic_types::decider_appointment::DeciderAppointment;
+    store.insert_decider_appointment(&DeciderAppointment {
+        appointment_id: format!("apt-test-{}-{}", agent_id, scope_root).replace('/', "_"),
+        decider_agent: agent_id.to_string(),
+        decider_revision: "rev-test".to_string(),
+        kinds: vec!["approval".to_string(), "escalation".to_string()],
+        scope_root_session: scope_root.to_string(),
+        decider_session: None,
+        risk_ceiling: ApprovalRisk::High,
+        advice_only: true,
+        expires_at: None,
+        max_gates: None,
+        gates_decided: 0,
+        appointed_by: "operator".to_string(),
+        appointed_at: chrono::Utc::now().to_rfc3339(),
+        revoked_at: None,
+        revoked_by: None,
+        revoked_reason: None,
+    })
+}
+
 fn create_pending_approval(
     store: &GatewayStore,
     request_id: &str,
@@ -211,6 +244,7 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "decider.default")?;
     seed_decider_session(&store, "other-session", "decider.default")?;
+    seed_appointment(&store, "decider.default", "root-session")?;
     create_pending_approval(
         &store,
         "apr-decider",
@@ -502,6 +536,7 @@ fn agent_decider_can_reject_with_capability() -> anyhow::Result<()> {
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "rejecter.default")?;
     seed_decider_session(&store, "other-session", "rejecter.default")?;
+    seed_appointment(&store, "rejecter.default", "root-session")?;
     create_pending_approval(
         &store,
         "apr-reject",
@@ -552,6 +587,7 @@ fn agent_decider_escalates_to_human_when_uncertain() -> anyhow::Result<()> {
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "escalator.default")?;
     seed_decider_session(&store, "other-session", "escalator.default")?;
+    seed_appointment(&store, "escalator.default", "root-session")?;
 
     // Create an approval gate.
     create_pending_approval(
@@ -1002,6 +1038,7 @@ fn unrelated_decider_in_another_tree_still_decides() -> anyhow::Result<()> {
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "free.default")?;
     seed_decider_session(&store, "other-root/watch-1", "free.default")?;
+    seed_appointment(&store, "free.default", "root-3")?;
     create_pending_approval(&store, "apr-free", "coder.default", "root-3/coder-1")?;
 
     let decision = approve_request_with_options(
@@ -1020,6 +1057,66 @@ fn unrelated_decider_in_another_tree_still_decides() -> anyhow::Result<()> {
     )?;
 
     assert_eq!(decision.status, ApprovalStatus::Approved);
+
+    Ok(())
+}
+
+/// #1195 (closing #1193's second half): lineage is not provenance. An agent
+/// that holds `GateDecider`, is installed, and sits in a completely unrelated
+/// session tree still may not rule on a gate nobody seated it for. The
+/// capability is an eligibility to be appointed, not a standing licence.
+#[test]
+fn decider_without_an_appointment_is_refused() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "unseated.default",
+        &[Capability::GateDecider {
+            kinds: vec!["*".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "unseated.default")?;
+    // Clean lineage: a different root entirely.
+    seed_decider_session(&store, "other-root/watch-1", "unseated.default")?;
+    create_pending_approval(&store, "apr-unseated", "coder.default", "root-9/coder-a")?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-unseated",
+        "agent:unseated.default",
+        Some("ruling without a seat".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("other-root/watch-1".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("an unappointed decider must be refused even with clean lineage");
+
+    assert!(
+        err.to_string().contains("no active appointment"),
+        "refusal should name the missing appointment: {}",
+        err
+    );
+
+    let after = store
+        .get_approval("apr-unseated")?
+        .expect("approval should still exist");
+    assert!(after.decided_by.is_none(), "the gate must still be pending");
 
     Ok(())
 }

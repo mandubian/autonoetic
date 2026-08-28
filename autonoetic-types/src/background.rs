@@ -776,6 +776,48 @@ impl ApprovalRequest {
     }
 }
 
+/// Risk class of an approval, derived mechanically from its `ScheduledAction`
+/// by the gateway's `classify_approval_risk`. It drives operator-facing
+/// hardening (dwell times, confirm phrases) and, since #1195, the `risk_ceiling`
+/// of a decider appointment — one vocabulary for "how consequential is this
+/// gate", rather than a parallel notion of gate altitude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRisk {
+    Standard,
+    High,
+    Critical,
+}
+
+impl ApprovalRisk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "high" => Some(Self::High),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
+    /// Ordering for ceiling comparisons: a gate routes to an appointed decider
+    /// only when its risk is at or below the appointment's ceiling.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::Standard => 0,
+            Self::High => 1,
+            Self::Critical => 2,
+        }
+    }
+}
+
 /// Approval level for escalation control.
 /// Determines who is authorized to resolve an approval request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

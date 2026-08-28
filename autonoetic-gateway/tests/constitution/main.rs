@@ -20,6 +20,7 @@ mod constant_time_auth;
 mod date_2026_07_08_new_clauses_present;
 mod date_2026_07_19_new_clauses_present;
 mod degraded_inspection_available;
+mod decider_appointment;
 mod denial_affordances;
 mod deny_unknown_tools;
 mod egress_data_localization;

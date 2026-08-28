@@ -3788,6 +3788,236 @@ impl JsonRpcRouter {
             // Read-only; the TUI polls this on its idle cadence to render a
             // grants panel. The store methods are the single source of truth
             // (Separation of Powers: the TUI never opens SQLite directly).
+            // ── Decider appointments (#1195) ─────────────────────────
+            //
+            // Operator surface only. Deliberately not exposed as an agent
+            // tool: an appointment is a power grant, and if an agent could
+            // file one, a prompt-injected planner could seat an accomplice.
+            // Prompt-nominated intake arrives in #1197's follow-on as an
+            // operator-confirmed gate, never as a direct agent call.
+            "deciders.appoint" => {
+                #[derive(Deserialize)]
+                struct AppointParams {
+                    decider_agent: String,
+                    scope_root_session: String,
+                    #[serde(default)]
+                    kinds: Vec<String>,
+                    #[serde(default)]
+                    risk_ceiling: Option<String>,
+                    #[serde(default)]
+                    advice_only: Option<bool>,
+                    #[serde(default)]
+                    expires_at: Option<String>,
+                    #[serde(default)]
+                    max_gates: Option<u32>,
+                    #[serde(default)]
+                    appointed_by: Option<String>,
+                }
+                let params: AppointParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for deciders.appoint: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let risk_ceiling = match params.risk_ceiling.as_deref() {
+                    // Defaulting to Standard keeps the quiet path the narrow
+                    // one: reaching High (where network-egress gates live) is
+                    // something the operator has to say out loud.
+                    None => autonoetic_types::background::ApprovalRisk::Standard,
+                    Some(raw) => match autonoetic_types::background::ApprovalRisk::parse(raw) {
+                        Some(r) => r,
+                        None => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!(
+                                    "Unknown risk_ceiling '{}': expected standard or high \
+                                     (critical is not appointable)",
+                                    raw
+                                ),
+                            );
+                        }
+                    },
+                };
+                let kinds = if params.kinds.is_empty() {
+                    vec![
+                        autonoetic_types::decider_appointment::GATE_KIND_APPROVAL.to_string(),
+                    ]
+                } else {
+                    params.kinds
+                };
+                let config = self.execution.config();
+                let request = crate::decider_appointment::AppointmentRequest {
+                    decider_agent: params.decider_agent,
+                    kinds,
+                    scope_root_session: params.scope_root_session,
+                    risk_ceiling,
+                    // Phase 1 is advisory-only; `appoint` refuses false, so a
+                    // caller asking for binding gets the reason, not a silent
+                    // downgrade.
+                    advice_only: params.advice_only.unwrap_or(true),
+                    expires_at: params.expires_at,
+                    max_gates: params.max_gates,
+                    appointed_by: params
+                        .appointed_by
+                        .unwrap_or_else(|| "operator".to_string()),
+                };
+                match crate::decider_appointment::appoint(config.as_ref(), store.as_ref(), request)
+                {
+                    Ok(a) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "appointment": a,
+                            "standing": a.is_standing(),
+                        }),
+                    ),
+                    Err(e) => {
+                        JsonRpcResponse::error(req.id, -32000, format!("{}", e))
+                    }
+                }
+            }
+            "deciders.list" => {
+                #[derive(Deserialize)]
+                struct DecidersListParams {
+                    #[serde(default)]
+                    root_session_id: Option<String>,
+                    #[serde(default)]
+                    include_revoked: Option<bool>,
+                }
+                let params: DecidersListParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for deciders.list: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let include_revoked = params.include_revoked.unwrap_or(false);
+                let listed = match &params.root_session_id {
+                    Some(root) => {
+                        store.list_decider_appointments_for_scope(root, !include_revoked)
+                    }
+                    // Without a scope this is the standing view across runs —
+                    // which is how an appointment pointing at a finished run
+                    // becomes visible.
+                    None => store.list_active_decider_appointments(),
+                };
+                match listed {
+                    Ok(rows) => {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let enriched: Vec<serde_json::Value> = rows
+                            .iter()
+                            .map(|a| {
+                                let mut v = serde_json::to_value(a)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                if let Some(obj) = v.as_object_mut() {
+                                    // Expiry and standing are computed, never
+                                    // stored — an operator reading the list
+                                    // should not have to do date arithmetic to
+                                    // learn whether a seat is still occupied.
+                                    obj.insert(
+                                        "expired".to_string(),
+                                        serde_json::json!(a.is_expired(&now)),
+                                    );
+                                    obj.insert(
+                                        "standing".to_string(),
+                                        serde_json::json!(a.is_standing()),
+                                    );
+                                }
+                                v
+                            })
+                            .collect();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({ "appointments": enriched }),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("deciders.list failed: {}", e),
+                    ),
+                }
+            }
+            "deciders.revoke" => {
+                #[derive(Deserialize)]
+                struct RevokeParams {
+                    appointment_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                    #[serde(default)]
+                    revoked_by: Option<String>,
+                }
+                let params: RevokeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for deciders.revoke: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let revoked_by = params.revoked_by.as_deref().unwrap_or("operator");
+                match crate::decider_appointment::revoke(
+                    store.as_ref(),
+                    &params.appointment_id,
+                    revoked_by,
+                    params.reason.as_deref(),
+                ) {
+                    // `revoked: false` is not an error: revoking an already
+                    // revoked appointment is a no-op that must not rewrite the
+                    // first revocation's attribution.
+                    Ok(revoked) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "appointment_id": params.appointment_id,
+                            "revoked": revoked,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("deciders.revoke failed: {}", e),
+                    ),
+                }
+            }
             "grants.list" => {
                 #[derive(Deserialize)]
                 struct GrantsListParams {
