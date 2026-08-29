@@ -229,7 +229,7 @@
             <span>📋</span> Drafts & Plans
           </button>
           <button id="tab-btn-constitution" onclick="switchRightTab('constitution')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
-            <span>🛡️</span> Constitution
+            <span>🛡️</span> Constitution <span id="constitution-tab-badge" class="bg-accentAmber/15 text-accentAmber border border-accentAmber/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
           </button>
           <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>📖</span> Wiki
@@ -297,6 +297,30 @@
 
         <!-- Tab 3: Constitution Profile -->
         <div id="tab-content-constitution" class="flex-1 flex flex-col overflow-hidden hidden">
+          <!-- Pending Amendment Proposals (O-6: every proposal is owed a decision) -->
+          <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 42%;">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-accentAmber/5 flex items-center justify-between shrink-0">
+              <h3 class="font-display font-semibold text-xs text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
+                <span>📜</span> Pending Amendment Proposals
+              </h3>
+              <button onclick="fetchConstitutionProposals()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+            </div>
+            <div id="constitution-proposals" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-3">Open the tab to load pending proposals.</div>
+            </div>
+          </div>
+          <!-- Anomaly Flags (O-7: every flag is owed an adjudication) -->
+          <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 34%;">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-accentRed/5 flex items-center justify-between shrink-0">
+              <h3 class="font-display font-semibold text-xs text-accentRed uppercase tracking-wider flex items-center gap-1.5">
+                <span>🚩</span> Anomaly Flags
+              </h3>
+              <button onclick="fetchAnomalyFlags()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+            </div>
+            <div id="anomaly-flags" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-3">Open the tab to load anomaly flags.</div>
+            </div>
+          </div>
           <div class="p-4 overflow-y-auto space-y-3.5 flex-1 flex flex-col">
             <div class="bg-slate-900 border border-slate-800 p-3.5 rounded-xl space-y-2 shrink-0">
               <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase">Constitution Profile</h3>
@@ -650,6 +674,8 @@
     let grantsPollTimer = null;
     let llmActivityTimer = null;
     let credentialPromptCtx = null; // {secretFields, allowedHosts} for the open gate modal
+    let lastProposals = null; // pending constitutional amendments (O-6 view)
+    let lastFlags = null;     // open anomaly flags (O-7 view)
 
     function getConnectInfo() {
       const sid = document.getElementById('session-input').value.trim();
@@ -727,6 +753,11 @@
       document.getElementById('cron-jobs').innerHTML = '<div class="text-center text-slate-500 py-4">Loading…</div>';
       document.getElementById('evolution-status').innerText = '';
       document.getElementById('evolution-counts-badge').innerText = '—';
+      lastProposals = null;
+      lastFlags = null;
+      document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
+      document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
+      document.getElementById('constitution-tab-badge').classList.add('hidden');
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -760,6 +791,10 @@
       await fetchPendingPlans();
       fetchEvolution();
       fetchCronJobs();
+
+      // 6. Governance standing views (O-6 proposals + O-7 anomaly flags)
+      fetchConstitutionProposals();
+      fetchAnomalyFlags();
 
       if (statusText.innerText !== 'Connecting...') return;
 
@@ -846,6 +881,11 @@
       document.getElementById('cron-jobs').innerHTML = '<div class="text-center text-slate-500 py-4">Connect to a session to load.</div>';
       document.getElementById('evolution-status').innerText = '';
       document.getElementById('evolution-counts-badge').innerText = '—';
+      lastProposals = null;
+      lastFlags = null;
+      document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
+      document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
+      document.getElementById('constitution-tab-badge').classList.add('hidden');
       
       eventList = [];
       activityList = [];
@@ -1588,6 +1628,202 @@
           alert(`Job already in flight (task ${r.existing_task_id}) — not double-fired.`);
         }
         fetchCronJobs();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
+    // ── Governance: constitution amendments (O-6) + anomaly flags (O-7) ──
+
+    function updateConstitutionTabBadge() {
+      const badge = document.getElementById('constitution-tab-badge');
+      const p = (lastProposals ? lastProposals.length : 0) + (lastFlags ? lastFlags.length : 0);
+      if (p > 0) { badge.innerText = p; badge.classList.remove('hidden'); }
+      else badge.classList.add('hidden');
+    }
+
+    async function fetchConstitutionProposals() {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'const-proposals', method: 'constitution.list_pending_proposals',
+            params: { limit: 50 }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        lastProposals = (json.result && json.result.proposals) || [];
+        renderProposals(lastProposals);
+        updateConstitutionTabBadge();
+      } catch (e) {
+        // Fail-visible: zero the standing state so the tab badge cannot
+        // advertise pending work the panel says is unavailable.
+        lastProposals = null;
+        renderPanelError('constitution-proposals', `constitution.list_pending_proposals failed: ${e.message}`);
+        updateConstitutionTabBadge();
+      }
+    }
+
+    function renderProposals(proposals) {
+      const div = document.getElementById('constitution-proposals');
+      if (!proposals.length) { div.innerHTML = '<div class="text-center text-slate-500 py-3">No pending amendment proposals.</div>'; return; }
+      div.innerHTML = proposals.map(p => {
+        const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(p.proposal_id));
+        const act = (status, label, cls) => safeId
+          ? `<button onclick="decideProposal('${p.proposal_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          : '';
+        return `
+          <div class="p-2.5 rounded border ${p.sla_breached_at ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="bg-accentAmber/10 text-accentAmber border border-accentAmber/20 text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">${escapeHTML(p.kind || 'proposal')}</span>
+                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(p.proposal_id))}">${escapeHTML(String(p.proposal_id))}</code>
+                ${p.sla_breached_at ? '<span class="text-accentRed text-[8px] font-mono font-bold shrink-0">⚠ SLA BREACHED</span>' : ''}
+              </div>
+              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(p.created_at)}</span>
+            </div>
+            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(p.justification || '')}</div>
+            ${p.proposed_text ? `<pre class="text-[9px] font-mono text-slate-400 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-20 overflow-y-auto">${escapeHTML(String(p.proposed_text).slice(0, 400))}${String(p.proposed_text).length > 400 ? '…' : ''}</pre>` : ''}
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <span class="text-[9px] font-mono text-slate-500">${escapeHTML(p.proposer_agent_id || '?')}${p.target_id ? ` · target ${escapeHTML(p.target_id)}` : ''}</span>
+              <div class="flex gap-1.5">
+                ${act('approved', '✓ Approve', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
+                ${act('rejected', '✗ Reject', 'bg-accentRed/10 border-accentRed/40 hover:bg-accentRed/25 text-accentRed')}
+                ${act('deferred', '⏸ Defer', 'bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-300')}
+                ${act('under_review', '🔍 Review', 'bg-accentIndigo/10 border-accentIndigo/40 hover:bg-accentIndigo/25 text-accentIndigo')}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function decideProposal(proposalId, status, btn) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !proposalId) return;
+      const terminal = status !== 'under_review';
+      const reason = prompt(`Reason for '${status}' on proposal ${proposalId}:${terminal ? ' (required)' : ' (optional)'}`);
+      if (reason === null) return;
+      if (terminal && !reason.trim()) { alert(`A recorded motivation is owed (O-6) — provide a reason for '${status}'.`); return; }
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'proposal-decide', method: 'constitution.resolve_proposal',
+            params: { proposal_id: proposalId, decided_by: 'operator', status, reason: reason.trim() || null }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Decision failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        fetchConstitutionProposals();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
+    async function fetchAnomalyFlags() {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'anomaly-pending', method: 'anomaly.list_pending',
+            params: { limit: 50 }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        lastFlags = (json.result && json.result.flags) || [];
+        renderAnomalies(lastFlags);
+        updateConstitutionTabBadge();
+      } catch (e) {
+        lastFlags = null;
+        renderPanelError('anomaly-flags', `anomaly.list_pending failed: ${e.message}`);
+        updateConstitutionTabBadge();
+      }
+    }
+
+    // Shallow evidence preview: never stringifies nested structures (a large
+    // evidence_json must not block the UI just to show a 300-char head).
+    function evidencePreview(ev) {
+      if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return '';
+      const keys = Object.keys(ev);
+      if (!keys.length) return '';
+      const parts = keys.slice(0, 4).map(k => {
+        const v = ev[k];
+        let s;
+        if (typeof v === 'string') s = v;
+        else if (v === null || v === undefined) s = '';
+        else if (Array.isArray(v)) s = `[${v.length} item${v.length === 1 ? '' : 's'}]`;
+        else if (typeof v === 'object') s = '{…}';
+        else s = String(v);
+        return `${k}: ${s.slice(0, 60)}`;
+      });
+      if (keys.length > 4) parts.push(`+${keys.length - 4} more keys`);
+      return parts.join(' · ');
+    }
+
+    function renderAnomalies(flags) {
+      const div = document.getElementById('anomaly-flags');
+      if (!flags.length) { div.innerHTML = '<div class="text-center text-slate-500 py-3">No open anomaly flags.</div>'; return; }
+      const sevCls = s => ({ critical: 'bg-accentRed/20 text-accentRed border-accentRed/40 font-bold', high: 'bg-accentRed/10 text-accentRed border-accentRed/30', medium: 'bg-accentAmber/10 text-accentAmber border-accentAmber/30', low: 'bg-slate-800 text-slate-400 border-slate-700' }[s] || 'bg-slate-800 text-slate-400 border-slate-700');
+      div.innerHTML = flags.map(f => {
+        const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(f.flag_id));
+        const act = (status, label, cls) => safeId
+          ? `<button onclick="resolveFlag('${f.flag_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          : '';
+        const evidence = evidencePreview(f.evidence_json);
+        return `
+          <div class="p-2.5 rounded border ${f.sla_breached_at ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="text-[8px] font-mono px-1.5 py-0.5 rounded uppercase border shrink-0 ${sevCls(f.severity)}">${escapeHTML(f.severity || 'low')}</span>
+                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(f.flag_id))}">${escapeHTML(String(f.flag_id))}</code>
+                ${f.status !== 'pending' ? `<span class="text-[8px] font-mono text-slate-500 shrink-0">${escapeHTML(f.status)}</span>` : ''}
+                ${f.sla_breached_at ? '<span class="text-accentRed text-[8px] font-mono font-bold shrink-0">⚠ SLA BREACHED</span>' : ''}
+              </div>
+              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(f.created_at)}</span>
+            </div>
+            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(f.observation || '')}</div>
+            ${evidence ? `<pre class="text-[9px] font-mono text-slate-500 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-14 overflow-y-auto">${escapeHTML(evidence.slice(0, 300))}${evidence.length > 300 ? '…' : ''}</pre>` : ''}
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <span class="text-[9px] font-mono text-slate-500">${escapeHTML(f.reporter_agent_id || '?')} · ${escapeHTML(f.subject_ref || '')}</span>
+              <div class="flex gap-1.5">
+                ${act('confirmed', '✓ Confirm', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
+                ${act('dismissed', '✗ Dismiss', 'bg-accentRed/10 border-accentRed/40 hover:bg-accentRed/25 text-accentRed')}
+                ${act('deferred', '⏸ Defer', 'bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-300')}
+                ${act('under_review', '🔍 Investigate', 'bg-accentIndigo/10 border-accentIndigo/40 hover:bg-accentIndigo/25 text-accentIndigo')}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function resolveFlag(flagId, status, btn) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !flagId) return;
+      const terminal = status !== 'under_review';
+      const reason = prompt(`Reason for '${status}' on flag ${flagId}:${terminal ? ' (required by O-7)' : ' (optional)'}`);
+      if (reason === null) return;
+      if (terminal && !reason.trim()) { alert(`Decider obligation O-7: recording '${status}' requires a non-empty motivation.`); return; }
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'flag-resolve', method: 'anomaly.resolve',
+            params: { flag_id: flagId, decided_by: 'operator', status, reason: reason.trim() || null }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Adjudication failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        fetchAnomalyFlags();
       } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
     }
 
@@ -2906,7 +3142,7 @@
       activeBtn.className = activeBtn.className.replace('border-transparent text-slate-400 hover:text-white', 'border-accentIndigo text-white');
 
       const info = getConnectInfo();
-      if (tabId === 'constitution' && isConnected) fetchConstitution(info.baseURL, info.secret);
+      if (tabId === 'constitution' && isConnected) { fetchConstitution(info.baseURL, info.secret); fetchConstitutionProposals(); fetchAnomalyFlags(); }
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
       if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); }
       if (tabId === 'evolution' && isConnected) { fetchEvolution(); fetchCronJobs(); }
