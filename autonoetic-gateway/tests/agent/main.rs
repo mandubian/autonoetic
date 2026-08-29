@@ -8,6 +8,7 @@
 mod support;
 
 mod adapter_scripts;
+mod adapter_real_adaptation;
 mod adapter_staleness;
 mod adapter_wrapper;
 mod executor_helpers;
