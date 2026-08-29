@@ -977,6 +977,48 @@ impl GatewayStore {
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,
     ) -> Result<()> {
+        // #1238: an execution trace is a pure *record* — unlike an approval's
+        // `action_payload`, nothing ever executes it — so the write-time
+        // redaction that `action_payload` cannot have is available here, and
+        // this is the single write chokepoint for it.
+        //
+        // The exposure is specifically for credentials the *gateway itself*
+        // injected. A `LockedCredentialMount` puts a secret in the sandbox as
+        // an env var, so the command text stays a reference (`$GITHUB_TOKEN`)
+        // and is safe — but the process output is captured verbatim, and
+        // `curl -v`, `set -x` or a config dump resolves that variable and
+        // prints the literal. The gateway would then have handed out a secret
+        // and stored it back in the clear, under a 30-day retention.
+        //
+        // Masking is in-place, so the fidelity these rows exist for — full,
+        // untruncated stdout/stderr — survives; only credential values go.
+        let trace = &autonoetic_types::causal_chain::ExecutionTraceRecord {
+            command: trace
+                .command
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            stdout: trace
+                .stdout
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            stderr: trace
+                .stderr
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            arguments: trace
+                .arguments
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            result: trace
+                .result
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            error_summary: trace
+                .error_summary
+                .as_deref()
+                .map(crate::log_redaction::redact_text_for_logs),
+            ..trace.clone()
+        };
         let egress_label_json = match &trace.egress_label {
             Some(label) => Some(serde_json::to_string(label)?),
             None => None,
