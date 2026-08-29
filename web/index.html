@@ -321,6 +321,18 @@
               <div class="text-center text-slate-500 py-3">Open the tab to load anomaly flags.</div>
             </div>
           </div>
+          <!-- Escalations (federation/promotion gates owed an operator decision) -->
+          <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 30%;">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-accentRed/5 flex items-center justify-between shrink-0">
+              <h3 class="font-display font-semibold text-xs text-accentRed uppercase tracking-wider flex items-center gap-1.5">
+                <span>⚖️</span> Escalations
+              </h3>
+              <button onclick="fetchEscalations()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+            </div>
+            <div id="escalations-list" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-3">Open the tab to load escalations.</div>
+            </div>
+          </div>
           <div class="p-4 overflow-y-auto space-y-3.5 flex-1 flex flex-col">
             <div class="bg-slate-900 border border-slate-800 p-3.5 rounded-xl space-y-2 shrink-0">
               <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase">Constitution Profile</h3>
@@ -371,7 +383,7 @@
             <div class="flex items-center gap-2">
               <span id="grants-taint-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" title="Root session egress taint (absence ⇒ unrestricted)">taint: —</span>
               <span id="grants-provider-badge" class="bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full hidden" title="Provider constraint (rung 1)">provider: —</span>
-              <button onclick="fetchGrants(); fetchLabels();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <button onclick="fetchGrants(); fetchLabels(); fetchEgressPolicy(); fetchEnvelopes();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
             </div>
           </div>
           <!-- Egress Policy (RFC §5.4: /private pin, /taint rules, /local intent authoring) -->
@@ -405,6 +417,18 @@
             </div>
           </div>
           <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+            <div class="border-b border-slate-800 pb-3">
+              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                <span>🌐 Network Envelope Locks</span>
+                <span class="flex items-center gap-1.5">
+                  <button onclick="fetchEnvelopes()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻</button>
+                  <button onclick="proposeEnvelope()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">⚒ Propose from observed</button>
+                </span>
+              </h3>
+              <div id="envelopes-body" class="space-y-1.5">
+                <div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>
+              </div>
+            </div>
             <div id="grants-panel-body" class="space-y-4">
               <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
             </div>
@@ -535,6 +559,19 @@
         <!-- Filled dynamically -->
       </div>
 
+      <!-- Gate message thread (operator ↔ gateway notes on this gate) -->
+      <div id="gate-thread" class="hidden pt-3 border-t border-slate-800 flex flex-col space-y-2 shrink-0" style="max-height: 28%;">
+        <div class="flex items-center justify-between shrink-0">
+          <span class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Gate Thread</span>
+          <button onclick="loadGateThread(currentModalGateId)" class="text-accentIndigo hover:underline text-[9px] font-mono">↻</button>
+        </div>
+        <div id="gate-thread-messages" class="flex-1 overflow-y-auto space-y-1.5"></div>
+        <div class="flex items-center gap-2 shrink-0">
+          <input id="gate-thread-input" placeholder="Add an operator note to this gate…" class="flex-1 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+          <button onclick="sendGateMessage()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[10px] px-2.5 py-1.5 rounded uppercase shrink-0 transition-all">Send</button>
+        </div>
+      </div>
+
       <!-- Motivation / Reply input panel -->
       <div id="modal-action-panel" class="pt-3 border-t border-slate-800 flex flex-col space-y-3 shrink-0">
         <label id="modal-input-label" class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Motivation (Required for Governance Audit)</label>
@@ -602,6 +639,13 @@
             Unsuspend Agent
           </button>
         </div>
+      </div>
+
+      <!-- Handoff (#1088: operator-only rebind of the live session) -->
+      <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Session Handoff</h4>
+        <p class="text-[10px] text-slate-500 leading-relaxed">Rebinds the live root session to <code class="text-slate-300" id="handoff-target-label">—</code>. Operator-only; refused while a gate is parked. Agents may propose it in prose — only you can pull the trigger.</p>
+        <button onclick="handoffToAgent()" class="w-full bg-accentAmber/10 border border-accentAmber/30 hover:bg-accentAmber/25 text-accentAmber font-bold text-xs py-1.5 rounded shadow transition-all">⟲ Hand off session to this agent</button>
       </div>
 
       <!-- Inference Overrides -->
@@ -2170,6 +2214,297 @@
       } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
     }
 
+    // ── Escalations (federation/promotion gates, #724 bidirectional resolve) ──
+
+    async function fetchEscalations() {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'esc-list', method: 'admin.escalation_list', params: {}
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        renderEscalations((json.result && json.result.escalations) || []);
+      } catch (e) {
+        renderPanelError('escalations-list', `admin.escalation_list failed: ${e.message}`);
+      }
+    }
+
+    function renderEscalations(list) {
+      const div = document.getElementById('escalations-list');
+      if (!list.length) { div.innerHTML = '<div class="text-center text-slate-500 py-3">No pending or stale escalations.</div>'; return; }
+      const statusCls = s => ({ pending: 'text-accentAmber border-accentAmber/30 bg-accentAmber/10', stale: 'text-accentRed border-accentRed/30 bg-accentRed/10' }[s] || 'text-slate-400 border-slate-700');
+      div.innerHTML = list.map(e => {
+        const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(e.escalation_id));
+        const act = (status, label, cls) => safeId
+          ? `<button onclick="resolveEscalation('${e.escalation_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          : '';
+        return `
+          <div class="p-2.5 rounded border ${e.status === 'stale' ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="text-[8px] font-mono px-1.5 py-0.5 rounded uppercase border shrink-0 ${statusCls(e.status)}">${escapeHTML(e.status || 'pending')}</span>
+                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(e.escalation_id))}">${escapeHTML(String(e.escalation_id))}</code>
+                ${e.escalation_type ? `<span class="text-[8px] font-mono text-slate-500 shrink-0">${escapeHTML(e.escalation_type)}</span>` : ''}
+              </div>
+              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(e.created_at)}</span>
+            </div>
+            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(e.planner_synthesis || '')}</div>
+            <div class="text-[9px] font-mono text-slate-500">${escapeHTML(e.agent_id || '?')} · rev ${escapeHTML(String(e.revision_id || '?')).slice(0, 20)}${(e.role_verdicts || []).length ? ` · ${(e.role_verdicts.filter(v => v.passed)).length}/${e.role_verdicts.length} roles passed` : ''}</div>
+            ${(e.role_verdicts || []).length ? `<div class="flex gap-1 flex-wrap">${e.role_verdicts.map(v => `<span class="text-[8px] font-mono px-1 py-0.5 rounded border ${v.passed ? 'text-accentGreen border-accentGreen/30 bg-accentGreen/5' : 'text-accentRed border-accentRed/30 bg-accentRed/5'}">${escapeHTML(v.role)} ${v.passed ? '✓' : '✗'}</span>`).join('')}</div>` : ''}
+            <div class="flex items-center justify-end gap-1.5">
+              ${act('approved', '✓ Approve', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
+              ${act('rejected', '✗ Reject', 'bg-accentRed/10 border-accentRed/40 hover:bg-accentRed/25 text-accentRed')}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function resolveEscalation(escalationId, status, btn) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !escalationId) return;
+      const reason = prompt(`Reason for '${status}' on escalation ${escalationId}: (required)`);
+      if (reason === null) return;
+      if (!reason.trim()) { alert('A recorded reason is required — the resolution lands on the causal chain and may resolve a linked approval.'); return; }
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'esc-resolve', method: 'admin.escalation_resolve',
+            params: { escalation_id: escalationId, decided_by: 'operator', status, reason: reason.trim() }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Resolve failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        fetchEscalations();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
+    // ── Session handoff (#1088: operator-only live rebind) ──
+
+    async function handoffToAgent() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret || !selectedAgentName) return;
+      const target = selectedAgentName.toLowerCase().endsWith('.default')
+        ? selectedAgentName.toLowerCase() : selectedAgentName.toLowerCase() + '.default';
+      const reason = prompt(`Hand the live session '${sid}' to '${target}'?\n\nReason (recorded on the causal event):`);
+      if (reason === null) return;
+      if (!reason.trim()) { alert('A reason is required for a handoff.'); return; }
+      const note = prompt('Context note for the successor (optional, folded into its context envelope):');
+      if (note === null) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'handoff', method: 'session.handoff',
+            params: { session_id: sid, target_agent_id: target, reason: reason.trim(), context_note: note.trim() || null }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Handoff failed: ${json.error.message}`); return; }
+        const r = json.result || {};
+        alert(r.message || `Handed off to ${r.to_agent_id}.`);
+        closeAgentControlModal();
+      } catch (e) { alert(`Connection error: ${e.message}`); }
+    }
+
+    // ── Network envelope locks (authorize the root before the agent set is known) ──
+
+    async function fetchEnvelopes() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'env-list', method: 'session.envelope.list',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        renderEnvelopes(json.result || {});
+      } catch (e) {
+        renderPanelError('envelopes-body', `session.envelope.list failed: ${e.message}`);
+      }
+    }
+
+    function envelopeHosts(capability) {
+      return (capability && capability.type === 'NetworkAccess' && Array.isArray(capability.hosts))
+        ? capability.hosts : [];
+    }
+
+    function renderEnvelopes(data) {
+      const div = document.getElementById('envelopes-body');
+      const proposed = data.proposed || [];
+      const active = data.active || [];
+      const observed = data.observed_hosts || [];
+      const pending = data.pending_hosts || [];
+      if (!proposed.length && !active.length && !observed.length) {
+        div.innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">No observed hosts yet — nothing to propose.</div>';
+        return;
+      }
+      const recRow = (e, isActive) => {
+        const hosts = envelopeHosts(e.capability);
+        const safeId = Number.isInteger(e.id) && e.id >= 0;
+        return `
+          <div class="p-2 rounded border ${isActive ? 'border-accentGreen/30 bg-accentGreen/5' : 'border-slate-800 bg-slate-900/40'}">
+            <div class="flex items-center justify-between gap-2">
+              <code class="text-slate-200 text-[10px]">env #${e.id}${e.source ? ` · ${escapeHTML(e.source)}` : ''}${isActive && e.locked_by ? ` · by ${escapeHTML(e.locked_by)}` : ''}</code>
+              ${safeId && !isActive
+                ? `<button onclick="lockEnvelope(${e.id}, this)" class="bg-accentGreen/10 border border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen font-bold text-[9px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">🔒 Lock</button>`
+                : ''}
+              ${safeId && isActive
+                ? `<button onclick="revokeEnvelope(${e.id}, this)" class="bg-accentRed/10 border border-accentRed/40 hover:bg-accentRed/25 text-accentRed font-bold text-[9px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">✕ Revoke</button>`
+                : ''}
+            </div>
+            <div class="text-[9px] font-mono text-slate-400 mt-0.5 break-all">${hosts.map(h => escapeHTML(h)).join(' · ') || '—'}</div>
+          </div>`;
+      };
+      let html = '';
+      if (active.length) html += `<div class="text-[9px] font-mono text-slate-500 uppercase">Active locks (${active.length})</div>` + active.map(e => recRow(e, true)).join('');
+      if (proposed.length) html += `<div class="text-[9px] font-mono text-slate-500 uppercase pt-1">Proposed (${proposed.length})</div>` + proposed.map(e => recRow(e, false)).join('');
+      if (observed.length || pending.length) {
+        html += `<div class="text-[9px] font-mono text-slate-500 pt-1">observed: ${observed.map(h => escapeHTML(h)).join(' · ') || '—'}${pending.length ? `<br><span class="text-accentAmber">pending proposal: ${pending.map(h => escapeHTML(h)).join(' · ')}</span>` : ''}</div>`;
+      }
+      div.innerHTML = html;
+    }
+
+    async function proposeEnvelope() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'env-propose', method: 'session.envelope.propose',
+            params: { root_session_id: sid, source: 'operator', proposed_by: 'operator:web_cockpit' }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Propose failed: ${json.error.message}`); return; }
+        const p = (json.result && json.result.proposal) || null;
+        if (!p || p.skipped) alert(p && p.skipped ? 'Nothing new to propose (already proposed/locked).' : 'No hosts observed yet — nothing to propose.');
+        fetchEnvelopes();
+      } catch (e) { alert(`Connection error: ${e.message}`); }
+    }
+
+    async function lockEnvelope(envelopeId, btn) {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!secret || !Number.isInteger(envelopeId)) return;
+      if (!confirm(`Lock envelope #${envelopeId}?\n\nLocking materializes root-wide session grants for exactly these hosts — every agent under the root is covered.`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'env-lock', method: 'session.envelope.lock',
+            params: { envelope_id: envelopeId, locked_by: 'operator:web_cockpit' }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Lock failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        const r = json.result || {};
+        if (r.grants_materialized !== undefined) alert(`Locked — ${r.grants_materialized} grant(s) materialized.`);
+        fetchEnvelopes();
+        fetchGrants();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
+    async function revokeEnvelope(envelopeId, btn) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !Number.isInteger(envelopeId)) return;
+      if (!confirm(`Revoke envelope #${envelopeId}?\n\nRevocation blocks future uses; grants it materialized are soft-revoked. Agents already promoted under it are reported.`)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'env-revoke', method: 'session.envelope.revoke',
+            params: { envelope_id: envelopeId, revoked_by: 'operator:web_cockpit' }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Revoke failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
+        const r = json.result || {};
+        const promoted = (r.agents_promoted_under_envelope || []).map(a => a.agent_id);
+        if (promoted.length) alert(`Revoked. Agents promoted under this envelope: ${promoted.join(', ')}`);
+        fetchEnvelopes();
+        fetchGrants();
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
+    }
+
+    // ── Gate message threads (operator notes on a pending gate) ──
+
+    async function loadGateThread(gateId) {
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret || !gateId) return;
+      const wrap = document.getElementById('gate-thread');
+      const div = document.getElementById('gate-thread-messages');
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'gate-msgs', method: 'gate.get_messages',
+            params: { gate_id: gateId }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        const msgs = (json.result && json.result.messages) || [];
+        div.innerHTML = msgs.length
+          ? msgs.map(m => `
+              <div class="p-1.5 rounded border border-slate-800 bg-slate-900/40">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[8px] font-mono font-bold uppercase ${m.sender === 'operator' ? 'text-accentGreen' : 'text-slate-500'}">${escapeHTML(m.sender)}</span>
+                  <span class="text-[8px] font-mono text-slate-600">${formatTime(m.created_at)}</span>
+                </div>
+                <div class="text-[10px] text-slate-200 leading-snug">${escapeHTML(m.content)}</div>
+              </div>`).join('')
+          : '<div class="text-[10px] text-slate-600 italic">No notes on this gate yet.</div>';
+        wrap.classList.remove('hidden');
+        div.scrollTop = div.scrollHeight;
+      } catch (e) {
+        wrap.classList.add('hidden');
+      }
+    }
+
+    async function sendGateMessage() {
+      const input = document.getElementById('gate-thread-input');
+      const content = input.value.trim();
+      if (!content || !currentModalGateId) return;
+      const { secret, baseURL } = getConnectInfo();
+      if (!secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'gate-msg-add', method: 'gate.add_message',
+            params: { gate_id: currentModalGateId, sender: 'operator', content }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) { alert(`Send failed: ${json.error.message}`); return; }
+        input.value = '';
+        loadGateThread(currentModalGateId);
+      } catch (e) { alert(`Connection error: ${e.message}`); }
+    }
+
     function renderContentList(files, sid) {
       const listDiv = document.getElementById('workbench-list');
       if (!files || files.length === 0) {
@@ -2464,6 +2799,29 @@
               ${escapeHTML(payload?.message || payload?.text || extractSummary(e))}
             </div>
           `;
+        } else if (eventType === 'escalation.pending') {
+          const escId = payload?.escalation_id || e.event_id;
+          const isClosed = closedGates.has(escId);
+          const verdicts = Array.isArray(payload?.role_verdicts) ? payload.role_verdicts : [];
+          richBody = `
+            <div class="mt-2 p-3 rounded-lg border border-accentRed/40 bg-accentRed/10 flex flex-col space-y-2 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-accentRed font-bold uppercase tracking-wide flex items-center gap-1.5">
+                  <span>⚖️</span> Promotion Escalation
+                </span>
+                <span class="font-mono text-[10px] text-slate-400">${escapeHTML(escId)}</span>
+              </div>
+              <p class="text-slate-200 leading-relaxed">${escapeHTML(payload?.synthesis || 'Operator decision requested.')}</p>
+              ${(payload?.agent_id || payload?.revision_id) ? `<div class="font-mono text-[10px] text-slate-400">${escapeHTML(payload?.agent_id || '')}${payload?.revision_id ? ` · rev ${escapeHTML(String(payload.revision_id)).slice(0, 24)}` : ''}${payload?.escalation_type ? ` · ${escapeHTML(payload.escalation_type)}` : ''}</div>` : ''}
+              ${verdicts.length ? `<div class="flex gap-1 flex-wrap">${verdicts.map(v => `<span class="text-[8px] font-mono px-1 py-0.5 rounded border ${v.passed ? 'text-accentGreen border-accentGreen/30 bg-accentGreen/5' : 'text-accentRed border-accentRed/30 bg-accentRed/5'}">${escapeHTML(v.role)} ${v.passed ? '✓' : '✗'}</span>`).join('')}</div>` : ''}
+              <div class="flex justify-end gap-2 pt-1">
+                ${isClosed ?
+                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
+                  `<button onclick="openGateModalById('${escId}')" class="bg-accentRed hover:bg-opacity-95 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Review & Decide</button>`
+                }
+              </div>
+            </div>
+          `;
         } else if (promotionView(e)) {
           richBody = renderPromotionCard(promotionView(e));
         } else if (eventType.startsWith('egress.')) {
@@ -2554,10 +2912,11 @@
       closedGates.clear();
       eventList.forEach(e => {
         if (['approval.resolved', 'approval.approved', 'approval.rejected', 'approval.cancelled',
-             'interaction.resolved', 'user.ask.resolved', 'user.ask.cancelled', 'user.ask.expired'].includes(e.event_type)) {
+             'interaction.resolved', 'user.ask.resolved', 'user.ask.cancelled', 'user.ask.expired',
+             'escalation.resolved', 'escalation.cancelled'].includes(e.event_type)) {
           try {
             const p = JSON.parse(e.payload);
-            const id = p.request_id || p.interaction_id;
+            const id = p.request_id || p.interaction_id || p.escalation_id;
             if (id) closedGates.add(id);
           } catch(err) {}
         }
@@ -2565,10 +2924,10 @@
 
       let newestPending = null;
       eventList.forEach(e => {
-        if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending') {
+        if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending' || e.event_type === 'escalation.pending') {
           try {
             const p = JSON.parse(e.payload);
-            const id = p.request_id || p.interaction_id;
+            const id = p.request_id || p.interaction_id || p.escalation_id;
             if (id && !closedGates.has(id)) {
               pendingGates.set(id, { entry: e, payload: p, type: e.event_type });
               newestPending = id;
@@ -2711,6 +3070,46 @@
         if ((gate.payload.action || '') === 'credential_prompt') {
           await renderCredentialPromptSection(gateId, body);
         }
+      } else if (gate.type === 'escalation.pending') {
+        // Federation/promotion escalation gate card (mirrors the TUI's
+        // high-visibility card): planner synthesis, agent/revision, and the
+        // recorded role verdicts. Decision = admin.escalation_resolve, which
+        // resolves any linked approval bidirectionally (#724).
+        title.innerText = '⚖️ Promotion Escalation';
+        subtitle.innerText = `Operator decision requested — ${gate.payload.escalation_type || 'federation verdicts'}`;
+        label.innerText = 'Decision reason (required — lands on the causal chain)';
+        rejectBtn.classList.remove('hidden');
+        const verdicts = Array.isArray(gate.payload.role_verdicts) ? gate.payload.role_verdicts : [];
+        body.innerHTML = `
+          <div class="space-y-3">
+            <p class="text-sm text-slate-100 font-medium leading-relaxed bg-slate-950 p-3 rounded-xl border border-accentAmber/30">${escapeHTML(gate.payload.synthesis || 'Operator decision requested.')}</p>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
+                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Agent / Revision</span>
+                <span class="font-mono text-slate-200 font-bold">${escapeHTML(gate.payload.agent_id || '?')}</span>
+                <span class="font-mono text-[10px] text-slate-400 block truncate" title="${escapeHTML(String(gate.payload.revision_id || ''))}">${escapeHTML(String(gate.payload.revision_id || '?'))}</span>
+              </div>
+              <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
+                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Escalation</span>
+                <span class="font-mono text-accentAmber font-bold">${escapeHTML(gate.payload.escalation_type || 'escalation')}</span>
+                ${gate.payload.artifact_id ? `<span class="font-mono text-[10px] text-slate-400 block truncate">${escapeHTML(String(gate.payload.artifact_id))}</span>` : ''}
+              </div>
+            </div>
+            ${verdicts.length ? `
+            <div>
+              <span class="text-[10px] text-slate-400 font-semibold uppercase block mb-1">Federation role verdicts</span>
+              <div class="space-y-1">
+                ${verdicts.map(v => `
+                  <div class="flex items-center justify-between gap-2 p-1.5 rounded border border-slate-800 bg-slate-900/40">
+                    <span class="text-[10px] font-mono text-slate-300">${escapeHTML(v.role)} <span class="text-slate-500">· ${escapeHTML(v.agent_id || '')}</span></span>
+                    <span class="text-[9px] font-mono font-bold ${v.passed ? 'text-accentGreen' : 'text-accentRed'} shrink-0">${v.passed ? '✓ pass' : '✗ fail'}</span>
+                  </div>
+                  ${v.findings_summary ? `<div class="text-[9px] text-slate-500 pl-2">${escapeHTML(v.findings_summary)}</div>` : ''}
+                `).join('')}
+              </div>
+            </div>` : ''}
+          </div>
+        `;
       } else {
         title.innerText = '❓ Clarification Input Needed';
         subtitle.innerText = 'Agent requires user decision to continue step';
@@ -2740,12 +3139,18 @@
       }
 
       modal.classList.remove('hidden');
+      // Operator notes ride with approval and escalation gates only.
+      if (gate.type === 'approval.pending' || gate.type === 'escalation.pending') loadGateThread(gateId);
+      else document.getElementById('gate-thread').classList.add('hidden');
     }
 
     function closeGateModal() {
       document.getElementById('gate-modal').classList.add('hidden');
       currentModalGateId = null;
       credentialPromptCtx = null;
+      document.getElementById('gate-thread').classList.add('hidden');
+      document.getElementById('gate-thread-messages').innerHTML = '';
+      document.getElementById('gate-thread-input').value = '';
     }
 
     // CredentialPrompt card (mirrors the TUI secret-entry modal): service,
@@ -2808,6 +3213,29 @@
     async function submitGateAction(isApprove) {
       const input = document.getElementById('modal-text-input').value.trim();
       const { sid, secret, baseURL } = getConnectInfo();
+
+      if (currentModalGateType === 'escalation.pending') {
+        if (!input) { alert('A decision reason is required — it lands on the causal chain.'); return; }
+        try {
+          const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+            body: JSON.stringify({
+              jsonrpc: '2.0', id: 'esc-gate-resolve', method: 'admin.escalation_resolve',
+              params: {
+                escalation_id: currentModalGateId, decided_by: 'operator',
+                status: isApprove ? 'approved' : 'rejected', reason: input
+              }
+            })
+          });
+          const json = await resp.json();
+          if (json.error) { alert(`Resolve failed: ${json.error.message}`); return; }
+          closeGateModal();
+          fetchTimelineHistory(baseURL, sid, secret);
+          fetchEscalations();
+        } catch (e) { alert(`Connection error: ${e.message}`); }
+        return;
+      }
 
       if (currentModalGateType === 'approval.pending') {
         const gate = pendingGates.get(currentModalGateId);
@@ -3039,7 +3467,7 @@
           }
         }
 
-        if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending') {
+        if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending' || e.event_type === 'escalation.pending') {
           try {
             const p = JSON.parse(e.payload);
             const id = p.request_id || p.interaction_id;
@@ -3295,6 +3723,7 @@
       if (type === 'approval.pending') return payload?.command || payload?.summary || 'Approval required';
       if (type === 'approval.approved') return 'Approval granted';
       if (type === 'user.ask.pending') return payload?.question || 'Agent requested feedback';
+      if (type === 'escalation.pending') return payload?.synthesis || 'Promotion escalation — operator decision requested';
       return type.replace(/\./g, ' ').replace(/_/g, ' ');
     }
 
@@ -3486,9 +3915,9 @@
       activeBtn.className = activeBtn.className.replace('border-transparent text-slate-400 hover:text-white', 'border-accentIndigo text-white');
 
       const info = getConnectInfo();
-      if (tabId === 'constitution' && isConnected) { fetchConstitution(info.baseURL, info.secret); fetchConstitutionProposals(); fetchAnomalyFlags(); }
+      if (tabId === 'constitution' && isConnected) { fetchConstitution(info.baseURL, info.secret); fetchConstitutionProposals(); fetchAnomalyFlags(); fetchEscalations(); }
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
-      if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); fetchEgressPolicy(); }
+      if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); fetchEgressPolicy(); fetchEnvelopes(); }
       if (tabId === 'evolution' && isConnected) { fetchEvolution(); fetchCronJobs(); }
     }
 
