@@ -764,6 +764,49 @@ pub struct RiskSummary {
     pub auditor_findings_link: Option<String>,
 }
 
+impl ApprovalRequest {
+    /// The whole record as a given viewer class may see it (#1233).
+    ///
+    /// `ScheduledAction::redact_for_viewer` covers the action, but an
+    /// `ApprovalRequest` carries four other fields that can hold credential
+    /// text: the agent-written `reason` and `decision_reason`, the auditor's
+    /// `risk_summary`, and `code_excerpts` — which is *artifact source code*,
+    /// so a script with an inlined key travels with the gate.
+    ///
+    /// Redaction has to live at the record level because that is the unit the
+    /// RPC surfaces serialize. Redacting only the action left every other
+    /// field in the clear on the one path operators actually read.
+    pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
+        if matches!(viewer, super::disclosure::ViewerClass::Admin) {
+            return self.clone();
+        }
+        let mask = |t: &String| super::redaction::redact_embedded_secrets(t);
+        Self {
+            action: self.action.redact_for_viewer(viewer),
+            reason: self.reason.as_ref().map(mask),
+            decision_reason: self.decision_reason.as_ref().map(mask),
+            code_excerpts: self.code_excerpts.as_ref().map(|xs| {
+                xs.iter()
+                    .map(|x| CodeExcerpt {
+                        content: super::redaction::redact_embedded_secrets(&x.content),
+                        ..x.clone()
+                    })
+                    .collect()
+            }),
+            risk_summary: self.risk_summary.as_ref().map(|r| RiskSummary {
+                dangerous_patterns: r
+                    .dangerous_patterns
+                    .iter()
+                    .map(|p| super::redaction::redact_embedded_secrets(p))
+                    .collect(),
+                auditor_verdict: r.auditor_verdict.as_ref().map(mask),
+                ..r.clone()
+            }),
+            ..self.clone()
+        }
+    }
+}
+
 /// A request for human approval. The `action` describes what is being approved: either a
 /// schedulable action (WriteFile, SandboxExec) that the scheduler will run after approval, or
 /// an approval-only subject (AgentInstall) where the actual install is done by the caller

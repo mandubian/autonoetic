@@ -1612,9 +1612,25 @@ impl GatewayExecutionService {
 
     /// The global pending-approval list (all roots) — the RPC form of
     /// `scheduler::load_approval_requests` for the CLI approvals surface.
+    /// Pending approvals **as an operator may see them** (#1233).
+    ///
+    /// Redaction lives here rather than in the RPC handler on purpose. The
+    /// stored `action_payload` is raw — it is the scheduler's execution input —
+    /// so read-time redaction is the only thing between an operator surface and
+    /// a credential an agent inlined, and it was previously applied at exactly
+    /// one call site (the agent-facing tool) while this path served the record
+    /// verbatim. Putting it at the accessor means any future surface built on
+    /// this method inherits the guarantee instead of having to remember it.
+    ///
+    /// Callers that genuinely need the executable form use
+    /// `GatewayStore::get_pending_approvals` directly.
     pub fn pending_approvals(&self) -> anyhow::Result<Vec<autonoetic_types::background::ApprovalRequest>> {
         let store = self.require_store()?;
-        Ok(store.get_pending_approvals()?)
+        Ok(store
+            .get_pending_approvals()?
+            .iter()
+            .map(|r| r.redact_for_viewer(autonoetic_types::disclosure::ViewerClass::Operator))
+            .collect())
     }
 
     /// Approval statistics for `gateway approvals stats`.
