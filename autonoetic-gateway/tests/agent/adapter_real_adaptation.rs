@@ -244,8 +244,8 @@ layers: []
     let bundle = artifact_store
         .build_with_kind(&names, None, None, ArtifactKind::AgentBundle, &session)
         .unwrap();
-    // `ar.` + 12 alphanumerics, unique per install (a base re-installs with a
-    // fresh artifact).
+    // `ar.` + agent-id alphanumerics + a 4-digit install sequence — unique
+    // per install (a base re-installs with a fresh artifact).
     static INSTALL_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let seq = INSTALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let stripped: String = agent_id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -289,7 +289,10 @@ layers: []
     let revision_id = res["revision_id"].as_str().unwrap().to_string();
     // Federation gate, real shape: a pure-skill agent needs an auditor pass
     // record bound to the artifact + revision digest before promote.
-    let content_digest = format!("sha256:{}", &revision_id["rev_sha256:".len()..]);
+    let digest_hex = revision_id.strip_prefix("rev_sha256:").unwrap_or_else(|| {
+        panic!("unexpected revision id format: {revision_id}")
+    });
+    let content_digest = format!("sha256:{digest_hex}");
     let promo_store = autonoetic_gateway::runtime::promotion_store::PromotionStore::new(
         &fx.gateway_dir,
     )
@@ -493,7 +496,10 @@ fn real_adaptation_loop_install_roster_and_drift() {
     // The wrapper is a capability-bearing pure-skill agent too: auditor pass
     // record bound to its artifact + digest, then promote.
     let wrapper_artifact_id = wrapper_res["artifact_id"].as_str().unwrap().to_string();
-    let wrapper_digest = format!("sha256:{}", &wrapper_rev["rev_sha256:".len()..]);
+    let wrapper_digest_hex = wrapper_rev
+        .strip_prefix("rev_sha256:")
+        .unwrap_or_else(|| panic!("unexpected revision id format: {wrapper_rev}"));
+    let wrapper_digest = format!("sha256:{wrapper_digest_hex}");
     let wrapper_promo_store = autonoetic_gateway::runtime::promotion_store::PromotionStore::new(
         &fx.gateway_dir,
     )
