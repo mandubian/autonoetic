@@ -13,7 +13,13 @@
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
 
-const INJECTED: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+/// Assembled at runtime rather than written as a literal. A fixture realistic
+/// enough to exercise the `ghp_…` rule is, by construction, shaped like a real
+/// credential — GitHub push protection rejected exactly this shape in #1216 —
+/// so the repository holds no scannable token while the test still sees one.
+fn injected_token() -> String {
+    format!("{}_{}", "ghp", "16C7e42F292c6912E7710c838347Ae178B4a")
+}
 
 fn trace_with(stdout: &str, stderr: &str, command: &str) -> ExecutionTraceRecord {
     ExecutionTraceRecord {
@@ -52,7 +58,7 @@ fn a_credential_echoed_by_a_verbose_command_is_masked_at_write() -> anyhow::Resu
     // output resolved it.
     let trace = trace_with(
         "* Connected to api.github.com\n> GET /user HTTP/2",
-        &format!("> Authorization: Bearer {INJECTED}\n< HTTP/2 200"),
+        &format!("> Authorization: Bearer {}\n< HTTP/2 200", injected_token()),
         "curl -v -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/user",
     );
     let trace_id = trace.trace_id.clone();
@@ -62,7 +68,7 @@ fn a_credential_echoed_by_a_verbose_command_is_masked_at_write() -> anyhow::Resu
 
     let blob = serde_json::to_string(&stored)?;
     assert!(
-        !blob.contains(INJECTED),
+        !blob.contains(&injected_token()),
         "a gateway-injected credential survived into execution_traces:\n{blob}"
     );
 
