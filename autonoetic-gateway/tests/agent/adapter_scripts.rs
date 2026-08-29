@@ -275,3 +275,27 @@ fn test_schema_diff_emits_multiple_mappings() {
     assert_eq!(input_mappings.len(), 2);
     assert_eq!(output_mappings.len(), 2);
 }
+
+/// The drift machinery (roster `stale_base`, spawn advisories, promotion-time
+/// drift events) only fires when wrapper provenance claims a digest — and only
+/// the adapter agent can supply it at generation time, via its SKILL.md
+/// instructions. Pin the wiring: if the instruction is renamed away, this
+/// fails instead of every future wrapper silently under-claiming (#1221).
+#[test]
+fn adapter_skill_md_instructs_base_revision_digest_capture() {
+    let skill_path = script_path("../SKILL.md");
+    let skill = std::fs::read_to_string(&skill_path)
+        .expect("agent-adapter.default SKILL.md should exist");
+
+    assert!(
+        skill.contains("--base-revision-digest"),
+        "SKILL.md must instruct passing the base revision digest to \
+         generate_wrapper.py — without it every generated wrapper under-claims \
+         and drift detection stays dormant"
+    );
+    assert!(
+        skill.contains("agent_inspect"),
+        "SKILL.md must instruct calling agent_inspect to learn the base's \
+         promoted revision"
+    );
+}
