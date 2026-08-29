@@ -428,6 +428,8 @@ fn pending_request(request_id: &str, action: ScheduledAction) -> ApprovalRequest
 
 /// A rejected gate's turn is dead — the checkpoint is reaped and the command
 /// will never run — so the stored payload has nothing left to be raw for.
+/// Approved and stale gates are excluded: both remain resolvable, and scrubbing
+/// them would leave a command with `***REDACTED***` where a token belongs.
 #[test]
 fn rejecting_a_gate_scrubs_the_credential_from_its_stored_action() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;

@@ -298,9 +298,14 @@ impl GatewayStore {
     ///
     /// `action_payload` is kept raw while an approval is live because it *is*
     /// the execution input — the scheduler deserializes it and runs it. Once a
-    /// gate is rejected, cancelled or gone stale, its turn is dead (the bound
-    /// checkpoint is reaped in `apply_decision`), so the raw command will never
-    /// be executed and there is nothing left to keep it raw for.
+    /// gate is **rejected or cancelled**, its turn is dead (the bound checkpoint
+    /// is reaped in the same `apply_decision` branch), so the raw command will
+    /// never be executed and there is nothing left to keep it raw for.
+    ///
+    /// `Stale` is deliberately **not** in that set. A stale approval is still
+    /// resolvable — scrubbing it would leave an operator able to approve a
+    /// command whose credential had been replaced with `***REDACTED***`. Stale
+    /// rows are bounded by retention like approved ones.
     ///
     /// The projection is the operator view, so the record keeps everything a
     /// human reviewing history would look at — binary, flags, destination host

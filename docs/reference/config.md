@@ -1109,12 +1109,13 @@ Controls pruning of historical data. Values are in days; `0` means retain foreve
 > execution input, not merely a record, so it cannot be redacted at write time
 > without breaking the command it describes. An agent that inlines a credential
 > therefore causes that credential to be stored verbatim. Two things bound it:
-> a gate that is rejected, cancelled or stale has its payload replaced with the
+> a gate that is **rejected or cancelled** has its payload replaced with the
 > operator-class projection as soon as it is decided (its turn is dead, so the
 > raw form has nothing left to be raw for), and everything else is pruned by
-> this setting. Approved payloads stay raw until pruned because they remain
-> resumable — a crash between the decision and its execution would otherwise
-> resume a command with `***REDACTED***` where a token belongs.
+> this setting. **Approved and stale** payloads stay raw until pruned because
+> both remain resolvable — a crash between an approval and its execution, or an
+> operator later resolving a stale gate, would otherwise act on a command with
+> `***REDACTED***` where a token belongs.
 
 Example:
 
