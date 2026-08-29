@@ -1612,6 +1612,24 @@ impl GatewayExecutionService {
 
     /// The global pending-approval list (all roots) — the RPC form of
     /// `scheduler::load_approval_requests` for the CLI approvals surface.
+    /// A single approval **as an operator may see it** (#1233).
+    ///
+    /// Sibling of [`Self::pending_approvals`], and for the same reason: the
+    /// `approvals.inspect` handler serializes the whole record under `"full"`,
+    /// so redaction has to happen before the handler sees it rather than on the
+    /// fields the handler happens to derive. Keeping both reads behind
+    /// accessors means the operator-view guarantee is testable at the service
+    /// layer, which is where the convention puts it.
+    pub fn approval_for_operator(
+        &self,
+        request_id: &str,
+    ) -> anyhow::Result<Option<autonoetic_types::background::ApprovalRequest>> {
+        let store = self.require_store()?;
+        Ok(store.get_approval(request_id)?.map(|a| {
+            a.redact_for_viewer(autonoetic_types::disclosure::ViewerClass::Operator)
+        }))
+    }
+
     /// Pending approvals **as an operator may see them** (#1233).
     ///
     /// Redaction lives here rather than in the RPC handler on purpose. The

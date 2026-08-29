@@ -5619,7 +5619,10 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.get_approval(params.request_id.trim()) {
+                // #1233: goes through the operator accessor, not the store —
+                // this handler serializes the whole record under `"full"`, so
+                // redacting only the fields it derives would not have helped.
+                match self.execution.approval_for_operator(params.request_id.trim()) {
                     Ok(Some(approval)) => {
                         use autonoetic_types::background::ScheduledAction;
                         let mut added_capabilities = Vec::new();
