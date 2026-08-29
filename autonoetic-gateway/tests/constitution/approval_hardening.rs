@@ -397,3 +397,131 @@ async fn standalone_approval_gets_ttl_once_service_wires_store_config() {
         "standalone approval must receive a TTL once the service wires store config"
     );
 }
+
+/// Minimal pending approval carrying `action`, for the #1213 at-rest tests.
+fn pending_request(request_id: &str, action: ScheduledAction) -> ApprovalRequest {
+    ApprovalRequest {
+        request_id: request_id.to_string(),
+        agent_id: "test.agent".to_string(),
+        session_id: "sess/test".to_string(),
+        action,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        reason: None,
+        evidence_ref: None,
+        root_session_id: Some("root".to_string()),
+        workflow_id: None,
+        task_id: None,
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        approval_level: ApprovalLevel::Operator,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    }
+}
+
+// ── #1213: secrets at rest in approvals.action_payload ─────────────────────
+
+/// A rejected gate's turn is dead — the checkpoint is reaped and the command
+/// will never run — so the stored payload has nothing left to be raw for.
+/// Approved and stale gates are excluded: both remain resolvable, and scrubbing
+/// them would leave a command with `***REDACTED***` where a token belongs.
+#[test]
+fn rejecting_a_gate_scrubs_the_credential_from_its_stored_action() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = GatewayStore::open(&gateway_dir)?;
+
+    let mut request = pending_request(
+        "apr-scrub",
+        ScheduledAction::SandboxExec {
+            command: "curl -H 'Authorization: Bearer eyJhbGc.supersecret' https://x".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["x".to_string()]),
+            intent: None,
+        },
+    );
+    store.create_approval(&mut request)?;
+
+    // Raw on disk while the gate is live: this is the scheduler's execution
+    // input, not merely a record.
+    let live = store.get_approval("apr-scrub")?.expect("exists");
+    assert!(
+        matches!(&live.action, ScheduledAction::SandboxExec { command, .. }
+            if command.contains("eyJhbGc.supersecret")),
+        "a live gate must keep the executable command intact"
+    );
+
+    assert!(store.scrub_dead_approval_payload("apr-scrub")?);
+
+    let dead = store.get_approval("apr-scrub")?.expect("exists");
+    let ScheduledAction::SandboxExec { command, detected_hosts, .. } = &dead.action else {
+        panic!("expected SandboxExec");
+    };
+    assert!(
+        !command.contains("eyJhbGc.supersecret"),
+        "credential survived at rest: {command}"
+    );
+    assert!(
+        command.contains("curl") && command.contains("https://x"),
+        "the shape a reviewer reads must survive: {command}"
+    );
+    assert_eq!(
+        detected_hosts.as_deref(),
+        Some(&["x".to_string()][..]),
+        "structural fields are untouched"
+    );
+    Ok(())
+}
+
+/// Retention prunes decided approvals, and deliberately never prunes pending
+/// ones — an unanswered gate is outstanding work, not stale data.
+#[test]
+fn retention_prunes_decided_approvals_but_never_pending_ones() -> anyhow::Result<()> {
+    use autonoetic_types::config::RetentionConfig;
+
+    let temp = tempfile::tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = GatewayStore::open(&gateway_dir)?;
+
+    let action = || ScheduledAction::SandboxExec {
+        command: "echo hi".to_string(),
+        dependencies: None,
+        requires_approval: true,
+        evidence_ref: None,
+        detected_hosts: None,
+        intent: None,
+    };
+
+    let mut old_decided = pending_request("apr-old", action());
+    store.create_approval(&mut old_decided)?;
+    let long_ago = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+    store.record_decision("apr-old", "approved", "operator", &long_ago, Some("ok"))?;
+
+    let mut still_pending = pending_request("apr-pending", action());
+    store.create_approval(&mut still_pending)?;
+
+    store.apply_retention_policy(&RetentionConfig {
+        approvals_days: 90,
+        ..Default::default()
+    })?;
+
+    assert!(
+        store.get_approval("apr-old")?.is_none(),
+        "a decision from 400 days ago should be pruned at a 90-day policy"
+    );
+    assert!(
+        store.get_approval("apr-pending")?.is_some(),
+        "a pending gate must never be reaped by retention — it is work the \
+         operator still owes a decision on, at any age"
+    );
+    Ok(())
+}

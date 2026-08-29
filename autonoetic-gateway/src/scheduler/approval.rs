@@ -263,6 +263,30 @@ pub fn apply_decision(
                 "Failed to reap orphan checkpoint after reject/cancel"
             );
         }
+
+        // #1213: the same reasoning that reaps the checkpoint applies to the
+        // stored action. `action_payload` is kept raw while a gate is live
+        // because it is the scheduler's execution input; a rejected or
+        // cancelled gate will never be executed, so the raw command — which may
+        // carry a credential the agent inlined — has nothing left to be raw
+        // for. Replaced with its operator-class projection, which keeps the
+        // shape a human reviewing history reads and drops the values.
+        if let Some(store) = gateway_store {
+            match store.scrub_dead_approval_payload(&decision.request_id) {
+                Ok(true) => tracing::debug!(
+                    target: "approval",
+                    request_id = %decision.request_id,
+                    "Scrubbed secrets from a dead approval's stored action"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    target: "approval",
+                    request_id = %decision.request_id,
+                    error = %e,
+                    "Failed to scrub a dead approval's stored action"
+                ),
+            }
+        }
     }
 
     let Some(store) = gateway_store else {
