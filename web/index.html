@@ -1658,7 +1658,11 @@
         renderProposals(lastProposals);
         updateConstitutionTabBadge();
       } catch (e) {
+        // Fail-visible: zero the standing state so the tab badge cannot
+        // advertise pending work the panel says is unavailable.
+        lastProposals = null;
         renderPanelError('constitution-proposals', `constitution.list_pending_proposals failed: ${e.message}`);
+        updateConstitutionTabBadge();
       }
     }
 
@@ -1696,13 +1700,14 @@
       }).join('');
     }
 
-    async function decideProposal(proposalId, status) {
+    async function decideProposal(proposalId, status, btn) {
       const { secret, baseURL } = getConnectInfo();
       if (!secret || !proposalId) return;
       const terminal = status !== 'under_review';
       const reason = prompt(`Reason for '${status}' on proposal ${proposalId}:${terminal ? ' (required)' : ' (optional)'}`);
       if (reason === null) return;
       if (terminal && !reason.trim()) { alert(`A recorded motivation is owed (O-6) — provide a reason for '${status}'.`); return; }
+      if (btn) btn.disabled = true;
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
@@ -1713,9 +1718,9 @@
           })
         });
         const json = await resp.json();
-        if (json.error) { alert(`Decision failed: ${json.error.message}`); return; }
+        if (json.error) { alert(`Decision failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
         fetchConstitutionProposals();
-      } catch (e) { alert(`Connection error: ${e.message}`); }
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
     }
 
     async function fetchAnomalyFlags() {
@@ -1736,8 +1741,30 @@
         renderAnomalies(lastFlags);
         updateConstitutionTabBadge();
       } catch (e) {
+        lastFlags = null;
         renderPanelError('anomaly-flags', `anomaly.list_pending failed: ${e.message}`);
+        updateConstitutionTabBadge();
       }
+    }
+
+    // Shallow evidence preview: never stringifies nested structures (a large
+    // evidence_json must not block the UI just to show a 300-char head).
+    function evidencePreview(ev) {
+      if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return '';
+      const keys = Object.keys(ev);
+      if (!keys.length) return '';
+      const parts = keys.slice(0, 4).map(k => {
+        const v = ev[k];
+        let s;
+        if (typeof v === 'string') s = v;
+        else if (v === null || v === undefined) s = '';
+        else if (Array.isArray(v)) s = `[${v.length} item${v.length === 1 ? '' : 's'}]`;
+        else if (typeof v === 'object') s = '{…}';
+        else s = String(v);
+        return `${k}: ${s.slice(0, 60)}`;
+      });
+      if (keys.length > 4) parts.push(`+${keys.length - 4} more keys`);
+      return parts.join(' · ');
     }
 
     function renderAnomalies(flags) {
@@ -1749,8 +1776,7 @@
         const act = (status, label, cls) => safeId
           ? `<button onclick="resolveFlag('${f.flag_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
           : '';
-        const evidence = f.evidence_json && Object.keys(f.evidence_json).length
-          ? JSON.stringify(f.evidence_json) : '';
+        const evidence = evidencePreview(f.evidence_json);
         return `
           <div class="p-2.5 rounded border ${f.sla_breached_at ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
             <div class="flex items-center justify-between gap-2">
@@ -1778,13 +1804,14 @@
       }).join('');
     }
 
-    async function resolveFlag(flagId, status) {
+    async function resolveFlag(flagId, status, btn) {
       const { secret, baseURL } = getConnectInfo();
       if (!secret || !flagId) return;
       const terminal = status !== 'under_review';
       const reason = prompt(`Reason for '${status}' on flag ${flagId}:${terminal ? ' (required by O-7)' : ' (optional)'}`);
       if (reason === null) return;
       if (terminal && !reason.trim()) { alert(`Decider obligation O-7: recording '${status}' requires a non-empty motivation.`); return; }
+      if (btn) btn.disabled = true;
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
@@ -1795,9 +1822,9 @@
           })
         });
         const json = await resp.json();
-        if (json.error) { alert(`Adjudication failed: ${json.error.message}`); return; }
+        if (json.error) { alert(`Adjudication failed: ${json.error.message}`); if (btn) btn.disabled = false; return; }
         fetchAnomalyFlags();
-      } catch (e) { alert(`Connection error: ${e.message}`); }
+      } catch (e) { alert(`Connection error: ${e.message}`); if (btn) btn.disabled = false; }
     }
 
     function renderContentList(files, sid) {
