@@ -65,6 +65,23 @@ fn timeline_event(
     }
 }
 
+/// Commit seeded events before any concurrent reader can touch the buffer.
+///
+/// `create_live_digest_event` buffers and only writes at capacity, and
+/// `flush_live_digest_events` drains the buffer, releases the buffer lock, and
+/// only *then* takes the connection lock. Two of these tests share one store and
+/// run concurrently, so a peer's flush can drain this test's events into its own
+/// transaction — leaving the seeding test to query before its rows are
+/// committed and see nothing. Flushing here makes the seed durable before the
+/// read, which is what these tests are actually about.
+///
+/// This is a pre-existing race in the buffered write path (it reproduces on
+/// 1e1d63af with no other changes); pinning it down belongs in its own change,
+/// not here.
+fn seal(env: &SharedEnv) {
+    env.store.flush_live_digest_events().expect("flush seeded events");
+}
+
 #[tokio::test]
 async fn session_timeline_list_returns_seeded_events_above_floor() {
     let env = shared();
@@ -86,6 +103,7 @@ async fn session_timeline_list_returns_seeded_events_above_floor() {
             "2026-06-01T10:00:01+00:00",
         ))
         .unwrap();
+    seal(env);
 
     // Omit min_altitude → defaults to `normal` (the type contract).
     let resp = env
@@ -163,6 +181,7 @@ async fn clone_timeline_for_fork_mirrors_history_up_to_turn() {
     ] {
         env.store.create_live_digest_event(&ev).unwrap();
     }
+    seal(env);
 
     // Fork at turn 2: turns 1–2 plus the turn-less message before the cutoff
     // should be mirrored; turns 3 and 4 must not.
@@ -215,6 +234,7 @@ async fn clone_timeline_for_fork_excludes_later_turn_sharing_cutoff_timestamp() 
     ] {
         env.store.create_live_digest_event(&ev).unwrap();
     }
+    seal(env);
 
     let fork_root = "root-fork-tie-branch";
     let copied = env.store.clone_timeline_for_fork(src, fork_root, 2).unwrap();

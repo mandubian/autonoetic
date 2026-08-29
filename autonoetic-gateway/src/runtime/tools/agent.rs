@@ -1649,13 +1649,19 @@ important signals (progress reports, divergence findings, status updates from sp
         let acl_target_agent_id = match (&args.target_session_id, &args.target_agent_id) {
             (Some(sid), _) => match store.get_session_agent_binding(sid)? {
                 Some(binding) => {
-                    // A closed session can never consume a delivery: injection
-                    // happens at wake, and a finished session does not wake
-                    // again. Queueing anyway and reporting `delivered` is the
-                    // same dishonesty the broadcast path had — the liveness
-                    // filter must apply to both addressing modes, not just the
-                    // one that enumerates sessions itself.
-                    if store.get_session_outcome(sid)?.is_some() {
+                    // A session that cannot consume a delivery must not be
+                    // queued for: the liveness filter applies to both
+                    // addressing modes, not just the one that enumerates
+                    // sessions itself.
+                    //
+                    // "Has an outcome row" is NOT that test (#1231). A room or
+                    // root session writes one at every close and wakes again on
+                    // the next operator turn, so presence-as-terminality made
+                    // the most valuable recipient — the orchestrating parent —
+                    // permanently unreachable while it was still running.
+                    // `is_session_addressable` asks the ordering question
+                    // instead: has it woken since it last closed?
+                    if !store.is_session_addressable(sid)? {
                         return Ok(serde_json::json!({
                             "ok": false,
                             "status": "target_session_finished",
@@ -1663,10 +1669,10 @@ important signals (progress reports, divergence findings, status updates from sp
                             "target_agent_id": binding.agent_id,
                             "recipients_count": 0,
                             "message": format!(
-                                "Session '{}' (agent '{}') has already finished, so it cannot receive \
-                                 a message — messages are injected when a session wakes, and this one \
-                                 will not wake again. Nothing was queued. Use agent_spawn if the work \
-                                 still needs doing.",
+                                "Session '{}' (agent '{}') has closed and has not woken since, so it \
+                                 cannot receive a message — deliveries are injected by a running \
+                                 session. Nothing was queued. Use agent_spawn if the work still \
+                                 needs doing.",
                                 sid, binding.agent_id
                             ),
                         })

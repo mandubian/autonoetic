@@ -138,13 +138,58 @@ or is reaped, so it states reachability instead of inferring it.
 `GatewayStore::list_addressable_sessions_for_agent` is residency plus
 still-executing sessions, and is what a broadcast resolves against.
 
-**Known gap:** a session suspended on a gate (`WaitingForChild`,
-`ApprovalRequired`, `UserInputRequired`, `HumanEscalation`) is genuinely
-resumable and would consume a queued message at its next wake, but it already has
-an outcome row and no residency row, so it is not currently counted as
-addressable. Recording residency for gate suspensions too would close that gap;
-it touches the approval and child-wait lifecycles and is deliberately out of
-scope here.
+Residency is opt-in through `resident_idle_ttl_secs`, which no reference bundle
+declares — so in practice that first half is empty and everything rests on the
+second.
+
+### The liveness ledger (#1231)
+
+"Still executing" was itself inferred from the absence of an outcome row, and
+that inference was wrong in both directions a session can come back:
+
+- A **room or root session** closes and wakes on every operator turn. The
+  outcome row is written at each close and never removed, so after its first
+  turn the session read as finished forever. Observed in `session-4d4c3f46`: the
+  root's row was written at 13:40, and the same session went on to spawn five
+  children and send a peer message of its own at 14:25 — having refused three
+  inbound messages in between.
+- A session **suspended at a yield point** (`WaitingForChild`,
+  `ApprovalRequired`, `UserInputRequired`, `HumanEscalation`) is parked, not
+  ended. Suspension writes an outcome row like any other close, so a parent
+  blocked waiting for its child was unreachable by that very child.
+
+Neither could be fixed by reinterpreting an existing signal, because every one
+of them is one-way: `session_outcomes` survives close, and
+`session_transcripts.status` / `.lifecycle_state` are sticky-terminal *by
+design* (125485f5 — a stale, poll-driven upsert must not resurrect a closed
+session).
+
+`session_liveness` records the missing fact directly: when a session last began
+executing (`last_woken_at`, written by `AgentExecutor::execute_with_history`),
+and when and how it last stopped (`last_closed_at` + `resumable`, written by
+`close_session` on **every** close path, where `resumable` is
+`SessionCloseOutcome::is_suspended()`).
+
+A session is addressable when any of these holds, in order:
+
+1. it holds an unexpired **residency** row (parked, and parking exists so peers
+   can still reach it);
+2. it has **never closed**;
+3. it closed **as a suspension** — a yield point it will resume from;
+4. it has **woken since** it last closed.
+
+Residency comes first because parking follows a clean-completion close, so the
+ledger alone would read "closed, not resumable". Both the direct check
+(`is_session_addressable`) and the broadcast filter
+(`list_addressable_sessions_for_agent`) apply the same order — if the direct
+check were the stricter of the two, a role broadcast would reach sessions a
+direct send could not.
+
+It is ordering-based rather than state-based, and is written from the lifecycle
+rather than from an observability path, so a late or duplicated transcript write
+cannot move it — the sticky terminal fields stay untouched and 125485f5 stays
+fixed. Sessions with no ledger row predate the table and keep the original
+outcome-row behaviour, so migration reclassifies nothing.
 
 ## Wakeup Mechanism
 

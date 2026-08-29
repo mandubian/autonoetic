@@ -306,3 +306,47 @@ async fn a_turn_with_no_pending_messages_injects_nothing() {
         );
     }
 }
+
+/// The wake marker must actually be written by the lifecycle, not just exist as
+/// a store API (#1231).
+///
+/// The store-level rules are covered in `messaging.rs`, but those tests call
+/// `record_session_wake` themselves. If the lifecycle never called it, every one
+/// of them would still pass while a real re-woken session stayed unreachable —
+/// the same shape of gap that let the original delivery bug through, where the
+/// tests stopped at the queue and nothing drove the executor.
+#[tokio::test]
+async fn running_a_session_marks_it_addressable_again_after_a_terminal_close() {
+    let mut f = fixture(false);
+
+    // The session ran once and closed for good.
+    f.store
+        .upsert_session_outcome_metrics(
+            RECEIVER_SESSION,
+            RECEIVER_SESSION,
+            "coder.midturn_test",
+            None,
+            1,
+            10,
+            0.0,
+            1.0,
+        )
+        .unwrap();
+    f.store.record_session_close(RECEIVER_SESSION, false).unwrap();
+    assert!(
+        !f.store.is_session_addressable(RECEIVER_SESSION).unwrap(),
+        "a terminally closed session must not be addressable"
+    );
+
+    // The operator sends another message and the session runs again.
+    let mut history = vec![
+        Message::system("You are a test agent.".to_string()),
+        Message::user("do the work".to_string()),
+    ];
+    f.executor.execute_with_history(&mut history).await.unwrap();
+
+    assert!(
+        f.store.is_session_addressable(RECEIVER_SESSION).unwrap(),
+        "executing a turn must record the wake that makes the session reachable again"
+    );
+}

@@ -2764,6 +2764,32 @@ impl GatewayExecutionService {
             }
         }
 
+        // Liveness ledger (#1231): record that this session stopped, and
+        // whether it can resume. Written before the residency/outcome branches
+        // below because it must hold for *every* close path, parked or not —
+        // a ledger with gaps is a ledger that silently reads as terminal.
+        //
+        // `is_suspended()` is the resumable test: a gate, child wait or
+        // user-input yield parks the session at a yield point it will run
+        // again from, and it still consumes queued deliveries when it does.
+        // Treating those as endings is what made a parent blocked on
+        // `WaitingForChild` unreachable by the very child it was waiting for.
+        // A clean completion that then *parks* (below) stays reachable through
+        // its residency row, which `is_session_addressable` and
+        // `list_addressable_sessions_for_agent` both consult ahead of this
+        // ledger — so recording the close here does not strand a parked
+        // resident session.
+        if let Some(store) = self.gateway_store.as_ref() {
+            if let Err(e) = store.record_session_close(&session_id, close_outcome.is_suspended()) {
+                tracing::warn!(
+                    target: "session_liveness",
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to record session close in the liveness ledger"
+                );
+            }
+        }
+
         // Residency: a resident agent that finished its task parks instead of
         // terminating, so peers can still reach it (`agent_message`). Parking
         // means: persist an Idle checkpoint, record the session as addressable,

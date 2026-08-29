@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 82;
+const SCHEMA_VERSION_LATEST: i64 = 83;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -567,6 +567,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_carry_forward_lineage_v80(conn)?;
     apply_execution_trace_mount_set_v81(conn)?;
     apply_decider_appointments_v82(conn)?;
+    apply_session_liveness_v83(conn)?;
 
     Ok(())
 }
@@ -3683,6 +3684,59 @@ fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
 /// mid-execution", not "alive". A row here is written deliberately when a
 /// resident session parks and deleted when it resumes or is reaped, so
 /// addressability is stated rather than inferred.
+/// #1231 — the missing "this session can still run" signal.
+///
+/// Every pre-existing liveness signal is one-way. `session_outcomes` is an
+/// upsert written at each close and never removed. `session_transcripts.status`
+/// and `.lifecycle_state` are sticky-terminal *by design* (125485f5: a stale
+/// in-flight upsert from the scheduler's poll must not resurrect a closed
+/// session). `session_residency` is opt-in via `resident_idle_ttl_secs`, which
+/// no bundle declares.
+///
+/// So the store could distinguish "never closed" from "closed", but not
+/// "closed for good" from either "closed, and since re-woken" (a room or root
+/// session, on every operator turn) or "closed *as a suspension*, and waiting
+/// to resume". `agent_message` read the outcome row as terminal and refused to
+/// deliver to sessions that were about to run again.
+///
+/// Both gaps are the same missing fact, so this ledger records both halves:
+/// when a session last began executing, and when — and *how* — it last stopped.
+/// `resumable` is `SessionCloseOutcome::is_suspended()`: a suspension is a
+/// yield point, not an ending.
+///
+/// Written from the lifecycle's own wake and close paths, never from an
+/// observability writer, so a late or duplicated transcript upsert cannot move
+/// it. The sticky terminal fields are left untouched, keeping 125485f5 fixed.
+fn apply_session_liveness_v83(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 83 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_liveness (
+            session_id     TEXT PRIMARY KEY,
+            -- RFC3339 (`Utc::now().to_rfc3339()`) for both stamps, so they
+            -- order lexicographically against each other.
+            last_woken_at  TEXT,
+            last_closed_at TEXT,
+            -- 1 when the last close was a suspension (gate, child wait, user
+            -- input): the session is parked at a yield point and will run again.
+            resumable      INTEGER NOT NULL DEFAULT 0
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![83_i64, "session_liveness", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_session_residency_v72(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

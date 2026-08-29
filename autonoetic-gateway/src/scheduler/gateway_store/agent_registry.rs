@@ -442,8 +442,23 @@ impl GatewayStore {
     ///
     /// A `session_outcomes` row is written unconditionally at session close
     /// (`session_outcome_writer::write_session_outcome_metrics` — "every
-    /// session gets a row"). Its **presence** therefore marks a session as
-    /// closed, and a binding with no such row is one this query returns.
+    /// session gets a row"), and `updated_at` is refreshed at *each* close.
+    ///
+    /// Presence alone is **not** terminality (#1231). A room or root session
+    /// closes and wakes again on every operator turn, and the row is never
+    /// removed, so reading presence as "finished" made every such session
+    /// permanently unaddressable while it was still running. The observed case:
+    /// a root session whose outcome row was written at 13:40 went on to spawn
+    /// five children and send a peer message of its own at 14:25.
+    ///
+    /// A session is unfinished when `session_liveness` says it has not stopped
+    /// for good: never closed, closed *as a suspension* (a yield point it will
+    /// resume from), or woken again since it last closed.
+    ///
+    /// Sessions with no `session_liveness` row predate the ledger, so they fall
+    /// back to the original outcome-row test. That keeps historical rows
+    /// behaving exactly as before rather than reclassifying them en masse on
+    /// migration.
     ///
     /// Residual case: a session killed without a clean close leaves no outcome
     /// row and stays listed here. Messaging it queues a delivery that is never
@@ -456,7 +471,17 @@ impl GatewayStore {
             "SELECT b.session_id
              FROM session_agent_bindings b
              LEFT JOIN session_outcomes o ON o.session_id = b.session_id
-             WHERE b.agent_id = ?1 AND o.session_id IS NULL
+             LEFT JOIN session_liveness l ON l.session_id = b.session_id
+             WHERE b.agent_id = ?1 AND (
+                 CASE
+                     WHEN l.session_id IS NULL      THEN o.session_id IS NULL
+                     WHEN l.last_closed_at IS NULL  THEN 1
+                     WHEN l.resumable = 1           THEN 1
+                     WHEN l.last_woken_at IS NOT NULL
+                          AND l.last_woken_at > l.last_closed_at THEN 1
+                     ELSE 0
+                 END
+             )
              ORDER BY b.created_at ASC",
         )?;
         let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
@@ -465,6 +490,82 @@ impl GatewayStore {
             results.push(r?);
         }
         Ok(results)
+    }
+
+    /// Record that `session_id` has begun executing.
+    ///
+    /// Called from the lifecycle's wake path rather than from the transcript
+    /// upsert on purpose: the transcript is written by observability paths that
+    /// can arrive late or duplicated (the very thing 125485f5 hardened
+    /// against), whereas this fires where a session genuinely starts a turn.
+    pub fn record_session_wake(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_liveness (session_id, last_woken_at) VALUES (?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET last_woken_at = excluded.last_woken_at",
+            params![session_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Record that `session_id` has stopped, and whether it can resume.
+    ///
+    /// `resumable` is `SessionCloseOutcome::is_suspended()` — a gate, child
+    /// wait or user-input yield parks the session rather than ending it, and a
+    /// parked session still consumes its queued deliveries when it resumes.
+    pub fn record_session_close(&self, session_id: &str, resumable: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_liveness (session_id, last_closed_at, resumable)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                last_closed_at = excluded.last_closed_at,
+                resumable = excluded.resumable",
+            params![
+                session_id,
+                chrono::Utc::now().to_rfc3339(),
+                if resumable { 1_i64 } else { 0_i64 }
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `session_id` can still consume a delivery — the single-session
+    /// counterpart of [`Self::list_addressable_sessions_for_agent`], and it must
+    /// stay in lockstep with it: if the direct check were stricter than the
+    /// broadcast filter, a role broadcast would reach sessions a direct send
+    /// could not, turning the narrower mode into an evasion of the broader one.
+    ///
+    /// That lockstep is why residency is the first clause. A parked resident
+    /// session took a clean-completion close, so the ledger alone reads
+    /// "closed, not resumable" — but parking exists precisely so peers can
+    /// still reach an agent that finished its task, and the broadcast filter
+    /// unions residency in. Consulting only the ledger here made the same
+    /// session reachable by role broadcast and not by its own session id.
+    /// Expiry is honoured, so a lapsed residency does not keep a dead session
+    /// alive.
+    pub fn is_session_addressable(&self, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let addressable: bool = conn.query_row(
+            "SELECT CASE
+                 WHEN r.session_id IS NOT NULL  THEN 1
+                 WHEN l.session_id IS NULL      THEN o.session_id IS NULL
+                 WHEN l.last_closed_at IS NULL  THEN 1
+                 WHEN l.resumable = 1           THEN 1
+                 WHEN l.last_woken_at IS NOT NULL
+                      AND l.last_woken_at > l.last_closed_at THEN 1
+                 ELSE 0
+             END
+             FROM (SELECT ?1 AS session_id) s
+             LEFT JOIN session_outcomes o ON o.session_id = s.session_id
+             LEFT JOIN session_liveness l ON l.session_id = s.session_id
+             LEFT JOIN session_residency r
+                 ON r.session_id = s.session_id AND r.expires_at > ?2",
+            params![session_id, now],
+            |row| row.get::<_, i64>(0).map(|v| v == 1),
+        )?;
+        Ok(addressable)
     }
 
     pub fn insert_promotion_record(&self, record: &PromotionRecord) -> Result<()> {

@@ -844,3 +844,237 @@ async fn closed_inbox_does_not_block_the_agents_own_id() -> anyhow::Result<()> {
     assert_eq!(h.queued_for("self-closed-session-b")?, 1);
     Ok(())
 }
+
+// ── Liveness: closed is not the same as finished (#1231) ────────────────────
+//
+// `session_outcomes` is written at every close and never removed, so reading
+// its presence as terminality made any session that closes and wakes again —
+// a room or root session, on every operator turn — permanently unaddressable
+// while it was still running. Observed in session-4d4c3f46: the root's outcome
+// row was written at 13:40, and the same session spawned five children and sent
+// a peer message of its own at 14:25, having refused three inbound messages in
+// between.
+
+/// The reported bug, end to end: closed, then woken again ⇒ deliverable.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_session_that_woke_after_closing_is_addressable_again() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "room-session", "receiver-agent")?;
+
+    // First turn completes: outcome row written, ledger records a terminal close.
+    h.store.record_session_wake("room-session")?;
+    finish_session(&h.store, "room-session", "receiver-agent")?;
+    h.store.record_session_close("room-session", false)?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "room-session",
+        "message": "while closed"
+    }))?;
+    assert_eq!(
+        parsed["status"], "target_session_finished",
+        "a session that closed and has not woken must still be refused: {parsed}"
+    );
+
+    // The operator sends another message; the session wakes and runs again.
+    h.store.record_session_wake("room-session")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "room-session",
+        "message": "after waking"
+    }))?;
+    assert!(
+        parsed["ok"].as_bool().unwrap(),
+        "a re-woken session must be addressable again: {parsed}"
+    );
+    assert_eq!(h.queued_for("room-session")?, 1);
+    Ok(())
+}
+
+/// A parent parked on `WaitingForChild` is exactly who its child needs to
+/// reach. Suspension writes an outcome row like any other close, so this was
+/// the documented "Known gap" — and it is the child→parent leg of the demo.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_session_suspended_at_a_yield_point_is_still_addressable() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "parent-session", "receiver-agent")?;
+
+    h.store.record_session_wake("parent-session")?;
+    finish_session(&h.store, "parent-session", "receiver-agent")?;
+    // Suspension, not termination: `SessionCloseOutcome::is_suspended()`.
+    h.store.record_session_close("parent-session", true)?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "parent-session",
+        "message": "child reporting upward"
+    }))?;
+
+    assert!(
+        parsed["ok"].as_bool().unwrap(),
+        "a suspended session will resume and consume its queue: {parsed}"
+    );
+    assert_eq!(h.queued_for("parent-session")?, 1);
+    Ok(())
+}
+
+/// The fix must not resurrect genuinely finished sessions.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_terminally_closed_session_stays_unaddressable() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "done-session", "receiver-agent")?;
+
+    h.store.record_session_wake("done-session")?;
+    finish_session(&h.store, "done-session", "receiver-agent")?;
+    h.store.record_session_close("done-session", false)?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "done-session",
+        "message": "should not arrive"
+    }))?;
+    assert_eq!(parsed["status"], "target_session_finished", "{parsed}");
+    assert_eq!(h.queued_for("done-session")?, 0);
+    Ok(())
+}
+
+/// Both addressing modes must agree. If the broadcast filter were laxer than
+/// the direct check, a role broadcast would reach sessions a direct send could
+/// not — turning the narrower mode into an evasion of the broader one.
+#[serial_test::serial]
+#[tokio::test]
+async fn broadcast_and_direct_agree_on_liveness() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    for (sid, resumable) in [("bcast-woken", false), ("bcast-suspended", true)] {
+        bind_session(&h.store, sid, "receiver-agent")?;
+        h.store.record_session_wake(sid)?;
+        finish_session(&h.store, sid, "receiver-agent")?;
+        h.store.record_session_close(sid, resumable)?;
+    }
+    // Only the first one wakes again; the second stays parked at its gate.
+    h.store.record_session_wake("bcast-woken")?;
+
+    bind_session(&h.store, "bcast-dead", "receiver-agent")?;
+    h.store.record_session_wake("bcast-dead")?;
+    finish_session(&h.store, "bcast-dead", "receiver-agent")?;
+    h.store.record_session_close("bcast-dead", false)?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_agent_id": "receiver-agent",
+        "message": "broadcast"
+    }))?;
+    assert!(parsed["ok"].as_bool().unwrap(), "{parsed}");
+    assert_eq!(
+        parsed["recipients_count"].as_u64().unwrap(),
+        2,
+        "the re-woken and the suspended session are recipients; the dead one is not: {parsed}"
+    );
+    assert_eq!(h.queued_for("bcast-woken")?, 1);
+    assert_eq!(h.queued_for("bcast-suspended")?, 1);
+    assert_eq!(h.queued_for("bcast-dead")?, 0);
+
+    // Direct sends must reach exactly the same set.
+    for (sid, want_ok) in [
+        ("bcast-woken", true),
+        ("bcast-suspended", true),
+        ("bcast-dead", false),
+    ] {
+        let p = h.send(serde_json::json!({
+            "target_session_id": sid, "message": "direct"
+        }))?;
+        assert_eq!(
+            p["ok"].as_bool().unwrap(),
+            want_ok,
+            "direct and broadcast disagree for {sid}: {p}"
+        );
+    }
+    Ok(())
+}
+
+/// Sessions predating the ledger keep the original outcome-row behaviour —
+/// migration must not reclassify historical rows en masse.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_session_with_no_ledger_row_falls_back_to_the_outcome_test() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "legacy-open", "receiver-agent")?;
+    bind_session(&h.store, "legacy-closed", "receiver-agent")?;
+    finish_session(&h.store, "legacy-closed", "receiver-agent")?;
+
+    assert!(h.store.is_session_addressable("legacy-open")?);
+    assert!(!h.store.is_session_addressable("legacy-closed")?);
+    Ok(())
+}
+
+/// A parked resident session is *explicitly* meant to stay reachable — parking
+/// exists so peers can still message an agent that finished its task.
+///
+/// `record_session_close` fires on every close path including the parked one
+/// (a ledger with gaps reads as terminal), so the ledger alone says "closed,
+/// not resumable". Residency is what makes it reachable, and both addressing
+/// modes have to consult it or they disagree: the broadcast filter unions
+/// residency in, so without this the same session was reachable by role
+/// broadcast but not by its own session id.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_parked_resident_session_is_addressable_by_both_modes() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "parked-session", "receiver-agent")?;
+
+    // Ran, completed cleanly, then parked instead of terminating.
+    h.store.record_session_wake("parked-session")?;
+    h.store.record_session_close("parked-session", false)?;
+    h.store
+        .upsert_session_residency(&autonoetic_gateway::scheduler::gateway_store::SessionResidency {
+            session_id: "parked-session".to_string(),
+            root_session_id: "parked-session".to_string(),
+            agent_id: "receiver-agent".to_string(),
+            turn_id: "turn-000001".to_string(),
+            since: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: "2099-01-01T00:00:00Z".to_string(),
+        })?;
+
+    let direct = h.send(serde_json::json!({
+        "target_session_id": "parked-session",
+        "message": "direct to a parked resident"
+    }))?;
+    assert!(
+        direct["ok"].as_bool().unwrap(),
+        "a parked resident session must be reachable by session id: {direct}"
+    );
+
+    let broadcast = h.send(serde_json::json!({
+        "target_agent_id": "receiver-agent",
+        "message": "broadcast to a parked resident"
+    }))?;
+    assert!(broadcast["ok"].as_bool().unwrap(), "{broadcast}");
+    assert_eq!(
+        broadcast["recipients_count"].as_u64().unwrap(),
+        1,
+        "broadcast and direct must agree: {broadcast}"
+    );
+    assert_eq!(h.queued_for("parked-session")?, 2);
+    Ok(())
+}
+
+/// An expired residency row must not keep a dead session addressable.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_expired_residency_does_not_keep_a_closed_session_addressable() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "expired-session", "receiver-agent")?;
+    h.store.record_session_wake("expired-session")?;
+    h.store.record_session_close("expired-session", false)?;
+    h.store
+        .upsert_session_residency(&autonoetic_gateway::scheduler::gateway_store::SessionResidency {
+            session_id: "expired-session".to_string(),
+            root_session_id: "expired-session".to_string(),
+            agent_id: "receiver-agent".to_string(),
+            turn_id: "turn-000001".to_string(),
+            since: "2020-01-01T00:00:00Z".to_string(),
+            expires_at: "2020-01-01T00:00:01Z".to_string(),
+        })?;
+
+    assert!(!h.store.is_session_addressable("expired-session")?);
+    Ok(())
+}
