@@ -1005,3 +1005,76 @@ async fn a_session_with_no_ledger_row_falls_back_to_the_outcome_test() -> anyhow
     assert!(!h.store.is_session_addressable("legacy-closed")?);
     Ok(())
 }
+
+/// A parked resident session is *explicitly* meant to stay reachable — parking
+/// exists so peers can still message an agent that finished its task.
+///
+/// `record_session_close` fires on every close path including the parked one
+/// (a ledger with gaps reads as terminal), so the ledger alone says "closed,
+/// not resumable". Residency is what makes it reachable, and both addressing
+/// modes have to consult it or they disagree: the broadcast filter unions
+/// residency in, so without this the same session was reachable by role
+/// broadcast but not by its own session id.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_parked_resident_session_is_addressable_by_both_modes() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "parked-session", "receiver-agent")?;
+
+    // Ran, completed cleanly, then parked instead of terminating.
+    h.store.record_session_wake("parked-session")?;
+    h.store.record_session_close("parked-session", false)?;
+    h.store
+        .upsert_session_residency(&autonoetic_gateway::scheduler::gateway_store::SessionResidency {
+            session_id: "parked-session".to_string(),
+            root_session_id: "parked-session".to_string(),
+            agent_id: "receiver-agent".to_string(),
+            turn_id: "turn-000001".to_string(),
+            since: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: "2099-01-01T00:00:00Z".to_string(),
+        })?;
+
+    let direct = h.send(serde_json::json!({
+        "target_session_id": "parked-session",
+        "message": "direct to a parked resident"
+    }))?;
+    assert!(
+        direct["ok"].as_bool().unwrap(),
+        "a parked resident session must be reachable by session id: {direct}"
+    );
+
+    let broadcast = h.send(serde_json::json!({
+        "target_agent_id": "receiver-agent",
+        "message": "broadcast to a parked resident"
+    }))?;
+    assert!(broadcast["ok"].as_bool().unwrap(), "{broadcast}");
+    assert_eq!(
+        broadcast["recipients_count"].as_u64().unwrap(),
+        1,
+        "broadcast and direct must agree: {broadcast}"
+    );
+    assert_eq!(h.queued_for("parked-session")?, 2);
+    Ok(())
+}
+
+/// An expired residency row must not keep a dead session addressable.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_expired_residency_does_not_keep_a_closed_session_addressable() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "expired-session", "receiver-agent")?;
+    h.store.record_session_wake("expired-session")?;
+    h.store.record_session_close("expired-session", false)?;
+    h.store
+        .upsert_session_residency(&autonoetic_gateway::scheduler::gateway_store::SessionResidency {
+            session_id: "expired-session".to_string(),
+            root_session_id: "expired-session".to_string(),
+            agent_id: "receiver-agent".to_string(),
+            turn_id: "turn-000001".to_string(),
+            since: "2020-01-01T00:00:00Z".to_string(),
+            expires_at: "2020-01-01T00:00:01Z".to_string(),
+        })?;
+
+    assert!(!h.store.is_session_addressable("expired-session")?);
+    Ok(())
+}

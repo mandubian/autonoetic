@@ -2259,12 +2259,13 @@ impl AgentExecutor {
         //
         // Written here, at the point a session actually begins executing,
         // rather than from an observability writer that can arrive late or
-        // duplicated. Compared against `session_outcomes.updated_at`, so it
-        // orders wakes against closes instead of asserting a state.
+        // duplicated. `is_session_addressable` compares it against this
+        // session's own `last_closed_at`, so the ledger orders wakes against
+        // closes instead of asserting a state.
         if let Some(store) = self.gateway_store.as_ref() {
             if let Err(e) = store.record_session_wake(&session_id) {
                 tracing::warn!(
-                    target: "session_wake",
+                    target: "session_liveness",
                     session_id = %session_id,
                     error = %e,
                     "Failed to record session wake; peers may read this session as finished"

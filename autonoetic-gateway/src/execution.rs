@@ -2774,10 +2774,15 @@ impl GatewayExecutionService {
         // again from, and it still consumes queued deliveries when it does.
         // Treating those as endings is what made a parent blocked on
         // `WaitingForChild` unreachable by the very child it was waiting for.
+        // A clean completion that then *parks* (below) stays reachable through
+        // its residency row, which `is_session_addressable` and
+        // `list_addressable_sessions_for_agent` both consult ahead of this
+        // ledger — so recording the close here does not strand a parked
+        // resident session.
         if let Some(store) = self.gateway_store.as_ref() {
             if let Err(e) = store.record_session_close(&session_id, close_outcome.is_suspended()) {
                 tracing::warn!(
-                    target: "session_wake",
+                    target: "session_liveness",
                     session_id = %session_id,
                     error = %e,
                     "Failed to record session close in the liveness ledger"

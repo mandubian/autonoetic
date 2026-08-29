@@ -531,14 +531,25 @@ impl GatewayStore {
     }
 
     /// Whether `session_id` can still consume a delivery — the single-session
-    /// counterpart of [`Self::list_unfinished_sessions_for_agent`], and it must
+    /// counterpart of [`Self::list_addressable_sessions_for_agent`], and it must
     /// stay in lockstep with it: if the direct check were stricter than the
     /// broadcast filter, a role broadcast would reach sessions a direct send
     /// could not, turning the narrower mode into an evasion of the broader one.
+    ///
+    /// That lockstep is why residency is the first clause. A parked resident
+    /// session took a clean-completion close, so the ledger alone reads
+    /// "closed, not resumable" — but parking exists precisely so peers can
+    /// still reach an agent that finished its task, and the broadcast filter
+    /// unions residency in. Consulting only the ledger here made the same
+    /// session reachable by role broadcast and not by its own session id.
+    /// Expiry is honoured, so a lapsed residency does not keep a dead session
+    /// alive.
     pub fn is_session_addressable(&self, session_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
         let addressable: bool = conn.query_row(
             "SELECT CASE
+                 WHEN r.session_id IS NOT NULL  THEN 1
                  WHEN l.session_id IS NULL      THEN o.session_id IS NULL
                  WHEN l.last_closed_at IS NULL  THEN 1
                  WHEN l.resumable = 1           THEN 1
@@ -548,8 +559,10 @@ impl GatewayStore {
              END
              FROM (SELECT ?1 AS session_id) s
              LEFT JOIN session_outcomes o ON o.session_id = s.session_id
-             LEFT JOIN session_liveness l ON l.session_id = s.session_id",
-            params![session_id],
+             LEFT JOIN session_liveness l ON l.session_id = s.session_id
+             LEFT JOIN session_residency r
+                 ON r.session_id = s.session_id AND r.expires_at > ?2",
+            params![session_id, now],
             |row| row.get::<_, i64>(0).map(|v| v == 1),
         )?;
         Ok(addressable)

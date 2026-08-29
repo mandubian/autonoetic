@@ -168,8 +168,22 @@ session).
 executing (`last_woken_at`, written by `AgentExecutor::execute_with_history`),
 and when and how it last stopped (`last_closed_at` + `resumable`, written by
 `close_session` on **every** close path, where `resumable` is
-`SessionCloseOutcome::is_suspended()`). A session is addressable when it has
-never closed, closed as a suspension, or has woken since it last closed.
+`SessionCloseOutcome::is_suspended()`).
+
+A session is addressable when any of these holds, in order:
+
+1. it holds an unexpired **residency** row (parked, and parking exists so peers
+   can still reach it);
+2. it has **never closed**;
+3. it closed **as a suspension** — a yield point it will resume from;
+4. it has **woken since** it last closed.
+
+Residency comes first because parking follows a clean-completion close, so the
+ledger alone would read "closed, not resumable". Both the direct check
+(`is_session_addressable`) and the broadcast filter
+(`list_addressable_sessions_for_agent`) apply the same order — if the direct
+check were the stricter of the two, a role broadcast would reach sessions a
+direct send could not.
 
 It is ordering-based rather than state-based, and is written from the lifecycle
 rather than from an observability path, so a late or duplicated transcript write
