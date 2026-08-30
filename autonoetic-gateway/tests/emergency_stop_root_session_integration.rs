@@ -1104,3 +1104,110 @@ async fn emergency_stop_terminates_parked_root_so_children_are_reapable() -> any
 
     Ok(())
 }
+
+/// #1199: emergency stop vacates the decider seats over the run it stops.
+///
+/// The stop already cancels this run's pending gates, so the seat has nothing
+/// left to decide — but a peer-root appointment is scoped to the run and would
+/// otherwise survive it, still satisfying the provenance check that lets an
+/// agent decide. Driven through `emergency_stop_root_session` rather than the
+/// revocation helper, because the helper working is not the question: the
+/// question is whether the stop calls it.
+#[tokio::test]
+async fn emergency_stop_vacates_decider_seats_over_the_run() -> anyhow::Result<()> {
+    use autonoetic_types::background::ApprovalRisk;
+    use autonoetic_types::decider_appointment::DeciderAppointment;
+
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    write_planner_agent(&workspace.agents_dir)?;
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let root_session = "root-1199-stop";
+    let other_run = "root-1199-untouched";
+
+    // Seated directly: this test is about the stop path, not about the
+    // appointing validator, which has its own suite.
+    let seat = |id: &str, scope: &str| DeciderAppointment {
+        appointment_id: id.to_string(),
+        decider_agent: "nightwatch.default".to_string(),
+        decider_revision: "rev-test".to_string(),
+        decider_provider: Some("anthropic".to_string()),
+        decider_model: Some("claude-opus-4-20250514".to_string()),
+        kinds: vec!["approval".to_string()],
+        scope_root_session: scope.to_string(),
+        decider_session: Some(format!("decider-{id}")),
+        risk_ceiling: ApprovalRisk::High,
+        advice_only: true,
+        expires_at: None,
+        max_gates: None,
+        gates_decided: 0,
+        appointed_by: "operator".to_string(),
+        appointed_at: Utc::now().to_rfc3339(),
+        revoked_at: None,
+        revoked_by: None,
+        revoked_reason: None,
+    };
+    store.insert_decider_appointment(&seat("apt-stopped", root_session))?;
+    store.insert_decider_appointment(&seat("apt-other", other_run))?;
+
+    // The stop writes an emergency checkpoint, which needs a workflow lead.
+    let ts = Utc::now().to_rfc3339();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_session,
+        Some("planner.default"),
+    )?;
+    wf.status = WorkflowRunStatus::WaitingChildren;
+    wf.updated_at = ts.clone();
+    save_workflow_run(&config, Some(store.as_ref()), &wf)?;
+
+    let out = execution
+        .emergency_stop_root_session(
+            root_session,
+            "test seat vacation",
+            "user",
+            "tester",
+            "manual",
+            None,
+        )
+        .await?;
+    assert_eq!(out["ok"], true);
+    let stop_id = out["stop_id"].as_str().expect("stop_id").to_string();
+
+    let stopped = store
+        .get_decider_appointment("apt-stopped")?
+        .expect("record kept, not deleted");
+    assert!(
+        stopped.revoked_at.is_some(),
+        "the stop must vacate seats over the run it stopped"
+    );
+    assert_eq!(
+        stopped.revoked_reason.as_deref(),
+        Some(format!("emergency_stop:{stop_id}").as_str()),
+        "the chain should say which stop ended the seat"
+    );
+    assert!(
+        store
+            .list_decider_appointments_for_scope(root_session, true)?
+            .is_empty(),
+        "no seat remains active over a stopped run"
+    );
+
+    let untouched = store
+        .get_decider_appointment("apt-other")?
+        .expect("still there");
+    assert!(
+        untouched.revoked_at.is_none(),
+        "stopping one run must not vacate seats over another"
+    );
+    Ok(())
+}

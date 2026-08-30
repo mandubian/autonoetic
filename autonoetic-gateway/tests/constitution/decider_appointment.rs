@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use autonoetic_gateway::decider_appointment::{
     active_appointment_for_gate, agent_is_appointed_for_scope, appoint, revoke,
-    viewer_class_for_gate, AppointmentRequest,
+    revoke_appointments_for_scope, viewer_class_for_gate, AppointmentRequest,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::ApprovalRisk;
@@ -722,5 +722,85 @@ fn a_database_created_before_the_model_pin_is_upgraded_not_broken() -> anyhow::R
         .expect("readable back after upgrade");
     assert_eq!(back.decider_model.as_deref(), Some("claude-opus-4-20250514"));
     assert_eq!(back.decider_provider.as_deref(), Some("anthropic"));
+    Ok(())
+}
+
+
+// ── #1199: an appointment does not outlive its run ─────────────────────────
+
+/// The accumulation problem peer-root creates. A decider session is top-level
+/// so it survives the run — which is the point — and that is exactly why the
+/// *appointment* needs an explicit end, or live seats pile up against finished
+/// runs, each still satisfying the provenance check that lets an agent decide.
+#[test]
+fn ending_a_run_vacates_every_seat_over_it() -> anyhow::Result<()> {
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    let b = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    // A seat over a different run must be untouched.
+    let other = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-2"))?;
+
+    let vacated = revoke_appointments_for_scope(&f.store, "root-1", "gateway", "session_close")?;
+    assert_eq!(vacated.len(), 2, "both seats over root-1");
+
+    for id in [&a.appointment_id, &b.appointment_id] {
+        let after = f.store.get_decider_appointment(id)?.expect("record kept");
+        assert_eq!(after.revoked_by.as_deref(), Some("gateway"));
+        assert_eq!(after.revoked_reason.as_deref(), Some("session_close"));
+    }
+    assert!(
+        !agent_is_appointed_for_scope(&f.store, "nightwatch.default", "root-1")?,
+        "a vacated seat must stop satisfying the provenance check"
+    );
+    assert!(
+        active_appointment_for_gate(&f.store, "root-1", "approval", ApprovalRisk::High)?.is_none(),
+        "and must stop routing gates"
+    );
+
+    let untouched = f
+        .store
+        .get_decider_appointment(&other.appointment_id)?
+        .expect("still there");
+    assert!(
+        untouched.revoked_at.is_none(),
+        "ending one run must not vacate seats over another"
+    );
+    Ok(())
+}
+
+#[test]
+fn vacating_a_scope_is_idempotent_and_keeps_the_first_attribution() -> anyhow::Result<()> {
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    revoke(&f.store, &a.appointment_id, "pascal", Some("shift over"))?;
+
+    // The run then closes. An already-vacated seat must not be re-attributed.
+    let vacated = revoke_appointments_for_scope(&f.store, "root-1", "gateway", "session_close")?;
+    assert!(vacated.is_empty(), "nothing left to vacate");
+    let after = f.store.get_decider_appointment(&a.appointment_id)?.expect("kept");
+    assert_eq!(after.revoked_by.as_deref(), Some("pascal"));
+    assert_eq!(after.revoked_reason.as_deref(), Some("shift over"));
+    Ok(())
+}
+
+/// Forks get a new root session id, and an appointment is scoped to one root —
+/// so a fork inherits no seat. Pinned rather than assumed: reuse-by-reference
+/// would otherwise let one operator gesture seat a decider over runs the
+/// operator never saw.
+#[test]
+fn a_fork_inherits_no_seat() -> anyhow::Result<()> {
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+
+    for forked_root in ["root-1-fork", "root-1f", "root-2"] {
+        assert!(
+            !agent_is_appointed_for_scope(&f.store, "nightwatch.default", forked_root)?,
+            "a fork must be seated deliberately, never by inheritance: {forked_root}"
+        );
+        assert!(
+            active_appointment_for_gate(&f.store, forked_root, "approval", ApprovalRisk::High)?
+                .is_none()
+        );
+    }
     Ok(())
 }
