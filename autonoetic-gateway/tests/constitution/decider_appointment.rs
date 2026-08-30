@@ -642,3 +642,85 @@ fn an_unresolvable_preset_is_refused_at_appointment_time() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// An existing database that has already applied v82 must gain the model-pin
+/// columns, not just a freshly created one.
+///
+/// This is the case the first version of #1196 got wrong: the columns were
+/// added by editing v82's `CREATE TABLE`, which only ever runs on a database
+/// that has not applied v82 yet. A released schema version cannot be edited in
+/// place — every deployment that had run it would keep the old table while the
+/// new code inserted columns that were not there.
+#[test]
+fn a_database_created_before_the_model_pin_is_upgraded_not_broken() -> anyhow::Result<()> {
+    use rusqlite::Connection;
+
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    // Stand up the v82-era table shape by hand, and claim v83 so the migrator
+    // treats this as a database that predates the pin.
+    {
+        let db = gateway_dir.join("gateway.db");
+        let conn = Connection::open(&db)?;
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+             CREATE TABLE decider_appointments (
+                appointment_id TEXT PRIMARY KEY,
+                decider_agent TEXT NOT NULL,
+                decider_revision TEXT NOT NULL,
+                kinds TEXT NOT NULL,
+                scope_root_session TEXT NOT NULL,
+                decider_session TEXT,
+                risk_ceiling TEXT NOT NULL,
+                advice_only INTEGER NOT NULL DEFAULT 1,
+                expires_at TEXT,
+                max_gates INTEGER,
+                gates_decided INTEGER NOT NULL DEFAULT 0,
+                appointed_by TEXT NOT NULL,
+                appointed_at TEXT NOT NULL,
+                revoked_at TEXT,
+                revoked_by TEXT,
+                revoked_reason TEXT);
+             INSERT INTO schema_migrations (version, name, applied_at)
+                VALUES (83, 'pre-existing', '2026-01-01T00:00:00Z');",
+        )?;
+    }
+
+    // Opening the store runs the migrator over that database.
+    let store = GatewayStore::open(&gateway_dir)?;
+
+    // The round trip is the real assertion: insert and read back a row naming
+    // the new columns. A missing column fails here, which is exactly how the
+    // unmigrated deployment would have failed at runtime.
+    use autonoetic_types::decider_appointment::DeciderAppointment;
+    store.insert_decider_appointment(&DeciderAppointment {
+        appointment_id: "apt-upgrade".to_string(),
+        decider_agent: "nightwatch.default".to_string(),
+        decider_revision: "rev-x".to_string(),
+        decider_provider: Some("anthropic".to_string()),
+        decider_model: Some("claude-opus-4-20250514".to_string()),
+        kinds: vec!["approval".to_string()],
+        scope_root_session: "root-1".to_string(),
+        decider_session: Some("decider-x".to_string()),
+        risk_ceiling: ApprovalRisk::High,
+        advice_only: true,
+        expires_at: None,
+        max_gates: None,
+        gates_decided: 0,
+        appointed_by: "operator".to_string(),
+        appointed_at: chrono::Utc::now().to_rfc3339(),
+        revoked_at: None,
+        revoked_by: None,
+        revoked_reason: None,
+    })?;
+
+    let back = store
+        .get_decider_appointment("apt-upgrade")?
+        .expect("readable back after upgrade");
+    assert_eq!(back.decider_model.as_deref(), Some("claude-opus-4-20250514"));
+    assert_eq!(back.decider_provider.as_deref(), Some("anthropic"));
+    Ok(())
+}

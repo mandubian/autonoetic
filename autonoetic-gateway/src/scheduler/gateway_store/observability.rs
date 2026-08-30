@@ -1327,13 +1327,6 @@ impl GatewayStore {
         Ok(())
     }
 
-    /// Resolve the agent identity that owns a session. Used to authenticate a
-    /// caller-supplied `decider_session_id` against the recorded owner before
-    /// applying R-10.7 trust-boundary checks. Consults `session_transcripts`
-    /// first (covers root and child sessions), then falls back to
-    /// `session_spawn_lineage.target_agent_id` for child sessions whose
-    /// transcript has not yet been written. Returns `None` when the session is
-    /// not recorded anywhere (treated as untrusted by callers).
     /// The principal a session was opened on behalf of (#1196).
     ///
     /// Sibling of [`Self::session_owner_agent`], which answers *which agent
@@ -1355,6 +1348,13 @@ impl GatewayStore {
         Ok(principal.flatten())
     }
 
+    /// Resolve the agent identity that owns a session. Used to authenticate a
+    /// caller-supplied `decider_session_id` against the recorded owner before
+    /// applying R-10.7 trust-boundary checks. Consults `session_transcripts`
+    /// first (covers root and child sessions), then falls back to
+    /// `session_spawn_lineage.target_agent_id` for child sessions whose
+    /// transcript has not yet been written. Returns `None` when the session is
+    /// not recorded anywhere (treated as untrusted by callers).
     pub fn session_owner_agent(&self, session_id: &str) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().unwrap();

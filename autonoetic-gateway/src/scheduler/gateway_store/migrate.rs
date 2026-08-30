@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 83;
+const SCHEMA_VERSION_LATEST: i64 = 84;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -568,6 +568,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_execution_trace_mount_set_v81(conn)?;
     apply_decider_appointments_v82(conn)?;
     apply_session_liveness_v83(conn)?;
+    apply_decider_model_pin_v84(conn)?;
 
     Ok(())
 }
@@ -628,8 +629,6 @@ fn apply_decider_appointments_v82(conn: &mut Connection) -> Result<()> {
             appointment_id TEXT PRIMARY KEY,
             decider_agent TEXT NOT NULL,
             decider_revision TEXT NOT NULL,
-            decider_provider TEXT,
-            decider_model TEXT,
             kinds TEXT NOT NULL,
             scope_root_session TEXT NOT NULL,
             decider_session TEXT,
@@ -3709,6 +3708,42 @@ fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
 /// Written from the lifecycle's own wake and close paths, never from an
 /// observability writer, so a late or duplicated transcript upsert cannot move
 /// it. The sticky terminal fields are left untouched, keeping 125485f5 fixed.
+fn apply_decider_model_pin_v84(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 84 {
+        return Ok(());
+    }
+
+    // #1196 records the provider/model an appointment resolved to. Added as its
+    // own migration rather than by editing v82's CREATE TABLE: v82 is already
+    // released, so a database that has applied it would never gain the columns
+    // and every insert naming them would fail at runtime. The per-column guard
+    // keeps this idempotent against a database created before the split.
+    for (col, ty) in &[("decider_provider", "TEXT"), ("decider_model", "TEXT")] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('decider_appointments') WHERE name = ?1",
+            [col],
+            |row| row.get(0),
+        )?;
+        if col_count == 0 {
+            conn.execute(
+                &format!("ALTER TABLE decider_appointments ADD COLUMN {col} {ty}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![84_i64, "decider_model_pin", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_session_liveness_v83(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

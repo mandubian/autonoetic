@@ -210,7 +210,15 @@ pub fn appoint(
         user_id: Some(appointment.appointed_by.clone()),
         started_at: appointment.appointed_at.clone(),
         ended_at: None,
-        status: "appointed".to_string(),
+        // A vocabulary the rest of the pipeline already handles. The seat
+        // exists but has never run, and `suspended` is the one existing status
+        // that says that honestly — `active` would inflate in-progress and
+        // liveness counts with a session that has no turns. When #1197 wakes
+        // it, `upsert_session_transcript`'s reopen path (excluded `active` over
+        // a suspended row) is exactly the transition needed. A new status value
+        // would be unhandled by that mapping and by the
+        // `status IN ('active','suspended')` queries.
+        status: "suspended".to_string(),
         turn_count: 0,
         transcript_handle: None,
         excerpt: None,
