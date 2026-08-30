@@ -62,7 +62,15 @@ fn shipped_residency_roster_matches_the_1247_decision() {
         let (manifest, _) = SkillParser::parse(&content)
             .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
         if let Some(ttl) = manifest.agent.resident_idle_ttl_secs {
-            actual.insert(manifest.agent.id.clone(), ttl);
+            let replaced = actual.insert(manifest.agent.id.clone(), ttl);
+            if replaced.is_some() {
+                panic!(
+                    "{}: agent id '{}' declares residency in more than one shipped \
+                     SKILL.md — the roster must name each resident agent exactly once",
+                    path.display(),
+                    manifest.agent.id
+                );
+            }
         }
     }
 

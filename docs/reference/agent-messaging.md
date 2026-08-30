@@ -98,9 +98,8 @@ set of addressable peers was close to empty: workers run to completion, and only
 an orchestrator blocked on children stays around. Messaging worked; it had nobody
 to talk to.
 
-An agent opts into **residency** with `agent.resident_idle_ttl_secs` in its
-SKILL.md — `planner.default`, `planner.collaborative`, and `watchdog.default`
-ship with it enabled (#1247):
+An agent opts into **residency** by declaring `agent.resident_idle_ttl_secs`
+in its SKILL.md frontmatter:
 
 ```yaml
 agent:
@@ -109,6 +108,9 @@ agent:
   description: "..."
   resident_idle_ttl_secs: 900
 ```
+
+Three shipped bundles declare it (#1247): `planner.default`,
+`planner.collaborative`, and `watchdog.default`, all at 900 seconds.
 
 A resident session, on finishing its task, parks in `YieldReason::Idle` instead
 of terminating: an Idle checkpoint is written, a `session_residency` row records
@@ -142,12 +144,13 @@ still-executing sessions, and is what a broadcast resolves against.
 Residency is opt-in through `resident_idle_ttl_secs`. As of #1247 the reference
 bundles whose job is being reachable declare it — `planner.default`,
 `planner.collaborative`, and `watchdog.default`, all at 900 s — so the parked arm
-of the addressability union is live for those roles. The gating roles
-(`accepts_from: []` — evaluators, the sentinel, the auditor, the ombudsman)
-refuse peer mail outright and deliberately stay non-resident: there is nothing
-to be reachable for. Workers (`executor.*`, `coder.*`, …) also stay
-non-resident; their sessions are one-shot by contract, and a peer that needs
-their attention spawns them with a kickoff message.
+of the addressability union is live for those roles. The gating roles (the
+shipped bundles with `messaging.accepts_from: []` — for example the evaluators,
+the security sentinel, the auditor, the ombudsman) refuse peer mail outright and
+deliberately stay non-resident: there is nothing to be reachable for. Workers
+(`executor.*`, `coder.*`, …) also stay non-resident; their sessions are one-shot
+by contract, and a peer that needs their attention spawns them with a kickoff
+message.
 
 **The cost view that justified enabling it (#1247):** a parked session holds its
 checkpoint and its accumulated history until the TTL reaps it, and while parked
