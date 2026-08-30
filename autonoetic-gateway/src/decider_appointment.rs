@@ -112,6 +112,33 @@ pub fn appoint(
         }
     }
 
+    // Resolve the preset now, and refuse a routing one. `is_routing_preset`
+    // means the model is chosen per call, so the seat would be served by
+    // different models on different gates — see `RoutingPresetNotSeatable`.
+    let profile = crate::runtime::inference_profile::resolve_inference_profile(
+        &req.decider_agent,
+        &loaded.manifest,
+        config,
+        None,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot appoint '{}': its inference preset does not resolve ({}). An appointment \
+             records the model it seated, and an agent whose model cannot be resolved could not \
+             decide anything anyway — better to fail here than at 3am. Define the preset named by \
+             the agent's `llm_preset` in `llm_presets` (see docs/reference/config.md)",
+            req.decider_agent,
+            e
+        )
+    })?;
+    if profile.is_routing_preset {
+        return Err(AppointmentError::RoutingPresetNotSeatable {
+            agent_id: req.decider_agent.clone(),
+            preset: profile.preset_name.clone().unwrap_or_else(|| "?".to_string()),
+        }
+        .into());
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     // Pin the closure, not just the name. The revision carries the
     // instructions, the capabilities and the model; calibration evidence
@@ -142,15 +169,24 @@ pub fn appoint(
         })?
         .revision_id;
 
+    let appointment_id = format!("apt_{}", uuid::Uuid::new_v4());
+    // The peer-root session: a **top-level** id, so it shares no root with the
+    // run and is therefore outside it for R-10.7, budget, emergency stop,
+    // session grants and content-visibility push — none of which needs a
+    // hand-written exclusion (#1196). Owned by the decider agent so R-10.7's
+    // ownership check authenticates, with the appointing operator as the
+    // recorded principal so the chain reads as delegation, not spawn.
+    let decider_session = format!("decider-{}", uuid::Uuid::new_v4());
+
     let appointment = DeciderAppointment {
-        appointment_id: format!("apt_{}", uuid::Uuid::new_v4()),
+        appointment_id,
         decider_agent: req.decider_agent,
         decider_revision,
+        decider_provider: Some(profile.llm_config.provider.clone()),
+        decider_model: Some(profile.llm_config.model.clone()),
         kinds: req.kinds,
         scope_root_session: req.scope_root_session,
-        // Filled by #1196 when the gateway creates the peer-root session. An
-        // appointment is a record of authority, not of a running process.
-        decider_session: None,
+        decider_session: Some(decider_session.clone()),
         risk_ceiling: req.risk_ceiling,
         advice_only: req.advice_only,
         expires_at: req.expires_at,
@@ -163,6 +199,31 @@ pub fn appoint(
         revoked_reason: None,
     };
 
+    // Record the peer-root session before the appointment, so an appointment
+    // that exists always has a session R-10.7 can authenticate against.
+    store.upsert_session_transcript(&autonoetic_types::causal_chain::SessionTranscriptRecord {
+        transcript_id: format!("tr-{}", decider_session),
+        session_id: decider_session.clone(),
+        root_session_id: decider_session.clone(),
+        agent_id: appointment.decider_agent.clone(),
+        revision_id: Some(appointment.decider_revision.clone()),
+        user_id: Some(appointment.appointed_by.clone()),
+        started_at: appointment.appointed_at.clone(),
+        ended_at: None,
+        // A vocabulary the rest of the pipeline already handles. The seat
+        // exists but has never run, and `suspended` is the one existing status
+        // that says that honestly — `active` would inflate in-progress and
+        // liveness counts with a session that has no turns. When #1197 wakes
+        // it, `upsert_session_transcript`'s reopen path (excluded `active` over
+        // a suspended row) is exactly the transition needed. A new status value
+        // would be unhandled by that mapping and by the
+        // `status IN ('active','suspended')` queries.
+        status: "suspended".to_string(),
+        turn_count: 0,
+        transcript_handle: None,
+        excerpt: None,
+        origin_node_id: None,
+    })?;
     store.insert_decider_appointment(&appointment)?;
     emit_appointment_event(store, &appointment, "decider.appointed", "appointed", None);
     Ok(appointment)
@@ -295,6 +356,9 @@ fn emit_appointment_event(
                 "appointment_id": a.appointment_id,
                 "decider_agent": a.decider_agent,
                 "decider_revision": a.decider_revision,
+                "decider_provider": a.decider_provider,
+                "decider_model": a.decider_model,
+                "decider_session": a.decider_session,
                 "kinds": a.kinds,
                 "scope_root_session": a.scope_root_session,
                 "risk_ceiling": a.risk_ceiling.as_str(),

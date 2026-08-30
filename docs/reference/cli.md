@@ -205,6 +205,12 @@ autonoetic gateway deciders list [--root-session <root_session_id>] [--include-r
 autonoetic gateway deciders revoke <appointment_id> [--reason TEXT] [--revoked-by <principal>]
 ```
 
+**The bundled occupant is `nightwatch.default`.** It holds `GateDecider { kinds: ["approval"] }` and nothing else — no network, no exec, no spawn. It reads a gate card and returns a verdict, and every additional capability would be a way for the seat to do something other than decide. It is declared as a system agent with **no schedule**: the night watch is woken by a gate opening in a scope it was appointed to, not by a clock, which also means no run can spawn it.
+
+**It runs on the `decider` preset**, which must be a *fixed* preset. Appointing an agent on a routing preset is refused: a routing preset chooses a model per call, so the same seat would be served by different models on different gates and "which model produced this verdict" would have no answer — which would make the calibration evidence meaningless. If the preset cannot be resolved at all, the appointment is refused then rather than failing at 3am.
+
+**The seat gets its own session.** The gateway creates a **top-level** session for the appointment, owned by the appointee with the appointing operator as its principal. Because `root_session_id` is the first segment of a session id, a top-level session is outside the run for budget, emergency stop, session approval grants, content-visibility propagation and R-10.7 — none of which needed a special case written for the decider. The run cannot starve, stop, or feed its own judge.
+
 **An appointment never widens capabilities.** The appointee must already hold
 `GateDecider` covering every kind named, checked against its promoted revision.
 Appointing an agent that lacks the capability — or holds it for `approval` but
