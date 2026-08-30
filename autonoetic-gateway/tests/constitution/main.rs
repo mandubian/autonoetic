@@ -16,6 +16,7 @@ mod audit_rule_id_coverage;
 mod audit_runtime_lock_drift;
 mod budget_root_session_tree;
 mod capability_scope_required;
+mod citation_liveness;
 mod clarification_child_read_only;
 mod constant_time_auth;
 mod date_2026_07_08_new_clauses_present;

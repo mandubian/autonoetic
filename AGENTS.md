@@ -170,8 +170,8 @@ Do NOT add a `warnings_acknowledged` boolean — the LLM will just set it to `tr
 
 ### LoopGuard
 Two trip conditions, independent:
-1. **Max loops without progress**: `current_loops >= max_loops_without_progress` (default 5). Reset by `register_progress()` (any tool returning `ok: true`).
-2. **Per-tool failure budget**: `tool_failure_counts[tool_name] >= max_tool_failures` (default 5). NOT reset by `register_progress()`. Counts total failures per tool name regardless of arguments/hosts.
+1. **Max loops without progress**: `current_loops >= max_loops_without_progress` (default 10). Reset by `register_progress()` (any tool returning `ok: true`).
+2. **Per-tool failure budget**: `tool_failure_counts[tool_name] >= max_tool_failures` (default 8). NOT reset by `register_progress()`. Counts total failures per tool name regardless of arguments/hosts.
 
 Both are configurable via `loop_guard:` in `config-template.yaml`.
 

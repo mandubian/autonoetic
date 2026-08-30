@@ -369,7 +369,7 @@ causal logging, durable workflows, OFP federation with HMAC + constitution
 digest handshake, and MCP client/server plumbing.
 
 Governance is built alongside the runtime: the current constitution
-(`2026.07.30`) has 18 enforced rights and 182 rules, 179 of them enforced — see
+(`2026.08.30`) has 18 enforced rights and 182 rules, 179 of them enforced — see
 [`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md)
 for what is `ENFORCED` vs `PARTIAL` / `MISSING` / `DESIGN DEBT`. In-flight design work is
 tracked in [`docs/proposals/`](docs/proposals/README.md); superseded plans in

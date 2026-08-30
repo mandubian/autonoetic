@@ -519,8 +519,8 @@ Controls the per-session runaway loop detection. Independent of `max_session_tur
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by mutating tool calls that count as progress (a new or still-allowed (tool, arguments) fingerprint, up to `max_consecutive_same_progress` repeats). Read-only, side-effect-free tools (`resolve`, `workflow_state`, `planframe_get`, `approval_list`, `knowledge_search`, …) do NOT reset it (issue #701) — they advance no workflow, so a planner cannot keep the counter pinned by interleaving one probe between every failed mutation. |
-| `loop_guard.max_tool_failures` | u32 | `5` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
+| `loop_guard.max_loops_without_progress` | u32 | `10` | Maximum turns without meaningful progress before suspension. Reset by mutating tool calls that count as progress (a new or still-allowed (tool, arguments) fingerprint, up to `max_consecutive_same_progress` repeats). Read-only, side-effect-free tools (`resolve`, `workflow_state`, `planframe_get`, `approval_list`, `knowledge_search`, …) do NOT reset it (issue #701) — they advance no workflow, so a planner cannot keep the counter pinned by interleaving one probe between every failed mutation. |
+| `loop_guard.max_tool_failures` | u32 | `8` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
 | `loop_guard.max_consecutive_same_progress` | u32 | `1` | Number of consecutive identical (tool, arguments) calls allowed before repeats stop counting as progress. Default `1` means the first call counts as progress, but the second identical call does not. |
 | `loop_guard.max_child_failures` | u32 | `5` | Maximum total child-agent spawn failures before suspension. Prevents agents from repeatedly spawning failing children. |
 | `loop_guard.rotation_window_size` | usize | `16` | **Rotating-polling detector window (issue #287).** *System-config only* (not overridable from agent manifests). The detector tracks the last N successful-tool-call fingerprints; trips when the window is full and has only `rotation_distinct_floor` or fewer distinct values. Set to `0` to disable the detector entirely. |
@@ -536,8 +536,8 @@ Example:
 
 ```yaml
 loop_guard:
-  max_loops_without_progress: 5
-  max_tool_failures: 5
+  max_loops_without_progress: 10
+  max_tool_failures: 8
   max_consecutive_same_progress: 1
   max_child_failures: 5
   rotation_window_size: 16
@@ -1654,8 +1654,8 @@ session_budget:
   max_tool_invocations: 500
 
 loop_guard:
-  max_loops_without_progress: 5
-  max_tool_failures: 5
+  max_loops_without_progress: 10
+  max_tool_failures: 8
   max_consecutive_same_progress: 1
   max_child_failures: 5
 
