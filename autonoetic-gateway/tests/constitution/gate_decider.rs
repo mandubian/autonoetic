@@ -70,6 +70,7 @@ agent:
   id: {agent_id}
   name: {agent_id}
   description: test agent {agent_id}
+llm_preset: decider
 capabilities:
 {caps_yaml}---
 # Instructions
@@ -166,6 +167,8 @@ fn seed_appointment(
         appointment_id: format!("apt-test-{}-{}", agent_id, scope_root).replace('/', "_"),
         decider_agent: agent_id.to_string(),
         decider_revision: "rev-test".to_string(),
+        decider_provider: None,
+        decider_model: None,
         kinds: vec!["approval".to_string(), "escalation".to_string()],
         scope_root_session: scope_root.to_string(),
         decider_session: None,

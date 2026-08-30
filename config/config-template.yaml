@@ -850,6 +850,33 @@ llm_presets:
     #   effort: high
     #   budget_tokens: 8192
 
+  # A decider seat (#1196). Deliberately its own preset rather than reusing
+  # `coding`: the preset *name* is what an agent revision pins, so a shared
+  # name means the decider's model can change as a side effect of retuning
+  # someone else's agent.
+  #
+  # Fixed, never routing. A routing preset picks a tier per call, so the same
+  # appointment would be served by different models on different gates and
+  # "which model produced this verdict" becomes unanswerable — which would make
+  # the agreement rate in the calibration ledger meaningless. `deciders appoint`
+  # refuses a routing preset for this reason.
+  #
+  # temperature 0: a decider that gives different verdicts for the same gate
+  # card cannot be calibrated. Premium tier because the volume argument runs
+  # opposite to the watchdog's — this fires on a handful of gates a night, each
+  # one replacing a decision the operator would otherwise have made.
+  decider:
+    provider: "anthropic"
+    model: "claude-opus-4-20250514"
+    tier: premium
+    temperature: 0.0
+    cost:
+      input_per_million: 15.0
+      output_per_million: 75.0
+    thinking:
+      effort: high
+      budget_tokens: 8192
+
   # ── Routing presets: select from fixed presets at call time ─────────
   smart:
     routing:
@@ -1012,6 +1039,11 @@ context_compression:
 #   - agent_id: ombudsman.default
 #     schedule: "0 */2 * * *"
 #     message: "Ombudsman sweep: review anomaly-flag queue"
+#     enabled: true
+#   # No `schedule`: the night watch is woken by a gate opening in a scope it
+#   # was appointed to, not by a clock. Declaring it here gives it a
+#   # gateway-owned identity no run can spawn (#1196).
+#   - agent_id: nightwatch.default
 #     enabled: true
 
 # ── Protected Agents (issue #21) ───────────────────────────────────────

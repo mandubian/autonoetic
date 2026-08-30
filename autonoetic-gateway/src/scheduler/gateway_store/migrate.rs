@@ -628,6 +628,8 @@ fn apply_decider_appointments_v82(conn: &mut Connection) -> Result<()> {
             appointment_id TEXT PRIMARY KEY,
             decider_agent TEXT NOT NULL,
             decider_revision TEXT NOT NULL,
+            decider_provider TEXT,
+            decider_model TEXT,
             kinds TEXT NOT NULL,
             scope_root_session TEXT NOT NULL,
             decider_session TEXT,

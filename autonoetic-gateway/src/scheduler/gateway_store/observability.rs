@@ -1334,6 +1334,27 @@ impl GatewayStore {
     /// `session_spawn_lineage.target_agent_id` for child sessions whose
     /// transcript has not yet been written. Returns `None` when the session is
     /// not recorded anywhere (treated as untrusted by callers).
+    /// The principal a session was opened on behalf of (#1196).
+    ///
+    /// Sibling of [`Self::session_owner_agent`], which answers *which agent
+    /// runs here*. This answers *whose authority it runs under*. For a
+    /// gateway-created decider session the two differ on purpose: the agent is
+    /// the appointee, the principal is the operator who seated it, and that
+    /// difference is what makes the causal chain read as delegation rather than
+    /// as an agent spawning itself a judge.
+    pub fn session_principal(&self, session_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let principal: Option<Option<String>> = conn
+            .query_row(
+                "SELECT user_id FROM session_transcripts WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(principal.flatten())
+    }
+
     pub fn session_owner_agent(&self, session_id: &str) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().unwrap();

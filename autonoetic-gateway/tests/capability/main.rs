@@ -5,4 +5,5 @@ mod civic_attestation_wake;
 mod civic_eval_binding_promotion_gate;
 mod isolation;
 mod protected_agents_promotion_gate;
+mod nightwatch_capability;
 mod watchdog_capability;

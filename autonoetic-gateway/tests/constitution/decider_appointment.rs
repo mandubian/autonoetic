@@ -37,9 +37,35 @@ fn fixture(agent_id: &str, capabilities: &[Capability]) -> anyhow::Result<Fixtur
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
     write_agent_dir(&agents_dir, agent_id, capabilities);
+    // A fixed preset, as an operator's config would define it. `appoint`
+    // resolves it to record what was seated, and refuses routing presets.
+    let mut llm_presets = std::collections::HashMap::new();
+    llm_presets.insert(
+        "decider".to_string(),
+        autonoetic_types::config::LlmPreset {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-opus-4-20250514".to_string()),
+            temperature: Some(0.0),
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: None,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            thinking: None,
+            tier: None,
+            cost: None,
+            latency: None,
+            routing: None,
+            egress_class: None,
+            request_timeout_secs: None,
+            ttfb_timeout_secs: None,
+        },
+    );
     let cfg = GatewayConfig {
         runtime_dir: gateway_dir.clone(),
         agents_dir: agents_dir.clone(),
+        llm_presets,
         ..Default::default()
     };
     let store = GatewayStore::open(&gateway_dir)?;
@@ -180,11 +206,26 @@ fn appointment_round_trips_and_lands_on_the_causal_chain() -> anyhow::Result<()>
     assert_eq!(stored.risk_ceiling, ApprovalRisk::High);
     assert!(stored.advice_only, "phase 1 is advisory-only");
     assert_eq!(stored.appointed_by, "operator");
+    // #1196: the peer-root session exists as soon as the seat does, and is
+    // **top-level** — that is what puts it outside the run for R-10.7, budget,
+    // emergency stop, session grants and content-visibility push, with no
+    // hand-written exclusion for any of them.
+    let session = stored
+        .decider_session
+        .as_deref()
+        .expect("the peer-root session is created with the appointment");
     assert!(
-        stored.decider_session.is_none(),
-        "the peer-root session is created later (#1196); an appointment is a \
-         record of authority, not of a running process"
+        !session.contains('/'),
+        "a decider session must be top-level, not a child of anything: {session}"
     );
+    assert!(
+        !session.starts_with(&stored.scope_root_session),
+        "and must not share a root with the run it decides for: {session}"
+    );
+
+    // The model is pinned alongside the revision (#1232 down payment).
+    assert_eq!(stored.decider_provider.as_deref(), Some("anthropic"));
+    assert_eq!(stored.decider_model.as_deref(), Some("claude-opus-4-20250514"));
 
     let events = f
         .store
@@ -472,6 +513,132 @@ fn an_expired_appointment_stops_conferring_read_parity() -> anyhow::Result<()> {
         viewer_class_for_gate(&f.store, "nightwatch.default", "root-1/coder-a"),
         ViewerClass::Agent,
         "an expired seat confers nothing"
+    );
+    Ok(())
+}
+
+// ── #1196: the peer-root session, and what it buys ─────────────────────────
+
+/// The decider's session shares no root with the run, which is the whole
+/// mechanism. `root_session_id` is the first path segment, so budget rollup,
+/// emergency stop, session approval grants and content-visibility propagation
+/// are all keyed on a root the run does not share — none of them needs an
+/// exclusion written for the decider.
+#[test]
+fn the_decider_session_shares_no_root_with_the_run() -> anyhow::Result<()> {
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    let session = a.decider_session.as_deref().expect("session created");
+
+    // Same derivation the gateway uses everywhere else.
+    let decider_root = session.split('/').next().unwrap_or(session);
+    assert_eq!(decider_root, session, "the decider session *is* its own root");
+    assert_ne!(
+        decider_root, "root-1",
+        "sharing a root would put the decider inside the run's budget, stop \
+         scope, grants and content visibility"
+    );
+    Ok(())
+}
+
+/// R-10.7 authenticates the decider against recorded session ownership, so the
+/// seat is useless unless the gateway registered that ownership. The principal
+/// is the appointing operator, so the chain reads as delegation, not spawn.
+#[test]
+fn the_decider_session_is_owned_by_the_agent_and_principaled_to_the_operator() -> anyhow::Result<()>
+{
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let mut req = request("nightwatch.default", "root-1");
+    req.appointed_by = "pascal".to_string();
+    let a = appoint(&f.cfg, &f.store, req)?;
+    let session = a.decider_session.as_deref().expect("session created");
+
+    assert_eq!(
+        f.store.session_owner_agent(session)?.as_deref(),
+        Some("nightwatch.default"),
+        "R-10.7 authenticates against this; without it the seat cannot be used"
+    );
+
+    assert_eq!(
+        f.store.session_principal(session)?.as_deref(),
+        Some("pascal"),
+        "the appointing operator is the principal — the chain must read as \
+         delegation, not as an agent spawning itself a judge"
+    );
+    Ok(())
+}
+
+/// Two appointments never collide on one session, so revoking one seat cannot
+/// disturb another.
+#[test]
+fn each_appointment_gets_its_own_session() -> anyhow::Result<()> {
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let a = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))?;
+    let b = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-2"))?;
+    assert_ne!(a.decider_session, b.decider_session);
+    Ok(())
+}
+
+/// A routing preset picks a model per call, so the same seat would be served by
+/// different models on different gates — and the agreement rate that is meant
+/// to justify binding authority would be an average over an unknown mixture.
+#[test]
+fn a_routing_preset_cannot_be_seated() -> anyhow::Result<()> {
+    let mut f = fixture("nightwatch.default", &approval_decider())?;
+    // A routing preset that *does* resolve — otherwise the refusal would come
+    // from resolution failing, and the routing check would go untested.
+    let fixed = f
+        .cfg
+        .llm_presets
+        .get("decider")
+        .cloned()
+        .expect("fixture defines a fixed decider preset");
+    f.cfg.llm_presets.insert("opus_fixed".to_string(), fixed);
+    f.cfg.llm_presets.insert(
+        "decider".to_string(),
+        autonoetic_types::config::LlmPreset {
+            provider: None,
+            model: None,
+            temperature: None,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: None,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            thinking: None,
+            tier: None,
+            cost: None,
+            latency: None,
+            routing: Some(autonoetic_types::config::RoutingPresetConfig {
+                models: vec!["opus_fixed".to_string()],
+                ..Default::default()
+            }),
+            egress_class: None,
+            request_timeout_secs: None,
+            ttfb_timeout_secs: None,
+        },
+    );
+    let err = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))
+        .expect_err("a routing preset must not be seatable");
+    assert!(
+        err.to_string().contains("fixed preset"),
+        "refusal should explain why routing is disqualifying: {err}"
+    );
+    Ok(())
+}
+
+/// An agent whose preset does not resolve could not decide anything, so the
+/// refusal belongs at appointment time rather than at 3am.
+#[test]
+fn an_unresolvable_preset_is_refused_at_appointment_time() -> anyhow::Result<()> {
+    let mut f = fixture("nightwatch.default", &approval_decider())?;
+    f.cfg.llm_presets.clear();
+    let err = appoint(&f.cfg, &f.store, request("nightwatch.default", "root-1"))
+        .expect_err("an unresolvable preset must be refused");
+    assert!(
+        err.to_string().contains("llm_presets"),
+        "refusal should point at the fix: {err}"
     );
     Ok(())
 }

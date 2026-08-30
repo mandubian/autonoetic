@@ -52,6 +52,21 @@ pub struct DeciderAppointment {
     /// rather than a `None` written into the record.
     pub decider_revision: String,
 
+    /// The provider and model the preset resolved to **at appointment time**.
+    ///
+    /// `decider_revision` pins the bundle, but a revision only names an
+    /// `llm_preset`; the name → model mapping lives in `config.yaml` and can be
+    /// rewritten with no revision, gate or causal event (#1232). Recording the
+    /// resolution here is a local down payment on that: it does not stop the
+    /// mapping changing, but it means the record can *say* what was seated, so
+    /// a later mismatch is detectable rather than silent.
+    ///
+    /// `None` only for records written before this field existed.
+    #[serde(default)]
+    pub decider_provider: Option<String>,
+    #[serde(default)]
+    pub decider_model: Option<String>,
+
     /// Gate kinds routed to the appointee — a subset of the agent's capability.
     pub kinds: Vec<String>,
 
@@ -163,6 +178,11 @@ pub enum AppointmentError {
     CriticalNotAppointable,
     /// Phase 1 ships advisory-only; binding appointments wait on calibration.
     BindingNotYetAvailable,
+    /// The appointee resolves to a **routing** preset, which selects a model
+    /// per call. A seat served by a different model on different gates makes
+    /// "which model produced this verdict" unanswerable, and the agreement
+    /// rate meaningless.
+    RoutingPresetNotSeatable { agent_id: String, preset: String },
     /// The scope is empty.
     NoScope,
     /// An expiry timestamp that is not RFC3339.
@@ -194,6 +214,13 @@ impl std::fmt::Display for AppointmentError {
                  they are refused at appointment time rather than left above a ceiling, because \
                  promotion and secret delivery must not be delegable by a single operator gesture"
             ),
+            Self::RoutingPresetNotSeatable { agent_id, preset } => write!(
+                f,
+                "Agent '{agent_id}' uses the routing preset '{preset}', which selects a model per \
+                 call. A decider must be on a fixed preset: a seat served by different models on \
+                 different gates cannot say which model produced a verdict, and the agreement \
+                 rate that would justify binding authority becomes meaningless"
+            ),
             Self::BindingNotYetAvailable => write!(
                 f,
                 "Binding appointments are not available yet: phase 1 is advisory-only, so \
@@ -223,6 +250,8 @@ mod tests {
             appointment_id: "apt-1".into(),
             decider_agent: "nightwatch.default".into(),
             decider_revision: "rev_sha256:abc".into(),
+            decider_provider: Some("anthropic".into()),
+            decider_model: Some("claude-opus-4-20250514".into()),
             kinds: vec![GATE_KIND_APPROVAL.into()],
             scope_root_session: "root-1".into(),
             decider_session: None,

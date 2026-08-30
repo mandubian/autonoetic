@@ -13,14 +13,17 @@ use autonoetic_types::decider_appointment::DeciderAppointment;
 pub(crate) fn insert_appointment(conn: &Connection, a: &DeciderAppointment) -> Result<()> {
     conn.execute(
         "INSERT INTO decider_appointments
-            (appointment_id, decider_agent, decider_revision, kinds, scope_root_session,
-             decider_session, risk_ceiling, advice_only, expires_at, max_gates, gates_decided,
-             appointed_by, appointed_at, revoked_at, revoked_by, revoked_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            (appointment_id, decider_agent, decider_revision, decider_provider, decider_model,
+             kinds, scope_root_session, decider_session, risk_ceiling, advice_only, expires_at,
+             max_gates, gates_decided, appointed_by, appointed_at, revoked_at, revoked_by,
+             revoked_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             a.appointment_id,
             a.decider_agent,
             a.decider_revision,
+            a.decider_provider,
+            a.decider_model,
             a.kinds.join(","),
             a.scope_root_session,
             a.decider_session,
@@ -132,19 +135,19 @@ pub(crate) fn record_gate_decided(conn: &Connection, appointment_id: &str) -> Re
     Ok(n > 0)
 }
 
-const SELECT_COLS: &str = "SELECT appointment_id, decider_agent, decider_revision, kinds, \
-     scope_root_session, decider_session, risk_ceiling, advice_only, expires_at, max_gates, \
-     gates_decided, appointed_by, appointed_at, revoked_at, revoked_by, revoked_reason \
-     FROM decider_appointments";
+const SELECT_COLS: &str = "SELECT appointment_id, decider_agent, decider_revision, \
+     decider_provider, decider_model, kinds, scope_root_session, decider_session, risk_ceiling, \
+     advice_only, expires_at, max_gates, gates_decided, appointed_by, appointed_at, revoked_at, \
+     revoked_by, revoked_reason FROM decider_appointments";
 
 fn row_to_appointment(
     row: &rusqlite::Row<'_>,
 ) -> Result<DeciderAppointment, rusqlite::Error> {
-    let kinds_raw: String = row.get(3)?;
-    let risk_raw: String = row.get(6)?;
+    let kinds_raw: String = row.get(5)?;
+    let risk_raw: String = row.get(8)?;
     let risk_ceiling = ApprovalRisk::parse(&risk_raw).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            6,
+            8,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -156,30 +159,32 @@ fn row_to_appointment(
     // future-widened column would silently produce a *smaller* ceiling or
     // tally, which for `gates_decided` means a spent appointment reading as
     // live. Saturation errs toward expired in both directions.
-    let max_gates: Option<i64> = row.get(9)?;
-    let gates_decided: i64 = row.get(10)?;
+    let max_gates: Option<i64> = row.get(11)?;
+    let gates_decided: i64 = row.get(12)?;
     Ok(DeciderAppointment {
         appointment_id: row.get(0)?,
         decider_agent: row.get(1)?,
         decider_revision: row.get(2)?,
+        decider_provider: row.get(3)?,
+        decider_model: row.get(4)?,
         kinds: kinds_raw
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect(),
-        scope_root_session: row.get(4)?,
-        decider_session: row.get(5)?,
+        scope_root_session: row.get(6)?,
+        decider_session: row.get(7)?,
         risk_ceiling,
-        advice_only: row.get::<_, i64>(7)? != 0,
-        expires_at: row.get(8)?,
+        advice_only: row.get::<_, i64>(9)? != 0,
+        expires_at: row.get(10)?,
         max_gates: max_gates.map(saturating_u32),
         gates_decided: saturating_u32(gates_decided),
-        appointed_by: row.get(11)?,
-        appointed_at: row.get(12)?,
-        revoked_at: row.get(13)?,
-        revoked_by: row.get(14)?,
-        revoked_reason: row.get(15)?,
+        appointed_by: row.get(13)?,
+        appointed_at: row.get(14)?,
+        revoked_at: row.get(15)?,
+        revoked_by: row.get(16)?,
+        revoked_reason: row.get(17)?,
     })
 }
 
