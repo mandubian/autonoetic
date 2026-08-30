@@ -232,6 +232,35 @@ pub fn looks_like_secret_collection_prompt(text: &str) -> bool {
         || s.contains("enter your key")
 }
 
+/// True when a captured value is a **variable reference** rather than a
+/// credential — `$TOKEN`, `${TOKEN}`, `%TOKEN%`.
+///
+/// The gateway injects managed credentials as environment variables, so a
+/// well-behaved command reads `Bearer $GITHUB_TOKEN`. Masking that to
+/// `Bearer ***REDACTED***` protects nothing and destroys the single most useful
+/// fact in an execution trace: *which credential this call used*. A reference
+/// is public by construction — the name is not the value.
+fn is_variable_reference(value: &str) -> bool {
+    let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
+    let inner = if let Some(rest) = v.strip_prefix("${") {
+        match rest.strip_suffix('}') {
+            Some(name) => name,
+            None => return false,
+        }
+    } else if let Some(rest) = v.strip_prefix('$') {
+        rest
+    } else if let (Some(rest), true) = (v.strip_prefix('%'), v.ends_with('%')) {
+        &rest[..rest.len().saturating_sub(1)]
+    } else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !inner.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
 /// Mask credential-shaped fragments embedded in plain text.
 ///
 /// This is the precise version: it leaves the surrounding text intact and
@@ -240,17 +269,37 @@ pub fn redact_embedded_secrets(text: &str) -> String {
     // PEM first: it is the only multi-line shape, and masking it whole avoids
     // the inner rules chewing on its base64 body.
     let masked_pem = PEM_BLOCK_RE.replace_all(text, REDACTED).to_string();
+    // Each name-based rule keeps the value when it is a variable reference:
+    // the gateway injects managed credentials as env vars, so `Bearer $TOKEN`
+    // is the *correct* shape and masking it would hide which credential ran.
+    let keep_refs = |caps: &regex::Captures<'_>, prefix_group: usize, value_group: usize| {
+        let prefix = caps.get(prefix_group).map_or("", |m| m.as_str());
+        let value = caps.get(value_group).map_or("", |m| m.as_str());
+        if is_variable_reference(value) {
+            format!("{prefix}{value}")
+        } else {
+            format!("{prefix}{REDACTED}")
+        }
+    };
     let masked_env = ENV_ASSIGN_RE
-        .replace_all(&masked_pem, "${1}=***REDACTED***")
+        .replace_all(&masked_pem, |c: &regex::Captures<'_>| {
+            let name = c.get(1).map_or("", |m| m.as_str());
+            let value = c.get(2).map_or("", |m| m.as_str());
+            if is_variable_reference(value) {
+                format!("{name}={value}")
+            } else {
+                format!("{name}={REDACTED}")
+            }
+        })
         .to_string();
     let masked_query = QUERY_ASSIGN_RE
-        .replace_all(&masked_env, "${1}***REDACTED***")
+        .replace_all(&masked_env, |c: &regex::Captures<'_>| keep_refs(c, 1, 2))
         .to_string();
     let masked_bearer = BEARER_RE
-        .replace_all(&masked_query, "${1}***REDACTED***")
+        .replace_all(&masked_query, |c: &regex::Captures<'_>| keep_refs(c, 1, 2))
         .to_string();
     let masked_scheme = AUTH_SCHEME_RE
-        .replace_all(&masked_bearer, "${1}***REDACTED***")
+        .replace_all(&masked_bearer, |c: &regex::Captures<'_>| keep_refs(c, 1, 2))
         .to_string();
     let masked_userinfo = URL_USERINFO_RE
         .replace_all(&masked_scheme, "${1}***REDACTED***${3}")
@@ -554,6 +603,50 @@ mod tests {
                 "over-masked a benign command: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_variable_reference_is_not_masked() {
+        // The gateway injects managed credentials as env vars, so this is the
+        // *correct* shape for a command. Masking it protects nothing and hides
+        // which credential the call used — the most useful fact in a trace.
+        for text in [
+            "curl -H \"Authorization: Bearer $GITHUB_TOKEN\" https://x",
+            "curl -H 'Authorization: Bearer ${GITHUB_TOKEN}' https://x",
+            "export API_KEY=$VAULT_API_KEY",
+            "fetch https://x?token=$TOKEN",
+        ] {
+            assert_eq!(
+                redact_embedded_secrets(text),
+                text,
+                "a variable reference was masked: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_literal_beside_a_reference_is_still_masked() {
+        // The exemption is per-value, not per-line: one reference on a line
+        // must not shelter a literal next to it.
+        let masked = redact_embedded_secrets(
+            "export API_KEY=$VAULT_KEY && export OTHER_TOKEN=eyJhbGc.realsecret",
+        );
+        assert!(masked.contains("API_KEY=$VAULT_KEY"), "reference lost: {masked}");
+        assert!(!masked.contains("eyJhbGc.realsecret"), "literal survived: {masked}");
+    }
+
+    #[test]
+    fn variable_reference_detection_rejects_near_misses() {
+        assert!(is_variable_reference("$TOKEN"));
+        assert!(is_variable_reference("${TOKEN}"));
+        assert!(is_variable_reference("%TOKEN%"));
+        // Not references — these are values.
+        assert!(!is_variable_reference("eyJhbGc.foo"));
+        assert!(!is_variable_reference("$"));
+        assert!(!is_variable_reference("${unclosed"));
+        assert!(!is_variable_reference("$TOKEN-suffix"));
+        assert!(!is_variable_reference("$1abc"));
+        assert!(!is_variable_reference("sk-abc123def456ghi789"));
     }
 
     #[test]
