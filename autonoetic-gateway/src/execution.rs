@@ -2421,6 +2421,24 @@ impl GatewayExecutionService {
                 "Failed to revoke session envelopes during emergency stop"
             );
         }
+        // #1199: the stop cancels this run's pending gates, so the seat has
+        // nothing left to decide — but the appointment would survive the run it
+        // was scoped to and keep satisfying the provenance check. Vacated here
+        // alongside the grants and envelopes, and attributed to the stop so the
+        // chain says why the seat ended.
+        if let Err(e) = crate::decider_appointment::revoke_appointments_for_scope(
+            &store,
+            root_session_id,
+            "gateway",
+            &format!("emergency_stop:{stop_id}"),
+        ) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to vacate decider seats during emergency stop"
+            );
+        }
         crate::runtime::egress_labeler::clear_session_egress_policy(
             &store,
             root_session_id,

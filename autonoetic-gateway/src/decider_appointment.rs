@@ -251,6 +251,43 @@ pub fn revoke(
     Ok(revoked)
 }
 
+/// Vacate every seat over a run, because the run is over (#1199).
+///
+/// A peer-root decider session outlives the run it serves — that is the point
+/// of peer-root, and it is also why appointments need an explicit end. Without
+/// this the system accumulates live seats pointing at finished runs, each one
+/// still satisfying the provenance check that lets an agent decide.
+///
+/// Called from the two places a run actually ends: a non-suspended root
+/// `close_session`, and emergency stop. **Not** on suspension — a suspended
+/// run resumes and must keep its seat, the same reasoning that keeps session
+/// grants and the egress policy alive across a yield.
+///
+/// Returns the appointments vacated. Idempotent: an already-revoked seat is
+/// skipped rather than re-attributed.
+pub fn revoke_appointments_for_scope(
+    store: &GatewayStore,
+    scope_root_session: &str,
+    revoked_by: &str,
+    reason: &str,
+) -> Result<Vec<String>> {
+    let mut vacated = Vec::new();
+    for appointment in store.list_decider_appointments_for_scope(scope_root_session, true)? {
+        match revoke(store, &appointment.appointment_id, revoked_by, Some(reason)) {
+            Ok(true) => vacated.push(appointment.appointment_id),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                target: "decider_appointment",
+                appointment_id = %appointment.appointment_id,
+                scope = %scope_root_session,
+                error = %e,
+                "Failed to vacate a seat as its run ended; it will outlive the run"
+            ),
+        }
+    }
+    Ok(vacated)
+}
+
 /// The appointment covering a gate, if any: right scope, right kind, at or
 /// below the ceiling, and not expired by revocation, clock or gate count.
 ///

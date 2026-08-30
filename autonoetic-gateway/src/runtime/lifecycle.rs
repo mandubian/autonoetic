@@ -1131,6 +1131,35 @@ impl AgentExecutor {
                         &root_sid,
                         "session_close",
                     );
+                    // #1199: a decider seat dies with the run it was appointed
+                    // over. A peer-root decider session outlives that run by
+                    // design, which is exactly why the appointment needs an
+                    // explicit end — otherwise live seats accumulate against
+                    // finished runs, each still satisfying the provenance check
+                    // that lets an agent decide. Inside the same
+                    // `!is_suspended()` guard on purpose: a suspended run
+                    // resumes and must keep its seat, for the same reason it
+                    // keeps its grants and egress rules.
+                    match crate::decider_appointment::revoke_appointments_for_scope(
+                        gs,
+                        &root_sid,
+                        "gateway",
+                        "session_close",
+                    ) {
+                        Ok(vacated) if !vacated.is_empty() => tracing::info!(
+                            target: "decider_appointment",
+                            root_session_id = %root_sid,
+                            count = vacated.len(),
+                            "Vacated decider seats as their run closed"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            target: "decider_appointment",
+                            root_session_id = %root_sid,
+                            error = %e,
+                            "Failed to vacate decider seats on session close"
+                        ),
+                    }
                 }
             }
             // #853: free this session's per-host probe budget. Keyed by the
