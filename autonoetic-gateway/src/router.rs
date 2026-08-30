@@ -2798,6 +2798,12 @@ impl JsonRpcRouter {
                         })
                     })
                     .take(params.limit.unwrap_or(50))
+                    // Same record-level redaction as `approvals.list` (#1233).
+                    // A wiki proposal carries no command, but it carries the
+                    // agent-written `reason` and can carry `code_excerpts`.
+                    .map(|a| {
+                        a.redact_for_viewer(autonoetic_types::disclosure::ViewerClass::Operator)
+                    })
                     .collect();
                 JsonRpcResponse::success(
                     req.id,
@@ -5613,7 +5619,10 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.get_approval(params.request_id.trim()) {
+                // #1233: goes through the operator accessor, not the store —
+                // this handler serializes the whole record under `"full"`, so
+                // redacting only the fields it derives would not have helped.
+                match self.execution.approval_for_operator(params.request_id.trim()) {
                     Ok(Some(approval)) => {
                         use autonoetic_types::background::ScheduledAction;
                         let mut added_capabilities = Vec::new();
@@ -7199,6 +7208,8 @@ fn handle_approvals_list(execution: &GatewayExecutionService, req: JsonRpcReques
         return resp;
     }
     match execution.pending_approvals() {
+        // Already operator-redacted by `pending_approvals()` (#1233) — the
+        // guarantee sits at the accessor so a new surface cannot forget it.
         Ok(list) => match serde_json::to_value(list) {
             Ok(v) => JsonRpcResponse::success(req.id, v),
             Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),

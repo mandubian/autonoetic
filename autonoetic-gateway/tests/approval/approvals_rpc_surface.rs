@@ -92,3 +92,131 @@ async fn approval_stats_reports_totals() {
     let stats = svc.approval_stats(None, None, None).expect("stats");
     assert!(stats["total"].as_i64().unwrap_or(0) >= 1, "{stats}");
 }
+// ── #1233: the service surface must not serve credentials ──────────────────
+
+/// The test that would have caught the original defect. It runs at the
+/// **service accessor**, not on `redact_for_viewer`, because the bug was never
+/// in the redactor — it was that the operator path never called it.
+#[tokio::test]
+async fn pending_approvals_never_serves_a_credential_to_an_operator_surface() {
+    const TOKEN: &str = "eyJhbGc.serviceleveltoken";
+    let svc = service();
+    let store = svc.gateway_store().expect("store");
+
+    let mut approval = ApprovalRequest {
+        request_id: "apr-svc-secret".to_string(),
+        agent_id: "coder.default".to_string(),
+        session_id: "apr-svc-secret-session".to_string(),
+        action: ScheduledAction::SandboxExec {
+            command: format!("curl -H 'Authorization: Bearer {TOKEN}' https://x"),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["x".to_string()]),
+            intent: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-08-29T10:00:00+00:00".to_string(),
+        reason: Some(format!("calls the API with Bearer {TOKEN}")),
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some("apr-svc-secret-session".to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut approval).expect("seed");
+
+    // The store keeps it raw — that is the execution input and must not change.
+    let stored = store
+        .get_pending_approvals()
+        .expect("store read")
+        .into_iter()
+        .find(|a| a.request_id == "apr-svc-secret")
+        .expect("seeded row");
+    assert!(
+        serde_json::to_string(&stored).unwrap().contains(TOKEN),
+        "the stored record must stay executable"
+    );
+
+    // The operator-facing accessor must not.
+    let served = svc.pending_approvals().expect("service read");
+    let blob = serde_json::to_string(&served).expect("serializes");
+    assert!(
+        !blob.contains(TOKEN),
+        "a credential reached an operator-facing surface:\n{blob}"
+    );
+    assert!(
+        blob.contains("curl") && blob.contains("https://x"),
+        "redaction must leave the command triageable:\n{blob}"
+    );
+}
+
+
+/// Companion to the accessor test above, for `approvals.inspect`.
+///
+/// This one exists because I cleared `approvals.inspect` as safe after reading
+/// only part of the handler — it emits selected structural fields *and* the
+/// whole record under `"full"`. Enumerating surfaces by eye is what failed;
+/// every operator read now goes through an accessor so the guarantee is
+/// testable at this layer.
+#[tokio::test]
+async fn approval_for_operator_never_serves_a_credential() {
+    const TOKEN: &str = "eyJhbGc.inspectleveltoken";
+    let svc = service();
+    let store = svc.gateway_store().expect("store");
+
+    let mut approval = ApprovalRequest {
+        request_id: "apr-inspect-secret".to_string(),
+        agent_id: "coder.default".to_string(),
+        session_id: "apr-inspect-secret-session".to_string(),
+        action: ScheduledAction::SandboxExec {
+            command: format!("curl -H 'Authorization: Bearer {TOKEN}' https://x"),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["x".to_string()]),
+            intent: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-08-30T10:00:00+00:00".to_string(),
+        reason: Some(format!("uses Bearer {TOKEN}")),
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some("apr-inspect-secret-session".to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut approval).expect("seed");
+
+    let served = svc
+        .approval_for_operator("apr-inspect-secret")
+        .expect("service read")
+        .expect("exists");
+    // `approvals.inspect` serializes this whole record under `"full"`, so the
+    // assertion is on the serialized record, not on chosen fields.
+    let blob = serde_json::to_string(&served).expect("serializes");
+    assert!(
+        !blob.contains(TOKEN),
+        "a credential reached the inspect surface:\n{blob}"
+    );
+    assert!(
+        blob.contains("curl") && blob.contains("https://x"),
+        "redaction must leave the gate triageable:\n{blob}"
+    );
+}

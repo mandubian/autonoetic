@@ -7,6 +7,7 @@ mod abuse_sdk_bridge;
 mod abuse_spawn_depth;
 mod approval_grant_ttl;
 mod approval_hardening;
+mod approval_rpc_disclosure;
 mod attestation_freshness;
 mod attestation_signed;
 mod audit_fsync_ordering;
