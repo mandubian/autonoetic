@@ -8,7 +8,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 
 use autonoetic_types::background::ApprovalRisk;
-use autonoetic_types::decider_appointment::DeciderAppointment;
+use autonoetic_types::decider_appointment::{DeciderAppointment, DeciderGateRouting};
 
 pub(crate) fn insert_appointment(conn: &Connection, a: &DeciderAppointment) -> Result<()> {
     conn.execute(
@@ -191,4 +191,68 @@ fn row_to_appointment(
 /// Clamp a stored SQLite integer into `u32` without wrapping.
 fn saturating_u32(v: i64) -> u32 {
     v.clamp(0, u32::MAX as i64) as u32
+}
+
+
+// ── Gate routings (#1197) ───────────────────────────────────────────────────
+
+/// `INSERT OR IGNORE` on `(gate_id, appointment_id)`: gate creation is the
+/// trigger, and a retried creation must not produce a second referral.
+pub(crate) fn insert_gate_routing(conn: &Connection, r: &DeciderGateRouting) -> Result<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO decider_gate_routings
+            (routing_id, gate_id, appointment_id, decider_agent, decider_session,
+             gate_kind, gate_risk, advice_only, routed_at, verdict, verdict_reason, verdict_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            r.routing_id, r.gate_id, r.appointment_id, r.decider_agent, r.decider_session,
+            r.gate_kind, r.gate_risk, r.advice_only as i64, r.routed_at,
+            r.verdict, r.verdict_reason, r.verdict_at,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+pub(crate) fn list_gate_routings(conn: &Connection, gate_id: &str) -> Result<Vec<DeciderGateRouting>> {
+    let mut stmt = conn.prepare(&format!("{ROUTING_COLS} WHERE gate_id = ?1 ORDER BY routed_at"))?;
+    let rows = stmt.query_map(params![gate_id], |row| row_to_routing(row))?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
+/// Routed gates the seat has not answered — the reaper's input (#1199), and
+/// the set a verdict is missing from.
+pub(crate) fn list_routings_awaiting_verdict(
+    conn: &Connection,
+    appointment_id: &str,
+) -> Result<Vec<DeciderGateRouting>> {
+    let mut stmt = conn.prepare(&format!(
+        "{ROUTING_COLS} WHERE appointment_id = ?1 AND verdict IS NULL ORDER BY routed_at"
+    ))?;
+    let rows = stmt.query_map(params![appointment_id], |row| row_to_routing(row))?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
+const ROUTING_COLS: &str = "SELECT routing_id, gate_id, appointment_id, decider_agent, \
+     decider_session, gate_kind, gate_risk, advice_only, routed_at, verdict, verdict_reason, \
+     verdict_at FROM decider_gate_routings";
+
+fn row_to_routing(row: &rusqlite::Row<'_>) -> Result<DeciderGateRouting, rusqlite::Error> {
+    Ok(DeciderGateRouting {
+        routing_id: row.get(0)?,
+        gate_id: row.get(1)?,
+        appointment_id: row.get(2)?,
+        decider_agent: row.get(3)?,
+        decider_session: row.get(4)?,
+        gate_kind: row.get(5)?,
+        gate_risk: row.get(6)?,
+        advice_only: row.get::<_, i64>(7)? != 0,
+        routed_at: row.get(8)?,
+        verdict: row.get(9)?,
+        verdict_reason: row.get(10)?,
+        verdict_at: row.get(11)?,
+    })
 }

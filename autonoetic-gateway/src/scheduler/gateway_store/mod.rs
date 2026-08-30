@@ -865,6 +865,33 @@ impl GatewayStore {
         workbenches::delete_workbench(&mut conn, workbench_id)
     }
 
+    // ── Decider gate routings (#1197) ────────────────────────────────────
+
+    /// Returns false when this (gate, seat) was already routed.
+    pub fn insert_decider_gate_routing(
+        &self,
+        routing: &autonoetic_types::decider_appointment::DeciderGateRouting,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::insert_gate_routing(&conn, routing)
+    }
+
+    pub fn list_decider_gate_routings(
+        &self,
+        gate_id: &str,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderGateRouting>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_gate_routings(&conn, gate_id)
+    }
+
+    pub fn list_decider_routings_awaiting_verdict(
+        &self,
+        appointment_id: &str,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderGateRouting>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_routings_awaiting_verdict(&conn, appointment_id)
+    }
+
     // ── Decider appointments (#1195) ─────────────────────────────────────
     //
     // Storage only: validation (capability containment, Critical refusal,

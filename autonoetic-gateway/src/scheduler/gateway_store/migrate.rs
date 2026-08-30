@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 84;
+const SCHEMA_VERSION_LATEST: i64 = 85;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -569,6 +569,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_decider_appointments_v82(conn)?;
     apply_session_liveness_v83(conn)?;
     apply_decider_model_pin_v84(conn)?;
+    apply_decider_gate_routings_v85(conn)?;
 
     Ok(())
 }
@@ -3708,6 +3709,51 @@ fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
 /// Written from the lifecycle's own wake and close paths, never from an
 /// observability writer, so a late or duplicated transcript upsert cannot move
 /// it. The sticky terminal fields are left untouched, keeping 125485f5 fixed.
+fn apply_decider_gate_routings_v85(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 85 {
+        return Ok(());
+    }
+
+    // One row per gate that an appointment covered at the moment it opened
+    // (#1197). The verdict columns are nullable and unfilled here: routing
+    // decides *that* a gate goes to the seat, the decider turn decides *what*
+    // the seat says, and that half arrives with the ledger (#1198). They live
+    // in the same table from the start so #1198 is not a migration — an
+    // agreement rate needs the routing and the verdict side by side.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS decider_gate_routings (
+            routing_id TEXT PRIMARY KEY,
+            gate_id TEXT NOT NULL,
+            appointment_id TEXT NOT NULL,
+            decider_agent TEXT NOT NULL,
+            decider_session TEXT,
+            gate_kind TEXT NOT NULL,
+            gate_risk TEXT NOT NULL,
+            advice_only INTEGER NOT NULL,
+            routed_at TEXT NOT NULL,
+            verdict TEXT,
+            verdict_reason TEXT,
+            verdict_at TEXT,
+            UNIQUE(gate_id, appointment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_decider_routings_gate
+            ON decider_gate_routings (gate_id);
+        CREATE INDEX IF NOT EXISTS idx_decider_routings_appointment
+            ON decider_gate_routings (appointment_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![85_i64, "decider_gate_routings", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_decider_model_pin_v84(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

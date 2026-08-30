@@ -1317,6 +1317,26 @@ impl GateService {
 
         self.store.create_approval(&mut approval_req)?;
 
+        // #1197: consider the appointed seat at the one place every gate is
+        // persisted, so a new gate path cannot forget to. This decides only
+        // *that* a gate goes to a decider; nothing here resolves it, so a
+        // failure leaves the gate parked for the operator. Logged rather than
+        // propagated for the same reason — a routing problem must never fail
+        // the gate itself.
+        if let Err(e) = crate::decider_appointment::route_gate_to_decider(
+            self.store.as_ref(),
+            &request_id,
+            sid,
+            action,
+        ) {
+            tracing::warn!(
+                target: "decider_appointment",
+                gate_id = %request_id,
+                error = %e,
+                "Failed to consider a decider appointment; the gate parks for the operator"
+            );
+        }
+
         if matches!(
             action,
             ScheduledAction::SandboxExec { .. }

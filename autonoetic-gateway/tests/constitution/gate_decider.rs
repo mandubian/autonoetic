@@ -35,7 +35,7 @@ fn runtime_declaration() -> RuntimeDeclaration {
     }
 }
 
-fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
+pub(crate) fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {
         runtime: runtime_declaration(),
         agent: AgentIdentity {
