@@ -261,12 +261,15 @@ pub fn classify_adapter_drift_notice(
         .filter_map(|w| w.get("wrapper_agent_id").and_then(|x| x.as_str()))
         .map(str::to_string)
         .collect();
+    // Count the drift list itself, not the extracted names: a wrapper entry
+    // without `wrapper_agent_id` is still staled, and the count must match
+    // the list the causal event carries.
     let summary = format!(
         "adapter drift: promoting {}@{} staled {} installed wrapper(s){} — \
          re-adaptation via agent-adapter.default is advisory, nothing was regenerated",
         base_agent_id,
         promoted_revision,
-        wrapper_names.len(),
+        stale_wrappers.len(),
         if wrapper_names.is_empty() {
             String::new()
         } else {
@@ -897,5 +900,23 @@ mod tests {
         let draft = classify_adapter_drift_notice("weather.base", "rev_sha256:new", &[]);
         assert!(draft.summary.contains("0 installed wrapper(s)"));
         assert!(draft.summary.contains("nothing was regenerated"));
+    }
+
+    /// The count tracks the drift list, not the names that happened to
+    /// extract: an entry without `wrapper_agent_id` is still staled.
+    #[test]
+    fn classify_adapter_drift_notice_counts_entries_not_extracted_names() {
+        let stale = vec![
+            serde_json::json!({"wrapper_agent_id": "weather.wrapper", "claimed_base_revision_digest": "rev_sha256:old"}),
+            serde_json::json!({"claimed_base_revision_digest": "rev_sha256:old"}),
+        ];
+        let draft =
+            classify_adapter_drift_notice("weather.base", "rev_sha256:new", &stale);
+        assert!(
+            draft.summary.contains("2 installed wrapper(s)"),
+            "{}",
+            draft.summary
+        );
+        assert!(draft.summary.contains("(weather.wrapper)"), "{}", draft.summary);
     }
 }

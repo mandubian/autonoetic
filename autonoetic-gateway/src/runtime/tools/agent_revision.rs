@@ -4751,54 +4751,62 @@ do not re-issue."
                 evidence_ref: None,
                 reason: args.reason.clone(),
             };
-            if let Err(e) = gateway_store.create_causal_event(&drift_event) {
-                tracing::warn!(
-                    target: "promotion",
-                    agent_id = %args.agent_id,
-                    revision_id = %args.revision_id,
-                    error = %e,
-                    "failed to record adapter drift event; drift remains visible via agent_list stale_base"
-                );
-            }
+            let drift_event_persisted = match gateway_store.create_causal_event(&drift_event) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "promotion",
+                        agent_id = %args.agent_id,
+                        revision_id = %args.revision_id,
+                        error = %e,
+                        "failed to record adapter drift event; drift remains visible via agent_list stale_base"
+                    );
+                    false
+                }
+            };
 
             // #1228: push the drift into the promoting root's operator feed —
             // the causal event alone relied on someone querying for it. Linked
             // to the event id, so operator_activity's unique causal index
             // keeps it exactly-once per promotion; the standard per-root
-            // window rate limit applies on top. Advisory like the event: the
-            // notice never implies auto-regeneration.
-            if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
-                let draft = crate::runtime::operator_activity::classify_adapter_drift_notice(
-                    &args.agent_id,
-                    &args.revision_id,
-                    &stale_wrappers,
-                );
-                let record = draft.into_record(
-                    crate::runtime::content_store::root_session_id(sid).to_string(),
-                    sid.to_string(),
-                    args.agent_id.clone(),
-                    None,
-                    None,
-                    turn_id.map(str::to_string),
-                    Some("agent_revision_promote".to_string()),
-                    Some(drift_event_id),
-                    None,
-                );
-                let rate_limit_per_min = config
-                    .map(|c| c.operator_activity.rate_limit_per_min)
-                    .unwrap_or_else(|| {
-                        autonoetic_types::config::OperatorActivityConfig::default()
-                            .rate_limit_per_min
-                    });
-                if let Err(e) =
-                    gateway_store.insert_operator_activity_throttled(&record, rate_limit_per_min)
-                {
-                    tracing::warn!(
-                        target: "promotion",
-                        agent_id = %args.agent_id,
-                        error = %e,
-                        "failed to insert adapter drift operator-activity notice; the causal event remains the durable record"
+            // window rate limit applies on top. Only inserted when the causal
+            // event actually persisted, so the feed row never dangles.
+            // Advisory like the event: the notice never implies
+            // auto-regeneration.
+            if drift_event_persisted {
+                if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+                    let draft = crate::runtime::operator_activity::classify_adapter_drift_notice(
+                        &args.agent_id,
+                        &args.revision_id,
+                        &stale_wrappers,
                     );
+                    let record = draft.into_record(
+                        crate::runtime::content_store::root_session_id(sid).to_string(),
+                        sid.to_string(),
+                        args.agent_id.clone(),
+                        None,
+                        None,
+                        turn_id.map(str::to_string),
+                        Some("agent_revision_promote".to_string()),
+                        Some(drift_event_id),
+                        None,
+                    );
+                    let rate_limit_per_min = config
+                        .map(|c| c.operator_activity.rate_limit_per_min)
+                        .unwrap_or_else(|| {
+                            autonoetic_types::config::OperatorActivityConfig::default()
+                                .rate_limit_per_min
+                        });
+                    if let Err(e) = gateway_store
+                        .insert_operator_activity_throttled(&record, rate_limit_per_min)
+                    {
+                        tracing::warn!(
+                            target: "promotion",
+                            agent_id = %args.agent_id,
+                            error = %e,
+                            "failed to insert adapter drift operator-activity notice; the causal event remains the durable record"
+                        );
+                    }
                 }
             }
         }
