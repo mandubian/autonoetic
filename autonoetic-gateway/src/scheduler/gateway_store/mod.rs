@@ -70,6 +70,18 @@ use std::sync::{Arc, Mutex, Weak};
 /// Maximum buffered timeline events before an automatic flush.
 const LIVE_DIGEST_BUFFER_CAPACITY: usize = 32;
 
+/// Ceiling on timeline events held in memory while flushes keep failing
+/// (#1238).
+///
+/// Retaining a failed batch is what stops a transient `SQLITE_BUSY` from
+/// erasing the timeline, but retention without a bound is an unbounded leak: a
+/// database that stays unwritable would grow this buffer until the process
+/// dies, taking every other subsystem with it. Past this many events the oldest
+/// are dropped and the loss is logged with a count — bounded and visible,
+/// rather than unbounded and silent. Sixteen full batches is far more headroom
+/// than any transient fault needs.
+const LIVE_DIGEST_RETRY_CAPACITY: usize = LIVE_DIGEST_BUFFER_CAPACITY * 16;
+
 pub use messages::AgentMessageRecord;
 pub use residency::SessionResidency;
 pub(crate) use row_decode::memory_object_from_row;
@@ -952,25 +964,112 @@ impl GatewayStore {
     }
 
     /// Persist all buffered timeline events in a single transaction.
+    ///
+    /// Two properties this owes callers, neither of which it used to have
+    /// (#1238):
+    ///
+    /// **The buffer is only emptied by a write that succeeded.** The drain used
+    /// to happen before the transaction, so any error after it — transaction
+    /// start, one failing insert, commit — dropped every drained event on the
+    /// floor. A single `SQLITE_BUSY` under contention silently erased up to
+    /// `LIVE_DIGEST_BUFFER_CAPACITY` rows of the operator timeline, with no gap
+    /// marker to distinguish "lost" from "never happened". Events are now
+    /// restored to the front of the buffer on failure, in order, so the next
+    /// flush retries them.
+    ///
+    /// **The drain is atomic with respect to other flushers.** The buffer lock
+    /// used to be released before the connection lock was taken, so a reader —
+    /// every read path flushes first — could drain a *different* thread's
+    /// events into its own transaction. That thread would then flush, find the
+    /// buffer empty, return `Ok(())`, and query before the other transaction
+    /// had committed: it could not see its own writes. Holding the buffer lock
+    /// across the write serialises flushes and closes both halves.
+    ///
+    /// Lock order is buffer → connection. That is the order every emit site
+    /// already follows (they release the connection lock before emitting,
+    /// precisely because `create_live_digest_event` may flush), so no inversion
+    /// is introduced. Producers block for the length of one batched insert of
+    /// at most `LIVE_DIGEST_BUFFER_CAPACITY` rows.
     pub fn flush_live_digest_events(&self) -> Result<()> {
         let mut buf = self.live_digest_buffer.lock().unwrap();
         if buf.is_empty() {
             return Ok(());
         }
-        let drained: Vec<LiveDigestEventRecord> = buf.drain(..).collect();
-        drop(buf);
+        // Take a copy rather than draining: the buffer is only cleared once the
+        // transaction has committed.
+        let pending: Vec<LiveDigestEventRecord> = buf.clone();
 
+        match self.write_live_digest_events(&pending) {
+            Ok(()) => {
+                // Anything appended while we held the lock is impossible (we
+                // hold it), so the buffer is exactly what we just wrote.
+                buf.clear();
+                Ok(())
+            }
+            Err(e) => {
+                // The buffer still holds `pending` — nothing to restore. Left
+                // in place so the next flush retries rather than losing them.
+                //
+                // Bounded, so a database that never becomes writable degrades
+                // to visible loss instead of unbounded memory growth. Oldest
+                // first: newer timeline events are the ones an operator is
+                // most likely to still be looking at.
+                let dropped = buf.len().saturating_sub(LIVE_DIGEST_RETRY_CAPACITY);
+                if dropped > 0 {
+                    buf.drain(..dropped);
+                    tracing::error!(
+                        target: "live_digest",
+                        dropped,
+                        retained = buf.len(),
+                        "Live-digest retry buffer is full after repeated flush \
+                         failures; dropped the oldest timeline events"
+                    );
+                }
+                tracing::warn!(
+                    target: "live_digest",
+                    error = %e,
+                    buffered = buf.len(),
+                    "Failed to flush live-digest events; retained in the buffer for retry"
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// How many timeline events are buffered and not yet committed.
+    ///
+    /// A non-zero value after a flush means the write failed and the events are
+    /// held for retry rather than lost — the property that distinguishes the
+    /// current behaviour from the one that silently dropped them.
+    pub fn pending_live_digest_events(&self) -> usize {
+        self.live_digest_buffer
+            .lock()
+            .map(|b| b.len())
+            .unwrap_or_default()
+    }
+
+    /// Write `events` in one transaction. Split out so the buffer lock can be
+    /// held across the call without the SQL obscuring the ownership rules above.
+    fn write_live_digest_events(&self, events: &[LiveDigestEventRecord]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         {
+            // OR IGNORE, because retention makes a permanent per-row error
+            // poisonous in a way it never was before: a duplicate `event_id`
+            // would abort the batch, the batch would be retained, and every
+            // later flush would fail on the same row — the buffer would grow
+            // and *no* timeline event would ever be written again. Ignoring is
+            // also the semantically right answer for an append-only log keyed
+            // by a generated id: a colliding id means this event is already
+            // recorded.
             let mut stmt = tx.prepare(
-                "INSERT INTO live_digest_events (
+                "INSERT OR IGNORE INTO live_digest_events (
                     event_id, root_session_id, source_session_id, turn_id, source_agent_id,
                     source_node_id, event_type, payload, created_at,
                     principal_kind, principal_id, role, altitude, refs_json
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?;
-            for event in &drained {
+            for event in events {
                 stmt.execute(params![
                     &event.event_id,
                     &event.root_session_id,
@@ -997,7 +1096,25 @@ impl GatewayStore {
 
 impl Drop for GatewayStore {
     fn drop(&mut self) {
-        let _ = self.flush_live_digest_events();
+        // The one caller that cannot propagate. Discarding the error silently
+        // meant the tail of the buffer vanished at process exit — the moment it
+        // matters most — with nothing in the log to say so (#1238). Retry is not
+        // available here, so the least this owes an operator is a record that
+        // the timeline is short.
+        if let Err(e) = self.flush_live_digest_events() {
+            let buffered = self
+                .live_digest_buffer
+                .lock()
+                .map(|b| b.len())
+                .unwrap_or_default();
+            tracing::error!(
+                target: "live_digest",
+                error = %e,
+                buffered,
+                "Final live-digest flush failed on store shutdown; these timeline \
+                 events are lost"
+            );
+        }
     }
 }
 
@@ -1012,6 +1129,164 @@ mod tests {
     use autonoetic_types::causal_chain::SessionTranscriptRecord;
     use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
     use autonoetic_types::promotion::PromotionRole;
+
+    // ── #1238: live-digest flush durability ─────────────────────────────
+    //
+    // The flush used to `drain(..)` before opening its transaction, so any
+    // error after the drain discarded the whole batch: out of the buffer, and
+    // never written. These pin the ownership rule — the buffer is emptied only
+    // by a write that committed.
+
+    fn live_event(id: &str, root: &str) -> super::LiveDigestEventRecord {
+        super::LiveDigestEventRecord {
+            event_id: id.to_string(),
+            root_session_id: root.to_string(),
+            source_session_id: root.to_string(),
+            turn_id: None,
+            source_agent_id: Some("planner.default".to_string()),
+            source_node_id: "node".to_string(),
+            event_type: "turn.start".to_string(),
+            payload: None,
+            created_at: "2026-06-01T10:00:00+00:00".to_string(),
+            principal_kind: None,
+            principal_id: None,
+            role: None,
+            altitude: None,
+            refs_json: None,
+        }
+    }
+
+    /// Drop the table to make the next flush fail the way a transient fault
+    /// would, without needing to provoke real lock contention.
+    fn break_live_digest_table(store: &GatewayStore) {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE live_digest_events", [])
+            .unwrap();
+    }
+
+    fn restore_live_digest_table(store: &GatewayStore) {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS live_digest_events (
+                    event_id TEXT PRIMARY KEY,
+                    root_session_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    turn_id TEXT,
+                    source_agent_id TEXT,
+                    source_node_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT,
+                    created_at TEXT NOT NULL,
+                    principal_kind TEXT,
+                    principal_id TEXT,
+                    role TEXT,
+                    altitude TEXT,
+                    refs_json TEXT
+                );",
+            )
+            .unwrap();
+    }
+
+    fn live_event_count(store: &GatewayStore) -> i64 {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM live_digest_events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn failed_flush_retains_events_instead_of_discarding_them() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+
+        store.create_live_digest_event(&live_event("evt-a", "root-1"))?;
+        store.create_live_digest_event(&live_event("evt-b", "root-1"))?;
+
+        break_live_digest_table(&store);
+        assert!(
+            store.flush_live_digest_events().is_err(),
+            "flush must surface the write failure"
+        );
+
+        // Before the fix this was 0: both events had been drained out of the
+        // buffer and were never written anywhere.
+        assert_eq!(
+            store.pending_live_digest_events(),
+            2,
+            "a failed flush must retain its batch for retry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_events_land_once_the_write_path_recovers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+
+        store.create_live_digest_event(&live_event("evt-a", "root-2"))?;
+        break_live_digest_table(&store);
+        assert!(store.flush_live_digest_events().is_err());
+        assert_eq!(store.pending_live_digest_events(), 1);
+
+        // Retention is only meaningful if the retry actually commits.
+        restore_live_digest_table(&store);
+        store.flush_live_digest_events()?;
+        assert_eq!(store.pending_live_digest_events(), 0);
+        assert_eq!(live_event_count(&store), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_flush_clears_the_buffer_and_does_not_rewrite() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+
+        for i in 0..3 {
+            store.create_live_digest_event(&live_event(&format!("evt-{i}"), "root-3"))?;
+        }
+        assert_eq!(store.pending_live_digest_events(), 3);
+
+        store.flush_live_digest_events()?;
+        assert_eq!(store.pending_live_digest_events(), 0);
+        assert_eq!(live_event_count(&store), 3);
+
+        // A second flush is a no-op, not a duplicate write.
+        store.flush_live_digest_events()?;
+        assert_eq!(live_event_count(&store), 3);
+        Ok(())
+    }
+
+    /// Retention must not let one permanently-bad row block the timeline
+    /// forever. A colliding `event_id` is ignored rather than aborting the
+    /// batch, so its companions still land.
+    #[test]
+    fn a_duplicate_event_id_does_not_poison_the_batch() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+
+        store.create_live_digest_event(&live_event("evt-dup", "root-4"))?;
+        store.flush_live_digest_events()?;
+
+        store.create_live_digest_event(&live_event("evt-dup", "root-4"))?;
+        store.create_live_digest_event(&live_event("evt-new", "root-4"))?;
+        store.flush_live_digest_events()?;
+
+        assert_eq!(store.pending_live_digest_events(), 0);
+        assert_eq!(
+            live_event_count(&store),
+            2,
+            "the duplicate is ignored and its batch-mate is written"
+        );
+        Ok(())
+    }
 
     fn artifact_ref(
         ref_id: &str,
