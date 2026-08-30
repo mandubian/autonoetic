@@ -4724,8 +4724,9 @@ do not re-issue."
         let stale_wrappers =
             find_stale_wrappers_for_base(&gateway_store, &args.agent_id, &args.revision_id);
         if !stale_wrappers.is_empty() {
+            let drift_event_id = format!("adapter-drift-{}", uuid::Uuid::new_v4());
             let drift_event = autonoetic_types::causal_chain::CausalEventRecord {
-                event_id: format!("adapter-drift-{}", uuid::Uuid::new_v4()),
+                event_id: drift_event_id.clone(),
                 agent_id: args.agent_id.clone(),
                 session_id: session_id.unwrap_or("").to_string(),
                 turn_id: None,
@@ -4750,14 +4751,63 @@ do not re-issue."
                 evidence_ref: None,
                 reason: args.reason.clone(),
             };
-            if let Err(e) = gateway_store.create_causal_event(&drift_event) {
-                tracing::warn!(
-                    target: "promotion",
-                    agent_id = %args.agent_id,
-                    revision_id = %args.revision_id,
-                    error = %e,
-                    "failed to record adapter drift event; drift remains visible via agent_list stale_base"
-                );
+            let drift_event_persisted = match gateway_store.create_causal_event(&drift_event) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "promotion",
+                        agent_id = %args.agent_id,
+                        revision_id = %args.revision_id,
+                        error = %e,
+                        "failed to record adapter drift event; drift remains visible via agent_list stale_base"
+                    );
+                    false
+                }
+            };
+
+            // #1228: push the drift into the promoting root's operator feed —
+            // the causal event alone relied on someone querying for it. Linked
+            // to the event id, so operator_activity's unique causal index
+            // keeps it exactly-once per promotion; the standard per-root
+            // window rate limit applies on top. Only inserted when the causal
+            // event actually persisted, so the feed row never dangles.
+            // Advisory like the event: the notice never implies
+            // auto-regeneration.
+            if drift_event_persisted {
+                if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+                    let draft = crate::runtime::operator_activity::classify_adapter_drift_notice(
+                        &args.agent_id,
+                        &args.revision_id,
+                        &stale_wrappers,
+                    );
+                    let record = draft.into_record(
+                        crate::runtime::content_store::root_session_id(sid).to_string(),
+                        sid.to_string(),
+                        args.agent_id.clone(),
+                        None,
+                        None,
+                        turn_id.map(str::to_string),
+                        Some("agent_revision_promote".to_string()),
+                        Some(drift_event_id),
+                        None,
+                    );
+                    let rate_limit_per_min = config
+                        .map(|c| c.operator_activity.rate_limit_per_min)
+                        .unwrap_or_else(|| {
+                            autonoetic_types::config::OperatorActivityConfig::default()
+                                .rate_limit_per_min
+                        });
+                    if let Err(e) = gateway_store
+                        .insert_operator_activity_throttled(&record, rate_limit_per_min)
+                    {
+                        tracing::warn!(
+                            target: "promotion",
+                            agent_id = %args.agent_id,
+                            error = %e,
+                            "failed to insert adapter drift operator-activity notice; the causal event remains the durable record"
+                        );
+                    }
+                }
             }
         }
 
@@ -4793,6 +4843,16 @@ do not re-issue."
         if let Some(eid) = pre_auth_envelope_id {
             response["pre_authorized_by_envelope"] = serde_json::json!(eid);
             response["pre_auth_rule"] = serde_json::json!("P-2.27");
+        }
+
+        // #1228: tell the promoting session synchronously what the promotion
+        // staled, so the actor doesn't have to read the causal event or the
+        // operator feed to learn it. Advisory — regeneration is optional.
+        if !stale_wrappers.is_empty() {
+            response["adapter_drift"] = serde_json::json!({
+                "stale_wrappers": stale_wrappers,
+                "note": "these installed wrappers were generated against an older revision of this base; re-adaptation via agent-adapter.default is advisory",
+            });
         }
 
         // E.3 advisory: for high-risk revisions, surface civic eval scores as
