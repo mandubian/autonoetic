@@ -210,6 +210,7 @@ Markdown body with natural language instructions.
 | `metadata.autonoetic.adapter` | No | Composition provenance for a wrapper agent derived from a base agent: `base_agent_id` plus optional `base_revision_digest` / `generated_at` / `schema_notes` / `generator`. Static metadata — never executed; surfaced on the roster and the promotion card. See [proposal](proposals/agent-adaptation-composition.md). |
 | `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
 | `metadata.autonoetic.egress.output_label` | No | Bundle-wide egress output floor (`unrestricted` / `local_only` / `no_remote_model`). Intersects into every tool-result label resolution for this agent; can only restrict, never widen operator policy. See [RFC: data envelopes](proposals/data-envelopes-egress-localization.md) §4.1 path 2. |
+| `metadata.autonoetic.agent.resident_idle_ttl_secs` | No | Residency opt-in (#902): a session that finishes its task parks instead of terminating and stays reachable by `agent_message` for this many idle seconds, then the reaper closes it. Shipped on `planner.default`, `planner.collaborative`, and `watchdog.default` at 900 (#1247). See [Agent messaging — resident sessions](reference/agent-messaging.md). |
 
 ### Markdown Body
 

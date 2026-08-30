@@ -16,6 +16,10 @@ metadata:
       name: "Watchdog"
       description: "Observer that reviews agent sessions for trajectory divergence. Read-only — no execution capabilities."
       singleton: true
+      # Residency (#902, #1247): a divergence review that finishes stays
+      # reachable for 15 minutes so planners and peers can follow up on the
+      # reviewed session without a fresh spawn.
+      resident_idle_ttl_secs: 900
     llm_preset: budget
     llm_overrides:
       temperature: 0.0
