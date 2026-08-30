@@ -799,6 +799,12 @@
       document.getElementById('constitution-tab-badge').classList.add('hidden');
       discardProposal();
       document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      // Reset the policy chrome too — a stale pinned/declared badge from the
+      // previous session must not survive a failed read on the next one.
+      const eps = document.getElementById('egress-policy-state');
+      eps.innerText = 'undeclared';
+      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
       document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
@@ -934,6 +940,12 @@
       // Egress authoring state: no previous session's policy rules may leak.
       discardProposal();
       document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      // Reset the policy chrome too — a stale pinned/declared badge from the
+      // previous session must not survive a failed read on the next one.
+      const eps = document.getElementById('egress-policy-state');
+      eps.innerText = 'undeclared';
+      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
       document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
       
       eventList = [];
@@ -1415,7 +1427,7 @@
     async function clearEgressPolicy() {
       const { sid } = getConnectInfo();
       if (!sid) return;
-      if (!confirm('Clear the session egress policy?\n\nThis removes the session-scoped rules and any private pin; the operator-global configuration applies again (it can only have been more restrictive).')) return;
+      if (!confirm('Clear the session egress policy?\n\nThis removes the session-scoped rules and any private pin; the operator-global configuration applies again. If the session policy was STRICTER than the global default, clearing it WIDENS what may leave the machine — rules can only restrict, so removing them re-widens.')) return;
       try {
         await egressPolicyRpc('session.egress_policy.clear', { session_id: sid, set_by: 'operator:web_cockpit' });
         discardProposal();
@@ -1534,7 +1546,9 @@
                 </div>
                 ${rows.slice(0, 3).map(x => {
                   const f = x.fields || {};
-                  const lid = f.tool_call_id || f.tool_name || '';
+                  // egress.lineage accepts an env_*/tool-call id — a
+                  // tool_name-only row gets no button (it would never resolve).
+                  const lid = f.tool_call_id || '';
                   const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(lid));
                   return `<div class="text-[9px] font-mono text-slate-400 truncate">
                     <span class="${x.action.includes('withheld') || x.action.includes('violation') ? 'text-accentRed' : 'text-slate-500'}">${escapeHTML(x.action.replace('egress.', ''))}</span>
@@ -1580,7 +1594,7 @@
                 <span class="text-accentAmber font-mono text-[9px] shrink-0">${escapeHTML(ruleLabelName(n.label))}</span>
               </div>
               <div class="text-[9px] font-mono text-slate-500 mt-0.5">because: <span class="text-slate-300">${escapeHTML(originName(n.origin))}</span>${n.turn_id ? ` · turn ${escapeHTML(n.turn_id)}` : ''} · ${formatTime(n.timestamp)}</div>
-              ${(n.rules || []).length ? `<div class="text-[9px] font-mono text-slate-600">via ${escapeHTML(n.rules.join(', '))}</div>` : ''}
+              ${(n.matched_rules || []).length ? `<div class="text-[9px] font-mono text-slate-600">via ${escapeHTML((n.matched_rules || []).join(', '))}</div>` : ''}
             </div>`).join('');
         }
         content.innerHTML = html;
