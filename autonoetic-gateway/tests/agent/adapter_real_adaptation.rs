@@ -204,16 +204,18 @@ fn call_tool_session(
 /// the semantic install intent. Each install uses its own session so content
 /// names and artifact-ref scopes don't collide.
 fn install_agent(fx: &Fixture, agent_id: &str, instructions: &str, io: serde_json::Value) -> String {
-    install_agent_with_replace(fx, agent_id, instructions, io, false)
+    install_agent_with_replace(fx, agent_id, instructions, io, false).0
 }
 
+/// Returns `(revision_id, promote_response)` — the response lets tests assert
+/// the promotion's own advisory surfaces (#1228 `adapter_drift`).
 fn install_agent_with_replace(
     fx: &Fixture,
     agent_id: &str,
     instructions: &str,
     io: serde_json::Value,
     replace: bool,
-) -> String {
+) -> (String, serde_json::Value) {
     let session = format!("{SESSION}-{agent_id}");
     let content_store = ContentStore::new(&fx.gateway_dir).unwrap();
     let artifact_store =
@@ -307,13 +309,13 @@ layers: []
         &session,
         Some(&content_digest),
     );
-    call_tool_session(
+    let promote_response = call_tool_session(
         fx,
         &session,
         "agent_revision_promote",
         serde_json::json!({ "agent_id": agent_id, "revision_id": revision_id, "reason": "real-life fixture" }),
     );
-    revision_id
+    (revision_id, promote_response)
 }
 
 /// Run the real adapter scripts: schema_diff → generate_wrapper with the
@@ -552,7 +554,7 @@ fn real_adaptation_loop_install_roster_and_drift() {
     assert_eq!(wrapper["stale_base"], false);
 
     // 6. Base moves on (new revision, real create + promote → drift event).
-    let base_rev_b = install_agent_with_replace(
+    let (base_rev_b, base_promo_res) = install_agent_with_replace(
         &fx,
         BASE_ID,
         "# Weather Base v2\nFetches weather, now with humidity.\n",
@@ -574,6 +576,54 @@ fn real_adaptation_loop_install_roster_and_drift() {
         serde_json::from_str(drift[0].payload.as_deref().unwrap_or("")).unwrap();
     assert_eq!(payload["promoted_revision"], base_rev_b);
     assert_eq!(payload["stale_wrappers"][0]["wrapper_agent_id"], WRAPPER_ID);
+
+    // 6b. #1228: the promotion response names the staled wrappers inline —
+    // the actor learns the drift without reading store surfaces.
+    assert_eq!(
+        base_promo_res["adapter_drift"]["stale_wrappers"][0]["wrapper_agent_id"],
+        WRAPPER_ID
+    );
+
+    // 6c. #1228: the promoting root's operator feed carries exactly one
+    // proactive `adapter_drift_notice`, linked to the drift causal event.
+    // Rate-limited per root via the standard operator-activity window; the
+    // unique causal index makes it exactly-once per promotion.
+    let promo_root = format!("{SESSION}-{BASE_ID}");
+    let feed = fx
+        .store
+        .list_operator_activity(&promo_root, None, 50, None)
+        .unwrap();
+    let notices: Vec<_> = feed
+        .activities
+        .iter()
+        .filter(|a| {
+            a.kind == autonoetic_types::operator_activity::OperatorActivityKind::AdapterDriftNotice
+        })
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "expected one adapter_drift_notice, got: {:?}",
+        feed.activities
+    );
+    assert_eq!(
+        notices[0].severity,
+        autonoetic_types::operator_activity::OperatorActivitySeverity::Attention
+    );
+    assert_eq!(
+        notices[0].causal_event_id.as_deref(),
+        Some(drift[0].event_id.as_str())
+    );
+    assert!(
+        notices[0].summary.contains(WRAPPER_ID),
+        "notice should name the staled wrapper: {}",
+        notices[0].summary
+    );
+    assert!(
+        notices[0].summary.contains("nothing was regenerated"),
+        "notice must stay advisory: {}",
+        notices[0].summary
+    );
 
     // 7. Roster flips: the untouched wrapper is stale.
     let agents = list_agents(&fx);

@@ -247,6 +247,40 @@ pub fn classify_sentinel_notice(
     }
 }
 
+/// Build the proactive operator-activity notice for adapter drift (#1228):
+/// a base promotion staled installed wrappers. Advisory visibility only —
+/// the summary must never read as if anything was or will be regenerated;
+/// enactment stays adapter → artifact → factory → one door (P-9.15/P-2.25).
+pub fn classify_adapter_drift_notice(
+    base_agent_id: &str,
+    promoted_revision: &str,
+    stale_wrappers: &[serde_json::Value],
+) -> OperatorActivityDraft {
+    let wrapper_names: Vec<String> = stale_wrappers
+        .iter()
+        .filter_map(|w| w.get("wrapper_agent_id").and_then(|x| x.as_str()))
+        .map(str::to_string)
+        .collect();
+    let summary = format!(
+        "adapter drift: promoting {}@{} staled {} installed wrapper(s){} — \
+         re-adaptation via agent-adapter.default is advisory, nothing was regenerated",
+        base_agent_id,
+        promoted_revision,
+        wrapper_names.len(),
+        if wrapper_names.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", wrapper_names.join(", "))
+        },
+    );
+    OperatorActivityDraft {
+        kind: OperatorActivityKind::AdapterDriftNotice,
+        severity: OperatorActivitySeverity::Attention,
+        summary: truncate_chars(&summary, SUMMARY_MAX_CHARS),
+        refs: OperatorActivityRefs::default(),
+    }
+}
+
 pub fn is_poll_tool(tool_name: &str) -> bool {
     matches!(tool_name, "workflow_wait" | "workflow_state")
 }
@@ -838,5 +872,30 @@ mod tests {
         assert!(draft.summary.contains("planner.default"));
         assert!(draft.summary.contains("turn 7"));
         assert!(draft.summary.contains("feedback_ignored"));
+    }
+
+    /// #1228: the drift notice names the base, the promotion, and every
+    /// staled wrapper, and says explicitly that nothing was regenerated.
+    #[test]
+    fn classify_adapter_drift_notice_names_wrappers_and_stays_advisory() {
+        let stale = vec![
+            serde_json::json!({"wrapper_agent_id": "weather.wrapper", "claimed_base_revision_digest": "rev_sha256:old"}),
+            serde_json::json!({"wrapper_agent_id": "weather.wrapper2", "claimed_base_revision_digest": "rev_sha256:old"}),
+        ];
+        let draft =
+            classify_adapter_drift_notice("weather.base", "rev_sha256:new", &stale);
+        assert_eq!(draft.kind, OperatorActivityKind::AdapterDriftNotice);
+        assert_eq!(draft.severity, OperatorActivitySeverity::Attention);
+        assert!(draft.summary.contains("weather.base@rev_sha256:new"));
+        assert!(draft.summary.contains("2 installed wrapper(s)"));
+        assert!(draft.summary.contains("weather.wrapper, weather.wrapper2"));
+        assert!(draft.summary.contains("nothing was regenerated"));
+    }
+
+    #[test]
+    fn classify_adapter_drift_notice_handles_empty_wrapper_list() {
+        let draft = classify_adapter_drift_notice("weather.base", "rev_sha256:new", &[]);
+        assert!(draft.summary.contains("0 installed wrapper(s)"));
+        assert!(draft.summary.contains("nothing was regenerated"));
     }
 }

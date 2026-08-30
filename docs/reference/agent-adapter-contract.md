@@ -152,6 +152,18 @@ Re-adapt loop (#1221): a base promotion that stales installed wrappers emits one
 on a stale wrapper attaches a `gateway_note` proposing regeneration (or a
 deliberate pin). Still advisory — staleness never blocks.
 
+Proactive operator notice (#1228): the same promotion also pushes an
+`adapter_drift_notice` entry into the promoting root's operator-activity feed
+(severity `attention`, linked to the drift causal event — exactly-once per
+promotion via the feed's unique causal index, subject to the standard per-root
+rate limit) and returns an `adapter_drift` block in the promote response, so
+drift reaches the operator and the promoting session without anyone querying
+the store. Advisory like every other drift surface: the notice proposes
+re-adaptation, it never implies auto-regeneration — enactment stays
+adapter → artifact → factory → one door (P-9.15/P-2.25). A steward-spawn
+escalation ladder (feed first, steward if unactioned) remains a possible
+follow-up, deliberately not built speculatively.
+
 The block is **contract-classified** for federation carry-forward (like
 `middleware`): changing provenance voids a carry, because it names what the
 gates verified against. An absent `base_revision_digest` means unknown at

@@ -49,6 +49,11 @@ pub enum OperatorActivityKind {
     /// Passive advisory from the divergence Sentinel. Replaces the pushed
     /// DivergenceSentinel UserInteraction popup (Phase 2 D.7a).
     SentinelNotice,
+    /// Proactive notice that a base promotion staled installed adapter
+    /// wrappers (#1228). Advisory visibility only — never implies
+    /// auto-regeneration; enactment stays adapter → artifact → factory →
+    /// one door (P-9.15/P-2.25).
+    AdapterDriftNotice,
 }
 
 impl OperatorActivityKind {
@@ -64,6 +69,7 @@ impl OperatorActivityKind {
             Self::SessionLifecycle => "session_lifecycle",
             Self::RateLimited => "rate_limited",
             Self::SentinelNotice => "sentinel_notice",
+            Self::AdapterDriftNotice => "adapter_drift_notice",
         }
     }
 
@@ -79,6 +85,7 @@ impl OperatorActivityKind {
             "session_lifecycle" => Some(Self::SessionLifecycle),
             "rate_limited" => Some(Self::RateLimited),
             "sentinel_notice" => Some(Self::SentinelNotice),
+            "adapter_drift_notice" => Some(Self::AdapterDriftNotice),
             _ => None,
         }
     }
