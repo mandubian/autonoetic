@@ -840,6 +840,7 @@
       lastFlags = null;
       document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
       document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
+      document.getElementById('escalations-list').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
       document.getElementById('constitution-tab-badge').classList.add('hidden');
       discardProposal();
       document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
@@ -850,6 +851,7 @@
       eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
       document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
       document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
+      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -890,6 +892,10 @@
 
       // 7. Egress policy standing view (RFC §5.4 rungs 1-2)
       fetchEgressPolicy();
+
+      // 8. Escalations + envelope locks standing views
+      fetchEscalations();
+      fetchEnvelopes();
 
       if (statusText.innerText !== 'Connecting...') return;
 
@@ -980,6 +986,7 @@
       lastFlags = null;
       document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
       document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
+      document.getElementById('escalations-list').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load escalations.</div>';
       document.getElementById('constitution-tab-badge').classList.add('hidden');
       // Egress authoring state: no previous session's policy rules may leak.
       discardProposal();
@@ -991,6 +998,7 @@
       eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
       document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
       document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
+      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
       
       eventList = [];
       activityList = [];
@@ -2479,7 +2487,9 @@
         wrap.classList.remove('hidden');
         div.scrollTop = div.scrollHeight;
       } catch (e) {
-        wrap.classList.add('hidden');
+        // Fail-visible: a notes read failure must not look like 'no notes'.
+        wrap.classList.remove('hidden');
+        div.innerHTML = `<div class="p-1.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">⚠ gate notes unavailable: ${escapeHTML(e.message)}</div>`;
       }
     }
 
@@ -2812,12 +2822,14 @@
                 <span class="font-mono text-[10px] text-slate-400">${escapeHTML(escId)}</span>
               </div>
               <p class="text-slate-200 leading-relaxed">${escapeHTML(payload?.synthesis || 'Operator decision requested.')}</p>
-              ${(payload?.agent_id || payload?.revision_id) ? `<div class="font-mono text-[10px] text-slate-400">${escapeHTML(payload?.agent_id || '')}${payload?.revision_id ? ` · rev ${escapeHTML(String(payload.revision_id)).slice(0, 24)}` : ''}${payload?.escalation_type ? ` · ${escapeHTML(payload.escalation_type)}` : ''}</div>` : ''}
+              ${(payload?.agent_id || payload?.revision_id) ? `<div class="font-mono text-[10px] text-slate-400">${escapeHTML(payload?.agent_id || '')}${payload?.revision_id ? ` · rev ${escapeHTML(String(payload.revision_id).slice(0, 24))}` : ''}${payload?.escalation_type ? ` · ${escapeHTML(payload.escalation_type)}` : ''}</div>` : ''}
               ${verdicts.length ? `<div class="flex gap-1 flex-wrap">${verdicts.map(v => `<span class="text-[8px] font-mono px-1 py-0.5 rounded border ${v.passed ? 'text-accentGreen border-accentGreen/30 bg-accentGreen/5' : 'text-accentRed border-accentRed/30 bg-accentRed/5'}">${escapeHTML(v.role)} ${v.passed ? '✓' : '✗'}</span>`).join('')}</div>` : ''}
               <div class="flex justify-end gap-2 pt-1">
                 ${isClosed ?
                   `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
-                  `<button onclick="openGateModalById('${escId}')" class="bg-accentRed hover:bg-opacity-95 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Review & Decide</button>`
+                  (/^[A-Za-z0-9_.\-]+$/.test(String(escId))
+                    ? `<button onclick="openGateModalById('${escId}')" class="bg-accentRed hover:bg-opacity-95 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Review &amp; Decide</button>`
+                    : '<span class="text-[9px] text-slate-500 italic">non-standard escalation id — resolve from the Constitution tab</span>')
                 }
               </div>
             </div>
@@ -3087,7 +3099,7 @@
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
                 <span class="text-[9px] text-slate-500 font-semibold uppercase block">Agent / Revision</span>
                 <span class="font-mono text-slate-200 font-bold">${escapeHTML(gate.payload.agent_id || '?')}</span>
-                <span class="font-mono text-[10px] text-slate-400 block truncate" title="${escapeHTML(String(gate.payload.revision_id || ''))}">${escapeHTML(String(gate.payload.revision_id || '?'))}</span>
+                <span class="font-mono text-[10px] text-slate-400 block truncate" title="${escapeHTML(String(gate.payload.revision_id || ''))}">${escapeHTML(String(gate.payload.revision_id || '?').slice(0, 24))}</span>
               </div>
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
                 <span class="text-[9px] text-slate-500 font-semibold uppercase block">Escalation</span>
