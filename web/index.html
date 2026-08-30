@@ -374,11 +374,50 @@
               <button onclick="fetchGrants(); fetchLabels();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
             </div>
           </div>
+          <!-- Egress Policy (RFC §5.4: /private pin, /taint rules, /local intent authoring) -->
+          <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 52%;">
+            <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40 flex items-center justify-between shrink-0">
+              <h3 class="font-display font-semibold text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <span>🔒</span> Egress Policy
+                <span id="egress-policy-state" class="bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full">undeclared</span>
+              </h3>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button id="egress-pin-btn" onclick="togglePrivatePin()" class="bg-accentViolet/10 border border-accentViolet/30 hover:bg-accentViolet/25 text-accentViolet font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">🔒 Pin local_only</button>
+                <button onclick="clearEgressPolicy()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">Clear policy</button>
+              </div>
+            </div>
+            <div class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+              <div id="egress-policy-body">
+                <div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>
+              </div>
+              <div id="egress-proposal" class="hidden space-y-1.5"></div>
+              <div class="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-850">
+                <input id="rule-source-input" placeholder="source — e.g. email.send or mcp.gmail.*" class="flex-1 min-w-[140px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+                <input id="rule-path-input" placeholder="path (opt) ~/mail/**" class="w-32 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+                <select id="rule-label-select" class="bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[10px] text-slate-200 focus:outline-none">
+                  <option value="local_only">local_only</option>
+                  <option value="no_remote_model">no_remote_model</option>
+                </select>
+                <button onclick="addManualRule()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">+ Add rule</button>
+                <input id="egress-intent-input" placeholder="or say it: 'emails stay local'" class="flex-1 min-w-[160px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] text-white placeholder-slate-600 focus:outline-none focus:border-accentViolet">
+                <button onclick="proposeEgressRules()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">⚒ Propose</button>
+              </div>
+            </div>
+          </div>
           <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
             <div id="grants-panel-body" class="space-y-4">
               <div class="text-center text-slate-500 py-6">Connect to a session to load live grants.</div>
             </div>
             <div id="labels-panel-body" class="hidden space-y-2 border-t border-slate-800 pt-4"></div>
+            <div class="border-t border-slate-800 pt-3">
+              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                <span>🧾 Per-Turn Egress Audit</span>
+                <button onclick="loadEgressAudit()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Load</button>
+              </h3>
+              <div id="egress-audit" class="space-y-1.5">
+                <div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -758,6 +797,15 @@
       document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
       document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
       document.getElementById('constitution-tab-badge').classList.add('hidden');
+      discardProposal();
+      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      // Reset the policy chrome too — a stale pinned/declared badge from the
+      // previous session must not survive a failed read on the next one.
+      const eps = document.getElementById('egress-policy-state');
+      eps.innerText = 'undeclared';
+      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
+      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
@@ -795,6 +843,9 @@
       // 6. Governance standing views (O-6 proposals + O-7 anomaly flags)
       fetchConstitutionProposals();
       fetchAnomalyFlags();
+
+      // 7. Egress policy standing view (RFC §5.4 rungs 1-2)
+      fetchEgressPolicy();
 
       if (statusText.innerText !== 'Connecting...') return;
 
@@ -886,6 +937,16 @@
       document.getElementById('constitution-proposals').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
       document.getElementById('anomaly-flags').innerHTML = '<div class="text-center text-slate-500 py-3">Connect to a session to load.</div>';
       document.getElementById('constitution-tab-badge').classList.add('hidden');
+      // Egress authoring state: no previous session's policy rules may leak.
+      discardProposal();
+      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      // Reset the policy chrome too — a stale pinned/declared badge from the
+      // previous session must not survive a failed read on the next one.
+      const eps = document.getElementById('egress-policy-state');
+      eps.innerText = 'undeclared';
+      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
+      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
       
       eventList = [];
       activityList = [];
@@ -1258,6 +1319,288 @@
       if (empty) html += '<div class="text-slate-600 italic">No labeled items under this root.</div>';
       div.innerHTML = html;
       div.classList.remove('hidden');
+    }
+
+    // ── Egress policy authoring (RFC §5.4: /private, /taint, /local #978) ──
+
+    let pendingProposal = null; // EgressProposal awaiting Declare/Discard
+
+    async function egressPolicyRpc(method, params) {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) throw new Error('not connected');
+      const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params })
+      });
+      const json = await resp.json();
+      if (json.error) throw new Error(json.error.message);
+      return json.result;
+    }
+
+    async function fetchEgressPolicy() {
+      const { sid } = getConnectInfo();
+      if (!sid) return;
+      try {
+        const r = await egressPolicyRpc('session.egress_policy.get', { session_id: sid });
+        renderEgressPolicy(r.policy || null, r.set_by, r.updated_at);
+      } catch (e) {
+        renderPanelError('egress-policy-body', `egress_policy.get failed: ${e.message}`);
+      }
+    }
+
+    // set replaces the stored policy wholesale — always get → modify → set.
+    async function pushPolicy(mutate) {
+      const { sid } = getConnectInfo();
+      if (!sid) return false;
+      try {
+        const r = await egressPolicyRpc('session.egress_policy.get', { session_id: sid });
+        const policy = r.policy || {};
+        mutate(policy);
+        await egressPolicyRpc('session.egress_policy.set', {
+          session_id: sid, policy, set_by: 'operator:web_cockpit'
+        });
+        fetchEgressPolicy();
+        fetchGrants();
+        return true;
+      } catch (e) {
+        alert(`Egress policy update failed: ${e.message}\n\nNothing was widened — the policy read is fetched fresh on every change.`);
+        return false;
+      }
+    }
+
+    function ruleLabelName(label) {
+      if (typeof label === 'string') return label;
+      if (Array.isArray(label)) return sinksLabelName(label);
+      return String(label ?? '?');
+    }
+
+    function renderEgressPolicy(policy, setBy, updatedAt) {
+      const body = document.getElementById('egress-policy-body');
+      const stateBadge = document.getElementById('egress-policy-state');
+      const pinBtn = document.getElementById('egress-pin-btn');
+      const rules = (policy && policy.rules) || [];
+      const pinned = !!(policy && policy.provider_constraint);
+      const declared = rules.length > 0 || !!(policy && policy.default_label) || pinned;
+
+      stateBadge.innerText = pinned ? '🔒 pinned local_only' : (declared ? 'declared' : 'undeclared');
+      stateBadge.className = pinned
+        ? 'bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full'
+        : (declared
+          ? 'bg-accentAmber/10 text-accentAmber border border-accentAmber/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full'
+          : 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full');
+      pinBtn.innerHTML = pinned ? '🔓 Unpin provider' : '🔒 Pin local_only';
+
+      let html = '';
+      if (!declared) {
+        html = '<div class="text-slate-500 italic text-[10px]">No session policy declared — global defaults apply. Rules can only restrict; nothing here can widen egress.</div>';
+      } else {
+        if (rules.length) {
+          html += `<div class="space-y-1">${rules.map((r, i) => `
+            <div class="flex items-center justify-between gap-2 p-1.5 rounded border border-slate-800 bg-slate-900/40">
+              <div class="min-w-0">
+                <code class="text-slate-200 text-[10px]">${escapeHTML(r.source)}${r.path ? `<span class="text-accentCyan">:${escapeHTML(r.path)}</span>` : ''}</code>
+                <span class="text-accentAmber font-mono text-[9px] ml-1.5">→ ${escapeHTML(ruleLabelName(r.label))}</span>
+              </div>
+              <button onclick="removeRule(${i})" class="text-slate-500 hover:text-accentRed text-[9px] font-mono shrink-0" title="remove rule">✕</button>
+            </div>`).join('')}</div>`;
+        }
+        if (policy.default_label) {
+          html += `<div class="text-[9px] font-mono text-slate-500">default label: <span class="text-accentAmber">${escapeHTML(ruleLabelName(policy.default_label))}</span></div>`;
+        }
+        if (setBy || updatedAt) {
+          html += `<div class="text-[9px] font-mono text-slate-600">by ${escapeHTML(setBy || '?')}${updatedAt ? ` · ${escapeHTML(updatedAt)}` : ''}</div>`;
+        }
+      }
+      body.innerHTML = html;
+    }
+
+    async function togglePrivatePin() {
+      // RFC §5.4 rung 1 — flip only the provider constraint; rules/default stay.
+      // pushPolicy refetches the policy, so the button/badge re-render from
+      // the stored state (source of truth), not from the optimistic flip.
+      await pushPolicy(p => {
+        p.provider_constraint = p.provider_constraint ? null : 'local_only';
+      });
+    }
+
+    async function clearEgressPolicy() {
+      const { sid } = getConnectInfo();
+      if (!sid) return;
+      if (!confirm('Clear the session egress policy?\n\nThis removes the session-scoped rules and any private pin; the operator-global configuration applies again. If the session policy was STRICTER than the global default, clearing it WIDENS what may leave the machine — rules can only restrict, so removing them re-widens.')) return;
+      try {
+        await egressPolicyRpc('session.egress_policy.clear', { session_id: sid, set_by: 'operator:web_cockpit' });
+        discardProposal();
+        fetchEgressPolicy();
+        fetchGrants();
+      } catch (e) { alert(`Clear failed: ${e.message}`); }
+    }
+
+    async function addManualRule() {
+      const { sid } = getConnectInfo();
+      const src = document.getElementById('rule-source-input').value.trim();
+      const path = document.getElementById('rule-path-input').value.trim();
+      const label = document.getElementById('rule-label-select').value;
+      if (!sid) return;
+      if (!src) { alert('Rule source is required (e.g. email.send, mcp.gmail.*, fs.read).'); return; }
+      const ok = await pushPolicy(p => {
+        p.rules = p.rules || [];
+        const dup = p.rules.some(r => r.source === src && (r.path || null) === (path || null) && ruleLabelName(r.label) === label);
+        if (!dup) p.rules.push({ source: src, ...(path ? { path } : {}), label });
+      });
+      if (ok) {
+        document.getElementById('rule-source-input').value = '';
+        document.getElementById('rule-path-input').value = '';
+      }
+    }
+
+    async function removeRule(idx) {
+      await pushPolicy(p => { p.rules = (p.rules || []).filter((_, i) => i !== idx); });
+    }
+
+    async function proposeEgressRules() {
+      const { sid } = getConnectInfo();
+      const intent = document.getElementById('egress-intent-input').value.trim();
+      const div = document.getElementById('egress-proposal');
+      if (!sid) return;
+      if (!intent) { alert('Type an intent first — e.g. "emails stay local".'); return; }
+      try {
+        const r = await egressPolicyRpc('session.egress_policy.propose', { session_id: sid, intent });
+        pendingProposal = r;
+        if (!r.rules || !r.rules.length) {
+          pendingProposal = null;
+          div.classList.remove('hidden');
+          div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ no rules proposed — ${escapeHTML(r.note || 'intent not recognized')}${(r.known_sources || []).length ? `<br><span class="text-slate-400">known sources: ${escapeHTML(r.known_sources.join(' · '))}</span>` : ''}</div>`;
+          return;
+        }
+        div.classList.remove('hidden');
+        div.innerHTML = `
+          <div class="p-2.5 rounded border border-accentViolet/30 bg-accentViolet/5 space-y-1.5">
+            <div class="text-accentViolet font-bold text-[10px] uppercase">⚒ Proposed rules — "${escapeHTML(r.intent)}" (${escapeHTML(r.kind)})</div>
+            ${r.rules.map(pr => `
+              <div class="text-[10px] font-mono text-slate-200">
+                ${escapeHTML(pr.source)}${pr.path ? `<span class="text-accentCyan">:${escapeHTML(pr.path)}</span>` : ''} → <span class="text-accentAmber">${escapeHTML(ruleLabelName(pr.label))}</span>
+                <div class="text-[9px] text-slate-500">${escapeHTML(pr.rationale || '')}</div>
+              </div>`).join('')}
+            <div class="text-[9px] text-slate-500 italic">Declaration only takes effect when you confirm — the natural language is an authoring convenience, not enforcement (Lawful-Executor §14).</div>
+            <div class="flex gap-1.5">
+              <button onclick="declareProposal()" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">✓ Declare</button>
+              <button onclick="discardProposal()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">✕ Discard</button>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        div.classList.remove('hidden');
+        div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ propose failed: ${escapeHTML(e.message)}</div>`;
+      }
+    }
+
+    async function declareProposal() {
+      if (!pendingProposal || !pendingProposal.rules || !pendingProposal.rules.length) return;
+      const ok = await pushPolicy(p => {
+        p.rules = p.rules || [];
+        for (const pr of pendingProposal.rules) {
+          const dup = p.rules.some(r => r.source === pr.source && (r.path || null) === (pr.path || null) && ruleLabelName(r.label) === ruleLabelName(pr.label));
+          if (!dup) p.rules.push({ source: pr.source, ...(pr.path ? { path: pr.path } : {}), label: pr.label });
+        }
+      });
+      if (ok) discardProposal();
+    }
+
+    function discardProposal() {
+      pendingProposal = null;
+      const div = document.getElementById('egress-proposal');
+      div.classList.add('hidden');
+      div.innerHTML = '';
+      const inp = document.getElementById('egress-intent-input');
+      if (inp) inp.value = '';
+    }
+
+    // ── Per-turn egress audit (RFC §9.3, #973) + lineage drill-down (#975) ──
+
+    async function loadEgressAudit() {
+      const { sid } = getConnectInfo();
+      if (!sid) return;
+      const div = document.getElementById('egress-audit');
+      try {
+        const r = await egressPolicyRpc('egress.audit', { session_id: sid, limit: 2000 });
+        const report = r.report || {};
+        const turns = report.turns || [];
+        let html = `<div class="text-[10px] font-mono text-slate-400 flex gap-3 flex-wrap">
+            <span class="text-accentAmber">${report.total_withheld || 0} withheld</span>
+            <span class="text-accentRed">${report.total_violations || 0} violations</span>
+            <span class="text-slate-400">${report.total_boundary_refusals || 0} boundary refusals</span>
+            ${r.truncated ? '<span class="text-slate-500 italic">(window truncated)</span>' : ''}
+          </div>`;
+        if (!turns.length) {
+          html += '<div class="text-slate-500 italic text-[10px] py-1">No egress events recorded in the scanned window.</div>';
+        } else {
+          html += turns.slice(-12).reverse().map(t => {
+            const rows = t.rows || [];
+            const sev = rows.some(x => x.action === 'egress.assertion_violation' || x.action === 'egress.envelope_withheld');
+            return `
+              <div class="p-1.5 rounded border ${sev ? 'border-accentAmber/25 bg-accentAmber/5' : 'border-slate-800 bg-slate-900/40'}">
+                <div class="flex items-center justify-between gap-2">
+                  <code class="text-slate-300 text-[10px]">turn ${escapeHTML(t.turn_id || '—')}</code>
+                  <span class="text-[9px] font-mono text-slate-500">${rows.length} event${rows.length === 1 ? '' : 's'}</span>
+                </div>
+                ${rows.slice(0, 3).map(x => {
+                  const f = x.fields || {};
+                  // egress.lineage accepts an env_*/tool-call id — a
+                  // tool_name-only row gets no button (it would never resolve).
+                  const lid = f.tool_call_id || '';
+                  const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(lid));
+                  return `<div class="text-[9px] font-mono text-slate-400 truncate">
+                    <span class="${x.action.includes('withheld') || x.action.includes('violation') ? 'text-accentRed' : 'text-slate-500'}">${escapeHTML(x.action.replace('egress.', ''))}</span>
+                    ${f.tool_name ? escapeHTML(f.tool_name) : ''}${f.target_sink ? ` → ${escapeHTML(f.target_sink)}` : ''}
+                    ${safeId ? `<button onclick="showLineage('${lid}')" class="ml-1 text-accentIndigo hover:underline uppercase">why?</button>` : ''}
+                  </div>`;
+                }).join('')}
+                ${rows.length > 3 ? `<div class="text-[9px] text-slate-600 italic">+${rows.length - 3} more</div>` : ''}
+              </div>`;
+          }).join('');
+        }
+        div.innerHTML = html;
+      } catch (e) {
+        renderPanelError('egress-audit', `egress.audit failed: ${e.message}`);
+      }
+    }
+
+    // "Why is this tainted?" — walk the label back to its origin (RFC §9.1).
+    async function showLineage(fromId) {
+      const { sid } = getConnectInfo();
+      if (!sid || !fromId) return;
+      const modal = document.getElementById('event-detail-modal');
+      const title = document.getElementById('event-detail-title');
+      const content = document.getElementById('event-detail-content');
+      title.innerHTML = `<span>🧬</span> Taint Lineage <span class="font-mono text-accentIndigo text-xs ml-1">${escapeHTML(fromId)}</span>`;
+      content.innerHTML = '<div class="text-center text-slate-500 py-8 text-xs">Walking the label chain…</div>';
+      modal.classList.remove('hidden');
+      try {
+        const r = await egressPolicyRpc('egress.lineage', { root_session_id: sid, from: fromId, limit: 500 });
+        const nodes = r.nodes || [];
+        const originName = o => String(o || '?').replace(/_/g, ' ');
+        let html = '';
+        if (r.incomplete) html += '<div class="p-2 rounded border border-accentAmber/30 bg-accentAmber/10 text-accentAmber text-[10px] font-mono mb-2">⚠ record incomplete — a parent hop is missing from the scanned rows (retention or dropped write); chain shown is partial.</div>';
+        else if (r.truncated) html += '<div class="p-2 rounded border border-slate-700 bg-slate-900 text-slate-400 text-[10px] font-mono mb-2">scan window filled — widening the limit may reveal more.</div>';
+        if (!nodes.length) {
+          html += '<div class="text-center text-slate-500 py-4 text-xs">No lineage recorded for this id (unrestricted or out of window).</div>';
+        } else {
+          html += `<div class="text-[9px] font-mono text-slate-500 mb-2">origins: ${(r.origins || []).join(', ') || '—'}</div>`;
+          html += nodes.map(n => `
+            <div class="p-2 rounded border border-slate-800 bg-slate-900/40 mb-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <code class="text-slate-200 text-[10px]">${escapeHTML(n.envelope_id)}${n.tool_name ? ` · ${escapeHTML(n.tool_name)}` : ''}</code>
+                <span class="text-accentAmber font-mono text-[9px] shrink-0">${escapeHTML(ruleLabelName(n.label))}</span>
+              </div>
+              <div class="text-[9px] font-mono text-slate-500 mt-0.5">because: <span class="text-slate-300">${escapeHTML(originName(n.origin))}</span>${n.turn_id ? ` · turn ${escapeHTML(n.turn_id)}` : ''} · ${formatTime(n.timestamp)}</div>
+              ${(n.matched_rules || []).length ? `<div class="text-[9px] font-mono text-slate-600">via ${escapeHTML((n.matched_rules || []).join(', '))}</div>` : ''}
+            </div>`).join('');
+        }
+        content.innerHTML = html;
+      } catch (e) {
+        content.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ lineage failed: ${escapeHTML(e.message)}</div>`;
+      }
     }
 
     // ── Live LLM activity strip (#1082: llm.activity stream registry) ──
@@ -1917,6 +2260,7 @@
       }
       if (fresh.some(e => e.event_type.startsWith('egress.') || e.event_type.startsWith('grant_revocation')) && isConnected) {
         fetchGrants();
+        if (fresh.some(x => x.event_type === 'egress.session_policy')) fetchEgressPolicy();
       }
     }
 
@@ -3144,7 +3488,7 @@
       const info = getConnectInfo();
       if (tabId === 'constitution' && isConnected) { fetchConstitution(info.baseURL, info.secret); fetchConstitutionProposals(); fetchAnomalyFlags(); }
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
-      if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); }
+      if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); fetchEgressPolicy(); }
       if (tabId === 'evolution' && isConnected) { fetchEvolution(); fetchCronJobs(); }
     }
 
