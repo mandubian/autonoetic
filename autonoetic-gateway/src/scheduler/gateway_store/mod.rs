@@ -988,8 +988,14 @@ impl GatewayStore {
     /// Lock order is buffer → connection. That is the order every emit site
     /// already follows (they release the connection lock before emitting,
     /// precisely because `create_live_digest_event` may flush), so no inversion
-    /// is introduced. Producers block for the length of one batched insert of
-    /// at most `LIVE_DIGEST_BUFFER_CAPACITY` rows.
+    /// is introduced.
+    ///
+    /// Producers block for the length of one batched insert. That is normally
+    /// at most `LIVE_DIGEST_BUFFER_CAPACITY` rows, since a healthy buffer
+    /// flushes at capacity — but under sustained write failure the retained
+    /// batch grows, so the worst case is `LIVE_DIGEST_RETRY_CAPACITY`. A
+    /// database failing every write is already degraded; bounding the retry
+    /// buffer is what bounds this hold time too.
     pub fn flush_live_digest_events(&self) -> Result<()> {
         let mut buf = self.live_digest_buffer.lock().unwrap();
         if buf.is_empty() {
@@ -1054,20 +1060,31 @@ impl GatewayStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         {
-            // OR IGNORE, because retention makes a permanent per-row error
-            // poisonous in a way it never was before: a duplicate `event_id`
-            // would abort the batch, the batch would be retained, and every
-            // later flush would fail on the same row — the buffer would grow
-            // and *no* timeline event would ever be written again. Ignoring is
-            // also the semantically right answer for an append-only log keyed
-            // by a generated id: a colliding id means this event is already
-            // recorded.
+            // Ignore a colliding `event_id`, and *only* that.
+            //
+            // Retention makes a permanent per-row error poisonous in a way it
+            // never was before: a duplicate id would abort the batch, the batch
+            // would be retained, and every later flush would fail on the same
+            // row — the buffer would grow and no timeline event would ever be
+            // written again. Skipping the duplicate is also the right semantics
+            // for an append-only log keyed by a generated id: a colliding id
+            // means this event is already recorded.
+            //
+            // `ON CONFLICT(event_id) DO NOTHING` rather than `INSERT OR
+            // IGNORE`, which suppresses *every* constraint violation. Under
+            // `OR IGNORE` a data-shape bug — a NOT NULL or CHECK failure —
+            // would be skipped, the transaction would commit, and the buffer
+            // would clear as though the row had been written. That is the same
+            // silent loss this function exists to remove, just relocated.
+            // Anything that is not a primary-key conflict must still fail the
+            // flush so the batch is retained and the error is logged.
             let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO live_digest_events (
+                "INSERT INTO live_digest_events (
                     event_id, root_session_id, source_session_id, turn_id, source_agent_id,
                     source_node_id, event_type, payload, created_at,
                     principal_kind, principal_id, role, altitude, refs_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                ON CONFLICT(event_id) DO NOTHING",
             )?;
             for event in events {
                 stmt.execute(params![
@@ -1200,6 +1217,63 @@ mod tests {
             .unwrap()
             .query_row("SELECT COUNT(*) FROM live_digest_events", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// Only a primary-key conflict is skipped. Any other constraint violation
+    /// must still fail the flush, so the batch is retained and logged.
+    ///
+    /// `INSERT OR IGNORE` would suppress all of them: the transaction would
+    /// commit, the buffer would clear, and a malformed row would vanish exactly
+    /// as silently as the loss this function exists to remove.
+    #[test]
+    fn a_non_conflict_constraint_violation_still_fails_the_flush() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+
+        // Re-create the table with a CHECK the writer can violate. NOT NULL is
+        // unreachable through the API (those columns are non-Option `String`),
+        // so a CHECK stands in for the general data-shape bug.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE live_digest_events;
+                 CREATE TABLE live_digest_events (
+                    event_id TEXT PRIMARY KEY,
+                    root_session_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    turn_id TEXT,
+                    source_agent_id TEXT,
+                    source_node_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL CHECK (event_type <> 'poison'),
+                    payload TEXT,
+                    created_at TEXT NOT NULL,
+                    principal_kind TEXT,
+                    principal_id TEXT,
+                    role TEXT,
+                    altitude TEXT,
+                    refs_json TEXT
+                 );",
+            )
+            .unwrap();
+
+        let mut bad = live_event("evt-bad", "root-5");
+        bad.event_type = "poison".to_string();
+        store.create_live_digest_event(&bad)?;
+        store.create_live_digest_event(&live_event("evt-ok", "root-5"))?;
+
+        assert!(
+            store.flush_live_digest_events().is_err(),
+            "a CHECK violation must surface, not be silently skipped"
+        );
+        assert_eq!(
+            store.pending_live_digest_events(),
+            2,
+            "the batch must be retained so the failure is retryable and visible"
+        );
+        assert_eq!(live_event_count(&store), 0, "the transaction rolled back");
+        Ok(())
     }
 
     #[test]
