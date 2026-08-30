@@ -1377,6 +1377,10 @@ impl GatewayExecutionService {
                 session_id,
                 agent_id,
                 script_entry,
+                // #1222: middleware hooks transform the payload boundary —
+                // their sources join the run's label (restrict-join), designed
+                // in with the hooks rather than retrofitted.
+                middleware: manifest.middleware.as_ref(),
             },
             self.gateway_store.as_ref(),
         )
@@ -4119,6 +4123,7 @@ impl GatewayExecutionService {
                     credential_env,
                     &loaded.manifest.runtime.runtime_lock,
                     Some(&gateway_dir),
+                    loaded.manifest.middleware.as_ref(),
                 )
                 .await;
                 tracing::info!(

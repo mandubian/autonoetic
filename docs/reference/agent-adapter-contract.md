@@ -196,6 +196,17 @@ without requiring gateway binaries at generation time.
 
 If parsing fails, scripts are fail-soft and pass data through unchanged.
 
+Script-mode wrappers (#1222): script-mode agents can now carry the same
+`middleware` block, with the hooks running at the script boundary —
+`pre_process` receives the normalized task payload on stdin and its stdout
+replaces it before the entry script runs; `post_process` receives the entry
+script's stdout and its stdout becomes the reply. The script-mode contract is
+verbatim stdin→stdout (no `CompletionRequest`/`CompletionResponse` envelope);
+a hook failure there is fail-closed (the turn fails) rather than fail-soft.
+Note the generator's current scripts read the LLM envelopes, so on a
+script-mode agent they pass data through unchanged — emitting
+script-mode-aware hooks is a follow-up for the generator.
+
 ## Capability Inheritance
 
 When `--base-manifest-json` includes `capabilities`, the generated wrapper
