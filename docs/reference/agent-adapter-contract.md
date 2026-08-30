@@ -196,6 +196,15 @@ without requiring gateway binaries at generation time.
 
 If parsing fails, scripts are fail-soft and pass data through unchanged.
 
+Script-mode wrappers (#1222): the same generated hooks now also run for
+`execution_mode: script` agents, at the script boundary — `pre_map.py` receives
+the normalized task payload on stdin and its stdout replaces it before the
+entry script runs; `post_map.py` receives the entry script's stdout and its
+stdout becomes the reply. The script-mode contract is verbatim stdin→stdout
+(no `CompletionRequest`/`CompletionResponse` envelope), which the generated
+mapping scripts satisfy unchanged; a hook failure there is fail-closed (the
+turn fails) rather than fail-soft.
+
 ## Capability Inheritance
 
 When `--base-manifest-json` includes `capabilities`, the generated wrapper

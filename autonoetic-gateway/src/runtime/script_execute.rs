@@ -177,6 +177,7 @@ pub(crate) async fn execute_script_in_sandbox(
     credential_env: Vec<(String, String)>,
     runtime_lock_rel_path: &str,
     gateway_dir: Option<&Path>,
+    middleware: Option<&autonoetic_types::agent::Middleware>,
 ) -> anyhow::Result<String> {
     use std::io::Write;
 
@@ -201,6 +202,23 @@ pub(crate) async fn execute_script_in_sandbox(
         overrides.share_net = false;
     }
     let normalized_input = normalize_script_input_payload(input_payload, metadata);
+    // #1222: script-mode middleware mirrors the LLM loop's hooks at the payload
+    // boundary. pre_process transforms the normalized payload before it lands
+    // in AUTONOETIC_INPUT_PATH / AUTONOETIC_INPUT / argv; post_process
+    // transforms stdout before it becomes the reply, trace, and timeline row.
+    // Fail-closed like the LLM path: a broken hook fails the turn rather than
+    // feeding the entrypoint untransformed input or leaking raw output.
+    let normalized_input = match middleware.and_then(|m| m.pre_process.as_deref()) {
+        Some(hook) => run_script_middleware_hook(
+            driver,
+            agent_dir,
+            gateway_dir,
+            hook,
+            "pre_process",
+            &normalized_input,
+        )?,
+        None => normalized_input,
+    };
     let invocation_files = write_script_invocation_files(agent_dir, &normalized_input, metadata)?;
     let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
         Ok(relative) => format!(
@@ -300,7 +318,7 @@ pub(crate) async fn execute_script_in_sandbox(
             );
         }
         tracing::info!(stdout_len = stdout.len(), "WASM script execution completed");
-        return Ok(stdout);
+        return apply_script_post_hook(middleware, driver, agent_dir, gateway_dir, stdout);
     }
 
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_session_content_and_env(
@@ -377,7 +395,70 @@ pub(crate) async fn execute_script_in_sandbox(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     tracing::info!(stdout_len = stdout.len(), "Script execution completed");
 
-    Ok(stdout)
+    apply_script_post_hook(middleware, driver, agent_dir, gateway_dir, stdout)
+}
+
+/// Run one script-mode middleware hook (#1222): `command` executes in the
+/// agent workspace under the manifest's sandbox driver — the same shape as the
+/// LLM path's `run_middleware_script` (no credential env, no network policy
+/// args). `payload` goes in verbatim on stdin; stdout comes back verbatim as
+/// the replacement, so JSON-to-JSON mapping scripts (e.g. the adapter's
+/// generated pre/post_map) work unchanged and text payloads stay expressible.
+fn run_script_middleware_hook(
+    driver: crate::sandbox::SandboxDriverKind,
+    agent_dir: &Path,
+    gateway_dir: Option<&Path>,
+    command: &str,
+    hook: &str,
+    payload: &str,
+) -> anyhow::Result<String> {
+    use std::io::Write;
+
+    let gateway_dir = require_gateway_dir(gateway_dir)?;
+    let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
+        driver,
+        &agent_dir.to_string_lossy(),
+        gateway_dir,
+        command,
+        None,
+        None,
+    )?;
+    if let Some(mut stdin) = runner.process.stdin.take() {
+        stdin
+            .write_all(payload.as_bytes())
+            .map_err(|e| anyhow::anyhow!("script middleware {hook} ({command}) stdin: {e}"))?;
+    }
+    let output = runner.process.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "script middleware {} hook ({}) failed with {}: {}",
+            hook,
+            command,
+            output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string()),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        anyhow::anyhow!(
+            "script middleware {} hook ({}) returned non-UTF-8 stdout",
+            hook,
+            command
+        )
+    })
+}
+
+/// Apply the configured `post_process` hook to script stdout, if any.
+fn apply_script_post_hook(
+    middleware: Option<&autonoetic_types::agent::Middleware>,
+    driver: crate::sandbox::SandboxDriverKind,
+    agent_dir: &Path,
+    gateway_dir: Option<&Path>,
+    stdout: String,
+) -> anyhow::Result<String> {
+    match middleware.and_then(|m| m.post_process.as_deref()) {
+        Some(hook) => run_script_middleware_hook(driver, agent_dir, gateway_dir, hook, "post_process", &stdout),
+        None => Ok(stdout),
+    }
 }
 
 /// Write a single `causal_events` row for script-agent fast-path execution.

@@ -776,6 +776,16 @@ middleware:
 - **`post_process`** runs on the LLM output before it returns to the caller, and
   may transform or filter it.
 
+Script-mode agents (`execution_mode: script`) run the same hooks at their
+payload boundary: `pre_process` transforms the normalized task payload before
+the entry script runs (via `AUTONOETIC_INPUT_PATH`/stdin/argv), and
+`post_process` transforms the script's stdout before it becomes the reply.
+The hook contract there is verbatim stdin→stdout — no JSON envelope required,
+so mapping scripts written for LLM-mode wrappers work unchanged. A failing hook
+fails the turn (fail-closed), and the run's egress label covers the hook
+scripts too: a hook touching a labeled path narrows the result label, never
+widens it.
+
 ## Background Scheduling
 
 An agent may run on a schedule rather than only on request. This is distinct

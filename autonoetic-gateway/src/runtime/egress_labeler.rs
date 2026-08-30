@@ -2390,6 +2390,11 @@ pub struct ScriptExecLabelRequest<'a> {
     pub agent_id: &'a str,
     /// The manifest's `script_entry`, e.g. `fetch_mail.py`.
     pub script_entry: &'a str,
+    /// Script-mode middleware hooks (#1222): when set, each hook command is
+    /// exec-labeled exactly like the entry script and restrict-joins the run's
+    /// label — a hook touching a labeled path narrows the result, never
+    /// widens it. Designed in with the hooks, not retrofitted.
+    pub middleware: Option<&'a autonoetic_types::agent::Middleware>,
 }
 
 /// Resolve the egress label for a **script-agent run** (RFC §4, #1062).
@@ -2408,7 +2413,9 @@ pub struct ScriptExecLabelRequest<'a> {
 ///
 /// - the exec-shaped resolution over the script the agent actually runs
 ///   (operator rules, labeled path patterns matched against the script source,
-///   workspace taint, artifact taint), and
+///   workspace taint, artifact taint),
+/// - the same resolution over any script-mode middleware hooks (#1222),
+///   restrict-joined so a hook can only narrow, and
 /// - this turn's ingest label.
 ///
 /// `None` ⇒ unrestricted, which is how absence is encoded everywhere else in
@@ -2472,12 +2479,49 @@ pub fn resolve_script_exec_label(
         store,
         &std::collections::HashMap::new(),
     );
+    let mut resolved_label = resolved.map(|outcome| outcome.label);
 
-    let label = match (req.ingest.clone(), resolved) {
+    // #1222: middleware hooks are part of the run's data flow — label each
+    // one's source the same way as the entry and restrict-join. The combined
+    // label is the narrowest of the scripts that actually touch the payload,
+    // so a hook cannot widen what the entry script resolved to.
+    for hook in [
+        req.middleware.and_then(|m| m.pre_process.as_deref()),
+        req.middleware.and_then(|m| m.post_process.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let hook_arguments =
+            serde_json::json!({ "command": format!("run {}", hook) }).to_string();
+        let hook_label = labeler
+            .label_tool_result(
+                &LabelRequest {
+                    tool: "sandbox_exec",
+                    arguments_json: &hook_arguments,
+                    tool_call_id: req.session_id,
+                    artifact_id: None,
+                },
+                Some(&exec_ctx),
+                req.session_id,
+                req.agent_id,
+                None,
+                store,
+                &std::collections::HashMap::new(),
+            )
+            .map(|outcome| outcome.label);
+        resolved_label = match (resolved_label, hook_label) {
+            (Some(entry), Some(hook)) => Some(entry.restrict(&hook)),
+            (entry, None) => entry,
+            (None, Some(hook)) => Some(hook),
+        };
+    }
+
+    let label = match (req.ingest.clone(), resolved_label) {
         (None, None) => return None,
         (Some(l), None) => l,
-        (None, Some(outcome)) => outcome.label,
-        (Some(ingest), Some(outcome)) => ingest.restrict(&outcome.label),
+        (None, Some(outcome)) => outcome,
+        (Some(ingest), Some(outcome)) => ingest.restrict(&outcome),
     };
     (!label.is_unrestricted()).then_some(label)
 }

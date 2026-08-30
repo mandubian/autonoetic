@@ -214,8 +214,13 @@ roster. Deferred until there is evidence the passive surfaces are missed.
   composition style the same provenance field covers — always current by alias
   resolution, but pays child-spawn orchestration cost (Ri-0.14 wake cycles). The
   proposal standardizes the *metadata*, not the style.
-- **Script-mode middleware and true `skip_llm` bypass stay out of scope** —
-  sandbox-spawn-semantics surgery, separate ticket.
+- **Script-mode middleware shipped (#1222); the true `skip_llm` bypass stays
+  out of scope (#1223).** Script agents now run `pre_process`/`post_process` at
+  their payload boundary (verbatim stdin→stdout, fail-closed, egress-labeled),
+  so a deterministic mapping wrapper can be a script agent — which also
+  satisfies the adapter use case for the bypass, since script mode never
+  enters the LLM loop at all. The general pre-loop bypass remains a
+  design-pass ticket.
 
 ## 6. Validation
 
