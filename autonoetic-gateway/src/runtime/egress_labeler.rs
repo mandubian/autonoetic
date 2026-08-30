@@ -3986,6 +3986,7 @@ mod tests {
             session_id: "session-script",
             agent_id: "mailer.default",
             script_entry,
+            middleware: None,
         }
     }
 
@@ -4098,6 +4099,79 @@ mod tests {
             "the exec resolution must narrow the ingest label, not be shadowed by it"
         );
         assert!(!label.allows(Sink::RemoteModel));
+    }
+
+    /// #1222: a middleware hook touching a labeled path narrows the run even
+    /// when the entry script is clean — the hook is part of the data flow.
+    #[test]
+    fn script_exec_label_covers_a_hook_touching_a_labeled_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(
+            tmp.path(),
+            "mailer.default",
+            "hello.py",
+            "with open('~/public/greeting.txt') as f:\n    print(f.read())\n",
+        );
+        std::fs::create_dir_all(agent_dir.join("scripts")).unwrap();
+        std::fs::write(
+            agent_dir.join("scripts/pre_map.py"),
+            "with open('~/mail/inbox') as f:\n    print(f.read())\n",
+        )
+        .unwrap();
+
+        let config = cfg(vec![rule(
+            "sandbox.exec",
+            Some("~/mail/**"),
+            NamedEgressLabel::LocalOnly,
+        )]);
+        let middleware = autonoetic_types::agent::Middleware {
+            pre_process: Some("python3 scripts/pre_map.py".to_string()),
+            post_process: None,
+        };
+        let mut req = script_req(&config, &agent_dir, &gateway_dir, "hello.py");
+        req.middleware = Some(&middleware);
+        let label = resolve_script_exec_label(&req, None)
+            .expect("the hook's labeled read must label the run");
+        assert_eq!(label, EgressLabel::local_only());
+    }
+
+    /// #1222, the other direction: the hook must never *widen* — a clean hook
+    /// attached to an entry script that reads a labeled path keeps the
+    /// narrowed label.
+    #[test]
+    fn script_exec_label_lets_a_clean_hook_not_widen_the_entry_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(
+            tmp.path(),
+            "mailer.default",
+            "fetch_mail.py",
+            "with open('~/mail/inbox') as f:\n    print(f.read())\n",
+        );
+        std::fs::create_dir_all(agent_dir.join("scripts")).unwrap();
+        std::fs::write(
+            agent_dir.join("scripts/post_map.py"),
+            "import json, sys\nprint(json.load(sys.stdin))\n",
+        )
+        .unwrap();
+
+        let config = cfg(vec![rule(
+            "sandbox.exec",
+            Some("~/mail/**"),
+            NamedEgressLabel::LocalOnly,
+        )]);
+        let middleware = autonoetic_types::agent::Middleware {
+            pre_process: None,
+            post_process: Some("python3 scripts/post_map.py".to_string()),
+        };
+        let mut req = script_req(&config, &agent_dir, &gateway_dir, "fetch_mail.py");
+        req.middleware = Some(&middleware);
+        let label = resolve_script_exec_label(&req, None)
+            .expect("the entry's labeled read must still label the run");
+        assert_eq!(label, EgressLabel::local_only());
     }
 
     /// A bundle-declared output floor narrows the run on its own (RFC §4.1

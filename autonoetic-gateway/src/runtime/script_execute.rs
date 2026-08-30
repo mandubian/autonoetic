@@ -208,15 +208,25 @@ pub(crate) async fn execute_script_in_sandbox(
     // transforms stdout before it becomes the reply, trace, and timeline row.
     // Fail-closed like the LLM path: a broken hook fails the turn rather than
     // feeding the entrypoint untransformed input or leaking raw output.
+    // Hooks inherit the entrypoint's isolation overrides and its kill
+    // registration, so an emergency stop takes them down with the turn.
+    let hook_kill = sandbox_kill
+        .as_ref()
+        .map(|(reg, root)| (reg, root.as_str()));
     let normalized_input = match middleware.and_then(|m| m.pre_process.as_deref()) {
-        Some(hook) => run_script_middleware_hook(
-            driver,
-            agent_dir,
-            gateway_dir,
-            hook,
-            "pre_process",
-            &normalized_input,
-        )?,
+        Some(hook) => {
+            run_script_middleware_hook(
+                driver,
+                agent_dir,
+                gateway_dir,
+                &overrides,
+                hook_kill,
+                hook,
+                "pre_process",
+                &normalized_input,
+            )
+            .await?
+        }
         None => normalized_input,
     };
     let invocation_files = write_script_invocation_files(agent_dir, &normalized_input, metadata)?;
@@ -318,7 +328,16 @@ pub(crate) async fn execute_script_in_sandbox(
             );
         }
         tracing::info!(stdout_len = stdout.len(), "WASM script execution completed");
-        return apply_script_post_hook(middleware, driver, agent_dir, gateway_dir, stdout);
+        return apply_script_post_hook(
+            middleware,
+            driver,
+            agent_dir,
+            gateway_dir,
+            &overrides,
+            hook_kill,
+            stdout,
+        )
+        .await;
     }
 
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_session_content_and_env(
@@ -395,19 +414,35 @@ pub(crate) async fn execute_script_in_sandbox(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     tracing::info!(stdout_len = stdout.len(), "Script execution completed");
 
-    apply_script_post_hook(middleware, driver, agent_dir, gateway_dir, stdout)
+    apply_script_post_hook(
+        middleware,
+        driver,
+        agent_dir,
+        gateway_dir,
+        &overrides,
+        hook_kill,
+        stdout,
+    )
+    .await
 }
 
 /// Run one script-mode middleware hook (#1222): `command` executes in the
 /// agent workspace under the manifest's sandbox driver — the same shape as the
-/// LLM path's `run_middleware_script` (no credential env, no network policy
-/// args). `payload` goes in verbatim on stdin; stdout comes back verbatim as
-/// the replacement, so JSON-to-JSON mapping scripts (e.g. the adapter's
-/// generated pre/post_map) work unchanged and text payloads stay expressible.
-fn run_script_middleware_hook(
+/// LLM path's `run_middleware_script`, plus the entrypoint's isolation
+/// overrides and kill registration so hooks share the turn's isolation and
+/// emergency-stop semantics. `payload` goes in verbatim on stdin; stdout
+/// comes back verbatim as the replacement, so JSON-to-JSON mapping scripts
+/// written to the contract work unchanged and text payloads stay expressible.
+#[allow(clippy::too_many_arguments)]
+async fn run_script_middleware_hook(
     driver: crate::sandbox::SandboxDriverKind,
     agent_dir: &Path,
     gateway_dir: Option<&Path>,
+    overrides: &crate::sandbox::BwrapIsolationOverrides,
+    sandbox_kill: Option<(
+        &std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
+        &str,
+    )>,
     command: &str,
     hook: &str,
     payload: &str,
@@ -421,14 +456,31 @@ fn run_script_middleware_hook(
         gateway_dir,
         command,
         None,
-        None,
+        Some(overrides),
     )?;
+    let _hook_kill_guard = sandbox_kill.and_then(|(reg, root)| {
+        let pid = runner.process.id();
+        (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid))
+    });
     if let Some(mut stdin) = runner.process.stdin.take() {
         stdin
             .write_all(payload.as_bytes())
             .map_err(|e| anyhow::anyhow!("script middleware {hook} ({command}) stdin: {e}"))?;
     }
-    let output = runner.process.wait_with_output()?;
+    // Mirrors the entry script's wait: blocking waits belong off the Tokio
+    // worker thread.
+    let output =
+        match tokio::task::spawn_blocking(move || runner.process.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                return Err(anyhow::anyhow!(
+                    "script middleware {hook} ({command}) wait failed: {error}"
+                ));
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("Task join error: {error}"));
+            }
+        };
     if !output.status.success() {
         anyhow::bail!(
             "script middleware {} hook ({}) failed with {}: {}",
@@ -448,15 +500,33 @@ fn run_script_middleware_hook(
 }
 
 /// Apply the configured `post_process` hook to script stdout, if any.
-fn apply_script_post_hook(
+#[allow(clippy::too_many_arguments)]
+async fn apply_script_post_hook(
     middleware: Option<&autonoetic_types::agent::Middleware>,
     driver: crate::sandbox::SandboxDriverKind,
     agent_dir: &Path,
     gateway_dir: Option<&Path>,
+    overrides: &crate::sandbox::BwrapIsolationOverrides,
+    sandbox_kill: Option<(
+        &std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
+        &str,
+    )>,
     stdout: String,
 ) -> anyhow::Result<String> {
     match middleware.and_then(|m| m.post_process.as_deref()) {
-        Some(hook) => run_script_middleware_hook(driver, agent_dir, gateway_dir, hook, "post_process", &stdout),
+        Some(hook) => {
+            run_script_middleware_hook(
+                driver,
+                agent_dir,
+                gateway_dir,
+                overrides,
+                sandbox_kill,
+                hook,
+                "post_process",
+                &stdout,
+            )
+            .await
+        }
         None => Ok(stdout),
     }
 }

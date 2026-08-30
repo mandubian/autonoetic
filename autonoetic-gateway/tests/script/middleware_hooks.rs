@@ -1,8 +1,11 @@
 //! Script-mode middleware (#1222): `pre_process` transforms the normalized
 //! task payload before the entrypoint runs, `post_process` transforms stdout
-//! before it becomes the reply. The contract is verbatim stdin→stdout, so the
-//! adapter's generated JSON-to-JSON mapping scripts work unchanged. Hooks run
-//! in the same sandbox profile as the entrypoint and fail closed.
+//! before it becomes the reply. The contract is verbatim stdin→stdout, so
+//! hooks written to that contract — the shape a script-mode adapter wrapper's
+//! mapping needs — run unchanged. (The adapter generator's current LLM-envelope
+//! scripts are a different contract; making generation script-mode-aware is a
+//! follow-up.) Hooks run in the same sandbox profile as the entrypoint and
+//! fail closed.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
