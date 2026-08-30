@@ -160,6 +160,42 @@ impl DeciderAppointment {
     }
 }
 
+/// One gate that an appointment covered at the moment it opened (#1197).
+///
+/// Records *that* a gate reached the seat, separately from *what* the seat
+/// said. The verdict fields stay `None` until the decider turn runs (#1198) —
+/// a routed gate with no verdict is the normal state between the two, and also
+/// what a dead or timed-out decider leaves behind, which is what makes an
+/// unanswered referral visible to the reaper rather than silent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeciderGateRouting {
+    pub routing_id: String,
+    /// The approval request this routing is about.
+    pub gate_id: String,
+    pub appointment_id: String,
+    pub decider_agent: String,
+    pub decider_session: Option<String>,
+    /// `approval` or `escalation`, as classified when the gate opened.
+    pub gate_kind: String,
+    /// The risk class computed when the gate opened, recorded rather than
+    /// joined so a later reclassification cannot rewrite why this gate routed.
+    pub gate_risk: String,
+    /// Copied from the appointment for the same reason: the record says what
+    /// was true at referral even after the appointment is revoked.
+    pub advice_only: bool,
+    pub routed_at: String,
+    pub verdict: Option<String>,
+    pub verdict_reason: Option<String>,
+    pub verdict_at: Option<String>,
+}
+
+impl DeciderGateRouting {
+    /// True when the gate reached the seat but the seat has not answered.
+    pub fn is_awaiting_verdict(&self) -> bool {
+        self.verdict.is_none()
+    }
+}
+
 /// Why an appointment was refused. Each variant is a mechanical check, not a
 /// judgment call — the gateway is a Lawful Executor here as everywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]

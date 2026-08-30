@@ -16,7 +16,7 @@ use autonoetic_types::background::ApprovalRisk;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::decider_appointment::{
-    AppointmentError, DeciderAppointment, APPOINTABLE_GATE_KINDS,
+    AppointmentError, DeciderAppointment, DeciderGateRouting, APPOINTABLE_GATE_KINDS,
 };
 
 use crate::scheduler::gateway_store::GatewayStore;
@@ -316,6 +316,104 @@ pub fn viewer_class_for_gate(
             ViewerClass::Agent
         }
     }
+}
+
+/// Route a freshly opened gate to the seat appointed over its run, if any
+/// (#1197).
+///
+/// Called from `create_approval_row`, the one place every gate is persisted, so
+/// a new gate path cannot forget to consider the seat.
+///
+/// **The fail direction is the design.** This decides only *that* a gate goes
+/// to a decider; nothing here resolves a gate. A bug that fails to route leaves
+/// it parked for the operator — the status quo. That asymmetry is the argument
+/// for routing at gate creation rather than sweeping the pending queue: a
+/// sweeper's bug decides something it should not have, and this one's bug does
+/// nothing.
+///
+/// Phase 1 compounds it: `appoint` refuses a non-advisory appointment, so every
+/// routing recorded here is `advice_only` and the gate parks regardless of what
+/// the seat later says.
+pub fn route_gate_to_decider(
+    store: &GatewayStore,
+    gate_id: &str,
+    gate_session_id: &str,
+    action: &autonoetic_types::background::ScheduledAction,
+) -> Result<Option<DeciderGateRouting>> {
+    let kind = if matches!(
+        action,
+        autonoetic_types::background::ScheduledAction::SessionEscalate { .. }
+    ) {
+        autonoetic_types::decider_appointment::GATE_KIND_ESCALATION
+    } else {
+        autonoetic_types::decider_appointment::GATE_KIND_APPROVAL
+    };
+    let risk = crate::scheduler::approval_hardening::classify_approval_risk(action);
+    let root = crate::runtime::content_store::root_session_id(gate_session_id);
+
+    let Some(appointment) = active_appointment_for_gate(store, root, kind, risk)? else {
+        return Ok(None);
+    };
+
+    let routing = DeciderGateRouting {
+        routing_id: format!("rtg_{}", uuid::Uuid::new_v4()),
+        gate_id: gate_id.to_string(),
+        appointment_id: appointment.appointment_id.clone(),
+        decider_agent: appointment.decider_agent.clone(),
+        decider_session: appointment.decider_session.clone(),
+        gate_kind: kind.to_string(),
+        gate_risk: risk.as_str().to_string(),
+        advice_only: appointment.advice_only,
+        routed_at: chrono::Utc::now().to_rfc3339(),
+        verdict: None,
+        verdict_reason: None,
+        verdict_at: None,
+    };
+
+    if !store.insert_decider_gate_routing(&routing)? {
+        // Already routed to this seat — a retried gate creation, not a second
+        // referral.
+        return Ok(None);
+    }
+
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: routing.decider_agent.clone(),
+        session_id: gate_session_id.to_string(),
+        turn_id: None,
+        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: routing.routed_at.clone(),
+        category: "governance.decider".to_string(),
+        action: "decider.gate_routed".to_string(),
+        status: "routed".to_string(),
+        enforced_rules: vec!["P-2.20".to_string()],
+        target: Some(gate_id.to_string()),
+        payload: Some(
+            serde_json::json!({
+                "routing_id": routing.routing_id,
+                "gate_id": gate_id,
+                "appointment_id": routing.appointment_id,
+                "decider_agent": routing.decider_agent,
+                "decider_session": routing.decider_session,
+                "gate_kind": routing.gate_kind,
+                "gate_risk": routing.gate_risk,
+                "advice_only": routing.advice_only,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    };
+    if let Err(e) = store.create_causal_event(&event) {
+        tracing::warn!(
+            target: "decider_appointment",
+            gate_id = %gate_id,
+            error = %e,
+            "Failed to record gate routing on the causal chain"
+        );
+    }
+    Ok(Some(routing))
 }
 
 fn held_gate_kinds(capabilities: &[Capability]) -> Vec<String> {
