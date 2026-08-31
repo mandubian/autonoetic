@@ -116,9 +116,9 @@
       <div>
         <div class="flex items-center gap-2">
           <h1 class="font-display font-bold text-lg text-white leading-tight">Autonoetic</h1>
-          <span class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">DAG COCKPIT</span>
+          <span class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 text-[11px] font-mono font-bold px-2 py-0.5 rounded-full">DAG COCKPIT</span>
         </div>
-        <p class="text-xs text-slate-400">Governed Realtime Multi-Agent Visualizer</p>
+        <p class="text-[13px] text-slate-400">Governed Realtime Multi-Agent Visualizer</p>
       </div>
     </div>
 
@@ -126,48 +126,48 @@
     <div class="flex items-center gap-4 text-sm">
       
       <!-- Pending Gate Alert Pill -->
-      <div id="header-gate-alert" onclick="openActiveGateModal()" class="hidden cursor-pointer bg-accentAmber/15 border border-accentAmber/40 hover:bg-accentAmber/25 text-accentAmber px-3 py-1.5 rounded-lg flex items-center gap-2 text-xs font-semibold gate-pulse transition-all">
+      <div id="header-gate-alert" onclick="openActiveGateModal()" class="hidden cursor-pointer bg-accentAmber/15 border border-accentAmber/40 hover:bg-accentAmber/25 text-accentAmber px-3 py-1.5 rounded-lg flex items-center gap-2 text-[13px] font-semibold gate-pulse transition-all">
         <span class="text-sm">⏸</span>
         <span><strong id="header-gate-count">1</strong> Pending Gate Approval</span>
       </div>
 
       <div class="flex flex-col">
-        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Load Recent</label>
-        <select id="recent-sessions-select" onchange="selectRecentSession()" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-44 focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Load Recent</label>
+        <select id="recent-sessions-select" onchange="selectRecentSession()" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-[13px] w-44 focus:outline-none focus:border-accentIndigo transition-colors">
           <option value="">-- select session --</option>
         </select>
       </div>
 
       <div class="flex flex-col">
-        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Root Session ID</label>
-        <input id="session-input" type="text" placeholder="session-abc123" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-44 focus:outline-none focus:border-accentIndigo transition-colors font-mono">
+        <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Root Session ID</label>
+        <input id="session-input" type="text" placeholder="session-abc123" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-[13px] w-44 focus:outline-none focus:border-accentIndigo transition-colors font-mono">
       </div>
       
       <div class="flex flex-col">
-        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Shared Secret</label>
-        <input id="secret-input" type="password" placeholder="••••••••" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-32 focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Shared Secret</label>
+        <input id="secret-input" type="password" placeholder="••••••••" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-[13px] w-32 focus:outline-none focus:border-accentIndigo transition-colors">
       </div>
 
       <div class="flex flex-col">
-        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Port</label>
-        <input id="port-input" type="text" value="4100" class="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-white text-xs w-14 text-center focus:outline-none focus:border-accentIndigo transition-colors font-mono">
+        <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Port</label>
+        <input id="port-input" type="text" value="4100" class="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-white text-[13px] w-14 text-center focus:outline-none focus:border-accentIndigo transition-colors font-mono">
       </div>
 
-      <button id="connect-btn" onclick="toggleConnection()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5">
+      <button id="connect-btn" onclick="toggleConnection()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-semibold text-[13px] px-4 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5">
         Connect
       </button>
 
-      <button id="pause-btn" onclick="togglePause()" class="bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
+      <button id="pause-btn" onclick="togglePause()" class="bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-[13px] px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
         <span>⏸</span> Pause
       </button>
 
-      <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed/90 hover:bg-accentRed active:scale-95 text-white font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
+      <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed/90 hover:bg-accentRed active:scale-95 text-white font-bold text-[13px] px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
         <span>🚨</span> E-Stop
       </button>
 
       <div class="flex items-center gap-1.5 mt-3.5 ml-1">
         <div id="status-indicator" class="w-2.5 h-2.5 rounded-full bg-slate-500"></div>
-        <span id="status-text" class="text-xs text-slate-400 font-medium">Disconnected</span>
+        <span id="status-text" class="text-[13px] text-slate-400 font-medium">Disconnected</span>
       </div>
     </div>
   </header>
@@ -180,12 +180,12 @@
       <!-- Controls / Filter bar -->
       <div class="flex items-center justify-between px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-60">
         <div class="flex items-center gap-2">
-          <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider">Narrative Timeline</h2>
-          <span id="timeline-count-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono px-2 py-0.5 rounded-full">0 events</span>
+          <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider">Narrative Timeline</h2>
+          <span id="timeline-count-badge" class="bg-slate-800 text-slate-400 text-[11px] font-mono px-2 py-0.5 rounded-full">0 events</span>
         </div>
         <div class="flex items-center gap-2">
-          <label class="text-[11px] text-slate-400">Altitude:</label>
-          <select id="altitude-filter" onchange="changeAltitudeFilter()" class="bg-slate-900 border border-slate-800 text-xs rounded px-2 py-0.5 text-slate-300 focus:outline-none">
+          <label class="text-[12px] text-slate-400">Altitude:</label>
+          <select id="altitude-filter" onchange="changeAltitudeFilter()" class="bg-slate-900 border border-slate-800 text-[13px] rounded px-2 py-0.5 text-slate-300 focus:outline-none">
             <option value="detail">Detail (All)</option>
             <option value="normal" selected>Normal (Milestones)</option>
             <option value="attention">Attention (Gates & Warnings)</option>
@@ -207,7 +207,7 @@
       <!-- Composer Box -->
       <div class="shrink-0 p-3.5 border-t border-slate-800 bg-slate-950 bg-opacity-70">
         <div class="flex items-center gap-2">
-          <textarea id="composer-input" placeholder="Type a message to steer session (Enter to send)..." rows="1" class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white placeholder-slate-500 resize-none focus:outline-none focus:border-accentIndigo transition-colors max-h-24 font-sans"></textarea>
+          <textarea id="composer-input" placeholder="Type a message to steer session (Enter to send)..." rows="1" class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3.5 py-2 text-[13px] text-white placeholder-slate-500 resize-none focus:outline-none focus:border-accentIndigo transition-colors max-h-24 font-sans"></textarea>
           <button id="send-btn" onclick="sendMessage()" disabled class="bg-accentIndigo disabled:bg-slate-800 disabled:text-slate-600 hover:bg-opacity-90 active:scale-95 text-white p-2.5 rounded-lg shadow transition-all duration-150 flex items-center justify-center shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-send-horizontal"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
           </button>
@@ -222,40 +222,55 @@
       <div class="w-7/12 min-h-0 border-r border-slate-800/80 flex flex-col bg-slate-950 bg-opacity-20">
         <!-- Tab Navigation -->
         <div class="flex border-b border-slate-800 bg-slate-950 bg-opacity-60 shrink-0">
-          <button id="tab-btn-workflow" onclick="switchRightTab('workflow')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+          <button id="tab-btn-overview" onclick="switchRightTab('overview')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>🏠</span> Overview
+          </button>
+          <button id="tab-btn-workflow" onclick="switchRightTab('workflow')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>🗺️</span> Workflow DAG
           </button>
           <button id="tab-btn-checklist" onclick="switchRightTab('checklist')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>📋</span> Drafts & Plans
           </button>
           <button id="tab-btn-constitution" onclick="switchRightTab('constitution')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
-            <span>🛡️</span> Constitution <span id="constitution-tab-badge" class="bg-accentAmber/15 text-accentAmber border border-accentAmber/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
+            <span>🛡️</span> Constitution <span id="constitution-tab-badge" class="bg-accentAmber/15 text-accentAmber border border-accentAmber/30 text-[10px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
           </button>
           <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>📖</span> Wiki
           </button>
           <button id="tab-btn-grants" onclick="switchRightTab('grants')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
-            <span>🔑</span> Grants <span id="grants-tab-badge" class="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
+            <span>🔑</span> Grants <span id="grants-tab-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono px-1.5 py-0.5 rounded-full hidden">0</span>
           </button>
           <button id="tab-btn-evolution" onclick="switchRightTab('evolution')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
             <span>🧬</span> Evolution
           </button>
         </div>
 
-        <!-- Tab 1: Visual Workflow & Plan DAG -->
-        <div id="tab-content-workflow" class="flex-1 flex flex-col overflow-hidden">
+        <!-- Tab 0: Session Overview (default landing view — aggregates the
+             live surfaces so the column is never empty at session start) -->
+        <div id="tab-content-overview" class="flex-1 flex flex-col overflow-hidden">
           <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between">
-            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+            <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider">Session Overview</h2>
+            <span id="overview-status-badge" class="bg-slate-800 text-[11px] text-slate-400 font-mono font-semibold px-2 py-0.5 rounded-full">Idle</span>
+          </div>
+          <div id="overview-body" class="flex-1 overflow-y-auto p-4 space-y-4 text-[13px]">
+            <div class="text-center text-slate-500 py-8">Connect to a session to load the overview.</div>
+          </div>
+        </div>
+
+        <!-- Tab 1: Visual Workflow & Plan DAG -->
+        <div id="tab-content-workflow" class="flex-1 flex flex-col overflow-hidden hidden">
+          <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between">
+            <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
               <span>Execution Graph & Gate Nodes</span>
             </h2>
-            <span id="dag-status-badge" class="bg-slate-800 text-[10px] text-slate-400 font-mono font-semibold px-2 py-0.5 rounded-full">Waiting...</span>
+            <span id="dag-status-badge" class="bg-slate-800 text-[11px] text-slate-400 font-mono font-semibold px-2 py-0.5 rounded-full">Waiting...</span>
           </div>
 
           <!-- DAG Canvas container -->
           <div class="flex-1 p-4 overflow-auto relative bg-slate-950/40" id="workflow-dag-container">
             <svg id="workflow-dag-svg" class="w-full h-full min-h-[350px]"></svg>
-            <div id="workflow-dag-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">
-              Connect to session to render execution DAG graph...
+            <div id="workflow-dag-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-[13px] text-center px-8">
+              No active plan frame. The DAG renders the planner's plan steps once a plan is proposed and locked — gate nodes attach to the active step. Sessions without a planner plan stay empty here; agent activity lives in the timeline and topology.
             </div>
           </div>
         </div>
@@ -265,20 +280,20 @@
           <!-- Pending Plan Approvals (mirrors TUI /plan list + y approve) -->
           <div id="pending-plans-section" class="hidden shrink-0 border-b border-slate-850 max-h-[45%] flex flex-col overflow-hidden">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-accentAmber/5 flex items-center justify-between">
-              <h2 class="font-display font-semibold text-xs text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
+              <h2 class="font-display font-semibold text-[13px] text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
                 <span>📋</span> Pending Plan Approvals
               </h2>
-              <button onclick="fetchPendingPlans()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <button onclick="fetchPendingPlans()" class="text-accentIndigo hover:underline text-[11px] font-mono">↻ Refresh</button>
             </div>
-            <div id="pending-plans" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs"></div>
+            <div id="pending-plans" class="flex-1 overflow-y-auto p-3 space-y-2 text-[13px]"></div>
           </div>
           <!-- Active Plan Steps -->
           <div class="h-1/2 flex flex-col overflow-hidden border-b border-slate-850">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-slate-950 bg-opacity-40 flex items-center justify-between">
-              <h2 class="font-display font-semibold text-xs text-slate-400 uppercase tracking-wider">Active Plan Steps</h2>
-              <span id="plan-version-badge" class="bg-slate-800 text-[10px] text-slate-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
+              <h2 class="font-display font-semibold text-[13px] text-slate-400 uppercase tracking-wider">Active Plan Steps</h2>
+              <span id="plan-version-badge" class="bg-slate-800 text-[11px] text-slate-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
             </div>
-            <div id="plan-steps" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
+            <div id="plan-steps" class="flex-1 overflow-y-auto p-4 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-6">No plan loaded yet.</div>
             </div>
           </div>
@@ -286,11 +301,11 @@
           <!-- Workbenches & Live Content Drafts -->
           <div class="h-1/2 flex flex-col overflow-hidden bg-slate-950 bg-opacity-40">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-slate-950 bg-opacity-60 flex items-center justify-between">
-              <h2 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Live Content Drafts & Workbenches</h2>
-              <button onclick="fetchContentList(getConnectInfo().baseURL, getConnectInfo().sid, getConnectInfo().secret)" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <h2 class="font-display font-semibold text-[13px] text-slate-400 tracking-wider uppercase">Live Content Drafts & Workbenches</h2>
+              <button onclick="fetchContentList(getConnectInfo().baseURL, getConnectInfo().sid, getConnectInfo().secret)" class="text-accentIndigo hover:underline text-[11px] font-mono">↻ Refresh</button>
             </div>
             <div id="workbench-list" class="flex-1 overflow-y-auto p-3 space-y-2">
-              <div class="text-center text-slate-500 text-xs py-4">No active workbenches or drafts.</div>
+              <div class="text-center text-slate-500 text-[13px] py-4">No active workbenches or drafts.</div>
             </div>
           </div>
         </div>
@@ -300,54 +315,54 @@
           <!-- Pending Amendment Proposals (O-6: every proposal is owed a decision) -->
           <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 42%;">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-accentAmber/5 flex items-center justify-between shrink-0">
-              <h3 class="font-display font-semibold text-xs text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
+              <h3 class="font-display font-semibold text-[13px] text-accentAmber uppercase tracking-wider flex items-center gap-1.5">
                 <span>📜</span> Pending Amendment Proposals
               </h3>
-              <button onclick="fetchConstitutionProposals()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+              <button onclick="fetchConstitutionProposals()" class="text-accentIndigo hover:underline text-[11px] font-mono shrink-0">↻ Refresh</button>
             </div>
-            <div id="constitution-proposals" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+            <div id="constitution-proposals" class="flex-1 overflow-y-auto p-3 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-3">Open the tab to load pending proposals.</div>
             </div>
           </div>
           <!-- Anomaly Flags (O-7: every flag is owed an adjudication) -->
           <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 34%;">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-accentRed/5 flex items-center justify-between shrink-0">
-              <h3 class="font-display font-semibold text-xs text-accentRed uppercase tracking-wider flex items-center gap-1.5">
+              <h3 class="font-display font-semibold text-[13px] text-accentRed uppercase tracking-wider flex items-center gap-1.5">
                 <span>🚩</span> Anomaly Flags
               </h3>
-              <button onclick="fetchAnomalyFlags()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+              <button onclick="fetchAnomalyFlags()" class="text-accentIndigo hover:underline text-[11px] font-mono shrink-0">↻ Refresh</button>
             </div>
-            <div id="anomaly-flags" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+            <div id="anomaly-flags" class="flex-1 overflow-y-auto p-3 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-3">Open the tab to load anomaly flags.</div>
             </div>
           </div>
           <!-- Escalations (federation/promotion gates owed an operator decision) -->
           <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 30%;">
             <div class="px-5 py-2.5 border-b border-slate-850 bg-accentRed/5 flex items-center justify-between shrink-0">
-              <h3 class="font-display font-semibold text-xs text-accentRed uppercase tracking-wider flex items-center gap-1.5">
+              <h3 class="font-display font-semibold text-[13px] text-accentRed uppercase tracking-wider flex items-center gap-1.5">
                 <span>⚖️</span> Escalations
               </h3>
-              <button onclick="fetchEscalations()" class="text-accentIndigo hover:underline text-[10px] font-mono shrink-0">↻ Refresh</button>
+              <button onclick="fetchEscalations()" class="text-accentIndigo hover:underline text-[11px] font-mono shrink-0">↻ Refresh</button>
             </div>
-            <div id="escalations-list" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+            <div id="escalations-list" class="flex-1 overflow-y-auto p-3 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-3">Open the tab to load escalations.</div>
             </div>
           </div>
           <div class="p-4 overflow-y-auto space-y-3.5 flex-1 flex flex-col">
             <div class="bg-slate-900 border border-slate-800 p-3.5 rounded-xl space-y-2 shrink-0">
-              <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase">Constitution Profile</h3>
-              <div class="grid grid-cols-3 gap-y-2 gap-x-2 text-xs font-mono">
+              <h3 class="font-display font-bold text-[13px] text-slate-400 tracking-wider uppercase">Constitution Profile</h3>
+              <div class="grid grid-cols-3 gap-y-2 gap-x-2 text-[13px] font-mono">
                 <div class="text-slate-500">Version:</div>
                 <div id="const-version" class="text-slate-300 col-span-2 font-semibold">—</div>
                 <div class="text-slate-500">Format:</div>
                 <div id="const-format-version" class="text-slate-300 col-span-2">—</div>
                 <div class="text-slate-500">Digest:</div>
-                <div id="const-digest" class="text-slate-300 font-mono text-[10px] break-all col-span-2 select-all">—</div>
+                <div id="const-digest" class="text-slate-300 font-mono text-[11px] break-all col-span-2 select-all">—</div>
               </div>
             </div>
             <div class="flex-1 flex flex-col space-y-2 overflow-hidden min-h-[250px]">
-              <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase shrink-0">Canonical Rules & Rights Text</h3>
-              <div id="const-text" class="flex-1 p-3.5 bg-slate-950 border border-slate-900 rounded-lg font-mono text-[11px] text-slate-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
+              <h3 class="font-display font-bold text-[13px] text-slate-400 tracking-wider uppercase shrink-0">Canonical Rules & Rights Text</h3>
+              <div id="const-text" class="flex-1 p-3.5 bg-slate-950 border border-slate-900 rounded-lg font-mono text-[12px] text-slate-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
                 No constitution loaded.
               </div>
             </div>
@@ -358,17 +373,17 @@
         <div id="tab-content-wiki" class="flex-1 flex flex-col overflow-hidden hidden">
           <div class="h-1/2 border-b border-slate-850 flex flex-col overflow-hidden">
             <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40">
-              <h3 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Pending Wiki Proposals</h3>
+              <h3 class="font-display font-semibold text-[13px] text-slate-400 tracking-wider uppercase">Pending Wiki Proposals</h3>
             </div>
-            <div id="wiki-proposals-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-xs">
+            <div id="wiki-proposals-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-4">No pending proposals.</div>
             </div>
           </div>
           <div class="h-1/2 flex flex-col overflow-hidden">
             <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40">
-              <h3 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Wiki Pages</h3>
+              <h3 class="font-display font-semibold text-[13px] text-slate-400 tracking-wider uppercase">Wiki Pages</h3>
             </div>
-            <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-xs">
+            <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-[13px]">
               <div class="text-center text-slate-500 py-4">No pages found.</div>
             </div>
           </div>
@@ -377,56 +392,56 @@
         <!-- Tab 5: Live Grants & Egress Posture (mirrors TUI G panel) -->
         <div id="tab-content-grants" class="flex-1 flex flex-col overflow-hidden hidden">
           <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between">
-            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+            <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
               <span>🔑</span> Live Grants & Egress Posture
             </h2>
             <div class="flex items-center gap-2">
-              <span id="grants-taint-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" title="Root session egress taint (absence ⇒ unrestricted)">taint: —</span>
-              <span id="grants-provider-badge" class="bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full hidden" title="Provider constraint (rung 1)">provider: —</span>
-              <button onclick="fetchGrants(); fetchLabels(); fetchEgressPolicy(); fetchEnvelopes();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <span id="grants-taint-badge" class="bg-slate-800 text-slate-400 text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full" title="Root session egress taint (absence ⇒ unrestricted)">taint: —</span>
+              <span id="grants-provider-badge" class="bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full hidden" title="Provider constraint (rung 1)">provider: —</span>
+              <button onclick="fetchGrants(); fetchLabels(); fetchEgressPolicy(); fetchEnvelopes();" class="text-accentIndigo hover:underline text-[11px] font-mono">↻ Refresh</button>
             </div>
           </div>
           <!-- Egress Policy (RFC §5.4: /private pin, /taint rules, /local intent authoring) -->
           <div class="shrink-0 border-b border-slate-800 flex flex-col overflow-hidden" style="max-height: 52%;">
             <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40 flex items-center justify-between shrink-0">
-              <h3 class="font-display font-semibold text-[10px] text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 class="font-display font-semibold text-[11px] text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <span>🔒</span> Egress Policy
-                <span id="egress-policy-state" class="bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full">undeclared</span>
+                <span id="egress-policy-state" class="bg-slate-800 text-slate-500 text-[10px] font-mono px-1.5 py-0.5 rounded-full">undeclared</span>
               </h3>
               <div class="flex items-center gap-1.5 shrink-0">
-                <button id="egress-pin-btn" onclick="togglePrivatePin()" class="bg-accentViolet/10 border border-accentViolet/30 hover:bg-accentViolet/25 text-accentViolet font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">🔒 Pin local_only</button>
-                <button onclick="clearEgressPolicy()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">Clear policy</button>
+                <button id="egress-pin-btn" onclick="togglePrivatePin()" class="bg-accentViolet/10 border border-accentViolet/30 hover:bg-accentViolet/25 text-accentViolet font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">🔒 Pin local_only</button>
+                <button onclick="clearEgressPolicy()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">Clear policy</button>
               </div>
             </div>
-            <div class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+            <div class="flex-1 overflow-y-auto p-3 space-y-2 text-[13px]">
               <div id="egress-policy-body">
-                <div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>
+                <div class="text-center text-slate-500 py-2 text-[11px]">Connect to a session to load the policy.</div>
               </div>
               <div id="egress-proposal" class="hidden space-y-1.5"></div>
               <div class="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-850">
-                <input id="rule-source-input" placeholder="source — e.g. email.send or mcp.gmail.*" class="flex-1 min-w-[140px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
-                <input id="rule-path-input" placeholder="path (opt) ~/mail/**" class="w-32 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
-                <select id="rule-label-select" class="bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[10px] text-slate-200 focus:outline-none">
+                <input id="rule-source-input" placeholder="source — e.g. email.send or mcp.gmail.*" class="flex-1 min-w-[140px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+                <input id="rule-path-input" placeholder="path (opt) ~/mail/**" class="w-32 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] font-mono text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+                <select id="rule-label-select" class="bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[11px] text-slate-200 focus:outline-none">
                   <option value="local_only">local_only</option>
                   <option value="no_remote_model">no_remote_model</option>
                 </select>
-                <button onclick="addManualRule()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">+ Add rule</button>
-                <input id="egress-intent-input" placeholder="or say it: 'emails stay local'" class="flex-1 min-w-[160px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] text-white placeholder-slate-600 focus:outline-none focus:border-accentViolet">
-                <button onclick="proposeEgressRules()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">⚒ Propose</button>
+                <button onclick="addManualRule()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">+ Add rule</button>
+                <input id="egress-intent-input" placeholder="or say it: 'emails stay local'" class="flex-1 min-w-[160px] bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-accentViolet">
+                <button onclick="proposeEgressRules()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">⚒ Propose</button>
               </div>
             </div>
           </div>
-          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-[13px]">
             <div class="border-b border-slate-800 pb-3">
-              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+              <h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
                 <span>🌐 Network Envelope Locks</span>
                 <span class="flex items-center gap-1.5">
-                  <button onclick="fetchEnvelopes()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻</button>
-                  <button onclick="proposeEnvelope()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">⚒ Propose from observed</button>
+                  <button onclick="fetchEnvelopes()" class="text-accentIndigo hover:underline text-[11px] font-mono">↻</button>
+                  <button onclick="proposeEnvelope()" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">⚒ Propose from observed</button>
                 </span>
               </h3>
               <div id="envelopes-body" class="space-y-1.5">
-                <div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>
+                <div class="text-center text-slate-500 py-2 text-[11px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>
               </div>
             </div>
             <div id="grants-panel-body" class="space-y-4">
@@ -434,12 +449,12 @@
             </div>
             <div id="labels-panel-body" class="hidden space-y-2 border-t border-slate-800 pt-4"></div>
             <div class="border-t border-slate-800 pt-3">
-              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+              <h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
                 <span>🧾 Per-Turn Egress Audit</span>
-                <button onclick="loadEgressAudit()" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Load</button>
+                <button onclick="loadEgressAudit()" class="text-accentIndigo hover:underline text-[11px] font-mono">↻ Load</button>
               </h3>
               <div id="egress-audit" class="space-y-1.5">
-                <div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>
+                <div class="text-center text-slate-500 py-2 text-[11px] italic">Content-free per-turn report — totals, withholding, violations.</div>
               </div>
             </div>
           </div>
@@ -448,28 +463,28 @@
         <!-- Tab 6: Evolution, Curation & Cron (mirrors TUI /skills /crystallize /curate /cron) -->
         <div id="tab-content-evolution" class="flex-1 flex flex-col overflow-hidden hidden">
           <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between gap-2">
-            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+            <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
               <span>🧬</span> Evolution &amp; Scheduled Work
             </h2>
             <div class="flex items-center gap-2 shrink-0">
-              <span id="evolution-counts-badge" class="bg-slate-800 text-slate-400 text-[9px] font-mono px-2 py-0.5 rounded-full">—</span>
-              <button onclick="fetchEvolution(); fetchCronJobs();" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
+              <span id="evolution-counts-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono px-2 py-0.5 rounded-full">—</span>
+              <button onclick="fetchEvolution(); fetchCronJobs();" class="text-accentIndigo hover:underline text-[11px] font-mono">↻ Refresh</button>
             </div>
           </div>
           <div class="px-5 py-2 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center gap-2 shrink-0">
-            <button onclick="runCrystallize()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[10px] px-3 py-1.5 rounded uppercase transition-all">⚒ Crystallize session</button>
-            <button onclick="runCuration()" class="bg-accentCyan/15 border border-accentCyan/30 hover:bg-accentCyan/30 text-accentCyan font-bold text-[10px] px-3 py-1.5 rounded uppercase transition-all">🧹 Run curation</button>
-            <span id="evolution-status" class="text-[10px] font-mono text-slate-500 truncate"></span>
+            <button onclick="runCrystallize()" class="bg-accentViolet/15 border border-accentViolet/30 hover:bg-accentViolet/30 text-accentViolet font-bold text-[11px] px-3 py-1.5 rounded uppercase transition-all">⚒ Crystallize session</button>
+            <button onclick="runCuration()" class="bg-accentCyan/15 border border-accentCyan/30 hover:bg-accentCyan/30 text-accentCyan font-bold text-[11px] px-3 py-1.5 rounded uppercase transition-all">🧹 Run curation</button>
+            <span id="evolution-status" class="text-[11px] font-mono text-slate-500 truncate"></span>
           </div>
-          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+          <div class="flex-1 overflow-y-auto p-4 space-y-4 text-[13px]">
             <div>
-              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Proposed Skill Work</h3>
+              <h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2">Proposed Skill Work</h3>
               <div id="evolution-pending" class="space-y-1.5">
                 <div class="text-center text-slate-500 py-4">Connect to a session to load.</div>
               </div>
             </div>
             <div class="border-t border-slate-800 pt-3">
-              <h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Scheduled Jobs (cron)</h3>
+              <h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2">Scheduled Jobs (cron)</h3>
               <div id="cron-jobs" class="space-y-1.5">
                 <div class="text-center text-slate-500 py-4">Connect to a session to load.</div>
               </div>
@@ -481,17 +496,19 @@
       <!-- Right Pane: Agent Topology Map & Session Telemetry HUD -->
       <div class="w-5/12 min-h-0 flex flex-col bg-slate-950 bg-opacity-30">
         
-        <!-- Alive Agent Topology Map -->
-        <div class="flex-1 flex flex-col overflow-hidden border-b border-slate-800/80">
-          <div class="px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-40 flex items-center justify-between">
-            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+        <!-- Alive Agent Topology Map (collapsible — sparse early-session, so it
+             stays folded until the tree actually branches; HUD reclaims space) -->
+        <div id="topology-section" class="shrink-0 flex flex-col overflow-hidden border-b border-slate-800/80">
+          <div onclick="toggleTopology()" class="cursor-pointer px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-40 flex items-center justify-between hover:bg-slate-900/60 transition-colors">
+            <h2 class="font-display font-semibold text-[13px] text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
               <span>🌲 Alive Agent Topology</span>
+              <span id="topology-count" class="bg-slate-800 text-slate-400 text-[10px] font-mono px-1.5 py-0.5 rounded-full">0</span>
             </h2>
-            <span class="text-[10px] text-slate-500 font-mono">Click node for controls</span>
+            <span class="text-[11px] text-slate-500 font-mono flex items-center gap-1.5"><span id="topology-chevron">▶</span> <span class="hidden md:inline">Click node for controls</span></span>
           </div>
-          <div class="flex-1 p-4 overflow-auto relative" id="agent-tree-container">
+          <div class="flex-1 p-4 overflow-auto relative hidden" id="agent-tree-container">
             <svg id="agent-tree-svg" class="w-full h-full min-h-[220px]"></svg>
-            <div id="agent-tree-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">
+            <div id="agent-tree-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-[13px]">
               Waiting to parse agent hierarchy...
             </div>
           </div>
@@ -499,23 +516,23 @@
 
         <!-- Telemetry & Budget HUD -->
         <div class="shrink-0 p-4 space-y-3 bg-slate-950 bg-opacity-70">
-          <h2 class="font-display font-semibold text-[11px] text-slate-400 tracking-wider uppercase border-b border-slate-800 pb-1.5">Session Telemetry HUD</h2>
+          <h2 class="font-display font-semibold text-[12px] text-slate-400 tracking-wider uppercase border-b border-slate-800 pb-1.5">Session Telemetry HUD</h2>
           
-          <div class="grid grid-cols-2 gap-3 text-xs">
+          <div class="grid grid-cols-2 gap-3 text-[13px]">
             <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg shadow-inner">
-              <span class="text-[9px] text-slate-500 font-semibold block uppercase">LLM Rounds</span>
+              <span class="text-[10px] text-slate-500 font-semibold block uppercase">LLM Rounds</span>
               <span id="hud-llm-calls" class="font-mono text-base font-bold text-accentIndigo">0</span>
             </div>
             
             <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg shadow-inner">
-              <span class="text-[9px] text-slate-500 font-semibold block uppercase">Active Grants</span>
+              <span class="text-[10px] text-slate-500 font-semibold block uppercase">Active Grants</span>
               <span id="hud-grants-count" class="font-mono text-base font-bold text-accentViolet">0</span>
             </div>
           </div>
 
           <!-- Token Consumption Bar -->
-          <div class="space-y-1.5 text-xs">
-            <div class="flex items-center justify-between text-[9px] text-slate-400 font-semibold uppercase">
+          <div class="space-y-1.5 text-[13px]">
+            <div class="flex items-center justify-between text-[10px] text-slate-400 font-semibold uppercase">
               <span>Token Consumption</span>
               <span id="hud-tokens-total" class="font-mono text-slate-300">0</span>
             </div>
@@ -523,7 +540,7 @@
               <div id="token-bar-in" class="bg-accentIndigo h-full" style="width: 0%;"></div>
               <div id="token-bar-out" class="bg-accentViolet h-full" style="width: 0%;"></div>
             </div>
-            <div class="flex justify-between text-[9px] text-slate-500 font-mono">
+            <div class="flex justify-between text-[10px] text-slate-500 font-mono">
               <span id="hud-tokens-in">in: 0</span>
               <span id="hud-tokens-out">out: 0</span>
             </div>
@@ -548,51 +565,51 @@
             <h3 id="modal-title" class="font-display font-bold text-base text-accentAmber leading-tight">
               Gate Approval Required
             </h3>
-            <p id="modal-subtitle" class="text-xs text-slate-400">Linked to Execution DAG Node</p>
+            <p id="modal-subtitle" class="text-[13px] text-slate-400">Linked to Execution DAG Node</p>
           </div>
         </div>
-        <span id="modal-gate-id" class="text-xs font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded">apr-xxxx</span>
+        <span id="modal-gate-id" class="text-[13px] font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded">apr-xxxx</span>
       </div>
       
       <!-- Body Section -->
-      <div id="modal-body" class="text-xs text-slate-300 space-y-3.5 overflow-y-auto pr-1">
+      <div id="modal-body" class="text-[13px] text-slate-300 space-y-3.5 overflow-y-auto pr-1">
         <!-- Filled dynamically -->
       </div>
 
       <!-- Gate message thread (operator ↔ gateway notes on this gate) -->
       <div id="gate-thread" class="hidden pt-3 border-t border-slate-800 flex flex-col space-y-2 shrink-0" style="max-height: 28%;">
         <div class="flex items-center justify-between shrink-0">
-          <span class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Gate Thread</span>
-          <button onclick="loadGateThread(currentModalGateId)" class="text-accentIndigo hover:underline text-[9px] font-mono">↻</button>
+          <span class="text-[11px] text-slate-400 font-semibold uppercase tracking-wider">Gate Thread</span>
+          <button onclick="loadGateThread(currentModalGateId)" class="text-accentIndigo hover:underline text-[10px] font-mono">↻</button>
         </div>
         <div id="gate-thread-messages" class="flex-1 overflow-y-auto space-y-1.5"></div>
         <div class="flex items-center gap-2 shrink-0">
-          <input id="gate-thread-input" placeholder="Add an operator note to this gate…" class="flex-1 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
-          <button onclick="sendGateMessage()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[10px] px-2.5 py-1.5 rounded uppercase shrink-0 transition-all">Send</button>
+          <input id="gate-thread-input" placeholder="Add an operator note to this gate…" class="flex-1 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-[12px] text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+          <button onclick="sendGateMessage()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[11px] px-2.5 py-1.5 rounded uppercase shrink-0 transition-all">Send</button>
         </div>
       </div>
 
       <!-- Motivation / Reply input panel -->
       <div id="modal-action-panel" class="pt-3 border-t border-slate-800 flex flex-col space-y-3 shrink-0">
-        <label id="modal-input-label" class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Motivation (Required for Governance Audit)</label>
+        <label id="modal-input-label" class="text-[11px] text-slate-400 font-semibold uppercase tracking-wider">Motivation (Required for Governance Audit)</label>
         
         <!-- Motivation Text Box -->
-        <input id="modal-text-input" type="text" placeholder="Explain your decision rationale..." class="bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white focus:outline-none focus:border-accentIndigo transition-colors">
+        <input id="modal-text-input" type="text" placeholder="Explain your decision rationale..." class="bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-[13px] text-white focus:outline-none focus:border-accentIndigo transition-colors">
         
         <!-- Multi choice options list -->
         <div id="modal-choices" class="flex flex-col gap-2 hidden"></div>
 
         <div class="flex items-center justify-between pt-1">
-          <button onclick="closeGateModal()" class="text-slate-400 hover:text-white text-xs font-medium underline">
+          <button onclick="closeGateModal()" class="text-slate-400 hover:text-white text-[13px] font-medium underline">
             Peek DAG & Timeline
           </button>
           
           <div class="flex gap-2.5">
-            <button id="modal-reject-btn" onclick="submitGateAction(false)" class="bg-accentRed/20 hover:bg-accentRed/30 border border-accentRed/40 active:scale-95 text-accentRed font-bold text-xs px-4 py-2 rounded-lg transition-all duration-150 hidden">
+            <button id="modal-reject-btn" onclick="submitGateAction(false)" class="bg-accentRed/20 hover:bg-accentRed/30 border border-accentRed/40 active:scale-95 text-accentRed font-bold text-[13px] px-4 py-2 rounded-lg transition-all duration-150 hidden">
               Reject Action
             </button>
 
-            <button id="modal-submit-btn" onclick="submitGateAction(true)" class="bg-accentAmber hover:bg-opacity-95 text-slate-950 font-bold text-xs px-5 py-2 rounded-lg shadow-lg transition-all duration-150">
+            <button id="modal-submit-btn" onclick="submitGateAction(true)" class="bg-accentAmber hover:bg-opacity-95 text-slate-950 font-bold text-[13px] px-5 py-2 rounded-lg shadow-lg transition-all duration-150">
               Approve & Resume
             </button>
           </div>
@@ -613,29 +630,29 @@
         </button>
       </div>
       
-      <div class="grid grid-cols-2 gap-3 text-xs">
+      <div class="grid grid-cols-2 gap-3 text-[13px]">
         <div class="bg-slate-900 border border-slate-800 p-3 rounded-lg">
-          <span class="text-[9px] text-slate-500 font-semibold block uppercase">Session ID</span>
-          <span id="control-agent-id" class="font-mono text-slate-200 font-bold select-all text-[11px]">—</span>
+          <span class="text-[10px] text-slate-500 font-semibold block uppercase">Session ID</span>
+          <span id="control-agent-id" class="font-mono text-slate-200 font-bold select-all text-[12px]">—</span>
         </div>
         <div class="bg-slate-900 border border-slate-800 p-3 rounded-lg">
-          <span class="text-[9px] text-slate-500 font-semibold block uppercase">Seat / Role</span>
-          <span id="control-agent-name" class="font-mono text-slate-200 font-bold text-[11px]">—</span>
+          <span class="text-[10px] text-slate-500 font-semibold block uppercase">Seat / Role</span>
+          <span id="control-agent-name" class="font-mono text-slate-200 font-bold text-[12px]">—</span>
         </div>
       </div>
 
       <!-- Status / Suspension Actions -->
       <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
-        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Gating & Suspension</h4>
-        <div class="flex justify-between items-center text-xs">
+        <h4 class="text-[13px] font-semibold text-slate-400 uppercase tracking-wider block">Gating & Suspension</h4>
+        <div class="flex justify-between items-center text-[13px]">
           <span class="text-slate-400">Current Status:</span>
-          <span id="control-agent-suspend-status" class="px-2 py-0.5 rounded font-mono font-bold text-[10px]">Active</span>
+          <span id="control-agent-suspend-status" class="px-2 py-0.5 rounded font-mono font-bold text-[11px]">Active</span>
         </div>
         <div class="flex gap-2">
-          <button id="agent-suspend-btn" onclick="suspendAgent()" class="flex-1 bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/20 text-accentRed font-bold text-xs py-1.5 rounded shadow transition-all">
+          <button id="agent-suspend-btn" onclick="suspendAgent()" class="flex-1 bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/20 text-accentRed font-bold text-[13px] py-1.5 rounded shadow transition-all">
             Suspend Agent
           </button>
-          <button id="agent-unsuspend-btn" onclick="unsuspendAgent()" class="flex-1 bg-accentGreen/10 border border-accentGreen/30 hover:bg-accentGreen/20 text-accentGreen font-bold text-xs py-1.5 rounded shadow transition-all">
+          <button id="agent-unsuspend-btn" onclick="unsuspendAgent()" class="flex-1 bg-accentGreen/10 border border-accentGreen/30 hover:bg-accentGreen/20 text-accentGreen font-bold text-[13px] py-1.5 rounded shadow transition-all">
             Unsuspend Agent
           </button>
         </div>
@@ -643,31 +660,31 @@
 
       <!-- Handoff (#1088: operator-only rebind of the live session) -->
       <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
-        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Session Handoff</h4>
-        <p class="text-[10px] text-slate-500 leading-relaxed">Rebinds the live root session to <code class="text-slate-300" id="handoff-target-label">—</code>. Operator-only; refused while a gate is parked. Agents may propose it in prose — only you can pull the trigger.</p>
-        <button onclick="handoffToAgent()" class="w-full bg-accentAmber/10 border border-accentAmber/30 hover:bg-accentAmber/25 text-accentAmber font-bold text-xs py-1.5 rounded shadow transition-all">⟲ Hand off session to this agent</button>
+        <h4 class="text-[13px] font-semibold text-slate-400 uppercase tracking-wider block">Session Handoff</h4>
+        <p class="text-[11px] text-slate-500 leading-relaxed">Rebinds the live root session to <code class="text-slate-300" id="handoff-target-label">—</code>. Operator-only; refused while a gate is parked. Agents may propose it in prose — only you can pull the trigger.</p>
+        <button onclick="handoffToAgent()" class="w-full bg-accentAmber/10 border border-accentAmber/30 hover:bg-accentAmber/25 text-accentAmber font-bold text-[13px] py-1.5 rounded shadow transition-all">⟲ Hand off session to this agent</button>
       </div>
 
       <!-- Inference Overrides -->
       <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
-        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Inference Presets</h4>
+        <h4 class="text-[13px] font-semibold text-slate-400 uppercase tracking-wider block">Inference Presets</h4>
         <div class="flex flex-col space-y-2">
-          <div class="flex justify-between items-center text-xs">
+          <div class="flex justify-between items-center text-[13px]">
              <span class="text-slate-400">Active Preset Override:</span>
              <span id="control-agent-preset" class="font-mono font-bold text-accentIndigo">—</span>
           </div>
           <div class="flex gap-2">
-            <select id="inference-preset-select" class="bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-white text-xs flex-1 focus:outline-none focus:border-accentIndigo">
+            <select id="inference-preset-select" class="bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-white text-[13px] flex-1 focus:outline-none focus:border-accentIndigo">
               <option value="default">Default</option>
               <option value="fast">Fast (Cost-optimized)</option>
               <option value="smart">Smart (High Reasoning)</option>
               <option value="thorough">Thorough (Long thinking / exhaustive)</option>
               <option value="strict">Strict (Sentinel checked)</option>
             </select>
-            <button onclick="setInferencePreset()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-medium text-xs px-3.5 py-1.5 rounded shadow transition-all">
+            <button onclick="setInferencePreset()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-medium text-[13px] px-3.5 py-1.5 rounded shadow transition-all">
               Apply
             </button>
-            <button onclick="clearInferencePreset()" class="border border-slate-800 hover:bg-slate-950 text-slate-400 font-medium text-xs px-3 py-1.5 rounded transition-all">
+            <button onclick="clearInferencePreset()" class="border border-slate-800 hover:bg-slate-950 text-slate-400 font-medium text-[13px] px-3 py-1.5 rounded transition-all">
               Clear
             </button>
           </div>
@@ -708,30 +725,30 @@
       
       <div class="flex-1 flex gap-4 overflow-hidden">
         <!-- Code Content -->
-        <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-slate-950 p-4 rounded-xl border border-slate-900 font-mono text-xs text-slate-300">
+        <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-slate-950 p-4 rounded-xl border border-slate-900 font-mono text-[13px] text-slate-300">
           <!-- Filled dynamically -->
         </div>
 
         <!-- Live Comment Sidebar -->
         <div class="w-72 flex flex-col bg-slate-900/60 p-4 rounded-xl border border-slate-800 space-y-3 shrink-0">
-          <h4 class="font-display font-bold text-xs text-slate-300 border-b border-slate-800 pb-2 flex items-center gap-1.5">
+          <h4 class="font-display font-bold text-[13px] text-slate-300 border-b border-slate-800 pb-2 flex items-center gap-1.5">
             <span>💬</span> Attach Line Comment
           </h4>
           
           <div class="space-y-1">
-            <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider block">Line Range (Optional)</label>
+            <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Line Range (Optional)</label>
             <div class="flex gap-2">
-              <input id="comment-line-start" type="number" placeholder="Start (12)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
-              <input id="comment-line-end" type="number" placeholder="End (14)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+              <input id="comment-line-start" type="number" placeholder="Start (12)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-[13px] text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+              <input id="comment-line-end" type="number" placeholder="End (14)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-[13px] text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
             </div>
           </div>
 
           <div class="flex-1 flex flex-col space-y-1">
-            <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider block">Comment Body</label>
-            <textarea id="comment-body" placeholder="Describe feedback or suggestions for next turn..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-white placeholder-slate-600 resize-none focus:outline-none focus:border-accentIndigo font-sans"></textarea>
+            <label class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Comment Body</label>
+            <textarea id="comment-body" placeholder="Describe feedback or suggestions for next turn..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-[13px] text-white placeholder-slate-600 resize-none focus:outline-none focus:border-accentIndigo font-sans"></textarea>
           </div>
 
-          <button onclick="submitFileComment()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-semibold text-xs py-2 px-3 rounded-lg shadow transition-all flex items-center justify-center gap-1.5 w-full">
+          <button onclick="submitFileComment()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-semibold text-[13px] py-2 px-3 rounded-lg shadow transition-all flex items-center justify-center gap-1.5 w-full">
             <span>Send Comment to Agent</span>
           </button>
         </div>
@@ -757,6 +774,11 @@
     let gatesRefreshTimer = null; // debounce for event-triggered refreshes
     let gatesPollTimer = null;    // 10 s store re-sync while connected
     let expandedEvents = new Set(); // rows with the details section open (survives SSE re-renders)
+    let agentRoster = [];           // topology nodes in list form (id, name, parent, status) for the Overview tab
+    let currentRightTab = 'overview';
+    let topologyOpen = false;       // topology starts collapsed — sparse early-session
+    let topologyUserToggled = false; // manual toggle wins over the auto-expand heuristic
+    let dagAutoSwitched = false;    // auto-jump Overview → Workflow DAG on the first real plan
     let currentModalGateId = null;
     let currentModalGateType = null;
     let activeGrants = new Set();
@@ -852,20 +874,20 @@
       document.getElementById('escalations-list').innerHTML = '<div class="text-center text-slate-500 py-3">Loading…</div>';
       document.getElementById('constitution-tab-badge').classList.add('hidden');
       discardProposal();
-      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px]">Connect to a session to load the policy.</div>';
       // Reset the policy chrome too — a stale pinned/declared badge from the
       // previous session must not survive a failed read on the next one.
       const eps = document.getElementById('egress-policy-state');
       eps.innerText = 'undeclared';
-      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      eps.className = 'bg-slate-800 text-slate-500 text-[10px] font-mono px-1.5 py-0.5 rounded-full';
       document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
-      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
-      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
+      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
+      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
 
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
-      document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
+      document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-[13px] py-6">Loading plan...</div>';
       document.getElementById('plan-version-badge').classList.add('hidden');
-      document.getElementById('workbench-list').innerHTML = '<div class="text-center text-slate-500 text-xs py-4">No active workbenches.</div>';
+      document.getElementById('workbench-list').innerHTML = '<div class="text-center text-slate-500 text-[13px] py-4">No active workbenches.</div>';
       
       updateHUD();
 
@@ -920,6 +942,7 @@
       document.getElementById('estop-btn').classList.remove('hidden');
       sessionPaused = false;
       updatePauseBtn();
+      renderOverview();
 
       // Live grants bootstrap + polling (mirrors the TUI G panel refresh loop)
       fetchGrants();
@@ -979,6 +1002,14 @@
       authoritativeGates = new Set();
       pendingGates.clear();
       closedGates.clear();
+      // Overview + topology reset: the next session starts from a clean sheet.
+      agentRoster = [];
+      topologyOpen = false;
+      topologyUserToggled = false;
+      dagAutoSwitched = false;
+      currentRightTab = 'overview';
+      switchRightTab('overview');
+      applyTopologyVisibility();
       isConnected = false;
       
       document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
@@ -1016,15 +1047,15 @@
       document.getElementById('constitution-tab-badge').classList.add('hidden');
       // Egress authoring state: no previous session's policy rules may leak.
       discardProposal();
-      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px]">Connect to a session to load the policy.</div>';
+      document.getElementById('egress-policy-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px]">Connect to a session to load the policy.</div>';
       // Reset the policy chrome too — a stale pinned/declared badge from the
       // previous session must not survive a failed read on the next one.
       const eps = document.getElementById('egress-policy-state');
       eps.innerText = 'undeclared';
-      eps.className = 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full';
+      eps.className = 'bg-slate-800 text-slate-500 text-[10px] font-mono px-1.5 py-0.5 rounded-full';
       document.getElementById('egress-pin-btn').innerHTML = '🔒 Pin local_only';
-      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
-      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
+      document.getElementById('egress-audit').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px] italic">Content-free per-turn report — totals, withholding, violations.</div>';
+      document.getElementById('envelopes-body').innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px] italic">Lock the hosts this session actually touched — authorizes the root before the agent set is known.</div>';
       
       eventList = [];
       activityList = [];
@@ -1104,6 +1135,13 @@
           activePlanData = json.result.plan;
           renderPlanFrame(activePlanData);
           renderWorkflowDAG();
+          // The DAG view comes to you when there's something to see: jump
+          // Overview → Workflow DAG on the first plan with real steps.
+          if (!dagAutoSwitched && currentRightTab === 'overview'
+              && activePlanData.steps && activePlanData.steps.length > 0) {
+            dagAutoSwitched = true;
+            switchRightTab('workflow');
+          }
         }
       } catch(e) {}
     }
@@ -1134,7 +1172,7 @@
     function renderPanelError(divId, msg) {
       const div = document.getElementById(divId);
       if (!div) return;
-      div.innerHTML = `<div class="p-2.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed font-mono text-[10px]">⚠ ${escapeHTML(msg)} — data hidden, retrying on next refresh</div>`;
+      div.innerHTML = `<div class="p-2.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed font-mono text-[11px]">⚠ ${escapeHTML(msg)} — data hidden, retrying on next refresh</div>`;
       div.classList.remove('hidden');
     }
 
@@ -1219,16 +1257,16 @@
       // the fallback) rather than injecting raw values into the attribute.
       const numId = Number(id);
       const revokeBtn = (Number.isInteger(numId) && numId >= 0)
-        ? `<button onclick="revokeGrant('${kind}', ${numId}, this)" class="bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/25 text-accentRed font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">Revoke</button>`
-        : '<button disabled title="non-numeric grant id — revoke via CLI" class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 cursor-not-allowed">Revoke</button>';
+        ? `<button onclick="revokeGrant('${kind}', ${numId}, this)" class="bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/25 text-accentRed font-bold text-[11px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">Revoke</button>`
+        : '<button disabled title="non-numeric grant id — revoke via CLI" class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[11px] px-2.5 py-1 rounded uppercase shrink-0 cursor-not-allowed">Revoke</button>';
       return `
         <div class="p-2.5 rounded-lg border border-slate-800 bg-slate-900/40 flex items-center justify-between gap-3">
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2">
-              <span class="bg-accentViolet/10 text-accentViolet border border-accentViolet/20 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">${kind === 'session_approval' ? 'approval' : 'declass'}</span>
-              <code class="text-slate-200 font-semibold text-[11px] break-all">${escapeHTML(summary)}</code>
+              <span class="bg-accentViolet/10 text-accentViolet border border-accentViolet/20 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded uppercase">${kind === 'session_approval' ? 'approval' : 'declass'}</span>
+              <code class="text-slate-200 font-semibold text-[12px] break-all">${escapeHTML(summary)}</code>
             </div>
-            <div class="text-[9px] font-mono text-slate-500 mt-1">${escapeHTML(detail)}${agentId ? ` · agent ${escapeHTML(agentId)}` : ''}</div>
+            <div class="text-[10px] font-mono text-slate-500 mt-1">${escapeHTML(detail)}${agentId ? ` · agent ${escapeHTML(agentId)}` : ''}</div>
           </div>
           ${revokeBtn}
         </div>
@@ -1248,11 +1286,11 @@
       // Root taint: null ⇒ unrestricted; otherwise a sink-set array.
       if (data.current_taint === null || data.current_taint === undefined) {
         taintBadge.innerText = 'taint: unrestricted';
-        taintBadge.className = 'bg-accentGreen/10 text-accentGreen border border-accentGreen/25 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full';
+        taintBadge.className = 'bg-accentGreen/10 text-accentGreen border border-accentGreen/25 text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full';
       } else {
         const label = Array.isArray(data.current_taint) ? sinksLabelName(data.current_taint) : 'restricted';
         taintBadge.innerText = `taint: ${label}`;
-        taintBadge.className = 'bg-accentAmber/10 text-accentAmber border border-accentAmber/25 text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full';
+        taintBadge.className = 'bg-accentAmber/10 text-accentAmber border border-accentAmber/25 text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full';
       }
 
       if (data.provider_constraint) {
@@ -1267,13 +1305,13 @@
       else tabBadge.classList.add('hidden');
 
       let html = '';
-      html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Session Approval Grants (${sessGrants.length})</h3>`;
+      html += `<div><h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2">Session Approval Grants (${sessGrants.length})</h3>`;
       html += sessGrants.length
         ? `<div class="space-y-2">${sessGrants.map(g => grantRowHTML('session_approval', g.id, renderGrantTargets(g.targets), formatGrantDetail(g), g.agent_id)).join('')}</div>`
         : '<div class="text-slate-600 italic">None active.</div>';
       html += `</div>`;
 
-      html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Egress Declassification Grants (${declassGrants.length})</h3>`;
+      html += `<div><h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2">Egress Declassification Grants (${declassGrants.length})</h3>`;
       html += declassGrants.length
         ? `<div class="space-y-2">${declassGrants.map(g => {
             const kind = (g.target && g.target.kind) || '?';
@@ -1284,11 +1322,11 @@
       html += `</div>`;
 
       if (childTaints.length > 0) {
-        html += `<div><h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider mb-2">Child Session Taints (${childTaints.length})</h3><div class="space-y-1.5">`;
+        html += `<div><h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-2">Child Session Taints (${childTaints.length})</h3><div class="space-y-1.5">`;
         html += childTaints.map(c => `
           <div class="p-2 rounded border border-accentAmber/20 bg-accentAmber/5 flex items-center justify-between gap-2">
-            <code class="text-slate-300 text-[10px] break-all">${escapeHTML(c.session_id)}</code>
-            <span class="text-accentAmber font-mono font-bold text-[10px] shrink-0">${escapeHTML(Array.isArray(c.label) ? sinksLabelName(c.label) : 'restricted')}</span>
+            <code class="text-slate-300 text-[11px] break-all">${escapeHTML(c.session_id)}</code>
+            <span class="text-accentAmber font-mono font-bold text-[11px] shrink-0">${escapeHTML(Array.isArray(c.label) ? sinksLabelName(c.label) : 'restricted')}</span>
           </div>
         `).join('');
         html += `</div></div>`;
@@ -1360,24 +1398,24 @@
       return `
         <div class="p-2 rounded border border-slate-800 bg-slate-900/40">
           <div class="flex items-center justify-between gap-2">
-            <code class="text-slate-200 text-[10px] break-all">${escapeHTML(summary)}</code>
-            <span class="font-mono font-bold text-[10px] shrink-0 ${taintCls}">${escapeHTML(labelName)}</span>
+            <code class="text-slate-200 text-[11px] break-all">${escapeHTML(summary)}</code>
+            <span class="font-mono font-bold text-[11px] shrink-0 ${taintCls}">${escapeHTML(labelName)}</span>
           </div>
-          <div class="text-[9px] font-mono text-slate-500 mt-0.5">${escapeHTML(detail)}</div>
+          <div class="text-[10px] font-mono text-slate-500 mt-0.5">${escapeHTML(detail)}</div>
         </div>
       `;
     }
 
     function labelSectionHTML(title, rows, rowFn) {
       if (!rows || rows.length === 0) return '';
-      return `<div><h4 class="text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1.5">${title} (${rows.length})</h4>
+      return `<div><h4 class="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-1.5">${title} (${rows.length})</h4>
         <div class="space-y-1.5">${rows.map(rowFn).join('')}</div></div>`;
     }
 
     function renderLabelsPanel(data) {
       const div = document.getElementById('labels-panel-body');
       const labelName = row => sinksLabelName(Array.isArray(row.label) ? row.label : []);
-      let html = `<h3 class="font-display font-bold text-[10px] text-slate-400 uppercase tracking-wider flex items-center justify-between">
+      let html = `<h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider flex items-center justify-between">
         <span>🏷️ Labeled Items (per-item taint)</span></h3>`;
       html += labelSectionHTML('Envelopes', data.envelopes, r =>
         labelRowHTML(r.envelope_id, `${r.envelope_id} · ${r.tool_name || '?'}`, labelName(r),
@@ -1392,7 +1430,7 @@
         labelRowHTML(r.trace_id, `${r.trace_id} · ${r.tool_name || '?'} @ ${r.session_id || '?'}`, labelName(r), `label ${labelName(r)}`));
       html += labelSectionHTML('Agent messages', data.agent_messages, r =>
         labelRowHTML(r.message_id, `${r.message_id} · from ${r.from_agent || '?'}`, labelName(r), `label ${labelName(r)}`));
-      if (data.truncated) html += '<div class="text-[9px] text-slate-500 italic">… list truncated (limit reached)</div>';
+      if (data.truncated) html += '<div class="text-[10px] text-slate-500 italic">… list truncated (limit reached)</div>';
       const empty = !html.match(/<div><h4/);
       if (empty) html += '<div class="text-slate-600 italic">No labeled items under this root.</div>';
       div.innerHTML = html;
@@ -1463,31 +1501,31 @@
 
       stateBadge.innerText = pinned ? '🔒 pinned local_only' : (declared ? 'declared' : 'undeclared');
       stateBadge.className = pinned
-        ? 'bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full'
+        ? 'bg-accentViolet/15 text-accentViolet border border-accentViolet/30 text-[10px] font-mono px-1.5 py-0.5 rounded-full'
         : (declared
-          ? 'bg-accentAmber/10 text-accentAmber border border-accentAmber/30 text-[9px] font-mono px-1.5 py-0.5 rounded-full'
-          : 'bg-slate-800 text-slate-500 text-[9px] font-mono px-1.5 py-0.5 rounded-full');
+          ? 'bg-accentAmber/10 text-accentAmber border border-accentAmber/30 text-[10px] font-mono px-1.5 py-0.5 rounded-full'
+          : 'bg-slate-800 text-slate-500 text-[10px] font-mono px-1.5 py-0.5 rounded-full');
       pinBtn.innerHTML = pinned ? '🔓 Unpin provider' : '🔒 Pin local_only';
 
       let html = '';
       if (!declared) {
-        html = '<div class="text-slate-500 italic text-[10px]">No session policy declared — global defaults apply. Rules can only restrict; nothing here can widen egress.</div>';
+        html = '<div class="text-slate-500 italic text-[11px]">No session policy declared — global defaults apply. Rules can only restrict; nothing here can widen egress.</div>';
       } else {
         if (rules.length) {
           html += `<div class="space-y-1">${rules.map((r, i) => `
             <div class="flex items-center justify-between gap-2 p-1.5 rounded border border-slate-800 bg-slate-900/40">
               <div class="min-w-0">
-                <code class="text-slate-200 text-[10px]">${escapeHTML(r.source)}${r.path ? `<span class="text-accentCyan">:${escapeHTML(r.path)}</span>` : ''}</code>
-                <span class="text-accentAmber font-mono text-[9px] ml-1.5">→ ${escapeHTML(ruleLabelName(r.label))}</span>
+                <code class="text-slate-200 text-[11px]">${escapeHTML(r.source)}${r.path ? `<span class="text-accentCyan">:${escapeHTML(r.path)}</span>` : ''}</code>
+                <span class="text-accentAmber font-mono text-[10px] ml-1.5">→ ${escapeHTML(ruleLabelName(r.label))}</span>
               </div>
-              <button onclick="removeRule(${i})" class="text-slate-500 hover:text-accentRed text-[9px] font-mono shrink-0" title="remove rule">✕</button>
+              <button onclick="removeRule(${i})" class="text-slate-500 hover:text-accentRed text-[10px] font-mono shrink-0" title="remove rule">✕</button>
             </div>`).join('')}</div>`;
         }
         if (policy.default_label) {
-          html += `<div class="text-[9px] font-mono text-slate-500">default label: <span class="text-accentAmber">${escapeHTML(ruleLabelName(policy.default_label))}</span></div>`;
+          html += `<div class="text-[10px] font-mono text-slate-500">default label: <span class="text-accentAmber">${escapeHTML(ruleLabelName(policy.default_label))}</span></div>`;
         }
         if (setBy || updatedAt) {
-          html += `<div class="text-[9px] font-mono text-slate-600">by ${escapeHTML(setBy || '?')}${updatedAt ? ` · ${escapeHTML(updatedAt)}` : ''}</div>`;
+          html += `<div class="text-[10px] font-mono text-slate-600">by ${escapeHTML(setBy || '?')}${updatedAt ? ` · ${escapeHTML(updatedAt)}` : ''}</div>`;
         }
       }
       body.innerHTML = html;
@@ -1548,28 +1586,28 @@
         if (!r.rules || !r.rules.length) {
           pendingProposal = null;
           div.classList.remove('hidden');
-          div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ no rules proposed — ${escapeHTML(r.note || 'intent not recognized')}${(r.known_sources || []).length ? `<br><span class="text-slate-400">known sources: ${escapeHTML(r.known_sources.join(' · '))}</span>` : ''}</div>`;
+          div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[11px] font-mono">✗ no rules proposed — ${escapeHTML(r.note || 'intent not recognized')}${(r.known_sources || []).length ? `<br><span class="text-slate-400">known sources: ${escapeHTML(r.known_sources.join(' · '))}</span>` : ''}</div>`;
           return;
         }
         div.classList.remove('hidden');
         div.innerHTML = `
           <div class="p-2.5 rounded border border-accentViolet/30 bg-accentViolet/5 space-y-1.5">
-            <div class="text-accentViolet font-bold text-[10px] uppercase">⚒ Proposed rules — "${escapeHTML(r.intent)}" (${escapeHTML(r.kind)})</div>
+            <div class="text-accentViolet font-bold text-[11px] uppercase">⚒ Proposed rules — "${escapeHTML(r.intent)}" (${escapeHTML(r.kind)})</div>
             ${r.rules.map(pr => `
-              <div class="text-[10px] font-mono text-slate-200">
+              <div class="text-[11px] font-mono text-slate-200">
                 ${escapeHTML(pr.source)}${pr.path ? `<span class="text-accentCyan">:${escapeHTML(pr.path)}</span>` : ''} → <span class="text-accentAmber">${escapeHTML(ruleLabelName(pr.label))}</span>
-                <div class="text-[9px] text-slate-500">${escapeHTML(pr.rationale || '')}</div>
+                <div class="text-[10px] text-slate-500">${escapeHTML(pr.rationale || '')}</div>
               </div>`).join('')}
-            <div class="text-[9px] text-slate-500 italic">Declaration only takes effect when you confirm — the natural language is an authoring convenience, not enforcement (Lawful-Executor §14).</div>
+            <div class="text-[10px] text-slate-500 italic">Declaration only takes effect when you confirm — the natural language is an authoring convenience, not enforcement (Lawful-Executor §14).</div>
             <div class="flex gap-1.5">
-              <button onclick="declareProposal()" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">✓ Declare</button>
-              <button onclick="discardProposal()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[9px] px-2 py-1 rounded uppercase transition-all">✕ Discard</button>
+              <button onclick="declareProposal()" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">✓ Declare</button>
+              <button onclick="discardProposal()" class="bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 font-bold text-[10px] px-2 py-1 rounded uppercase transition-all">✕ Discard</button>
             </div>
           </div>
         `;
       } catch (e) {
         div.classList.remove('hidden');
-        div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ propose failed: ${escapeHTML(e.message)}</div>`;
+        div.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[11px] font-mono">✗ propose failed: ${escapeHTML(e.message)}</div>`;
       }
     }
 
@@ -1604,14 +1642,14 @@
         const r = await egressPolicyRpc('egress.audit', { session_id: sid, limit: 2000 });
         const report = r.report || {};
         const turns = report.turns || [];
-        let html = `<div class="text-[10px] font-mono text-slate-400 flex gap-3 flex-wrap">
+        let html = `<div class="text-[11px] font-mono text-slate-400 flex gap-3 flex-wrap">
             <span class="text-accentAmber">${report.total_withheld || 0} withheld</span>
             <span class="text-accentRed">${report.total_violations || 0} violations</span>
             <span class="text-slate-400">${report.total_boundary_refusals || 0} boundary refusals</span>
             ${r.truncated ? '<span class="text-slate-500 italic">(window truncated)</span>' : ''}
           </div>`;
         if (!turns.length) {
-          html += '<div class="text-slate-500 italic text-[10px] py-1">No egress events recorded in the scanned window.</div>';
+          html += '<div class="text-slate-500 italic text-[11px] py-1">No egress events recorded in the scanned window.</div>';
         } else {
           html += turns.slice(-12).reverse().map(t => {
             const rows = t.rows || [];
@@ -1619,8 +1657,8 @@
             return `
               <div class="p-1.5 rounded border ${sev ? 'border-accentAmber/25 bg-accentAmber/5' : 'border-slate-800 bg-slate-900/40'}">
                 <div class="flex items-center justify-between gap-2">
-                  <code class="text-slate-300 text-[10px]">turn ${escapeHTML(t.turn_id || '—')}</code>
-                  <span class="text-[9px] font-mono text-slate-500">${rows.length} event${rows.length === 1 ? '' : 's'}</span>
+                  <code class="text-slate-300 text-[11px]">turn ${escapeHTML(t.turn_id || '—')}</code>
+                  <span class="text-[10px] font-mono text-slate-500">${rows.length} event${rows.length === 1 ? '' : 's'}</span>
                 </div>
                 ${rows.slice(0, 3).map(x => {
                   const f = x.fields || {};
@@ -1628,13 +1666,13 @@
                   // tool_name-only row gets no button (it would never resolve).
                   const lid = f.tool_call_id || '';
                   const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(lid));
-                  return `<div class="text-[9px] font-mono text-slate-400 truncate">
+                  return `<div class="text-[10px] font-mono text-slate-400 truncate">
                     <span class="${x.action.includes('withheld') || x.action.includes('violation') ? 'text-accentRed' : 'text-slate-500'}">${escapeHTML(x.action.replace('egress.', ''))}</span>
                     ${f.tool_name ? escapeHTML(f.tool_name) : ''}${f.target_sink ? ` → ${escapeHTML(f.target_sink)}` : ''}
                     ${safeId ? `<button onclick="showLineage('${lid}')" class="ml-1 text-accentIndigo hover:underline uppercase">why?</button>` : ''}
                   </div>`;
                 }).join('')}
-                ${rows.length > 3 ? `<div class="text-[9px] text-slate-600 italic">+${rows.length - 3} more</div>` : ''}
+                ${rows.length > 3 ? `<div class="text-[10px] text-slate-600 italic">+${rows.length - 3} more</div>` : ''}
               </div>`;
           }).join('');
         }
@@ -1651,33 +1689,33 @@
       const modal = document.getElementById('event-detail-modal');
       const title = document.getElementById('event-detail-title');
       const content = document.getElementById('event-detail-content');
-      title.innerHTML = `<span>🧬</span> Taint Lineage <span class="font-mono text-accentIndigo text-xs ml-1">${escapeHTML(fromId)}</span>`;
-      content.innerHTML = '<div class="text-center text-slate-500 py-8 text-xs">Walking the label chain…</div>';
+      title.innerHTML = `<span>🧬</span> Taint Lineage <span class="font-mono text-accentIndigo text-[13px] ml-1">${escapeHTML(fromId)}</span>`;
+      content.innerHTML = '<div class="text-center text-slate-500 py-8 text-[13px]">Walking the label chain…</div>';
       modal.classList.remove('hidden');
       try {
         const r = await egressPolicyRpc('egress.lineage', { root_session_id: sid, from: fromId, limit: 500 });
         const nodes = r.nodes || [];
         const originName = o => String(o || '?').replace(/_/g, ' ');
         let html = '';
-        if (r.incomplete) html += '<div class="p-2 rounded border border-accentAmber/30 bg-accentAmber/10 text-accentAmber text-[10px] font-mono mb-2">⚠ record incomplete — a parent hop is missing from the scanned rows (retention or dropped write); chain shown is partial.</div>';
-        else if (r.truncated) html += '<div class="p-2 rounded border border-slate-700 bg-slate-900 text-slate-400 text-[10px] font-mono mb-2">scan window filled — widening the limit may reveal more.</div>';
+        if (r.incomplete) html += '<div class="p-2 rounded border border-accentAmber/30 bg-accentAmber/10 text-accentAmber text-[11px] font-mono mb-2">⚠ record incomplete — a parent hop is missing from the scanned rows (retention or dropped write); chain shown is partial.</div>';
+        else if (r.truncated) html += '<div class="p-2 rounded border border-slate-700 bg-slate-900 text-slate-400 text-[11px] font-mono mb-2">scan window filled — widening the limit may reveal more.</div>';
         if (!nodes.length) {
-          html += '<div class="text-center text-slate-500 py-4 text-xs">No lineage recorded for this id (unrestricted or out of window).</div>';
+          html += '<div class="text-center text-slate-500 py-4 text-[13px]">No lineage recorded for this id (unrestricted or out of window).</div>';
         } else {
-          html += `<div class="text-[9px] font-mono text-slate-500 mb-2">origins: ${(r.origins || []).join(', ') || '—'}</div>`;
+          html += `<div class="text-[10px] font-mono text-slate-500 mb-2">origins: ${(r.origins || []).join(', ') || '—'}</div>`;
           html += nodes.map(n => `
             <div class="p-2 rounded border border-slate-800 bg-slate-900/40 mb-1.5">
               <div class="flex items-center justify-between gap-2">
-                <code class="text-slate-200 text-[10px]">${escapeHTML(n.envelope_id)}${n.tool_name ? ` · ${escapeHTML(n.tool_name)}` : ''}</code>
-                <span class="text-accentAmber font-mono text-[9px] shrink-0">${escapeHTML(ruleLabelName(n.label))}</span>
+                <code class="text-slate-200 text-[11px]">${escapeHTML(n.envelope_id)}${n.tool_name ? ` · ${escapeHTML(n.tool_name)}` : ''}</code>
+                <span class="text-accentAmber font-mono text-[10px] shrink-0">${escapeHTML(ruleLabelName(n.label))}</span>
               </div>
-              <div class="text-[9px] font-mono text-slate-500 mt-0.5">because: <span class="text-slate-300">${escapeHTML(originName(n.origin))}</span>${n.turn_id ? ` · turn ${escapeHTML(n.turn_id)}` : ''} · ${formatTime(n.timestamp)}</div>
-              ${(n.matched_rules || []).length ? `<div class="text-[9px] font-mono text-slate-600">via ${escapeHTML((n.matched_rules || []).join(', '))}</div>` : ''}
+              <div class="text-[10px] font-mono text-slate-500 mt-0.5">because: <span class="text-slate-300">${escapeHTML(originName(n.origin))}</span>${n.turn_id ? ` · turn ${escapeHTML(n.turn_id)}` : ''} · ${formatTime(n.timestamp)}</div>
+              ${(n.matched_rules || []).length ? `<div class="text-[10px] font-mono text-slate-600">via ${escapeHTML((n.matched_rules || []).join(', '))}</div>` : ''}
             </div>`).join('');
         }
         content.innerHTML = html;
       } catch (e) {
-        content.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">✗ lineage failed: ${escapeHTML(e.message)}</div>`;
+        content.innerHTML = `<div class="p-2 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[11px] font-mono">✗ lineage failed: ${escapeHTML(e.message)}</div>`;
       }
     }
 
@@ -1705,7 +1743,7 @@
         // failures must not keep presenting stale streams as live.
         if (++pollFailures.activity >= 2) {
           const strip = document.getElementById('llm-activity-strip');
-          strip.innerHTML = `<div class="text-[10px] font-mono text-accentRed/80">⚠ llm.activity unavailable (${escapeHTML(e.message)}) — stream state hidden</div>`;
+          strip.innerHTML = `<div class="text-[11px] font-mono text-accentRed/80">⚠ llm.activity unavailable (${escapeHTML(e.message)}) — stream state hidden</div>`;
           strip.classList.remove('hidden');
         }
       }
@@ -1724,7 +1762,7 @@
         const idleTxt = s.phase === 'awaiting_first_byte' ? '' :
           ` · idle ${(s.since_last_chunk_ms / 1000).toFixed(1)}s/${(s.idle_budget_ms / 1000).toFixed(0)}s`;
         return `
-          <div class="flex items-center justify-between gap-2 text-[10px] font-mono ${atRisk ? 'text-accentRed' : 'text-slate-400'}">
+          <div class="flex items-center justify-between gap-2 text-[11px] font-mono ${atRisk ? 'text-accentRed' : 'text-slate-400'}">
             <span class="truncate">🧠 <span class="text-slate-200 font-semibold">${escapeHTML(s.agent_id || '?')}</span> · ${escapeHTML(s.model || '?')} · ${phase}${atRisk ? ' · ⚠ near stall budget' : ''}</span>
             <span class="shrink-0">${(s.elapsed_ms / 1000).toFixed(1)}s · ${s.chunks || 0} chunks${idleTxt}</span>
           </div>
@@ -1744,10 +1782,10 @@
       const vis = isConnected ? '' : ' hidden';
       if (sessionPaused) {
         btn.innerHTML = '<span>⏵</span> Resume';
-        btn.className = 'bg-accentGreen/90 hover:bg-accentGreen active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
+        btn.className = 'bg-accentGreen/90 hover:bg-accentGreen active:scale-95 text-slate-950 font-bold text-[13px] px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
       } else {
         btn.innerHTML = '<span>⏸</span> Pause';
-        btn.className = 'bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
+        btn.className = 'bg-accentAmber/90 hover:bg-accentAmber active:scale-95 text-slate-950 font-bold text-[13px] px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 flex items-center gap-1.5' + vis;
       }
     }
 
@@ -1806,21 +1844,21 @@
         // plan_id lands in an inline handler — only safe ids get a live button.
         const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(p.plan_id));
         const approveBtn = safeId
-          ? `<button onclick="approvePlan('${p.plan_id}')" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[10px] px-3 py-1 rounded uppercase shrink-0 transition-all">✓ Approve</button>`
-          : '<button disabled class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[10px] px-3 py-1 rounded uppercase shrink-0 cursor-not-allowed" title="non-standard plan id — approve via CLI">✓ Approve</button>';
+          ? `<button onclick="approvePlan('${p.plan_id}')" class="bg-accentGreen/15 border border-accentGreen/40 hover:bg-accentGreen/30 text-accentGreen font-bold text-[11px] px-3 py-1 rounded uppercase shrink-0 transition-all">✓ Approve</button>`
+          : '<button disabled class="bg-slate-800 border border-slate-700 text-slate-500 font-bold text-[11px] px-3 py-1 rounded uppercase shrink-0 cursor-not-allowed" title="non-standard plan id — approve via CLI">✓ Approve</button>';
         return `
           <div class="p-3 rounded-xl border border-accentAmber/30 bg-accentAmber/5 space-y-1.5">
             <div class="flex items-center justify-between gap-2">
-              <span class="font-display font-bold text-slate-100 text-xs truncate" title="${escapeHTML(p.title)}">${escapeHTML(p.title)}</span>
+              <span class="font-display font-bold text-slate-100 text-[13px] truncate" title="${escapeHTML(p.title)}">${escapeHTML(p.title)}</span>
               ${approveBtn}
             </div>
-            <div class="text-[9px] font-mono text-slate-500">${escapeHTML(p.plan_id)} · v${p.version} · by ${escapeHTML(p.created_by_agent_id || '?')}${p.status === 'stale' ? ' · <span class="text-accentRed">STALE</span>' : ''}${p.expires_at ? ` · exp ${escapeHTML(p.expires_at)}` : ''}</div>
+            <div class="text-[10px] font-mono text-slate-500">${escapeHTML(p.plan_id)} · v${p.version} · by ${escapeHTML(p.created_by_agent_id || '?')}${p.status === 'stale' ? ' · <span class="text-accentRed">STALE</span>' : ''}${p.expires_at ? ` · exp ${escapeHTML(p.expires_at)}` : ''}</div>
             ${p.objective ? `<p class="text-slate-300 leading-relaxed">${escapeHTML(p.objective.length > 220 ? p.objective.slice(0, 220) + '…' : p.objective)}</p>` : ''}
             <div class="space-y-0.5">
-              ${steps.map((s, i) => `<div class="flex items-center gap-1.5 text-[10px]"><span class="text-slate-600 font-mono">${i + 1}.</span><span class="font-mono text-[8px] uppercase ${ownerBadge(s.owner)}">${escapeHTML(s.owner || '?')}</span><span class="text-slate-300 truncate">${escapeHTML(s.title)}${s.agent_id ? ` <span class="text-slate-500 font-mono">→ ${escapeHTML(s.agent_id)}</span>` : ''}</span></div>`).join('')}
-              ${more > 0 ? `<div class="text-[9px] text-slate-500 italic">+${more} more step${more > 1 ? 's' : ''}</div>` : ''}
+              ${steps.map((s, i) => `<div class="flex items-center gap-1.5 text-[11px]"><span class="text-slate-600 font-mono">${i + 1}.</span><span class="font-mono text-[8px] uppercase ${ownerBadge(s.owner)}">${escapeHTML(s.owner || '?')}</span><span class="text-slate-300 truncate">${escapeHTML(s.title)}${s.agent_id ? ` <span class="text-slate-500 font-mono">→ ${escapeHTML(s.agent_id)}</span>` : ''}</span></div>`).join('')}
+              ${more > 0 ? `<div class="text-[10px] text-slate-500 italic">+${more} more step${more > 1 ? 's' : ''}</div>` : ''}
             </div>
-            ${(p.capability_envelope || []).length ? `<div class="text-[9px] font-mono text-accentViolet">envelope: ${p.capability_envelope.length} capabilit${p.capability_envelope.length === 1 ? 'y' : 'ies'} — approval locks it for the session</div>` : ''}
+            ${(p.capability_envelope || []).length ? `<div class="text-[10px] font-mono text-accentViolet">envelope: ${p.capability_envelope.length} capabilit${p.capability_envelope.length === 1 ? 'y' : 'ies'} — approval locks it for the session</div>` : ''}
           </div>
         `;
       }).join('');
@@ -1931,13 +1969,13 @@
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="${kCls} border text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">${kLabel}</span>
-                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border ${stageCls(e.stage)} shrink-0">${escapeHTML(e.stage)}${e.outcome ? ` · ${escapeHTML(e.outcome)}` : ''}</span>
-                ${e.verdict ? `<span class="text-[9px] font-mono text-slate-500 shrink-0">verdict: ${escapeHTML(e.verdict)}</span>` : ''}
+                <span class="text-[10px] font-mono px-1.5 py-0.5 rounded border ${stageCls(e.stage)} shrink-0">${escapeHTML(e.stage)}${e.outcome ? ` · ${escapeHTML(e.outcome)}` : ''}</span>
+                ${e.verdict ? `<span class="text-[10px] font-mono text-slate-500 shrink-0">verdict: ${escapeHTML(e.verdict)}</span>` : ''}
               </div>
-              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(e.recorded_at)}</span>
+              <span class="text-[10px] font-mono text-slate-600 shrink-0">${formatTime(e.recorded_at)}</span>
             </div>
-            <div class="text-slate-200 text-[11px] mt-1 leading-snug">${escapeHTML(e.summary)}</div>
-            <div class="text-[9px] font-mono text-slate-500 mt-0.5">
+            <div class="text-slate-200 text-[12px] mt-1 leading-snug">${escapeHTML(e.summary)}</div>
+            <div class="text-[10px] font-mono text-slate-500 mt-0.5">
               ${e.target_agent ? `target: ${escapeHTML(e.target_agent)}` : ''}${(e.target_agent_candidates || []).length ? ` · ${e.target_agent_candidates.length} candidate revision(s) held at gate` : ''}
             </div>
           </div>
@@ -2013,16 +2051,16 @@
           <div class="p-2 rounded border border-slate-800 bg-slate-900/40">
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 min-w-0">
-                <code class="text-slate-200 text-[10px] truncate" title="${escapeHTML(String(numId))}">${escapeHTML(String(numId))}</code>
-                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border ${statusCls(j.status)} shrink-0">${escapeHTML(j.status)}</span>
+                <code class="text-slate-200 text-[11px] truncate" title="${escapeHTML(String(numId))}">${escapeHTML(String(numId))}</code>
+                <span class="text-[10px] font-mono px-1.5 py-0.5 rounded border ${statusCls(j.status)} shrink-0">${escapeHTML(j.status)}</span>
               </div>
               ${safe && j.status === 'active'
-                ? `<button onclick="triggerCronJob('${escapeHTML(String(numId))}', this)" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[10px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">▶ Fire</button>`
+                ? `<button onclick="triggerCronJob('${escapeHTML(String(numId))}', this)" class="bg-accentIndigo/15 border border-accentIndigo/30 hover:bg-accentIndigo/30 text-accentIndigo font-bold text-[11px] px-2.5 py-1 rounded uppercase shrink-0 transition-all">▶ Fire</button>`
                 : ''}
             </div>
-            <div class="text-[9px] font-mono text-slate-500 mt-1">${escapeHTML(j.owner_agent_id || '?')} → ${escapeHTML(j.target_agent_id || '?')} · <span class="text-accentCyan">${escapeHTML(j.cron_expr)}</span> (${escapeHTML(j.timezone || 'UTC')})</div>
-            <div class="text-[9px] font-mono text-slate-500">next: ${escapeHTML(j.next_run_at || '—')}${j.last_run_at ? ` · last: ${escapeHTML(j.last_run_at)}` : ''}</div>
-            ${j.last_error ? `<div class="text-[9px] font-mono text-accentRed/80 mt-0.5">⚠ ${escapeHTML(j.last_error)}</div>` : ''}
+            <div class="text-[10px] font-mono text-slate-500 mt-1">${escapeHTML(j.owner_agent_id || '?')} → ${escapeHTML(j.target_agent_id || '?')} · <span class="text-accentCyan">${escapeHTML(j.cron_expr)}</span> (${escapeHTML(j.timezone || 'UTC')})</div>
+            <div class="text-[10px] font-mono text-slate-500">next: ${escapeHTML(j.next_run_at || '—')}${j.last_run_at ? ` · last: ${escapeHTML(j.last_run_at)}` : ''}</div>
+            ${j.last_error ? `<div class="text-[10px] font-mono text-accentRed/80 mt-0.5">⚠ ${escapeHTML(j.last_error)}</div>` : ''}
           </div>
         `;
       }).join('');
@@ -2093,22 +2131,22 @@
       div.innerHTML = proposals.map(p => {
         const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(p.proposal_id));
         const act = (status, label, cls) => safeId
-          ? `<button onclick="decideProposal('${p.proposal_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          ? `<button onclick="decideProposal('${p.proposal_id}', '${status}', this)" class="${cls} font-bold text-[11px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
           : '';
         return `
           <div class="p-2.5 rounded border ${p.sla_breached_at ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="bg-accentAmber/10 text-accentAmber border border-accentAmber/20 text-[8px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">${escapeHTML(p.kind || 'proposal')}</span>
-                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(p.proposal_id))}">${escapeHTML(String(p.proposal_id))}</code>
+                <code class="text-slate-400 text-[10px] truncate" title="${escapeHTML(String(p.proposal_id))}">${escapeHTML(String(p.proposal_id))}</code>
                 ${p.sla_breached_at ? '<span class="text-accentRed text-[8px] font-mono font-bold shrink-0">⚠ SLA BREACHED</span>' : ''}
               </div>
-              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(p.created_at)}</span>
+              <span class="text-[10px] font-mono text-slate-600 shrink-0">${formatTime(p.created_at)}</span>
             </div>
-            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(p.justification || '')}</div>
-            ${p.proposed_text ? `<pre class="text-[9px] font-mono text-slate-400 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-20 overflow-y-auto">${escapeHTML(String(p.proposed_text).slice(0, 400))}${String(p.proposed_text).length > 400 ? '…' : ''}</pre>` : ''}
+            <div class="text-slate-200 text-[12px] leading-snug">${escapeHTML(p.justification || '')}</div>
+            ${p.proposed_text ? `<pre class="text-[10px] font-mono text-slate-400 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-20 overflow-y-auto">${escapeHTML(String(p.proposed_text).slice(0, 400))}${String(p.proposed_text).length > 400 ? '…' : ''}</pre>` : ''}
             <div class="flex items-center justify-between gap-2 flex-wrap">
-              <span class="text-[9px] font-mono text-slate-500">${escapeHTML(p.proposer_agent_id || '?')}${p.target_id ? ` · target ${escapeHTML(p.target_id)}` : ''}</span>
+              <span class="text-[10px] font-mono text-slate-500">${escapeHTML(p.proposer_agent_id || '?')}${p.target_id ? ` · target ${escapeHTML(p.target_id)}` : ''}</span>
               <div class="flex gap-1.5">
                 ${act('approved', '✓ Approve', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
                 ${act('rejected', '✗ Reject', 'bg-accentRed/10 border-accentRed/40 hover:bg-accentRed/25 text-accentRed')}
@@ -2195,7 +2233,7 @@
       div.innerHTML = flags.map(f => {
         const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(f.flag_id));
         const act = (status, label, cls) => safeId
-          ? `<button onclick="resolveFlag('${f.flag_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          ? `<button onclick="resolveFlag('${f.flag_id}', '${status}', this)" class="${cls} font-bold text-[11px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
           : '';
         const evidence = evidencePreview(f.evidence_json);
         return `
@@ -2203,16 +2241,16 @@
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="text-[8px] font-mono px-1.5 py-0.5 rounded uppercase border shrink-0 ${sevCls(f.severity)}">${escapeHTML(f.severity || 'low')}</span>
-                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(f.flag_id))}">${escapeHTML(String(f.flag_id))}</code>
+                <code class="text-slate-400 text-[10px] truncate" title="${escapeHTML(String(f.flag_id))}">${escapeHTML(String(f.flag_id))}</code>
                 ${f.status !== 'pending' ? `<span class="text-[8px] font-mono text-slate-500 shrink-0">${escapeHTML(f.status)}</span>` : ''}
                 ${f.sla_breached_at ? '<span class="text-accentRed text-[8px] font-mono font-bold shrink-0">⚠ SLA BREACHED</span>' : ''}
               </div>
-              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(f.created_at)}</span>
+              <span class="text-[10px] font-mono text-slate-600 shrink-0">${formatTime(f.created_at)}</span>
             </div>
-            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(f.observation || '')}</div>
-            ${evidence ? `<pre class="text-[9px] font-mono text-slate-500 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-14 overflow-y-auto">${escapeHTML(evidence.slice(0, 300))}${evidence.length > 300 ? '…' : ''}</pre>` : ''}
+            <div class="text-slate-200 text-[12px] leading-snug">${escapeHTML(f.observation || '')}</div>
+            ${evidence ? `<pre class="text-[10px] font-mono text-slate-500 bg-slate-950 p-1.5 rounded border border-slate-900 whitespace-pre-wrap max-h-14 overflow-y-auto">${escapeHTML(evidence.slice(0, 300))}${evidence.length > 300 ? '…' : ''}</pre>` : ''}
             <div class="flex items-center justify-between gap-2 flex-wrap">
-              <span class="text-[9px] font-mono text-slate-500">${escapeHTML(f.reporter_agent_id || '?')} · ${escapeHTML(f.subject_ref || '')}</span>
+              <span class="text-[10px] font-mono text-slate-500">${escapeHTML(f.reporter_agent_id || '?')} · ${escapeHTML(f.subject_ref || '')}</span>
               <div class="flex gap-1.5">
                 ${act('confirmed', '✓ Confirm', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
                 ${act('dismissed', '✗ Dismiss', 'bg-accentRed/10 border-accentRed/40 hover:bg-accentRed/25 text-accentRed')}
@@ -2276,20 +2314,20 @@
       div.innerHTML = list.map(e => {
         const safeId = /^[A-Za-z0-9_.\-]+$/.test(String(e.escalation_id));
         const act = (status, label, cls) => safeId
-          ? `<button onclick="resolveEscalation('${e.escalation_id}', '${status}', this)" class="${cls} font-bold text-[10px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
+          ? `<button onclick="resolveEscalation('${e.escalation_id}', '${status}', this)" class="${cls} font-bold text-[11px] px-2 py-1 rounded uppercase shrink-0 transition-all border">${label}</button>`
           : '';
         return `
           <div class="p-2.5 rounded border ${e.status === 'stale' ? 'border-accentRed/40 bg-accentRed/5' : 'border-slate-800 bg-slate-900/40'} space-y-1">
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="text-[8px] font-mono px-1.5 py-0.5 rounded uppercase border shrink-0 ${statusCls(e.status)}">${escapeHTML(e.status || 'pending')}</span>
-                <code class="text-slate-400 text-[9px] truncate" title="${escapeHTML(String(e.escalation_id))}">${escapeHTML(String(e.escalation_id))}</code>
+                <code class="text-slate-400 text-[10px] truncate" title="${escapeHTML(String(e.escalation_id))}">${escapeHTML(String(e.escalation_id))}</code>
                 ${e.escalation_type ? `<span class="text-[8px] font-mono text-slate-500 shrink-0">${escapeHTML(e.escalation_type)}</span>` : ''}
               </div>
-              <span class="text-[9px] font-mono text-slate-600 shrink-0">${formatTime(e.created_at)}</span>
+              <span class="text-[10px] font-mono text-slate-600 shrink-0">${formatTime(e.created_at)}</span>
             </div>
-            <div class="text-slate-200 text-[11px] leading-snug">${escapeHTML(e.planner_synthesis || '')}</div>
-            <div class="text-[9px] font-mono text-slate-500">${escapeHTML(e.agent_id || '?')} · rev ${escapeHTML(String(e.revision_id || '?')).slice(0, 20)}${(e.role_verdicts || []).length ? ` · ${(e.role_verdicts.filter(v => v.passed)).length}/${e.role_verdicts.length} roles passed` : ''}</div>
+            <div class="text-slate-200 text-[12px] leading-snug">${escapeHTML(e.planner_synthesis || '')}</div>
+            <div class="text-[10px] font-mono text-slate-500">${escapeHTML(e.agent_id || '?')} · rev ${escapeHTML(String(e.revision_id || '?')).slice(0, 20)}${(e.role_verdicts || []).length ? ` · ${(e.role_verdicts.filter(v => v.passed)).length}/${e.role_verdicts.length} roles passed` : ''}</div>
             ${(e.role_verdicts || []).length ? `<div class="flex gap-1 flex-wrap">${e.role_verdicts.map(v => `<span class="text-[8px] font-mono px-1 py-0.5 rounded border ${v.passed ? 'text-accentGreen border-accentGreen/30 bg-accentGreen/5' : 'text-accentRed border-accentRed/30 bg-accentRed/5'}">${escapeHTML(v.role)} ${v.passed ? '✓' : '✗'}</span>`).join('')}</div>` : ''}
             <div class="flex items-center justify-end gap-1.5">
               ${act('approved', '✓ Approve', 'bg-accentGreen/10 border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen')}
@@ -2385,7 +2423,7 @@
       const observed = data.observed_hosts || [];
       const pending = data.pending_hosts || [];
       if (!proposed.length && !active.length && !observed.length) {
-        div.innerHTML = '<div class="text-center text-slate-500 py-2 text-[10px] italic">No observed hosts yet — nothing to propose.</div>';
+        div.innerHTML = '<div class="text-center text-slate-500 py-2 text-[11px] italic">No observed hosts yet — nothing to propose.</div>';
         return;
       }
       const recRow = (e, isActive) => {
@@ -2394,22 +2432,22 @@
         return `
           <div class="p-2 rounded border ${isActive ? 'border-accentGreen/30 bg-accentGreen/5' : 'border-slate-800 bg-slate-900/40'}">
             <div class="flex items-center justify-between gap-2">
-              <code class="text-slate-200 text-[10px]">env #${e.id}${e.source ? ` · ${escapeHTML(e.source)}` : ''}${isActive && e.locked_by ? ` · by ${escapeHTML(e.locked_by)}` : ''}</code>
+              <code class="text-slate-200 text-[11px]">env #${e.id}${e.source ? ` · ${escapeHTML(e.source)}` : ''}${isActive && e.locked_by ? ` · by ${escapeHTML(e.locked_by)}` : ''}</code>
               ${safeId && !isActive
-                ? `<button onclick="lockEnvelope(${e.id}, this)" class="bg-accentGreen/10 border border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen font-bold text-[9px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">🔒 Lock</button>`
+                ? `<button onclick="lockEnvelope(${e.id}, this)" class="bg-accentGreen/10 border border-accentGreen/40 hover:bg-accentGreen/25 text-accentGreen font-bold text-[10px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">🔒 Lock</button>`
                 : ''}
               ${safeId && isActive
-                ? `<button onclick="revokeEnvelope(${e.id}, this)" class="bg-accentRed/10 border border-accentRed/40 hover:bg-accentRed/25 text-accentRed font-bold text-[9px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">✕ Revoke</button>`
+                ? `<button onclick="revokeEnvelope(${e.id}, this)" class="bg-accentRed/10 border border-accentRed/40 hover:bg-accentRed/25 text-accentRed font-bold text-[10px] px-2 py-0.5 rounded uppercase shrink-0 transition-all">✕ Revoke</button>`
                 : ''}
             </div>
-            <div class="text-[9px] font-mono text-slate-400 mt-0.5 break-all">${hosts.map(h => escapeHTML(h)).join(' · ') || '—'}</div>
+            <div class="text-[10px] font-mono text-slate-400 mt-0.5 break-all">${hosts.map(h => escapeHTML(h)).join(' · ') || '—'}</div>
           </div>`;
       };
       let html = '';
-      if (active.length) html += `<div class="text-[9px] font-mono text-slate-500 uppercase">Active locks (${active.length})</div>` + active.map(e => recRow(e, true)).join('');
-      if (proposed.length) html += `<div class="text-[9px] font-mono text-slate-500 uppercase pt-1">Proposed (${proposed.length})</div>` + proposed.map(e => recRow(e, false)).join('');
+      if (active.length) html += `<div class="text-[10px] font-mono text-slate-500 uppercase">Active locks (${active.length})</div>` + active.map(e => recRow(e, true)).join('');
+      if (proposed.length) html += `<div class="text-[10px] font-mono text-slate-500 uppercase pt-1">Proposed (${proposed.length})</div>` + proposed.map(e => recRow(e, false)).join('');
       if (observed.length || pending.length) {
-        html += `<div class="text-[9px] font-mono text-slate-500 pt-1">observed: ${observed.map(h => escapeHTML(h)).join(' · ') || '—'}${pending.length ? `<br><span class="text-accentAmber">pending proposal: ${pending.map(h => escapeHTML(h)).join(' · ')}</span>` : ''}</div>`;
+        html += `<div class="text-[10px] font-mono text-slate-500 pt-1">observed: ${observed.map(h => escapeHTML(h)).join(' · ') || '—'}${pending.length ? `<br><span class="text-accentAmber">pending proposal: ${pending.map(h => escapeHTML(h)).join(' · ')}</span>` : ''}</div>`;
       }
       div.innerHTML = html;
     }
@@ -2507,15 +2545,15 @@
                   <span class="text-[8px] font-mono font-bold uppercase ${m.sender === 'operator' ? 'text-accentGreen' : 'text-slate-500'}">${escapeHTML(m.sender)}</span>
                   <span class="text-[8px] font-mono text-slate-600">${formatTime(m.created_at)}</span>
                 </div>
-                <div class="text-[10px] text-slate-200 leading-snug">${escapeHTML(m.content)}</div>
+                <div class="text-[11px] text-slate-200 leading-snug">${escapeHTML(m.content)}</div>
               </div>`).join('')
-          : '<div class="text-[10px] text-slate-600 italic">No notes on this gate yet.</div>';
+          : '<div class="text-[11px] text-slate-600 italic">No notes on this gate yet.</div>';
         wrap.classList.remove('hidden');
         div.scrollTop = div.scrollHeight;
       } catch (e) {
         // Fail-visible: a notes read failure must not look like 'no notes'.
         wrap.classList.remove('hidden');
-        div.innerHTML = `<div class="p-1.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[10px] font-mono">⚠ gate notes unavailable: ${escapeHTML(e.message)}</div>`;
+        div.innerHTML = `<div class="p-1.5 rounded border border-accentRed/30 bg-accentRed/10 text-accentRed text-[11px] font-mono">⚠ gate notes unavailable: ${escapeHTML(e.message)}</div>`;
       }
     }
 
@@ -2544,23 +2582,23 @@
     function renderContentList(files, sid) {
       const listDiv = document.getElementById('workbench-list');
       if (!files || files.length === 0) {
-        listDiv.innerHTML = '<div class="text-center text-slate-500 text-xs py-4">No active workbenches or drafts.</div>';
+        listDiv.innerHTML = '<div class="text-center text-slate-500 text-[13px] py-4">No active workbenches or drafts.</div>';
         return;
       }
 
       listDiv.innerHTML = '';
       files.forEach(file => {
         const item = document.createElement('div');
-        item.className = 'p-2 rounded border border-slate-800 bg-slate-900 bg-opacity-30 flex items-center justify-between gap-2 text-xs hover:bg-opacity-50 transition-all';
+        item.className = 'p-2 rounded border border-slate-800 bg-slate-900 bg-opacity-30 flex items-center justify-between gap-2 text-[13px] hover:bg-opacity-50 transition-all';
         item.innerHTML = `
           <div class="flex-1 min-w-0">
             <span class="font-mono text-slate-200 font-semibold block truncate" title="${file.name}">📄 ${file.name}</span>
-            <div class="flex gap-1.5 items-center mt-0.5 text-[9px] font-mono text-slate-500">
+            <div class="flex gap-1.5 items-center mt-0.5 text-[10px] font-mono text-slate-500">
               <span>alias: ${file.alias}</span>
               <span class="px-1 rounded bg-accentIndigo/10 text-accentIndigo border border-accentIndigo/20">${file.visibility}</span>
             </div>
           </div>
-          <button onclick="inspectFile('${file.name}', '${sid}')" class="bg-accentIndigo/20 border border-accentIndigo/30 text-accentIndigo hover:bg-accentIndigo hover:text-white px-2.5 py-1 rounded text-[10px] font-mono font-bold uppercase transition-all">Inspect</button>
+          <button onclick="inspectFile('${file.name}', '${sid}')" class="bg-accentIndigo/20 border border-accentIndigo/30 text-accentIndigo hover:bg-accentIndigo hover:text-white px-2.5 py-1 rounded text-[11px] font-mono font-bold uppercase transition-all">Inspect</button>
         `;
         listDiv.appendChild(item);
       });
@@ -2571,7 +2609,7 @@
       const badge = document.getElementById('plan-version-badge');
       
       if (!plan || !plan.steps || plan.steps.length === 0) {
-        planStepsDiv.innerHTML = '<div class="text-center text-slate-500 text-xs py-6">No active plan configured.</div>';
+        planStepsDiv.innerHTML = '<div class="text-center text-slate-500 text-[13px] py-6">No active plan configured.</div>';
         badge.classList.add('hidden');
         return;
       }
@@ -2598,8 +2636,8 @@
         stepCard.className = `p-2.5 rounded-lg border ${bgStyle} flex items-start justify-between gap-3`;
         stepCard.innerHTML = `
           <div class="flex-1">
-            <span class="text-[10px] text-slate-500 font-mono block">Step ${idx + 1} · ${step.owner || 'Planner'}</span>
-            <span class="text-xs text-slate-200 font-semibold block">${step.title || 'Untitled Step'}</span>
+            <span class="text-[11px] text-slate-500 font-mono block">Step ${idx + 1} · ${step.owner || 'Planner'}</span>
+            <span class="text-[13px] text-slate-200 font-semibold block">${step.title || 'Untitled Step'}</span>
           </div>
           <span class="text-sm ${statusStyle}">${statusIcon}</span>
         `;
@@ -2622,6 +2660,7 @@
       renderTimeline();
       updateAgentTree();
       renderWorkflowDAG();
+      renderOverview();
 
       const info = getConnectInfo();
       if (fresh.some(e => e.event_type.startsWith('plan.')) && isConnected) {
@@ -2738,36 +2777,36 @@
           const toolName = payload?.tool_name || payload?.name || 'tool';
           const cmd = payload?.command || (payload?.arguments ? (typeof payload.arguments === 'string' ? payload.arguments : JSON.stringify(payload.arguments, null, 2)) : '');
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border border-accentIndigo/30 bg-slate-950/80 space-y-1.5 font-mono text-xs">
+            <div class="mt-2 p-2.5 rounded-lg border border-accentIndigo/30 bg-slate-950/80 space-y-1.5 font-mono text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-accentIndigo font-bold flex items-center gap-1.5">
                   <span>🔧 Tool Call:</span> <code>${toolName}</code>
                 </span>
-                ${payload?.driver ? `<span class="text-[9px] text-slate-500 bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded">${payload.driver}</span>` : ''}
+                ${payload?.driver ? `<span class="text-[10px] text-slate-500 bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded">${payload.driver}</span>` : ''}
               </div>
-              ${cmd ? `<div class="text-[11px] text-slate-200 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(cmd)}</div>` : ''}
+              ${cmd ? `<div class="text-[12px] text-slate-200 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(cmd)}</div>` : ''}
             </div>
           `;
         } else if (eventType === 'tool.result' || eventType === 'tool.response') {
           const toolName = payload?.tool_name || payload?.name || 'tool';
           const isSuccess = payload?.ok !== false && payload?.status !== 'failed' && payload?.exit_code === 0;
           const statusBadge = isSuccess
-            ? '<span class="text-accentGreen font-bold text-[10px] uppercase bg-accentGreen/10 border border-accentGreen/20 px-1.5 py-0.5 rounded">✓ Success</span>'
-            : '<span class="text-accentRed font-bold text-[10px] uppercase bg-accentRed/10 border border-accentRed/20 px-1.5 py-0.5 rounded">✗ Failed</span>';
+            ? '<span class="text-accentGreen font-bold text-[11px] uppercase bg-accentGreen/10 border border-accentGreen/20 px-1.5 py-0.5 rounded">✓ Success</span>'
+            : '<span class="text-accentRed font-bold text-[11px] uppercase bg-accentRed/10 border border-accentRed/20 px-1.5 py-0.5 rounded">✗ Failed</span>';
           
           let outSnippet = payload?.stdout || payload?.output || payload?.result || payload?.error || '';
           if (typeof outSnippet === 'object') outSnippet = JSON.stringify(outSnippet, null, 2);
           
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 font-mono text-xs">
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 font-mono text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-slate-300 font-semibold">⚡ Result: <code>${toolName}</code></span>
                 ${statusBadge}
               </div>
-              ${outSnippet ? `<div class="text-[11px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-36">${escapeHTML(String(outSnippet))}</div>` : ''}
+              ${outSnippet ? `<div class="text-[12px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-36">${escapeHTML(String(outSnippet))}</div>` : ''}
               ${payload?.handle ? `
                 <div class="flex justify-end pt-1">
-                  <button onclick="inspectFile('${payload.name || payload.handle}', '${e.session_id}')" class="text-accentIndigo hover:underline font-mono text-[10px] uppercase font-bold">Inspect Artifact (${payload.handle.substring(0, 10)}...)</button>
+                  <button onclick="inspectFile('${payload.name || payload.handle}', '${e.session_id}')" class="text-accentIndigo hover:underline font-mono text-[11px] uppercase font-bold">Inspect Artifact (${payload.handle.substring(0, 10)}...)</button>
                 </div>
               ` : ''}
             </div>
@@ -2776,46 +2815,69 @@
           const fileName = payload?.name || payload?.sandbox_path || 'file';
           const snippet = payload?.content || payload?.patch || '';
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 text-xs">
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="font-mono text-slate-200 font-bold flex items-center gap-1.5">
                   <span>📄 Draft Write:</span> <code>${fileName}</code>
                 </span>
-                <button onclick="inspectFile('${fileName}', '${e.session_id}')" class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 hover:bg-accentIndigo hover:text-white px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase transition-all">Inspect Full Content</button>
+                <button onclick="inspectFile('${fileName}', '${e.session_id}')" class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 hover:bg-accentIndigo hover:text-white px-2 py-0.5 rounded text-[11px] font-mono font-bold uppercase transition-all">Inspect Full Content</button>
               </div>
-              ${snippet ? `<div class="font-mono text-[11px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(String(snippet).substring(0, 300))}${snippet.length > 300 ? '...' : ''}</div>` : ''}
+              ${snippet ? `<div class="font-mono text-[12px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(String(snippet).substring(0, 300))}${snippet.length > 300 ? '...' : ''}</div>` : ''}
             </div>
           `;
         } else if (eventType === 'llm.round') {
           const inTok = payload?.input_tokens || 0;
           const outTok = payload?.output_tokens || 0;
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1 text-xs">
-              <div class="flex items-center justify-between text-slate-400 font-mono text-[10px]">
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1 text-[13px]">
+              <div class="flex items-center justify-between text-slate-400 font-mono text-[11px]">
                 <span>🧠 LLM Reasoning Round</span>
                 <span>In: ${inTok.toLocaleString()} tok │ Out: ${outTok.toLocaleString()} tok</span>
               </div>
               ${payload?.thinking || payload?.intent ? `
-                <p class="text-slate-300 text-xs italic bg-slate-900/60 p-2 rounded border-l-2 border-accentIndigo pl-2.5 font-sans">${escapeHTML(payload.thinking || payload.intent)}</p>
+                <p class="text-slate-300 text-[13px] italic bg-slate-900/60 p-2 rounded border-l-2 border-accentIndigo pl-2.5 font-sans">${escapeHTML(payload.thinking || payload.intent)}</p>
               ` : ''}
+            </div>
+          `;
+        } else if (eventType === 'memory.primed') {
+          // Detail-altitude context observability: what the gateway injected
+          // into this agent's system prompt as "Prior Knowledge" this turn.
+          const entries = Array.isArray(payload?.memories) ? payload.memories : [];
+          const withheldCount = entries.filter(m => m && m.withheld).length;
+          const count = payload?.memory_count ?? entries.length;
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-accentCyan/30 bg-slate-950/80 space-y-1.5 text-[13px]">
+              <div class="flex items-center justify-between">
+                <span class="text-accentCyan font-bold flex items-center gap-1.5">
+                  🧠 Memory Primed — ${count} prior-knowledge ${count === 1 ? 'entry' : 'entries'} in context
+                </span>
+                <span class="text-[10px] font-mono text-slate-500">${payload?.task_matched ? 'task-matched recall' : 'recency'}</span>
+              </div>
+              ${entries.slice(0, 5).map(m => `
+                <div class="text-[12px] font-mono text-slate-300 bg-slate-900 p-1.5 rounded border border-slate-850 overflow-hidden">
+                  ${m?.error_lesson ? '<span class="text-accentRed font-bold">(error lesson)</span> ' : ''}${m?.withheld ? '<span class="text-slate-500 italic">[withheld]</span> ' : ''}${escapeHTML(String(m?.content || '').slice(0, 140))}${String(m?.content || '').length > 140 ? '…' : ''}
+                  ${m?.source_session ? `<span class="text-[10px] text-slate-500"> · from ${escapeHTML(m.source_session)}</span>` : ''}
+                </div>`).join('')}
+              ${entries.length > 5 ? `<div class="text-[11px] text-slate-500">+${entries.length - 5} more — click the row for the full payload</div>` : ''}
+              ${withheldCount ? `<div class="text-[11px] text-slate-500">${withheldCount} ${withheldCount === 1 ? 'entry' : 'entries'} withheld by egress filtering (model saw only an indication)</div>` : ''}
             </div>
           `;
         } else if (eventType === 'approval.pending') {
           const aprId = payload?.request_id || e.event_id;
           const isClosed = closedGates.has(aprId) || !authoritativeGates.has(aprId);
           richBody = `
-            <div class="mt-2 p-3 rounded-lg border border-accentAmber/40 bg-accentAmber/10 flex flex-col space-y-2 glow-amber text-xs">
+            <div class="mt-2 p-3 rounded-lg border border-accentAmber/40 bg-accentAmber/10 flex flex-col space-y-2 glow-amber text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-accentAmber font-bold uppercase tracking-wide flex items-center gap-1.5">
                   <span>⏸</span> DAG Approval Gate Required
                 </span>
-                <span class="font-mono text-[10px] text-slate-400">${aprId}</span>
+                <span class="font-mono text-[11px] text-slate-400">${aprId}</span>
               </div>
-              <div class="font-mono text-xs text-slate-200 bg-slate-950 p-2 rounded border border-slate-900">${escapeHTML(payload?.command || payload?.summary || 'Privileged operation check')}</div>
+              <div class="font-mono text-[13px] text-slate-200 bg-slate-950 p-2 rounded border border-slate-900">${escapeHTML(payload?.command || payload?.summary || 'Privileged operation check')}</div>
               <div class="flex justify-end gap-2 pt-1">
                 ${isClosed ? 
-                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
-                  `<button onclick="openGateModalById('${aprId}')" class="bg-accentAmber hover:bg-opacity-95 text-slate-955 font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Resolve Gate & Inspect</button>`
+                  `<span class="text-[11px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
+                  `<button onclick="openGateModalById('${aprId}')" class="bg-accentAmber hover:bg-opacity-95 text-slate-955 font-bold text-[11px] px-3 py-1.5 rounded uppercase shadow">Resolve Gate & Inspect</button>`
                 }
               </div>
             </div>
@@ -2824,37 +2886,37 @@
           const askId = payload?.interaction_id || e.event_id;
           const isClosed = closedGates.has(askId) || !authoritativeGates.has(askId);
           richBody = `
-            <div class="mt-2 p-3 rounded-lg border border-accentIndigo/40 bg-accentIndigo/10 flex flex-col space-y-2 text-xs">
+            <div class="mt-2 p-3 rounded-lg border border-accentIndigo/40 bg-accentIndigo/10 flex flex-col space-y-2 text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-accentIndigo font-bold uppercase tracking-wide flex items-center gap-1.5">
                   <span>❓</span> Clarification Question
                 </span>
-                <span class="font-mono text-[10px] text-slate-400">${askId}</span>
+                <span class="font-mono text-[11px] text-slate-400">${askId}</span>
               </div>
               <p class="text-slate-200 font-medium">${escapeHTML(payload?.question || 'Agent requested user feedback.')}</p>
               <div class="flex justify-end pt-1">
                 ${isClosed ? 
-                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Answered</span>` :
-                  `<button onclick="openGateModalById('${askId}')" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Provide Answer</button>`
+                  `<span class="text-[11px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Answered</span>` :
+                  `<button onclick="openGateModalById('${askId}')" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[11px] px-3 py-1.5 rounded uppercase shadow">Provide Answer</button>`
                 }
               </div>
             </div>
           `;
         } else if (eventType === 'operator.comment') {
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border border-accentAmber/30 bg-accentAmber/5 space-y-1 text-xs">
+            <div class="mt-2 p-2.5 rounded-lg border border-accentAmber/30 bg-accentAmber/5 space-y-1 text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-accentAmber font-bold flex items-center gap-1">
                   <span>💬</span> Line Comment: <code class="text-slate-200 ml-1">${payload?.name || 'file'}</code>
                 </span>
-                ${payload?.line_start ? `<span class="font-mono text-[10px] text-slate-400">L${payload.line_start}${payload.line_end ? `–${payload.line_end}` : ''}</span>` : ''}
+                ${payload?.line_start ? `<span class="font-mono text-[11px] text-slate-400">L${payload.line_start}${payload.line_end ? `–${payload.line_end}` : ''}</span>` : ''}
               </div>
               <p class="text-slate-200 italic bg-slate-950/60 p-2 rounded border-l-2 border-accentAmber pl-2.5 font-sans">${escapeHTML(payload?.body || '')}</p>
             </div>
           `;
         } else if (eventType === 'operator.message') {
           richBody = `
-            <div class="mt-1.5 p-2.5 rounded-lg border border-accentGreen/30 bg-accentGreen/5 text-slate-100 text-xs font-medium leading-relaxed">
+            <div class="mt-1.5 p-2.5 rounded-lg border border-accentGreen/30 bg-accentGreen/5 text-slate-100 text-[13px] font-medium leading-relaxed">
               ${escapeHTML(payload?.message || payload?.text || extractSummary(e))}
             </div>
           `;
@@ -2863,22 +2925,22 @@
           const isClosed = closedGates.has(escId);
           const verdicts = Array.isArray(payload?.role_verdicts) ? payload.role_verdicts : [];
           richBody = `
-            <div class="mt-2 p-3 rounded-lg border border-accentRed/40 bg-accentRed/10 flex flex-col space-y-2 text-xs">
+            <div class="mt-2 p-3 rounded-lg border border-accentRed/40 bg-accentRed/10 flex flex-col space-y-2 text-[13px]">
               <div class="flex items-center justify-between">
                 <span class="text-accentRed font-bold uppercase tracking-wide flex items-center gap-1.5">
                   <span>⚖️</span> Promotion Escalation
                 </span>
-                <span class="font-mono text-[10px] text-slate-400">${escapeHTML(escId)}</span>
+                <span class="font-mono text-[11px] text-slate-400">${escapeHTML(escId)}</span>
               </div>
               <p class="text-slate-200 leading-relaxed">${escapeHTML(payload?.synthesis || 'Operator decision requested.')}</p>
-              ${(payload?.agent_id || payload?.revision_id) ? `<div class="font-mono text-[10px] text-slate-400">${escapeHTML(payload?.agent_id || '')}${payload?.revision_id ? ` · rev ${escapeHTML(String(payload.revision_id).slice(0, 24))}` : ''}${payload?.escalation_type ? ` · ${escapeHTML(payload.escalation_type)}` : ''}</div>` : ''}
+              ${(payload?.agent_id || payload?.revision_id) ? `<div class="font-mono text-[11px] text-slate-400">${escapeHTML(payload?.agent_id || '')}${payload?.revision_id ? ` · rev ${escapeHTML(String(payload.revision_id).slice(0, 24))}` : ''}${payload?.escalation_type ? ` · ${escapeHTML(payload.escalation_type)}` : ''}</div>` : ''}
               ${verdicts.length ? `<div class="flex gap-1 flex-wrap">${verdicts.map(v => `<span class="text-[8px] font-mono px-1 py-0.5 rounded border ${v.passed ? 'text-accentGreen border-accentGreen/30 bg-accentGreen/5' : 'text-accentRed border-accentRed/30 bg-accentRed/5'}">${escapeHTML(v.role)} ${v.passed ? '✓' : '✗'}</span>`).join('')}</div>` : ''}
               <div class="flex justify-end gap-2 pt-1">
                 ${isClosed ?
-                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
+                  `<span class="text-[11px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
                   (/^[A-Za-z0-9_.\-]+$/.test(String(escId))
-                    ? `<button onclick="openGateModalById('${escId}')" class="bg-accentRed hover:bg-opacity-95 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Review &amp; Decide</button>`
-                    : '<span class="text-[9px] text-slate-500 italic">non-standard escalation id — resolve from the Constitution tab</span>')
+                    ? `<button onclick="openGateModalById('${escId}')" class="bg-accentRed hover:bg-opacity-95 text-white font-bold text-[11px] px-3 py-1.5 rounded uppercase shadow">Review &amp; Decide</button>`
+                    : '<span class="text-[10px] text-slate-500 italic">non-standard escalation id — resolve from the Constitution tab</span>')
                 }
               </div>
             </div>
@@ -2894,7 +2956,7 @@
             : (notable ? 'border-accentAmber/40 bg-accentAmber/10' : 'border-slate-800 bg-slate-950/60');
           const txtCls = severe ? 'text-accentRed' : (notable ? 'text-accentAmber' : 'text-slate-300');
           richBody = `
-            <div class="mt-2 p-2.5 rounded-lg border ${cardCls} flex items-center gap-2 text-xs">
+            <div class="mt-2 p-2.5 rounded-lg border ${cardCls} flex items-center gap-2 text-[13px]">
               <span class="${txtCls} text-sm shrink-0">🛡️</span>
               <span class="${txtCls} font-mono">${escapeHTML(sentence)}</span>
             </div>
@@ -2903,32 +2965,32 @@
           const keys = Object.keys(payload).slice(0, 4);
           const fields = keys.map(k => `<span class="text-slate-400">${k}:</span> <span class="text-slate-200 font-semibold">${escapeHTML(String(payload[k]))}</span>`).join(' │ ');
           richBody = `
-            <div class="mt-1.5 p-2 rounded border border-slate-850 bg-slate-950/50 text-[11px] font-mono text-slate-300">
+            <div class="mt-1.5 p-2 rounded border border-slate-850 bg-slate-950/50 text-[12px] font-mono text-slate-300">
               ${fields}
             </div>
           `;
         }
 
         item.innerHTML = `
-          <div class="w-8 h-8 rounded-full bg-gradient-to-tr ${avatarStyle} flex items-center justify-center font-display font-bold text-xs shadow text-white shrink-0 mt-0.5">
+          <div class="w-8 h-8 rounded-full bg-gradient-to-tr ${avatarStyle} flex items-center justify-center font-display font-bold text-[13px] shadow text-white shrink-0 mt-0.5">
             ${actorLabel.charAt(0)}
           </div>
           <div class="flex-1 space-y-1 min-w-0">
-            <div class="flex items-center justify-between text-xs">
+            <div class="flex items-center justify-between text-[13px]">
               <div class="flex items-center gap-2">
                 <span class="text-slate-200 font-bold font-display">${actorLabel}</span>
-                <span class="bg-slate-800 text-slate-400 font-mono text-[9px] px-2 py-0.5 rounded">${eventType}</span>
-                ${e.turn_id ? `<span class="text-[9px] font-mono text-slate-500">turn ${e.turn_id}</span>` : ''}
+                <span class="bg-slate-800 text-slate-400 font-mono text-[10px] px-2 py-0.5 rounded">${eventType}</span>
+                ${e.turn_id ? `<span class="text-[10px] font-mono text-slate-500">turn ${e.turn_id}</span>` : ''}
               </div>
               <div class="flex items-center gap-2">
-                <span class="text-[10px] text-slate-500 font-mono">${formatTime(e.occurred_at)}</span>
-                <button onclick="toggleRowJson('${e.event_id}')" class="text-[10px] text-slate-500 hover:text-accentIndigo font-mono bg-slate-950 px-1.5 py-0.5 rounded border border-slate-850">{ } JSON</button>
-                <span class="text-[9px] text-slate-600" title="Toggle details">${expandedEvents.has(e.event_id) ? '▼' : '▶'}</span>
+                <span class="text-[11px] text-slate-500 font-mono">${formatTime(e.occurred_at)}</span>
+                <button onclick="toggleRowJson('${e.event_id}')" class="text-[11px] text-slate-500 hover:text-accentIndigo font-mono bg-slate-950 px-1.5 py-0.5 rounded border border-slate-850">{ } JSON</button>
+                <span class="text-[10px] text-slate-600" title="Toggle details">${expandedEvents.has(e.event_id) ? '▼' : '▶'}</span>
               </div>
             </div>
             ${richBody}
             ${expandedEvents.has(e.event_id) ? eventDetailsHTML(e) : ''}
-            <pre id="json-${e.event_id}" class="hidden mt-2 font-mono text-[10px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-400 overflow-x-auto leading-relaxed select-all max-h-60">${escapeHTML(JSON.stringify(e, null, 2))}</pre>
+            <pre id="json-${e.event_id}" class="hidden mt-2 font-mono text-[11px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-400 overflow-x-auto leading-relaxed select-all max-h-60">${escapeHTML(JSON.stringify(e, null, 2))}</pre>
           </div>
         `;
         streamDiv.appendChild(item);
@@ -2974,14 +3036,14 @@
         : [];
       return `
         <div class="mt-2 p-3 rounded-lg border border-slate-850 bg-slate-950/80 space-y-2" onclick="event.stopPropagation()">
-          <div class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[10px] font-mono">
+          <div class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
             ${meta.map(([k, v]) => `<span class="text-slate-500">${k}</span><span class="text-slate-300 break-all">${escapeHTML(String(v))}</span>`).join('')}
             ${refEntries.length ? `<span class="text-slate-500">refs</span><span class="text-slate-300 break-all">${escapeHTML(refEntries.map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join('  '))}</span>` : ''}
           </div>
           ${payload !== null ? `
             <div class="pt-1.5 border-t border-slate-850">
-              <div class="text-[9px] text-slate-500 uppercase tracking-wider mb-1">payload</div>
-              <pre class="font-mono text-[10px] text-slate-400 max-h-64 overflow-auto whitespace-pre-wrap break-all leading-relaxed select-all">${escapeHTML(JSON.stringify(payload, null, 2))}</pre>
+              <div class="text-[10px] text-slate-500 uppercase tracking-wider mb-1">payload</div>
+              <pre class="font-mono text-[11px] text-slate-400 max-h-64 overflow-auto whitespace-pre-wrap break-all leading-relaxed select-all">${escapeHTML(JSON.stringify(payload, null, 2))}</pre>
             </div>` : ''}
         </div>
       `;
@@ -3072,6 +3134,7 @@
       } else {
         alertPill.classList.add('hidden');
       }
+      renderOverview();
 
       // Auto-open modal if new gate
       if (newestPending && newestPending !== currentModalGateId && document.getElementById('gate-modal').classList.contains('hidden')) {
@@ -3162,7 +3225,7 @@
         let confirmPhraseHTML = '';
         if (gate.payload.confirm_phrase) {
           confirmPhraseHTML = `
-            <div class="bg-accentRed/10 border border-accentRed/30 p-3 rounded-xl text-xs">
+            <div class="bg-accentRed/10 border border-accentRed/30 p-3 rounded-xl text-[13px]">
               <span class="text-accentRed font-bold block uppercase tracking-wide">High-Risk Tamper Confirmation Required</span>
               <p class="text-slate-400 mt-1">To approve this operation, type the confirmation phrase into motivation:</p>
               <p class="font-mono text-accentRed font-bold mt-1 text-sm bg-slate-950 p-2 rounded border border-slate-900 select-all">${gate.payload.confirm_phrase}</p>
@@ -3181,29 +3244,29 @@
 
         body.innerHTML = `
           <div class="space-y-3">
-            <div class="grid grid-cols-2 gap-2 text-xs">
+            <div class="grid grid-cols-2 gap-2 text-[13px]">
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
-                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Tool Action</span>
+                <span class="text-[10px] text-slate-500 font-semibold uppercase block">Tool Action</span>
                 <span class="font-mono text-slate-200 font-bold">${gate.payload.action || gate.payload.tool_name || 'sandbox.exec'}</span>
               </div>
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
-                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Target Scope</span>
+                <span class="text-[10px] text-slate-500 font-semibold uppercase block">Target Scope</span>
                 <span class="font-mono text-accentIndigo font-bold">${gate.payload.scope || 'RootSession'}</span>
               </div>
             </div>
             
             ${gate.payload.command ? `
               <div>
-                <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Command / Operation:</span>
-                <div class="font-mono text-xs bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-200 overflow-x-auto leading-relaxed">${escapeHTML(gate.payload.command)}</div>
+                <span class="text-[11px] text-slate-400 font-semibold block mb-1 uppercase">Command / Operation:</span>
+                <div class="font-mono text-[13px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-200 overflow-x-auto leading-relaxed">${escapeHTML(gate.payload.command)}</div>
               </div>
             ` : ''}
 
             ${gate.payload.host_patterns ? `
               <div>
-                <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Requested Remote Hosts:</span>
+                <span class="text-[11px] text-slate-400 font-semibold block mb-1 uppercase">Requested Remote Hosts:</span>
                 <div class="flex flex-wrap gap-1.5">
-                  ${gate.payload.host_patterns.map(h => `<span class="bg-slate-900 text-accentIndigo font-mono text-[10px] px-2 py-0.5 rounded border border-slate-800">${h}</span>`).join('')}
+                  ${gate.payload.host_patterns.map(h => `<span class="bg-slate-900 text-accentIndigo font-mono text-[11px] px-2 py-0.5 rounded border border-slate-800">${h}</span>`).join('')}
                 </div>
               </div>
             ` : ''}
@@ -3211,17 +3274,17 @@
             ${targetFileName ? `
               <div class="bg-slate-900 border border-slate-800 p-3 rounded-xl space-y-2">
                 <div class="flex justify-between items-center">
-                  <span class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <span class="text-[13px] text-slate-300 font-semibold flex items-center gap-1.5">
                     <span>📄</span> Linked Target Content: <strong class="font-mono text-accentIndigo">${targetFileName}</strong>
                   </span>
-                  <button onclick="inspectFile('${targetFileName}', '${gate.entry.session_id}')" class="bg-accentIndigo text-white font-mono text-[10px] px-2.5 py-1 rounded font-bold uppercase hover:bg-opacity-90">Preview Content</button>
+                  <button onclick="inspectFile('${targetFileName}', '${gate.entry.session_id}')" class="bg-accentIndigo text-white font-mono text-[11px] px-2.5 py-1 rounded font-bold uppercase hover:bg-opacity-90">Preview Content</button>
                 </div>
               </div>
             ` : ''}
 
             ${gate.payload.risk_summary ? `
-              <div class="bg-slate-900/80 border border-slate-800 p-3 rounded-xl text-xs">
-                <span class="text-[10px] font-semibold text-accentAmber uppercase block">Safety Risk Assessment:</span>
+              <div class="bg-slate-900/80 border border-slate-800 p-3 rounded-xl text-[13px]">
+                <span class="text-[11px] font-semibold text-accentAmber uppercase block">Safety Risk Assessment:</span>
                 <p class="text-slate-300 mt-1 leading-relaxed">${gate.payload.risk_summary}</p>
               </div>
             ` : ''}
@@ -3249,28 +3312,28 @@
         body.innerHTML = `
           <div class="space-y-3">
             <p class="text-sm text-slate-100 font-medium leading-relaxed bg-slate-950 p-3 rounded-xl border border-accentAmber/30">${escapeHTML(gate.payload.synthesis || 'Operator decision requested.')}</p>
-            <div class="grid grid-cols-2 gap-2 text-xs">
+            <div class="grid grid-cols-2 gap-2 text-[13px]">
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
-                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Agent / Revision</span>
+                <span class="text-[10px] text-slate-500 font-semibold uppercase block">Agent / Revision</span>
                 <span class="font-mono text-slate-200 font-bold">${escapeHTML(gate.payload.agent_id || '?')}</span>
-                <span class="font-mono text-[10px] text-slate-400 block truncate" title="${escapeHTML(String(gate.payload.revision_id || ''))}">${escapeHTML(String(gate.payload.revision_id || '?').slice(0, 24))}</span>
+                <span class="font-mono text-[11px] text-slate-400 block truncate" title="${escapeHTML(String(gate.payload.revision_id || ''))}">${escapeHTML(String(gate.payload.revision_id || '?').slice(0, 24))}</span>
               </div>
               <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
-                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Escalation</span>
+                <span class="text-[10px] text-slate-500 font-semibold uppercase block">Escalation</span>
                 <span class="font-mono text-accentAmber font-bold">${escapeHTML(gate.payload.escalation_type || 'escalation')}</span>
-                ${gate.payload.artifact_id ? `<span class="font-mono text-[10px] text-slate-400 block truncate">${escapeHTML(String(gate.payload.artifact_id))}</span>` : ''}
+                ${gate.payload.artifact_id ? `<span class="font-mono text-[11px] text-slate-400 block truncate">${escapeHTML(String(gate.payload.artifact_id))}</span>` : ''}
               </div>
             </div>
             ${verdicts.length ? `
             <div>
-              <span class="text-[10px] text-slate-400 font-semibold uppercase block mb-1">Federation role verdicts</span>
+              <span class="text-[11px] text-slate-400 font-semibold uppercase block mb-1">Federation role verdicts</span>
               <div class="space-y-1">
                 ${verdicts.map(v => `
                   <div class="flex items-center justify-between gap-2 p-1.5 rounded border border-slate-800 bg-slate-900/40">
-                    <span class="text-[10px] font-mono text-slate-300">${escapeHTML(v.role)} <span class="text-slate-500">· ${escapeHTML(v.agent_id || '')}</span></span>
-                    <span class="text-[9px] font-mono font-bold ${v.passed ? 'text-accentGreen' : 'text-accentRed'} shrink-0">${v.passed ? '✓ pass' : '✗ fail'}</span>
+                    <span class="text-[11px] font-mono text-slate-300">${escapeHTML(v.role)} <span class="text-slate-500">· ${escapeHTML(v.agent_id || '')}</span></span>
+                    <span class="text-[10px] font-mono font-bold ${v.passed ? 'text-accentGreen' : 'text-accentRed'} shrink-0">${v.passed ? '✓ pass' : '✗ fail'}</span>
                   </div>
-                  ${v.findings_summary ? `<div class="text-[9px] text-slate-500 pl-2">${escapeHTML(v.findings_summary)}</div>` : ''}
+                  ${v.findings_summary ? `<div class="text-[10px] text-slate-500 pl-2">${escapeHTML(v.findings_summary)}</div>` : ''}
                 `).join('')}
               </div>
             </div>` : ''}
@@ -3293,10 +3356,10 @@
           
           gate.payload.options.forEach((opt, index) => {
             const card = document.createElement('div');
-            card.className = 'flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-slate-900/40 hover:bg-slate-900 hover:border-accentIndigo cursor-pointer text-xs transition-all';
+            card.className = 'flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-slate-900/40 hover:bg-slate-900 hover:border-accentIndigo cursor-pointer text-[13px] transition-all';
             card.onclick = () => submitInteractionChoice(gateId, opt.id || String(index + 1));
             card.innerHTML = `
-              <span class="w-5 h-5 rounded-full bg-accentIndigo/20 text-accentIndigo flex items-center justify-center font-bold text-[10px]">${index + 1}</span>
+              <span class="w-5 h-5 rounded-full bg-accentIndigo/20 text-accentIndigo flex items-center justify-center font-bold text-[11px]">${index + 1}</span>
               <span class="text-slate-200 font-medium">${opt.label}</span>
             `;
             choicesDiv.appendChild(card);
@@ -3347,27 +3410,27 @@
       const sec = document.createElement('div');
       sec.className = 'mt-1';
       sec.innerHTML = `
-        <div class="bg-accentViolet/10 border border-accentViolet/30 p-3 rounded-xl text-xs space-y-2.5">
+        <div class="bg-accentViolet/10 border border-accentViolet/30 p-3 rounded-xl text-[13px] space-y-2.5">
           <div class="text-accentViolet font-bold uppercase tracking-wide flex items-center gap-1.5">
             <span>🔐</span> Credential Prompt${insp.service ? `: ${escapeHTML(insp.service)}` : ''}
             ${insp.credential_id ? `<code class="ml-1 text-slate-400 font-normal normal-case">${escapeHTML(insp.credential_id)}</code>` : ''}
           </div>
           ${insp.message ? `<p class="text-slate-300 leading-relaxed">${escapeHTML(insp.message)}</p>` : ''}
           <div>
-            <span class="text-[10px] text-accentAmber font-bold uppercase block mb-1">Egress scope this approval also grants:</span>
+            <span class="text-[11px] text-accentAmber font-bold uppercase block mb-1">Egress scope this approval also grants:</span>
             ${hosts.length === 0
-              ? '<span class="text-slate-500 text-[10px] italic">(none declared — requests will not be host-bound)</span>'
+              ? '<span class="text-slate-500 text-[11px] italic">(none declared — requests will not be host-bound)</span>'
               : `<div class="flex flex-wrap gap-1.5">${hosts.map(h => h === '*'
-                  ? '<span class="bg-accentRed/15 text-accentRed border border-accentRed/40 font-mono text-[10px] font-bold px-2 py-0.5 rounded">* — WILDCARD: the secret can be sent to ANY host</span>'
-                  : `<span class="bg-slate-900 text-accentCyan font-mono text-[10px] px-2 py-0.5 rounded border border-slate-800">· ${escapeHTML(h)}</span>`).join('')}</div>`}
+                  ? '<span class="bg-accentRed/15 text-accentRed border border-accentRed/40 font-mono text-[11px] font-bold px-2 py-0.5 rounded">* — WILDCARD: the secret can be sent to ANY host</span>'
+                  : `<span class="bg-slate-900 text-accentCyan font-mono text-[11px] px-2 py-0.5 rounded border border-slate-800">· ${escapeHTML(h)}</span>`).join('')}</div>`}
           </div>
           ${fields.length ? `
           <div class="space-y-1.5 pt-0.5">
-            <span class="text-[10px] text-slate-400 font-semibold uppercase block">Secret values (stored in the gateway vault — never reach the agent):</span>
+            <span class="text-[11px] text-slate-400 font-semibold uppercase block">Secret values (stored in the gateway vault — never reach the agent):</span>
             ${fields.map((f, i) => `
               <div class="flex items-center gap-2">
-                <span class="w-36 shrink-0 text-slate-300 font-medium text-[11px] truncate" title="${escapeHTML(f.name)}">${escapeHTML(f.label || f.name)}</span>
-                <input id="cred-secret-${i}" type="${f.masked === false ? 'text' : 'password'}" autocomplete="off" placeholder="${escapeHTML(f.name)}${f.masked === false ? '' : ' (masked)'}" class="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-accentViolet font-mono">
+                <span class="w-36 shrink-0 text-slate-300 font-medium text-[12px] truncate" title="${escapeHTML(f.name)}">${escapeHTML(f.label || f.name)}</span>
+                <input id="cred-secret-${i}" type="${f.masked === false ? 'text' : 'password'}" autocomplete="off" placeholder="${escapeHTML(f.name)}${f.masked === false ? '' : ' (masked)'}" class="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-[13px] text-white focus:outline-none focus:border-accentViolet font-mono">
               </div>
             `).join('')}
           </div>` : ''}
@@ -3681,15 +3744,34 @@
       });
 
       if (agents.size <= 1) {
+        agentRoster = Array.from(agents.values());
+        renderOverview();
+        const countBadge = document.getElementById('topology-count');
+        if (countBadge) countBadge.innerText = String(agents.size);
         svg.innerHTML = '';
         fallback.style.display = 'flex';
         return;
       }
-      
+
+      // Auto-expand once the tree earns the space (unless the operator chose).
+      if (!topologyUserToggled && agents.size >= 4 && !topologyOpen) {
+        topologyOpen = true;
+      }
+      applyTopologyVisibility();
+      document.getElementById('topology-count').innerText = String(agents.size);
+      if (!topologyOpen) {
+        // Folded: keep the roster fresh for the Overview tab, skip SVG work.
+        agentRoster = Array.from(agents.values());
+        renderOverview();
+        return;
+      }
+
       fallback.style.display = 'none';
       svg.innerHTML = '';
 
       const nodes = Array.from(agents.values());
+      agentRoster = nodes;
+      renderOverview();
       const roots = nodes.filter(n => !n.parent || !agents.has(n.parent));
       let levelHeights = [30, 110, 190];
       const visitedNodes = new Set();
@@ -3841,9 +3923,9 @@
       const border = ok ? 'border-accentGreen/40 bg-accentGreen/10' : 'border-accentRed/40 bg-accentRed/10';
       const txt = ok ? 'text-accentGreen' : 'text-accentRed';
       return `
-        <div class="mt-2 p-3 rounded-lg border ${border} text-xs space-y-1">
+        <div class="mt-2 p-3 rounded-lg border ${border} text-[13px] space-y-1">
           <div class="font-display font-bold ${txt} uppercase tracking-wide">${escapeHTML(headline)}</div>
-          ${lines.length ? `<div class="font-mono text-[10px] text-slate-300 whitespace-pre-wrap">${escapeHTML(lines.join('\n'))}</div>` : ''}
+          ${lines.length ? `<div class="font-mono text-[11px] text-slate-300 whitespace-pre-wrap">${escapeHTML(lines.join('\n'))}</div>` : ''}
         </div>
       `;
     }
@@ -3939,20 +4021,20 @@
       
       const content = document.getElementById('event-detail-content');
       content.innerHTML = `
-        <div class="grid grid-cols-2 gap-3 text-xs">
+        <div class="grid grid-cols-2 gap-3 text-[13px]">
           <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
-            <span class="text-[9px] text-slate-500 font-semibold block uppercase">Event Type</span>
+            <span class="text-[10px] text-slate-500 font-semibold block uppercase">Event Type</span>
             <span class="font-mono text-slate-200 font-bold">${e.event_type}</span>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
-            <span class="text-[9px] text-slate-500 font-semibold block uppercase">Occurred At</span>
+            <span class="text-[10px] text-slate-500 font-semibold block uppercase">Occurred At</span>
             <span class="font-mono text-slate-200">${formatTime(e.occurred_at)}</span>
           </div>
         </div>
         ${payloadObj ? `
           <div>
-            <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Payload JSON:</span>
-            <pre class="text-xs bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-300 font-mono overflow-x-auto leading-relaxed max-h-[300px]">${JSON.stringify(payloadObj, null, 2)}</pre>
+            <span class="text-[11px] text-slate-400 font-semibold block mb-1 uppercase">Payload JSON:</span>
+            <pre class="text-[13px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-300 font-mono overflow-x-auto leading-relaxed max-h-[300px]">${JSON.stringify(payloadObj, null, 2)}</pre>
           </div>
         ` : ''}
       `;
@@ -3995,6 +4077,7 @@
       document.getElementById('hud-tokens-total').innerText = totalTokens.toLocaleString();
       document.getElementById('hud-tokens-in').innerText = `in: ${inputTokens.toLocaleString()}`;
       document.getElementById('hud-tokens-out').innerText = `out: ${outputTokens.toLocaleString()}`;
+      renderOverview();
 
       if (totalTokens > 0) {
         document.getElementById('token-bar-in').style.width = `${(inputTokens / totalTokens) * 100}%`;
@@ -4034,7 +4117,7 @@
       currentViewedFileSessionId = sessionId;
 
       const modal = document.getElementById('diff-modal');
-      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName} <span class="text-[10px] text-slate-500 font-mono font-normal ml-2">${handle ? `(${handle.substring(0, 12)}...)` : ''}</span>`;
+      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName} <span class="text-[11px] text-slate-500 font-mono font-normal ml-2">${handle ? `(${handle.substring(0, 12)}...)` : ''}</span>`;
       
       document.getElementById('comment-line-start').value = '';
       document.getElementById('comment-line-end').value = '';
@@ -4048,7 +4131,7 @@
         lineEl.className = 'hover:bg-slate-900/60 px-2 py-0.5 rounded flex';
         let highlightClass = line.startsWith('+') ? 'diff-added' : (line.startsWith('-') ? 'diff-removed' : '');
         lineEl.innerHTML = `
-          <span class="w-10 text-slate-600 text-[10px] select-none text-right pr-4 shrink-0 font-mono">${index + 1}</span>
+          <span class="w-10 text-slate-600 text-[11px] select-none text-right pr-4 shrink-0 font-mono">${index + 1}</span>
           <span class="flex-1 font-mono whitespace-pre ${highlightClass}">${escapeHTML(line)}</span>
         `;
         contentDiv.appendChild(lineEl);
@@ -4104,7 +4187,7 @@
     }
 
     function switchRightTab(tabId) {
-      const tabs = ['workflow', 'checklist', 'constitution', 'wiki', 'grants', 'evolution'];
+      const tabs = ['overview', 'workflow', 'checklist', 'constitution', 'wiki', 'grants', 'evolution'];
       tabs.forEach(t => {
         document.getElementById(`tab-content-${t}`).classList.add('hidden');
         const btn = document.getElementById(`tab-btn-${t}`);
@@ -4114,12 +4197,161 @@
       document.getElementById(`tab-content-${tabId}`).classList.remove('hidden');
       const activeBtn = document.getElementById(`tab-btn-${tabId}`);
       activeBtn.className = activeBtn.className.replace('border-transparent text-slate-400 hover:text-white', 'border-accentIndigo text-white');
+      currentRightTab = tabId;
+      // Hidden tabs have zero clientWidth — SVG views drawn while hidden use a
+      // fallback width and land off-center. Re-render on reveal.
+      if (tabId === 'workflow' && isConnected) renderWorkflowDAG();
 
       const info = getConnectInfo();
       if (tabId === 'constitution' && isConnected) { fetchConstitution(info.baseURL, info.secret); fetchConstitutionProposals(); fetchAnomalyFlags(); fetchEscalations(); }
       if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
       if (tabId === 'grants' && isConnected) { fetchGrants(); fetchLabels(); fetchEgressPolicy(); fetchEnvelopes(); }
       if (tabId === 'evolution' && isConnected) { fetchEvolution(); fetchCronJobs(); }
+    }
+
+    // ── Topology collapse ────────────────────────────────────────────────
+    // The SVG tree is low-density early (1–3 nodes) and high-value once the
+    // tree branches, so it starts folded and auto-unfolds at ≥4 nodes — unless
+    // the operator toggled it manually, which always wins.
+    function applyTopologyVisibility() {
+      const section = document.getElementById('topology-section');
+      const container = document.getElementById('agent-tree-container');
+      const chevron = document.getElementById('topology-chevron');
+      if (!section || !container) return;
+      container.classList.toggle('hidden', !topologyOpen);
+      section.classList.toggle('flex-1', topologyOpen);
+      section.classList.toggle('shrink-0', !topologyOpen);
+      if (chevron) chevron.innerText = topologyOpen ? '▼' : '▶';
+    }
+
+    function toggleTopology() {
+      topologyOpen = !topologyOpen;
+      topologyUserToggled = true;
+      applyTopologyVisibility();
+      if (topologyOpen) updateAgentTree(); // re-render with real container width
+    }
+
+    // ── Session Overview tab ─────────────────────────────────────────────
+    // Aggregates the live surfaces into one never-empty landing view: pending
+    // gates, agent roster, plan progress, last memory priming, grants, recent
+    // attention events. Pure read of existing state; refreshed from timeline
+    // batches, gate re-syncs, HUD updates and plan loads.
+    function renderOverview() {
+      const body = document.getElementById('overview-body');
+      if (!body) return;
+      const badge = document.getElementById('overview-status-badge');
+
+      if (!isConnected && eventList.length === 0) {
+        if (badge) badge.innerText = 'Idle';
+        body.innerHTML = `
+          <div class="text-center text-slate-500 py-10 space-y-2">
+            <div class="text-3xl">🛰️</div>
+            <div class="font-display font-bold text-sm text-slate-400">No session connected</div>
+            <div class="text-[12px]">Enter credentials top-right and hit Connect — the live session view appears here.</div>
+          </div>`;
+        return;
+      }
+
+      const ago = (iso) => {
+        if (!iso) return '';
+        const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+        return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+      };
+      const chip = (status) => status === 'gated'
+        ? '<span class="text-[10px] font-mono font-bold text-accentAmber border border-accentAmber/40 bg-accentAmber/10 px-1.5 py-0.5 rounded">GATED</span>'
+        : status === 'running'
+          ? '<span class="text-[10px] font-mono text-emerald-400 border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 rounded">RUNNING</span>'
+          : '<span class="text-[10px] font-mono text-slate-500 border border-slate-700 px-1.5 py-0.5 rounded">IDLE</span>';
+      const sectionH = (icon, text, extra = '') => `<h3 class="font-display font-bold text-[11px] text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><span>${icon}</span> ${text}${extra}</h3>`;
+      const sections = [];
+
+      // 1. Pending gates (authoritative store set ∩ timeline) — actionable first.
+      if (pendingGates.size > 0) {
+        const rows = [...pendingGates.entries()].map(([id, g]) => {
+          const label = g.type === 'approval.pending' ? (g.payload?.command || g.payload?.summary || 'Approval required')
+            : g.type === 'user.ask.pending' ? (g.payload?.question || 'Clarification requested')
+            : (g.payload?.synthesis || 'Escalation under review');
+          return `
+            <div class="flex items-center justify-between gap-2 bg-accentAmber/10 border border-accentAmber/30 rounded-lg px-2.5 py-2">
+              <div class="min-w-0">
+                <div class="font-bold text-accentAmber uppercase text-[10px] tracking-wider">${escapeHTML(g.type.replace('.pending', ''))} gate</div>
+                <div class="truncate text-slate-300" title="${escapeHTML(String(label))}">${escapeHTML(String(label).slice(0, 110))}</div>
+              </div>
+              <button onclick="openGateModalById('${id}')" class="shrink-0 bg-accentAmber hover:bg-opacity-90 text-slate-950 font-bold text-[11px] px-2.5 py-1.5 rounded uppercase">Review</button>
+            </div>`;
+        }).join('');
+        sections.push(`<div>${sectionH('⏸', `Pending Gates`, `<span class="gate-pulse inline-block w-2 h-2 rounded-full bg-accentAmber ml-1"></span> <span class="text-accentAmber">(${pendingGates.size})</span>`)}<div class="space-y-1.5">${rows}</div></div>`);
+      }
+
+      // 2. Agent roster — the topology's information, list form (always present).
+      const rosterRows = agentRoster.map(n => `
+        <div class="flex items-center justify-between gap-2 bg-slate-900/60 border border-slate-800 rounded-lg px-2.5 py-1.5">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="w-5 h-5 rounded bg-gradient-to-tr from-accentIndigo to-accentViolet flex items-center justify-center text-[10px] font-bold text-white shrink-0">${escapeHTML((n.name || '?').charAt(0).toUpperCase())}</span>
+            <span class="font-semibold text-slate-200 truncate">${escapeHTML(n.name || n.id)}</span>
+          </div>
+          ${chip(n.status)}
+        </div>`).join('');
+      sections.push(`<div>${sectionH('🤖', `Agents (${agentRoster.length})`)}<div class="space-y-1">${rosterRows || '<div class="text-slate-500">None yet.</div>'}</div></div>`);
+
+      // 3. Plan progress (or a pointer to Drafts & Plans when none is active).
+      const steps = (activePlanData && activePlanData.steps) || [];
+      if (steps.length) {
+        const done = steps.filter(s => ['Completed', 'success'].includes(s.status)).length;
+        const active = steps.find(s => ['Active', 'running'].includes(s.status));
+        const pct = Math.round(done / steps.length * 100);
+        sections.push(`<div>${sectionH('🗺️', 'Plan Progress')}
+          <div class="w-full bg-slate-900 h-2 rounded border border-slate-800 overflow-hidden"><div class="bg-accentIndigo h-full transition-all" style="width:${pct}%"></div></div>
+          <div class="flex justify-between text-[11px] text-slate-500 font-mono mt-1">
+            <span>${done}/${steps.length} steps · ${pct}% · v${activePlanData.version || 1}</span>
+            <span class="truncate ml-2">${active ? escapeHTML(String(active.title || active.name || active.description || `step ${steps.indexOf(active) + 1}`).slice(0, 60)) : '—'}</span>
+          </div>
+        </div>`);
+      } else {
+        sections.push(`<div class="flex items-center justify-between text-slate-500"><span>No active plan yet.</span><button onclick="switchRightTab('checklist')" class="text-accentIndigo hover:underline text-[11px] font-mono">Drafts & Plans →</button></div>`);
+      }
+
+      // 4. Last memory priming (the memory.primed timeline record).
+      const primed = [...eventList].reverse().find(e => e.event_type === 'memory.primed');
+      if (primed) {
+        let p = {};
+        try { p = JSON.parse(primed.payload || '{}'); } catch (err) {}
+        sections.push(`<div>${sectionH('🧠', 'Last Memory Priming', ` <span class="text-slate-500 normal-case font-mono">${ago(primed.occurred_at)}</span>`)}
+          <div class="text-slate-300">${p.memory_count ?? '?'} ${p.memory_count === 1 ? 'memory' : 'memories'} in context · ${p.task_matched ? 'task-matched recall' : 'recency'}</div>
+          <button onclick="document.getElementById('altitude-filter').value='detail';changeAltitudeFilter();" class="text-accentCyan hover:underline text-[11px] font-mono mt-0.5">View in timeline (Detail) →</button>
+        </div>`);
+      } else {
+        sections.push(`<div class="flex items-center justify-between text-slate-500"><span>No memory primed yet this session.</span></div>`);
+      }
+
+      // 5. Grants & egress posture one-liner.
+      const grantsCount = lastGrantsData
+        ? ((lastGrantsData.session_approval_grants || []).length + (lastGrantsData.egress_declassification_grants || []).length)
+        : activeGrants.size;
+      const taintEl = document.getElementById('egress-policy-state');
+      sections.push(`<div>${sectionH('🔑', 'Grants & Egress')}
+        <div class="flex items-center justify-between text-slate-300">
+          <span>${grantsCount} active grant${grantsCount === 1 ? '' : 's'}${taintEl ? ` · taint: ${escapeHTML(taintEl.innerText)}` : ''}</span>
+          <button onclick="switchRightTab('grants')" class="text-accentIndigo hover:underline text-[11px] font-mono">Grants tab →</button>
+        </div>
+      </div>`);
+
+      // 6. Recent attention/error events (tail of the governance-visible stream).
+      const recent = eventList.filter(e => ['attention', 'error'].includes((e.altitude || '').toLowerCase())).slice(-5).reverse();
+      const recentRows = recent.map(e => `
+        <div class="flex items-center justify-between gap-2 font-mono text-[11px] py-0.5">
+          <span class="${(e.altitude || '').toLowerCase() === 'error' ? 'text-accentRed' : 'text-accentAmber'}">${(e.altitude || '').toLowerCase() === 'error' ? '✗' : '⚠'} ${escapeHTML(e.event_type)}</span>
+          <span class="text-slate-500 shrink-0">${formatTime(e.occurred_at)}</span>
+        </div>`).join('');
+      sections.push(`<div>${sectionH('📡', 'Recent Attention')}${recentRows || '<div class="text-slate-500">Nothing at attention or error altitude.</div>'}</div>`);
+
+      const gatedCount = agentRoster.filter(n => n.status === 'gated').length;
+      if (badge) {
+        badge.innerText = pendingGates.size ? `${pendingGates.size} gate${pendingGates.size === 1 ? '' : 's'} pending`
+          : gatedCount ? 'Gated' : 'Live';
+        badge.className = `text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full ${pendingGates.size ? 'bg-accentAmber/15 text-accentAmber border border-accentAmber/30' : 'bg-slate-800 text-slate-400'}`;
+      }
+      body.innerHTML = sections.join('');
     }
 
     async function fetchRecentSessions() {
@@ -4207,8 +4439,8 @@
               const item = document.createElement('div');
               item.className = 'p-2 rounded border border-slate-800 bg-slate-900 bg-opacity-30 flex items-center justify-between';
               item.innerHTML = `
-                <span class="font-semibold text-slate-200 text-xs truncate">📄 ${p.title || p.id}</span>
-                <button onclick="inspectWikiPage('${p.id}')" class="text-accentIndigo hover:underline font-mono text-[10px] uppercase">View</button>
+                <span class="font-semibold text-slate-200 text-[13px] truncate">📄 ${p.title || p.id}</span>
+                <button onclick="inspectWikiPage('${p.id}')" class="text-accentIndigo hover:underline font-mono text-[11px] uppercase">View</button>
               `;
               listDiv.appendChild(item);
             });
@@ -4245,8 +4477,8 @@
       const suspendStatusSpan = document.getElementById('control-agent-suspend-status');
       suspendStatusSpan.innerText = (status === 'suspended') ? 'SUSPENDED' : 'ACTIVE';
       suspendStatusSpan.className = (status === 'suspended') 
-        ? 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-accentRed/10 text-accentRed border border-accentRed/20'
-        : 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-accentGreen/10 text-accentGreen border border-accentGreen/20';
+        ? 'px-2 py-0.5 rounded font-mono font-bold text-[11px] bg-accentRed/10 text-accentRed border border-accentRed/20'
+        : 'px-2 py-0.5 rounded font-mono font-bold text-[11px] bg-accentGreen/10 text-accentGreen border border-accentGreen/20';
 
       document.getElementById('agent-control-modal').classList.remove('hidden');
     }
