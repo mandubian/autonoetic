@@ -560,23 +560,32 @@ pub fn extract_rule_glossary(text: &str) -> BTreeMap<String, String> {
 
 /// The first sentence of a clause statement: text up to the first sentence
 /// terminator (`. `, `; `, or `: ` followed by a space) that is **not inside a
-/// backtick code span** — so `` `error_type: fatal` `` doesn't split mid-span.
-/// Returns the whole string if no terminator is found. Markdown emphasis
-/// markers are left intact (they render fine in the consuming surfaces).
+/// backtick code span** — so `` `error_type: fatal` `` doesn't split mid-span —
+/// and **not inside an open parenthetical** — so a clause like "opt-in (flag;
+/// defaults false); rest" keeps its parenthetical whole instead of cutting to
+/// "opt-in (flag". Unbalanced parens degrade to "no terminator found": the
+/// whole string is returned rather than a run-on split at the first outside
+/// terminator. Returns the whole string if no terminator is found. Markdown
+/// emphasis markers are left intact (they render fine in the consuming
+/// surfaces).
 fn first_sentence(statement: &str) -> String {
     let s = statement.trim();
     let mut in_code = false;
+    let mut paren_depth: usize = 0;
     let mut chars = s.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
-        if c == '`' {
-            in_code = !in_code;
-            continue;
-        }
-        if !in_code
-            && matches!(c, '.' | ';' | ':')
-            && chars.peek().is_some_and(|(_, n)| *n == ' ')
-        {
-            return s[..=i].trim_end_matches([';', ':']).to_string();
+        match c {
+            '`' => in_code = !in_code,
+            _ if in_code => {}
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '.' | ';' | ':'
+                if paren_depth == 0
+                    && chars.peek().is_some_and(|(_, n)| *n == ' ') =>
+            {
+                return s[..=i].trim_end_matches([';', ':']).to_string();
+            }
+            _ => {}
         }
     }
     s.to_string()
@@ -689,6 +698,35 @@ mod tests {
         assert_eq!(
             first_sentence("`a: b` and `c: d` only"),
             "`a: b` and `c: d` only"
+        );
+    }
+
+    #[test]
+    fn first_sentence_ignores_terminators_inside_parentheticals() {
+        // The 2026.08.30 P-5.8 shape: the "; " inside the manifest parenthetical
+        // must not cut the gloss to an unmatched "…(manifest `a: b`". The split
+        // happens at the "; " that closes the sentence after the parenthetical.
+        assert_eq!(
+            first_sentence(
+                "Strictly opt-in (manifest `a: b`; `c` defaults to false); repair is clamped."
+            ),
+            "Strictly opt-in (manifest `a: b`; `c` defaults to false)"
+        );
+        // A period inside a parenthetical is not a sentence end either.
+        assert_eq!(
+            first_sentence("Bounded loop (cap 2. never more); exhaustion errors."),
+            "Bounded loop (cap 2. never more)"
+        );
+        // Parens inside code spans do not open a parenthetical.
+        assert_eq!(
+            first_sentence("`use (x; y)` optional; after that, done."),
+            "`use (x; y)` optional"
+        );
+        // Unbalanced parens degrade to "no terminator found" — whole string,
+        // never a run-on cut at the first outside terminator.
+        assert_eq!(
+            first_sentence("Unclosed (parenthesis; text continues here"),
+            "Unclosed (parenthesis; text continues here"
         );
     }
 
