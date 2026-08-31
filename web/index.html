@@ -105,10 +105,10 @@
     .diff-removed { background-color: rgba(239, 68, 68, 0.18); color: #f87171; }
   </style>
 </head>
-<body class="font-sans min-h-screen flex flex-col antialiased">
+<body class="font-sans h-screen overflow-hidden flex flex-col antialiased">
 
   <!-- Header Bar -->
-  <header class="glass-panel sticky top-0 z-40 px-6 py-3.5 flex items-center justify-between border-b border-slate-800 shadow-xl">
+  <header class="glass-panel sticky top-0 z-40 shrink-0 px-6 py-3.5 flex items-center justify-between border-b border-slate-800 shadow-xl">
     <div class="flex items-center gap-3.5">
       <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-accentIndigo via-accentViolet to-accentCyan flex items-center justify-center shadow-lg glow-indigo">
         <span class="font-display font-extrabold text-xl text-white">A</span>
@@ -172,11 +172,11 @@
     </div>
   </header>
 
-  <!-- Dashboard Main Layout -->
-  <main class="flex-1 flex overflow-hidden">
+  <!-- Dashboard Main Layout (fixed viewport: each column scrolls internally) -->
+  <main class="flex-1 min-h-0 flex overflow-hidden">
     
     <!-- Left Panel: Narrative Timeline & Steering Composer -->
-    <section class="w-5/12 flex flex-col border-r border-slate-800/80 relative bg-darkBg">
+    <section class="w-5/12 min-h-0 flex flex-col border-r border-slate-800/80 relative bg-darkBg">
       <!-- Controls / Filter bar -->
       <div class="flex items-center justify-between px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-60">
         <div class="flex items-center gap-2">
@@ -195,17 +195,17 @@
       </div>
 
       <!-- Live LLM Activity Strip (#1082 — mirrors the room's activity line) -->
-      <div id="llm-activity-strip" class="hidden px-5 py-2 border-b border-slate-800/80 bg-slate-950/60 space-y-1"></div>
+      <div id="llm-activity-strip" class="hidden shrink-0 max-h-24 overflow-y-auto px-5 py-2 border-b border-slate-800/80 bg-slate-950/60 space-y-1"></div>
 
       <!-- Timeline Stream -->
-      <div id="timeline-stream" class="flex-1 overflow-y-auto p-5 space-y-3.5">
+      <div id="timeline-stream" class="flex-1 min-h-0 overflow-y-auto p-5 space-y-3.5">
         <div class="text-center text-slate-500 text-sm mt-12">
           Enter credentials and click Connect to start real-time session stream.
         </div>
       </div>
 
       <!-- Composer Box -->
-      <div class="p-3.5 border-t border-slate-800 bg-slate-950 bg-opacity-70">
+      <div class="shrink-0 p-3.5 border-t border-slate-800 bg-slate-950 bg-opacity-70">
         <div class="flex items-center gap-2">
           <textarea id="composer-input" placeholder="Type a message to steer session (Enter to send)..." rows="1" class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white placeholder-slate-500 resize-none focus:outline-none focus:border-accentIndigo transition-colors max-h-24 font-sans"></textarea>
           <button id="send-btn" onclick="sendMessage()" disabled class="bg-accentIndigo disabled:bg-slate-800 disabled:text-slate-600 hover:bg-opacity-90 active:scale-95 text-white p-2.5 rounded-lg shadow transition-all duration-150 flex items-center justify-center shrink-0">
@@ -216,10 +216,10 @@
     </section>
 
     <!-- Right Panel: Interactive DAG Workflow + Active Workbenches & Topology -->
-    <section class="w-7/12 flex">
+    <section class="w-7/12 min-h-0 flex">
       
       <!-- Middle Pane: Plan & Workflow DAG Map -->
-      <div class="w-7/12 border-r border-slate-800/80 flex flex-col bg-slate-950 bg-opacity-20">
+      <div class="w-7/12 min-h-0 border-r border-slate-800/80 flex flex-col bg-slate-950 bg-opacity-20">
         <!-- Tab Navigation -->
         <div class="flex border-b border-slate-800 bg-slate-950 bg-opacity-60 shrink-0">
           <button id="tab-btn-workflow" onclick="switchRightTab('workflow')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
@@ -479,7 +479,7 @@
       </div>
 
       <!-- Right Pane: Agent Topology Map & Session Telemetry HUD -->
-      <div class="w-5/12 flex flex-col bg-slate-950 bg-opacity-30">
+      <div class="w-5/12 min-h-0 flex flex-col bg-slate-950 bg-opacity-30">
         
         <!-- Alive Agent Topology Map -->
         <div class="flex-1 flex flex-col overflow-hidden border-b border-slate-800/80">
@@ -498,7 +498,7 @@
         </div>
 
         <!-- Telemetry & Budget HUD -->
-        <div class="p-4 space-y-3 bg-slate-950 bg-opacity-70">
+        <div class="shrink-0 p-4 space-y-3 bg-slate-950 bg-opacity-70">
           <h2 class="font-display font-semibold text-[11px] text-slate-400 tracking-wider uppercase border-b border-slate-800 pb-1.5">Session Telemetry HUD</h2>
           
           <div class="grid grid-cols-2 gap-3 text-xs">
@@ -748,6 +748,15 @@
     let activityList = [];
     let pendingGates = new Map(); // gateId -> { entry, payload, type }
     let closedGates = new Set();
+    // Gate ids the gateway store currently reports as pending — the
+    // authoritative source (`approvals.list` + `interaction.list_pending` +
+    // `admin.escalation_list`). Timeline-event replay alone must never decide
+    // pending-ness: abandoned/expired/reaped approvals leave dangling
+    // `*.pending` events that would otherwise be resurrected on every load.
+    let authoritativeGates = new Set();
+    let gatesRefreshTimer = null; // debounce for event-triggered refreshes
+    let gatesPollTimer = null;    // 10 s store re-sync while connected
+    let expandedEvents = new Set(); // rows with the details section open (survives SSE re-renders)
     let currentModalGateId = null;
     let currentModalGateType = null;
     let activeGrants = new Set();
@@ -872,6 +881,10 @@
       // 1. Fetch entire timeline history
       await fetchTimelineHistory(baseURL, sid, secret);
 
+      // 1b. Authoritative pending-gate snapshot — must land before anything
+      // renders gates, so replayed history can't resurrect dead approvals.
+      await refreshAuthoritativeGates();
+
       // 2. Fetch planframes checklist
       await fetchPlanFrame(baseURL, sid, secret);
 
@@ -921,6 +934,12 @@
       if (llmActivityTimer) clearInterval(llmActivityTimer);
       llmActivityTimer = setInterval(pollLlmActivity, 3000);
 
+      // Authoritative gates: snapshot + 10 s re-sync while connected, so gate
+      // state converges even without matching timeline traffic.
+      refreshAuthoritativeGates();
+      if (gatesPollTimer) clearInterval(gatesPollTimer);
+      gatesPollTimer = setInterval(refreshAuthoritativeGates, 10000);
+
       // Timeline SSE Stream
       let lastEventId = eventList.length > 0 ? eventList[eventList.length - 1].event_id : null;
       let timelineURL = `${baseURL}/api/session/timeline/stream/${sid}?token=${encodeURIComponent(secret)}&min_altitude=detail`;
@@ -953,6 +972,13 @@
       if (sseActivitySource) { sseActivitySource.close(); sseActivitySource = null; }
       if (grantsPollTimer) { clearInterval(grantsPollTimer); grantsPollTimer = null; }
       if (llmActivityTimer) { clearInterval(llmActivityTimer); llmActivityTimer = null; }
+      if (gatesPollTimer) { clearInterval(gatesPollTimer); gatesPollTimer = null; }
+      if (gatesRefreshTimer) { clearTimeout(gatesRefreshTimer); gatesRefreshTimer = null; }
+      // Fail-clean: no previous session's gate view may survive — otherwise a
+      // stale authoritative set would gate the *next* session's rendering.
+      authoritativeGates = new Set();
+      pendingGates.clear();
+      closedGates.clear();
       isConnected = false;
       
       document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
@@ -2586,7 +2612,12 @@
       if (fresh.length === 0) return;
 
       eventList = [...eventList, ...fresh].sort((a, b) => new Date(a.occurred_at) - new Date(b.occurred_at));
-      
+
+      // Gate-family events (raise OR resolve) may have changed store state →
+      // re-sync the authoritative set (debounced; covers approvals answered in
+      // the TUI or another operator surface).
+      if (fresh.some(e => /^(approval|user\.ask|escalation)\./.test(e.event_type))) scheduleGateRefresh();
+
       detectGates();
       renderTimeline();
       updateAgentTree();
@@ -2650,10 +2681,16 @@
         return;
       }
 
+      // Preserve reading position across re-renders: follow the tail only when
+      // already at it, otherwise a fresh batch yanks the view mid-read.
+      const nearBottom = streamDiv.scrollHeight - streamDiv.scrollTop - streamDiv.clientHeight < 60;
+      const prevTop = streamDiv.scrollTop;
+
       streamDiv.innerHTML = '';
       filtered.forEach(e => {
         const item = document.createElement('div');
-        item.className = 'flex gap-3 p-3.5 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 hover:border-slate-700 transition-all';
+        item.className = 'flex gap-3 p-3.5 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 hover:border-slate-700 hover:shadow-lg transition-all cursor-pointer';
+        item.setAttribute('data-event-id', e.event_id);
 
         let altColor = 'text-slate-500';
         let altGlyph = '·';
@@ -2666,16 +2703,28 @@
         let avatarStyle = 'from-slate-700 to-slate-800';
         const roleObj = e.role || {};
         const roleType = typeof roleObj === 'string' ? roleObj : (roleObj.role || 'system');
-        
-        if (e.principal && e.principal.kind === 'Human') {
+        // Wire principal kinds are snake_case ("human", "autonoetic_agent", …).
+        const principalKind = ((e.principal && e.principal.kind) || '').toLowerCase();
+        const principalId = e.principal && e.principal.id;
+        const fmtActorName = (raw) => {
+          const n = String(raw || '').replace(/\.default$/, '').trim();
+          return n ? n.charAt(0).toUpperCase() + n.slice(1) : null;
+        };
+
+        if (principalKind === 'human') {
           actorLabel = '🧑 Operator'; avatarStyle = 'from-accentGreen to-emerald-600';
         } else if (roleType === 'planner') {
-          actorLabel = '🤖 Planner'; avatarStyle = 'from-accentViolet to-fuchsia-600';
+          const plannerName = fmtActorName(principalId);
+          actorLabel = principalId && plannerName !== 'Planner' ? `🤖 ${plannerName || 'Planner'}` : '🤖 Planner';
+          avatarStyle = 'from-accentViolet to-fuchsia-600';
         } else if (roleType === 'sentinel') {
           actorLabel = '🛡️ Sentinel'; avatarStyle = 'from-accentAmber to-yellow-600';
         } else if (roleType === 'specialist') {
+          // Prefer the real agent id (e.g. "coder.fast") over the generic seat
+          // kind — all specialists would otherwise read as "Specialist".
           const kind = roleObj.kind || 'specialist';
-          actorLabel = `👾 ${kind.charAt(0).toUpperCase() + kind.slice(1)}`; avatarStyle = 'from-accentIndigo to-sky-600';
+          actorLabel = `👾 ${fmtActorName(principalId) || (kind.charAt(0).toUpperCase() + kind.slice(1))}`;
+          avatarStyle = 'from-accentIndigo to-sky-600';
         }
 
         let payload = null;
@@ -2753,7 +2802,7 @@
           `;
         } else if (eventType === 'approval.pending') {
           const aprId = payload?.request_id || e.event_id;
-          const isClosed = closedGates.has(aprId);
+          const isClosed = closedGates.has(aprId) || !authoritativeGates.has(aprId);
           richBody = `
             <div class="mt-2 p-3 rounded-lg border border-accentAmber/40 bg-accentAmber/10 flex flex-col space-y-2 glow-amber text-xs">
               <div class="flex items-center justify-between">
@@ -2773,7 +2822,7 @@
           `;
         } else if (eventType === 'user.ask.pending') {
           const askId = payload?.interaction_id || e.event_id;
-          const isClosed = closedGates.has(askId);
+          const isClosed = closedGates.has(askId) || !authoritativeGates.has(askId);
           richBody = `
             <div class="mt-2 p-3 rounded-lg border border-accentIndigo/40 bg-accentIndigo/10 flex flex-col space-y-2 text-xs">
               <div class="flex items-center justify-between">
@@ -2874,16 +2923,68 @@
               <div class="flex items-center gap-2">
                 <span class="text-[10px] text-slate-500 font-mono">${formatTime(e.occurred_at)}</span>
                 <button onclick="toggleRowJson('${e.event_id}')" class="text-[10px] text-slate-500 hover:text-accentIndigo font-mono bg-slate-950 px-1.5 py-0.5 rounded border border-slate-850">{ } JSON</button>
+                <span class="text-[9px] text-slate-600" title="Toggle details">${expandedEvents.has(e.event_id) ? '▼' : '▶'}</span>
               </div>
             </div>
             ${richBody}
+            ${expandedEvents.has(e.event_id) ? eventDetailsHTML(e) : ''}
             <pre id="json-${e.event_id}" class="hidden mt-2 font-mono text-[10px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-400 overflow-x-auto leading-relaxed select-all max-h-60">${escapeHTML(JSON.stringify(e, null, 2))}</pre>
           </div>
         `;
         streamDiv.appendChild(item);
       });
 
-      streamDiv.scrollTop = streamDiv.scrollHeight;
+      streamDiv.scrollTop = nearBottom ? streamDiv.scrollHeight : prevTop;
+    }
+
+    // Click-to-inspect: one delegated listener on the stream container —
+    // clicking anywhere on a row toggles its details section, except on real
+    // controls (buttons/inputs/ selectable text) which keep their own
+    // behavior. Delegation on the container survives renderTimeline's
+    // innerHTML swaps, so expanded state persists across live batches.
+    document.getElementById('timeline-stream').addEventListener('click', (ev) => {
+      if (ev.target.closest('button, a, input, select, textarea, label, pre')) return;
+      const item = ev.target.closest('[data-event-id]');
+      if (!item) return;
+      const id = item.getAttribute('data-event-id');
+      if (!expandedEvents.delete(id)) expandedEvents.add(id);
+      renderTimeline();
+    });
+
+    // Structured inspector for one timeline event: envelope metadata,
+    // causal refs, and the pretty-printed payload. The raw `{ } JSON` button
+    // still shows the full wire envelope for debugging.
+    function eventDetailsHTML(e) {
+      let payload = null;
+      try { if (e.payload) payload = JSON.parse(e.payload); } catch (err) {}
+      const session = e.source_session_id || e.session_id;
+      const principal = e.principal ? (e.principal.id || e.principal.kind || null) : null;
+      const meta = [
+        ['event_id', e.event_id],
+        ['type', e.event_type],
+        ['altitude', e.altitude],
+        ['principal', principal],
+        ['root_session', e.root_session_id],
+        ['session', session],
+        ['turn', e.turn_id],
+        ['occurred_at', e.occurred_at],
+      ].filter(([, v]) => v !== undefined && v !== null && v !== '');
+      const refEntries = e.refs
+        ? Object.entries(e.refs).filter(([, v]) => v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0))
+        : [];
+      return `
+        <div class="mt-2 p-3 rounded-lg border border-slate-850 bg-slate-950/80 space-y-2" onclick="event.stopPropagation()">
+          <div class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[10px] font-mono">
+            ${meta.map(([k, v]) => `<span class="text-slate-500">${k}</span><span class="text-slate-300 break-all">${escapeHTML(String(v))}</span>`).join('')}
+            ${refEntries.length ? `<span class="text-slate-500">refs</span><span class="text-slate-300 break-all">${escapeHTML(refEntries.map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join('  '))}</span>` : ''}
+          </div>
+          ${payload !== null ? `
+            <div class="pt-1.5 border-t border-slate-850">
+              <div class="text-[9px] text-slate-500 uppercase tracking-wider mb-1">payload</div>
+              <pre class="font-mono text-[10px] text-slate-400 max-h-64 overflow-auto whitespace-pre-wrap break-all leading-relaxed select-all">${escapeHTML(JSON.stringify(payload, null, 2))}</pre>
+            </div>` : ''}
+        </div>
+      `;
     }
 
     function formatTime(isoString) {
@@ -2922,6 +3023,7 @@
 
     function detectGates() {
       closedGates.clear();
+      pendingGates.clear();
       eventList.forEach(e => {
         if (['approval.resolved', 'approval.approved', 'approval.rejected', 'approval.cancelled',
              'interaction.resolved', 'user.ask.resolved', 'user.ask.cancelled', 'user.ask.expired',
@@ -2940,13 +3042,24 @@
           try {
             const p = JSON.parse(e.payload);
             const id = p.request_id || p.interaction_id || p.escalation_id;
-            if (id && !closedGates.has(id)) {
+            // Authoritative-store intersection: a historical `*.pending` event
+            // is only a live gate if the gateway still reports it pending.
+            // Without this, approvals resolved/expired/reaped while the page
+            // was closed get replayed as actionable gates on resume.
+            if (id && !closedGates.has(id) && authoritativeGates.has(id)) {
               pendingGates.set(id, { entry: e, payload: p, type: e.event_type });
               newestPending = id;
             }
           } catch(err) {}
         }
       });
+
+      // If the open modal's gate is no longer pending (resolved in the TUI or
+      // another operator surface, expired, or abandoned), close it.
+      if (currentModalGateId && !pendingGates.has(currentModalGateId)
+          && !document.getElementById('gate-modal').classList.contains('hidden')) {
+        closeGateModal();
+      }
 
       // Update Header alert
       const gateCount = pendingGates.size;
@@ -2964,6 +3077,47 @@
       if (newestPending && newestPending !== currentModalGateId && document.getElementById('gate-modal').classList.contains('hidden')) {
         openGateModalById(newestPending);
       }
+    }
+
+    // Ask the gateway store what is *actually* pending right now. The store is
+    // the source of truth; the timeline is only history. Runs at bootstrap, on
+    // gate-family timeline events (debounced), and on a 10 s poll so gates
+    // resolved in the TUI or another operator surface close here too.
+    async function refreshAuthoritativeGates() {
+      const { baseURL, sid, secret } = getConnectInfo();
+      if (!secret || !sid) return;
+      const call = (method, params) =>
+        fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'gates-' + method, method, params })
+        }).then(r => r.json()).catch(() => null);
+
+      const [appr, inter, esc] = await Promise.all([
+        call('approvals.list', {}),
+        call('interaction.list_pending', { root_session_id: sid }),
+        call('admin.escalation_list', {})
+      ]);
+
+      const ids = new Set();
+      (Array.isArray(appr && appr.result) ? appr.result : []).forEach(a => {
+        if (a && a.request_id
+            && (a.root_session_id ? a.root_session_id === sid : a.session_id === sid)) ids.add(a.request_id);
+      });
+      (inter && Array.isArray(inter.result) ? inter.result : []).forEach(i => {
+        if (i && i.interaction_id) ids.add(i.interaction_id);
+      });
+      (esc && esc.result && Array.isArray(esc.result.escalations) ? esc.result.escalations : []).forEach(e => {
+        if (e && e.escalation_id && !e.resolved_at && e.root_session_id === sid) ids.add(e.escalation_id);
+      });
+
+      authoritativeGates = ids;
+      detectGates();
+    }
+
+    function scheduleGateRefresh() {
+      if (gatesRefreshTimer) return;
+      gatesRefreshTimer = setTimeout(() => { gatesRefreshTimer = null; refreshAuthoritativeGates(); }, 250);
     }
 
     function openActiveGateModal() {
@@ -3433,16 +3587,26 @@
       const agents = new Map();
       const sessionNames = new Map();
       sessionNames.set(rootSessionId, 'Planner');
+      // Real agent identity per session (principal.id, e.g. "coder.default").
+      // The role/seat ("specialist") is a bucket, not a name — without the
+      // principal every specialist collapses into the same "Specialist" label.
+      const agentNames = new Map();
 
-      // Associate session IDs with agent roles
+      // Associate session IDs with agent identities and roles
       eventList.forEach(e => {
         const sessId = e.source_session_id;
         if (!sessId) return;
 
+        const pid = e.principal && e.principal.id;
+        const pkind = e.principal && e.principal.kind;
+        if (pid && pkind !== 'human' && pkind !== 'script' && !agentNames.has(sessId)) {
+          agentNames.set(sessId, pid);
+        }
+
         let roleLabel = null;
         const roleObj = e.role || {};
         const roleType = typeof roleObj === 'string' ? roleObj : (roleObj.role || 'system');
-        
+
         if (roleType === 'planner') roleLabel = 'Planner';
         else if (roleType === 'sentinel') roleLabel = 'Sentinel';
         else if (roleType === 'specialist') {
@@ -3453,6 +3617,17 @@
         if (roleLabel && !sessionNames.has(sessId)) sessionNames.set(sessId, roleLabel);
       });
 
+      // Agent identity wins over the seat label when naming nodes (but never
+      // renames the root, which stays "Planner").
+      const formatAgentName = (raw) => {
+        const name = String(raw || '').replace(/\.default$/, '').trim();
+        if (!name) return 'Agent';
+        return name.charAt(0).toUpperCase() + name.slice(1);
+      };
+      agentNames.forEach((agentId, sessId) => {
+        if (sessId !== rootSessionId) sessionNames.set(sessId, formatAgentName(agentId));
+      });
+
       agents.set(rootSessionId, { id: rootSessionId, name: 'Planner', parent: null, status: 'running' });
 
       eventList.forEach(e => {
@@ -3461,20 +3636,24 @@
         const currentSessionId = e.source_session_id || rootSessionId;
 
         if (payload) {
-          if (payload.tool_name === 'agent_spawn' || e.event_type === 'agent_spawn') {
+          const isSpawnTool = payload.tool_name === 'agent_spawn' || payload.tool_name === 'agent.spawn' || e.event_type === 'agent_spawn';
+          // Workflow mirror events carry the authoritative spawn mapping
+          // (target_agent_id + child/parent session ids).
+          const isWfSpawn = e.event_type === 'workflow.task.spawned';
+          if (isSpawnTool || isWfSpawn) {
             let argsObj = typeof payload.arguments === 'string' ? (JSON.parse(payload.arguments || '{}')) : (payload.arguments || {});
             let resObj = typeof payload.result === 'string' ? (JSON.parse(payload.result || '{}')) : (payload.result || {});
             const childId = payload.child_session_id || resObj.session_id || resObj.child_session_id;
-            let agentId = payload.agent_id || argsObj.agent_id || 'Specialist';
-            agentId = agentId.replace('.default', '');
-            agentId = agentId.charAt(0).toUpperCase() + agentId.slice(1);
+            const rawAgentId = payload.agent_id || argsObj.agent_id || payload.target_agent_id || 'Specialist';
+            const parentId = isWfSpawn ? (payload.parent_session_id || currentSessionId) : currentSessionId;
 
             if (childId) {
-              if (!agents.has(currentSessionId)) {
-                agents.set(currentSessionId, { id: currentSessionId, name: sessionNames.get(currentSessionId) || 'Agent', parent: null, status: 'idle' });
+              if (!agents.has(parentId) && parentId !== rootSessionId) {
+                agents.set(parentId, { id: parentId, name: sessionNames.get(parentId) || 'Agent', parent: null, status: 'idle' });
               }
-              sessionNames.set(childId, agentId);
-              agents.set(childId, { id: childId, name: agentId, parent: currentSessionId, status: 'running' });
+              const nodeName = formatAgentName(rawAgentId);
+              sessionNames.set(childId, nodeName);
+              agents.set(childId, { id: childId, name: nodeName, parent: parentId, status: 'running' });
             }
           }
         }
@@ -3482,12 +3661,22 @@
         if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending' || e.event_type === 'escalation.pending') {
           try {
             const p = JSON.parse(e.payload);
-            const id = p.request_id || p.interaction_id;
-            if (id && !closedGates.has(id)) {
+            const id = p.request_id || p.interaction_id || p.escalation_id;
+            if (id && !closedGates.has(id) && authoritativeGates.has(id)) {
               const node = agents.get(currentSessionId);
               if (node) node.status = 'gated';
             }
           } catch(err) {}
+        }
+      });
+
+      // Final identity pass: rename every non-root node from the principal-
+      // derived map. Spawn payloads don't always carry the agent id (nodes may
+      // have been created with the 'Specialist' fallback), but the child's own
+      // events always attribute to its real principal id.
+      agents.forEach((node, id) => {
+        if (id !== rootSessionId && agentNames.has(id)) {
+          node.name = formatAgentName(agentNames.get(id));
         }
       });
 
