@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="100%" height="100%">
+  <defs>
+    <style>
+      .bg { fill: #0d1117; }
+      .box { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 6px; }
+      .box-propose { fill: #211c13; stroke: #d29922; stroke-width: 1.8; rx: 6px; }
+      .box-gw { fill: #101c30; stroke: #58a6ff; stroke-width: 2; rx: 6px; }
+      .box-ledger { fill: #152219; stroke: #3fb950; stroke-width: 1.8; rx: 6px; }
+      .box-promote { fill: #1e172a; stroke: #bc8cff; stroke-width: 1.8; rx: 6px; }
+      .box-const { fill: #1f161c; stroke: #e3919b; stroke-width: 1.8; rx: 6px; }
+      
+      .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 700; fill: #f0f6fc; }
+      .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 11.5px; fill: #8b949e; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; fill: #c9d1d9; }
+      .badge { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+      
+      .edge { fill: none; stroke-width: 2; }
+      .edge-gold { stroke: #d29922; }
+      .edge-blue { stroke: #58a6ff; }
+      .edge-green { stroke: #3fb950; }
+      .edge-purple { stroke: #bc8cff; }
+      .edge-pink { stroke: #e3919b; stroke-dasharray: 4 3; }
+      
+      .pill { rx: 3px; }
+    </style>
+
+    <marker id="evo-gold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#d29922" />
+    </marker>
+    <marker id="evo-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#58a6ff" />
+    </marker>
+    <marker id="evo-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#3fb950" />
+    </marker>
+    <marker id="evo-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#bc8cff" />
+    </marker>
+    <marker id="evo-pink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#e3919b" />
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" class="bg" />
+
+  <!-- HEADER -->
+  <text x="500" y="34" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="700" fill="#f0f6fc">The Constitutional Co-Evolutionary Lifecycle</text>
+  <text x="500" y="54" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" fill="#8b949e">How agents and humans build, evaluate, promote, and amend their common system under rule of law</text>
+
+  <!-- STAGE 1: REASON & PROPOSE (TOP-LEFT) -->
+  <g transform="translate(40, 85)">
+    <rect width="420" height="175" class="box-propose" />
+    
+    <text x="18" y="26" class="title" fill="#d29922">1. Reason &amp; Propose</text>
+    <rect x="250" y="12" width="154" height="18" class="pill" fill="#34281a" />
+    <text x="327" y="25" text-anchor="middle" class="badge" fill="#d29922">STAGE 1 · LOW PRIVILEGE</text>
+    
+    <text x="18" y="46" class="subtitle">🤖 Autonomous AI Reasoners</text>
+    <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
+    
+    <text x="18" y="74" class="mono">• Generates code, tests, and task breakdowns</text>
+    <text x="18" y="94" class="mono">• Proposes tool intents: <tspan fill="#f0f6fc">sandbox.exec, revision.create</tspan></text>
+    <text x="18" y="114" class="mono">• Submits constitutional amendment proposals (<tspan fill="#3fb950">Ri-0.8</tspan>)</text>
+    
+    <rect x="18" y="136" width="384" height="22" class="pill" fill="#34281a" />
+    <text x="210" y="151" text-anchor="middle" class="badge" fill="#d29922">PROPOSES INTENTS — NEVER EXECUTES PRIVILEGE DIRECTLY</text>
+  </g>
+
+  <!-- STAGE 2: ISOLATION & POLICY CHECK (TOP-RIGHT) -->
+  <g transform="translate(540, 85)">
+    <rect width="420" height="175" class="box-gw" />
+    
+    <text x="18" y="26" class="title" fill="#58a6ff">2. Gateway Policy &amp; Sandbox</text>
+    <rect x="250" y="12" width="154" height="18" class="pill" fill="#1c2a44" />
+    <text x="327" y="25" text-anchor="middle" class="badge" fill="#58a6ff">STAGE 2 · HIGH PRIVILEGE</text>
+    
+    <text x="18" y="46" class="subtitle">⚙️ Lawful Executor Engine</text>
+    <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
+    
+    <text x="18" y="74" class="mono">• Validates capabilities &amp; bounds (<tspan fill="#f0f6fc">Rule Zero</tspan>)</text>
+    <text x="18" y="94" class="mono">• Bubblewrap / Docker sandbox container execution</text>
+    <text x="18" y="114" class="mono">• Injects ephemeral secrets without exposing to model</text>
+    
+    <rect x="18" y="136" width="384" height="22" class="pill" fill="#1c2a44" />
+    <text x="210" y="151" text-anchor="middle" class="badge" fill="#58a6ff">MECHANICAL SAFETY ISOLATION &amp; CONTAINMENT</text>
+  </g>
+
+  <!-- STAGE 3: TAMPER-EVIDENT CAUSAL LEDGER (BOTTOM-RIGHT) -->
+  <g transform="translate(540, 305)">
+    <rect width="420" height="175" class="box-ledger" />
+    
+    <text x="18" y="26" class="title" fill="#3fb950">3. Immutable Causal Ledger</text>
+    <rect x="240" y="12" width="164" height="18" class="pill" fill="#17322e" />
+    <text x="322" y="25" text-anchor="middle" class="badge" fill="#3fb950">STAGE 3 · SHA-256 HASH CHAIN</text>
+    
+    <text x="18" y="46" class="subtitle">📜 Tamper-Evident Event Spine (P-8.1)</text>
+    <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
+    
+    <text x="18" y="74" class="mono">• Append-only log with non-repudiation (<tspan fill="#3fb950">Ri-0.11</tspan>)</text>
+    <text x="18" y="94" class="mono">• Every test run, tool call, &amp; diff hash recorded</text>
+    <text x="18" y="114" class="mono">• Unfalsifiable civic track record for all actors</text>
+    
+    <rect x="18" y="136" width="384" height="22" class="pill" fill="#17322e" />
+    <text x="210" y="151" text-anchor="middle" class="badge" fill="#3fb950">FACTUAL EVIDENCE BASELINE TO RESOLVE DISPUTES</text>
+  </g>
+
+  <!-- STAGE 4: PROMOTION & REVISION (BOTTOM-LEFT) -->
+  <g transform="translate(40, 305)">
+    <rect width="420" height="175" class="box-promote" />
+    
+    <text x="18" y="26" class="title" fill="#bc8cff">4. Verification &amp; Promotion</text>
+    <rect x="240" y="12" width="164" height="18" class="pill" fill="#291f3a" />
+    <text x="322" y="25" text-anchor="middle" class="badge" fill="#bc8cff">STAGE 4 · SINGLE-DOOR GATE</text>
+    
+    <text x="18" y="46" class="subtitle">⚖️ Human &amp; Agent Governance Seats</text>
+    <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
+    
+    <text x="18" y="74" class="mono">• Single-door candidate activation (<tspan fill="#f0f6fc">P-9.15</tspan>)</text>
+    <text x="18" y="94" class="mono">• Evaluator &amp; Auditor test verification</text>
+    <text x="18" y="114" class="mono">• Motivated Decider resolution required (<tspan fill="#bc8cff">O-1</tspan>)</text>
+    
+    <rect x="18" y="136" width="384" height="22" class="pill" fill="#291f3a" />
+    <text x="210" y="151" text-anchor="middle" class="badge" fill="#bc8cff">CAPSULE PROMOTED OR REJECTED WITH RULE ID</text>
+  </g>
+
+  <!-- BOTTOM CENTER BAR: CONSTITUTIONAL AMENDMENT PROCESS -->
+  <g transform="translate(140, 515)">
+    <rect width="720" height="96" class="box-const" />
+    <text x="24" y="26" class="title" fill="#ff7b72">🏛️ The Constitutional Evolution Track (Ri-0.8 / O-6 / P-10.9)</text>
+    <rect x="580" y="12" width="116" height="18" class="pill" fill="#35222a" />
+    <text x="638" y="25" text-anchor="middle" class="badge" fill="#e3919b">AMENDMENT TRACK</text>
+    
+    <text x="24" y="50" class="mono">• <tspan fill="#d29922" font-weight="600">Agents have Voice:</tspan> Ri-0.8 proposals cannot be dropped; O-6 mandates review SLA.</text>
+    <text x="24" y="68" class="mono">• <tspan fill="#58a6ff" font-weight="600">Recompute Lock:</tspan> Digest changes update canonical law across federated nodes.</text>
+    <text x="24" y="86" class="mono">• <tspan fill="#3fb950" font-weight="600">Entrenched Core:</tspan> Correction mechanisms can only be strengthened, never weakened.</text>
+  </g>
+
+  <!-- CONNECTING ARROWS -->
+  <!-- 1 -> 2 (Horizontal Top) -->
+  <path d="M 460 172 L 532 172" class="edge edge-gold" marker-end="url(#evo-gold)" />
+  
+  <!-- 2 -> 3 (Vertical Right) -->
+  <path d="M 750 260 L 750 297" class="edge edge-blue" marker-end="url(#evo-blue)" />
+  
+  <!-- 3 -> 4 (Horizontal Bottom) -->
+  <path d="M 540 392 L 468 392" class="edge edge-green" marker-end="url(#evo-green)" />
+  
+  <!-- 4 -> 1 (Vertical Left) -->
+  <path d="M 250 305 L 250 268" class="edge edge-purple" marker-end="url(#evo-purple)" />
+  
+  <!-- Promotion & Ledger links to Bottom Track -->
+  <path d="M 250 480 L 250 510" class="edge edge-pink" marker-end="url(#evo-pink)" />
+  <path d="M 750 480 L 750 510" class="edge edge-pink" marker-end="url(#evo-pink)" />
+
+</svg>
