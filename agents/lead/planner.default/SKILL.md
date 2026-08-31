@@ -16,6 +16,10 @@ metadata:
       name: "Planner Default"
       description: "Front-door lead agent for ambiguous goals. Interprets requests, routes to specialists, and synthesizes responses."
       singleton: true
+      # Residency (#902, #1247): the planner's session parks for 15 minutes
+      # after a turn instead of terminating, so children and peers can still
+      # reach it with agent_message between operator turns.
+      resident_idle_ttl_secs: 900
     llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"

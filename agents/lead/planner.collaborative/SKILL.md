@@ -16,6 +16,9 @@ metadata:
       name: "Collaborative Planner"
       description: "PlanFrame-aware lead agent. Proposes structured plans before building, offers workbench projection for human co-editing, and treats the operator as a co-builder."
       singleton: true
+      # Residency (#902, #1247): same reachability contract as planner.default —
+      # the session parks for 15 minutes after a turn so peers can message it.
+      resident_idle_ttl_secs: 900
     llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
