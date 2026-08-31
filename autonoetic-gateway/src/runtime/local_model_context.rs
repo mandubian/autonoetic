@@ -209,6 +209,10 @@ fn parse_context_window_from_model_object(obj: &Value) -> Option<u32> {
     if let Some(context_length) = parse_u32_field(obj.get("context_length")) {
         return Some(context_length);
     }
+    // vLLM-shaped servers (vllm, ninfer, …) expose `max_model_len`.
+    if let Some(max_model_len) = parse_u32_field(obj.get("max_model_len")) {
+        return Some(max_model_len);
+    }
     None
 }
 
@@ -294,6 +298,20 @@ mod tests {
         assert_eq!(
             parse_context_window_from_models_response(&resp, "anthropic/claude-sonnet-4"),
             Some(200000)
+        );
+    }
+
+    #[test]
+    fn parse_vllm_style_max_model_len() {
+        let resp = json!({
+            "data": [{
+                "id": "unsloth/Qwen3.8-27B-NVFP4",
+                "max_model_len": 32768
+            }]
+        });
+        assert_eq!(
+            parse_context_window_from_models_response(&resp, "unsloth/Qwen3.8-27B-NVFP4"),
+            Some(32768)
         );
     }
 

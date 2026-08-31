@@ -895,6 +895,23 @@ impl LlmDriver for OpenAiDriver {
                 }
             }
 
+            // Fallback: extract XML-style tool calls from accumulated text when
+            // the structured `tool_calls` deltas never arrived (mirrors the
+            // non-streaming `parse_response` fallback — models with XML-based
+            // chat templates may emit `<tool_call>` blocks as plain text).
+            if tool_calls_accum.is_empty() && text_accum.contains("<tool_call>") {
+                let (_reasoning, xml_calls) =
+                    crate::llm::xml_tool_calls::extract_xml_tool_calls(&text_accum);
+                if !xml_calls.is_empty() {
+                    tracing::info!(
+                        target: "llm::openai",
+                        count = xml_calls.len(),
+                        "Extracted XML tool calls from streamed text fallback"
+                    );
+                    tool_calls_accum = xml_calls;
+                }
+            }
+
             for tc in &tool_calls_accum {
                 let _ = tx
                     .send(StreamEvent::ToolUseEnd {
