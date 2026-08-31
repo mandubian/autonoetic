@@ -809,9 +809,28 @@ async fn handle_list_names(
     Ok(Json(ListResponse { names }))
 }
 
-/// Serve the web dashboard index.html
+/// Serve the web dashboard index.html.
+///
+/// Default (prod) builds embed the page into the binary at compile time.
+/// With the `dev-web` feature, the page is read from the repo tree on every
+/// request so edits live-refresh with just a browser reload — no rebuild,
+/// no gateway restart.
+#[cfg(not(feature = "dev-web"))]
 async fn handle_serve_index() -> impl IntoResponse {
     axum::response::Html(include_str!("../../../web/index.html"))
+}
+
+#[cfg(feature = "dev-web")]
+async fn handle_serve_index() -> impl IntoResponse {
+    // CARGO_MANIFEST_DIR is autonoetic-gateway/; the repo `web/` dir is a sibling.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/index.html");
+    match std::fs::read_to_string(&path) {
+        Ok(html) => axum::response::Html(html),
+        Err(e) => axum::response::Html(format!(
+            "<!doctype html><title>dev-web</title><pre>failed to read {}: {e}</pre>",
+            path.display()
+        )),
+    }
 }
 
 /// POST /api/jsonrpc - Handle JSON-RPC requests from the web dashboard

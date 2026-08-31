@@ -10,6 +10,9 @@ license.workspace = true
 # cost. Required to run `sandbox: "wasm"` agents (e.g. JavaScript agents) via
 # `autonoetic gateway start`.
 wasm-tier = ["autonoetic-gateway/wasm-tier"]
+# Serve the web dashboard from disk (live-refresh during development) instead of
+# the copy embedded at compile time. See autonoetic-gateway `dev-web`.
+dev-web = ["autonoetic-gateway/dev-web"]
 
 [dependencies]
 # `test-utils`: `reset_constitution_runtime_for_tests` for CLI unit tests that bootstrap multiple temp workspaces.

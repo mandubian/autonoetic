@@ -15,6 +15,17 @@ RUST_LOG=autonoetic=debug cargo test           # Debug logging during tests
 
 No linter or formatter is configured. There is no `cargo clippy` or `rustfmt` CI gate — run `cargo build` to verify.
 
+**Web dashboard dev loop:** the operator dashboard (`web/index.html`) is embedded
+into the binary at compile time (`include_str!` in `server/http.rs`). To iterate
+on it without rebuilding/restarting, run the gateway with the `dev-web` feature,
+which serves the file from disk on every request (browser reload picks up edits):
+
+```bash
+cargo run -p autonoetic --features dev-web --bin autonoetic run
+```
+
+Plain builds (no features) stay self-contained — always the prod shape.
+
 **Test runner:** CI uses [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`).
 Each test runs in its own process; `.config/nextest.toml` defines two profiles:
 

@@ -11,6 +11,11 @@ test-utils = []
 # Portable WASM execution tier (RFC docs/archived/portable-wasm-execution-tier.md, P4).
 # Off by default — the native build doesn't pay wasmtime's compile/binary cost.
 wasm-tier = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# Serve the web dashboard (`web/index.html`) from disk on each request so edits
+# live-refresh without rebuilding/restarting. Off by default — prod builds embed
+# the page into the binary. Dev: `cargo run --features dev-web` (or
+# `--features autonoetic-gateway/dev-web` when running the `autonoetic` CLI crate).
+dev-web = []
 
 [dependencies]
 autonoetic-types.workspace = true
