@@ -27,6 +27,10 @@ pub struct LlmPreset {
     /// Optional context window for CLI "% of context" when preset is applied to SKILL.
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
+    /// Optional per-completion output cap (tokens). Unset → server default
+    /// (often 8192 on local servers — too small for thinking-mode models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,

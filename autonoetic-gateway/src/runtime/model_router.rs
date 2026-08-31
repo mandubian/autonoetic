@@ -602,6 +602,7 @@ pub fn create_router_from_preset(
                 fallback_model: None,
                 chat_only: false,
                 context_window_tokens: None,
+                max_tokens: None,
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
@@ -628,6 +629,7 @@ pub fn create_router_from_preset(
                 fallback_model: None,
                 chat_only: false,
                 context_window_tokens: None,
+                max_tokens: None,
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
@@ -666,6 +668,7 @@ pub fn decision_to_llm_config(
         context_window_tokens: model_entry
             .and_then(|e| e.config.context_window_tokens)
             .or(base_config.context_window_tokens),
+        max_tokens: base_config.max_tokens,
         base_url: model_entry
             .and_then(|e| e.config.base_url.clone())
             .or(base_config.base_url.clone()),
@@ -711,6 +714,7 @@ mod tests {
                     fallback_model: None,
                     chat_only: false,
                     context_window_tokens: None,
+                    max_tokens: None,
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
@@ -731,6 +735,7 @@ mod tests {
                     fallback_model: None,
                     chat_only: false,
                     context_window_tokens: None,
+                    max_tokens: None,
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
@@ -751,6 +756,7 @@ mod tests {
                     fallback_model: None,
                     chat_only: false,
                     context_window_tokens: None,
+                    max_tokens: None,
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
@@ -773,6 +779,7 @@ mod tests {
             fallback_model: None,
             chat_only: false,
             context_window_tokens: None,
+            max_tokens: None,
             base_url: None,
             api_key_env: None,
             routing_preset: None,

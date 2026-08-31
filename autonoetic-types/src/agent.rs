@@ -100,6 +100,12 @@ pub struct LlmConfig {
     /// If unset, use env `AUTONOETIC_LLM_CONTEXT_WINDOW` or omit percentage.
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
+    /// Optional per-completion output cap (tokens). When unset the request omits
+    /// `max_tokens` entirely and the server default applies — which on local
+    /// OpenAI-compatible servers (vLLM/ninfer) can be as low as 8192, far below
+    /// what thinking-mode models need for reasoning + final answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,

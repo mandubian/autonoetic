@@ -263,6 +263,7 @@ impl NativeTool for SkillInstallTool {
                     fallback_model: None,
                     chat_only: preset.chat_only.unwrap_or(false),
                     context_window_tokens: None,
+                    max_tokens: None,
                     base_url: preset.base_url.clone(),
                     api_key_env: preset.api_key_env.clone(),
                     routing_preset: None,

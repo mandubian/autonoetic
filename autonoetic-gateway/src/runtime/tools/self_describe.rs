@@ -569,6 +569,7 @@ mod tests {
                 fallback_model: None,
                 chat_only: Some(false),
                 context_window_tokens: Some(200_000),
+                max_tokens: None,
                 base_url: None,
                 api_key_env: None,
                 thinking: None,

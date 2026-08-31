@@ -1349,7 +1349,7 @@ pub fn build_driver(
         } else {
             None
         },
-        None, // max_tokens from request, not config
+        config.max_tokens, // per-completion output cap from preset; server default when unset
         base_url_override.as_deref(),
         api_key_override.as_deref(),
         config.chat_only,

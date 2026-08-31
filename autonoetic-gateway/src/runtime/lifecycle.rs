@@ -163,6 +163,11 @@ pub struct AgentExecutor {
     /// resume a session starts with an unrestricted batch and the accumulated
     /// `egress_labels` still drive chokepoint withholding for older content.
     pub pending_batch_taint: autonoetic_types::egress::EgressLabel,
+    /// Signature (hash) of the last emitted `memory.primed` timeline payload —
+    /// dedupes the per-turn memory-context composition so the operator UI only
+    /// sees the event when the recalled set actually changes. `pub(crate)`:
+    /// mutated from the `impl AgentExecutor` block in `runtime/context.rs`.
+    pub(crate) last_primed_signature: u64,
     /// When set, passed to tool execution for config-dependent behavior.
     pub config: Option<Arc<GatewayConfig>>,
     /// Optional per-session LLM/tool/token/wall-clock budgets (shared `Arc` across spawns).
@@ -510,6 +515,7 @@ impl AgentExecutor {
             egress_ask_state: None,
             initial_ingest_egress_label: None,
             pending_batch_taint: autonoetic_types::egress::EgressLabel::unrestricted(),
+            last_primed_signature: 0,
             config: None,
             session_budget: None,
             root_session_budget: None,
@@ -1283,6 +1289,7 @@ impl AgentExecutor {
             fallback_model: None,
             chat_only: preset.chat_only.unwrap_or(false),
             context_window_tokens: preset.context_window_tokens,
+            max_tokens: None,
             base_url: preset.base_url.clone(),
             api_key_env: preset.api_key_env.clone(),
             routing_preset: Some(preset_name.to_string()),
@@ -3325,6 +3332,7 @@ impl AgentExecutor {
                 fallback_model: None,
                 chat_only: false,
                 context_window_tokens: None,
+                max_tokens: None,
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
@@ -3988,6 +3996,7 @@ impl AgentExecutor {
                                             fallback_model: None,
                                             chat_only: preset.chat_only.unwrap_or(false),
                                             context_window_tokens: preset.context_window_tokens,
+                                            max_tokens: None,
                                             base_url: preset.base_url.clone(),
                                             api_key_env: preset.api_key_env.clone(),
                                             routing_preset: Some(fb_preset.clone()),
@@ -4310,6 +4319,14 @@ impl AgentExecutor {
                 latest_assistant_text = Some(clean_text.clone());
             }
 
+            // Tool calls take precedence over the reported stop reason: some
+            // OpenAI-compatible servers (vLLM-shaped, e.g. ninfer) report
+            // finish_reason "stop" even when the model emitted a tool call,
+            // and the driver's XML-text fallback recovers it into
+            // `response.tool_calls`. A response carrying tool calls is a tool
+            // turn — dispatching on the finish reason alone would hibernate
+            // the session and drop the call.
+            let response_has_tool_calls = !response.tool_calls.is_empty();
             match response.stop_reason {
                 StopReason::ToolUse => {
                     let mut assistant_msg = Message::assistant(clean_text.clone());
@@ -4318,6 +4335,41 @@ impl AgentExecutor {
                     assistant_msg.tool_calls = response.tool_calls.clone();
                     // LLM-response label (RFC §4.5): tag + id the assistant
                     // message before `handle_tool_batch` commits it to history.
+                    commit_assistant_egress(
+                        &mut assistant_msg,
+                        &response_egress_label,
+                        &mut self.egress_labels,
+                    );
+
+                    if let Some(outcome) = self
+                        .handle_tool_batch(
+                            response.tool_calls,
+                            history,
+                            &turn_id,
+                            &mut tracer,
+                            &mut mcp_runtime,
+                            &mut disclosure_state,
+                            secret_store.as_mut(),
+                            &active_agent_dir,
+                            assistant_msg,
+                            &mut digest_turn_active,
+                        )
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+                StopReason::EndTurn | StopReason::StopSequence if response_has_tool_calls => {
+                    // Tool calls recovered from an "EndTurn" response — route
+                    // through the tool path above by falling into the same
+                    // dispatch the driver's ToolUse reason would take.
+                    // Fall through semantics: re-dispatch via ToolUse arm.
+                    // Implemented by duplicating the minimal routing: build the
+                    // assistant message with tool calls and run the batch.
+                    let mut assistant_msg = Message::assistant(clean_text.clone());
+                    assistant_msg.reasoning_content = response.reasoning_content.clone();
+                    assistant_msg.reasoning_details = response.reasoning_details.clone();
+                    assistant_msg.tool_calls = response.tool_calls.clone();
                     commit_assistant_egress(
                         &mut assistant_msg,
                         &response_egress_label,
@@ -4480,7 +4532,7 @@ impl AgentExecutor {
                     let _ = tracer.end_digest_turn();
                     break;
                 }
-                StopReason::MaxTokens | StopReason::Other(_) => {
+                StopReason::MaxTokens => {
                     if !response.text.trim().is_empty() {
                         let mut assistant_msg = Message::assistant(response.text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
@@ -4493,6 +4545,34 @@ impl AgentExecutor {
                         );
 
                         history.push(assistant_msg);
+                    }
+
+                    // Inform the model its output was cut off (it cannot see
+                    // its own truncation) and continue the loop so it can
+                    // finish — or wrap up concisely. Appended to the first
+                    // system message rather than a new one: some Jinja
+                    // templates (Qwen) reject multiple system messages.
+                    // The loop guard bounds this: repeated truncated rounds
+                    // without a successful tool call trip
+                    // max_loops_without_progress.
+                    const TRUNCATION_NOTICE: &str = "\n\n[gateway] The previous response hit the output token cap and was cut off mid-generation. You were truncated — do not assume the user saw any of it. Continue from where the text stopped, or produce a much shorter response that wraps up. If a final answer keeps overflowing, reduce verbosity.";
+                    let notice_already_present = history
+                        .get(0)
+                        .map(|m| m.content.contains("[gateway] The previous response hit the output token cap"))
+                        .unwrap_or(false);
+                    if !notice_already_present {
+                        if let Some(first) = history.get_mut(0) {
+                            if matches!(first.role, crate::llm::Role::System) {
+                                first.content.push_str(TRUNCATION_NOTICE);
+                            } else {
+                                history.insert(
+                                    0,
+                                    Message::system(TRUNCATION_NOTICE.trim().to_string()),
+                                );
+                            }
+                        } else {
+                            history.insert(0, Message::system(TRUNCATION_NOTICE.trim().to_string()));
+                        }
                     }
 
                     // #846: same premature-complete guard as EndTurn (issue
@@ -4530,6 +4610,17 @@ impl AgentExecutor {
                         }
                     }
 
+                    if end_turn_waiting_for_child {
+                        tracer.log_stopped(&format!("{:?}", response.stop_reason));
+                        let _ = tracer.end_digest_turn();
+                        break;
+                    }
+                    // Continue the loop: the truncation notice above is now in
+                    // history and the next LLM round can complete the turn.
+                    // Loop guard bounds the number of extra rounds.
+                    continue;
+                }
+                StopReason::Other(_) => {
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
                     let _ = tracer.end_digest_turn();
                     break;
@@ -6482,7 +6573,12 @@ mod tests {
         assert_eq!(*calls.lock().expect("mutex should lock"), 2);
     }
 
-    struct MaxTokensDriver;
+    struct MaxTokensDriver {
+        /// Number of MaxTokens responses before switching to EndTurn. The
+        /// truncation-recovery path continues the loop with a gateway notice,
+        /// so an always-truncating driver must be bounded by the test.
+        remaining: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl LlmDriver for MaxTokensDriver {
@@ -6490,12 +6586,23 @@ mod tests {
             &self,
             _request: &CompletionRequest,
         ) -> anyhow::Result<CompletionResponse> {
+            let stop_reason = if self
+                .remaining
+                .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                    n.checked_sub(1)
+                })
+                .is_ok()
+            {
+                StopReason::MaxTokens
+            } else {
+                StopReason::EndTurn
+            };
             Ok(CompletionResponse {
                 text: "partial narrative, then the model got truncated…".to_string(),
                 tool_calls: vec![],
                 reasoning_content: None,
                 reasoning_details: None,
-                stop_reason: StopReason::MaxTokens,
+                stop_reason,
                 usage: TokenUsage::default(),
             })
         }
@@ -6591,7 +6698,9 @@ mod tests {
         let mut runtime = AgentExecutor::new(
             manifest,
             "System prompt".to_string(),
-            Arc::new(MaxTokensDriver),
+            Arc::new(MaxTokensDriver {
+                remaining: std::sync::atomic::AtomicUsize::new(1),
+            }),
             temp.path().to_path_buf(),
             crate::runtime::tools::default_registry(),
             None,
@@ -6646,7 +6755,9 @@ mod tests {
         let mut runtime = AgentExecutor::new(
             manifest,
             "System prompt".to_string(),
-            Arc::new(MaxTokensDriver),
+            Arc::new(MaxTokensDriver {
+                remaining: std::sync::atomic::AtomicUsize::new(1),
+            }),
             temp.path().to_path_buf(),
             crate::runtime::tools::default_registry(),
             None,
@@ -6983,6 +7094,7 @@ mod tests {
             fallback_model: None,
             chat_only: false,
             context_window_tokens: None,
+            max_tokens: None,
             base_url: None,
             api_key_env: None,
             routing_preset: None,
@@ -7730,6 +7842,7 @@ mod tests {
                 } else {
                     "claude-sonnet".to_string()
                 }),
+                max_tokens: None,
                 temperature: Some(0.1),
                 fallback_provider: None,
                 fallback_model: None,

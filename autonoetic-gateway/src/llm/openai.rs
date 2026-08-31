@@ -424,6 +424,21 @@ impl OpenAiDriver {
                     }
                     body["reasoning"] = r;
                 }
+                crate::llm::provider::ReasoningStyle::LocalChatTemplate => {
+                    // vLLM-shaped local servers (vllm, ninfer, llama.cpp, LM
+                    // Studio, Ollama) toggle hybrid-thinking templates via
+                    // `chat_template_kwargs.enable_thinking` (Qwen family) and
+                    // accept an OpenAI-style top-level `reasoning_effort`
+                    // alongside. Servers understanding neither ignore both.
+                    // XHigh collapses to "high" — no local template maps it.
+                    body["chat_template_kwargs"] = json!({ "enable_thinking": true });
+                    let effort_str = match thinking.effort {
+                        ThinkingEffort::Low => "low",
+                        ThinkingEffort::Medium => "medium",
+                        ThinkingEffort::High | ThinkingEffort::XHigh => "high",
+                    };
+                    body["reasoning_effort"] = json!(effort_str);
+                }
             }
         }
 
@@ -460,6 +475,7 @@ impl OpenAiDriver {
                         body["prompt_cache_retention"] = json!("24h");
                     }
                 }
+                crate::llm::provider::ReasoningStyle::LocalChatTemplate => {}
                 crate::llm::provider::ReasoningStyle::None => {}
             }
         }
@@ -899,8 +915,10 @@ impl LlmDriver for OpenAiDriver {
             // the structured `tool_calls` deltas never arrived (mirrors the
             // non-streaming `parse_response` fallback — models with XML-based
             // chat templates may emit `<tool_call>` blocks as plain text).
+            // The recovered prefix replaces the text so the raw markup doesn't
+            // leak into history or the visible reply.
             if tool_calls_accum.is_empty() && text_accum.contains("<tool_call>") {
-                let (_reasoning, xml_calls) =
+                let (prefix, xml_calls) =
                     crate::llm::xml_tool_calls::extract_xml_tool_calls(&text_accum);
                 if !xml_calls.is_empty() {
                     tracing::info!(
@@ -909,6 +927,7 @@ impl LlmDriver for OpenAiDriver {
                         "Extracted XML tool calls from streamed text fallback"
                     );
                     tool_calls_accum = xml_calls;
+                    text_accum = prefix.trim_end().to_string();
                 }
             }
 
@@ -1001,10 +1020,11 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     // structured `tool_calls` field is empty but the response contains
     // `<tool_call>` blocks. This handles models that use XML-based chat
     // templates (e.g. Qwen 3.5 with qwen35-template.jinja) where the server
-    // may not extract tool calls into the structured JSON field.
+    // may not extract tool calls into the structured JSON field. The recovered
+    // prefix replaces the text so the raw markup doesn't leak into history.
+    let mut text = text;
     if tool_calls.is_empty() && text.contains("<tool_call>") {
-        let (_reasoning, xml_calls) =
-            crate::llm::xml_tool_calls::extract_xml_tool_calls(&text);
+        let (prefix, xml_calls) = crate::llm::xml_tool_calls::extract_xml_tool_calls(&text);
         if !xml_calls.is_empty() {
             tracing::info!(
                 target: "llm::openai",
@@ -1012,6 +1032,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
                 "Extracted XML tool calls from response text fallback"
             );
             tool_calls = xml_calls;
+            text = prefix.trim_end().to_string();
         }
     }
 
@@ -1313,6 +1334,43 @@ mod tests {
             false,
         );
         assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_local_chat_template_emits_enable_thinking_and_effort() {
+        // Local vLLM-shaped servers: thinking maps to the template toggle plus
+        // an OpenAI-style top-level reasoning_effort (ninfer honors both).
+        let driver = driver_with("qwen3.8-27b", ReasoningStyle::LocalChatTemplate);
+        let body = driver.build_body(
+            &req_with_thinking("qwen3.8-27b", ThinkingEffort::High, None),
+            false,
+        );
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_local_chat_template_xhigh_collapses_to_high() {
+        let driver = driver_with("qwen3.8-27b", ReasoningStyle::LocalChatTemplate);
+        let body = driver.build_body(
+            &req_with_thinking("qwen3.8-27b", ThinkingEffort::XHigh, None),
+            false,
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn reasoning_local_chat_template_not_emitted_without_thinking() {
+        // Presets without a `thinking:` block send a clean body — the server
+        // template default applies.
+        let driver = driver_with("qwen3.8-27b", ReasoningStyle::LocalChatTemplate);
+        let mut req = req_with_thinking("qwen3.8-27b", ThinkingEffort::Low, None);
+        req.thinking = None;
+        let body = driver.build_body(&req, false);
+        assert!(body.get("chat_template_kwargs").is_none());
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

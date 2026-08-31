@@ -25,6 +25,12 @@ pub enum ReasoningStyle {
     /// `cache_control` breakpoints on all models except GLM/Zhipu, plus
     /// per-session `prompt_cache_key` and `prompt_cache_retention: "24h"`.
     OpenCodeGo,
+    /// Local OpenAI-compatible servers (vllm, ninfer, llama.cpp, LM Studio,
+    /// Ollama) fronting Qwen-family hybrid-thinking templates: reasoning is
+    /// toggled via `chat_template_kwargs.enable_thinking`, with an OpenAI-style
+    /// top-level `reasoning_effort` alongside (servers that understand neither
+    /// ignore both fields silently).
+    LocalChatTemplate,
 }
 
 /// Flags describing what a provider's API supports.
@@ -169,6 +175,10 @@ fn reasoning_style_for_provider(provider: &str) -> ReasoningStyle {
         "openai" | "codex" => ReasoningStyle::OpenAiEffort,
         "openrouter" => ReasoningStyle::OpenRouterUnified,
         "opencode" => ReasoningStyle::OpenCodeGo,
+        // Local OpenAI-compatible servers: template-level thinking toggle.
+        "vllm" | "llamacpp" | "llama.cpp" | "ollama" | "lmstudio" => {
+            ReasoningStyle::LocalChatTemplate
+        }
         _ => ReasoningStyle::None,
     }
 }

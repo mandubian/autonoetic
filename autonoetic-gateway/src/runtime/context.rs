@@ -169,6 +169,22 @@ fn is_error_lesson_scope(scope: &str) -> bool {
     matches!(scope, "digest.error_pattern" | "digest.lesson")
 }
 
+/// One memory surfaced into the system prompt by `build_memory_context_snippet`
+/// — the operator-visible record of what the model actually saw. `content` is
+/// the post-egress-filter text (identical to what was injected; withheld rows
+/// carry the indication instead of source content).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrimedMemory {
+    pub scope: String,
+    pub error_lesson: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<String>,
+    pub chars: usize,
+    /// True when egress withholding replaced the content with an indication.
+    pub withheld: bool,
+    pub content: String,
+}
+
 /// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
 ///
 /// When `task_text` is `Some` and non-empty, candidates are scored against it
@@ -186,7 +202,7 @@ pub fn build_memory_context_snippet(
     task_text: Option<&str>,
     query_sink: Option<autonoetic_types::egress::Sink>,
     egress_cfg: Option<&autonoetic_types::egress::EgressConfig>,
-) -> Option<String> {
+) -> Option<(String, Vec<PrimedMemory>)> {
     use crate::runtime::egress_stored::{
         filter_or_indicate_for_sink, query_sink_or_remote, resolve_stored_label,
         FilteredStoredContent,
@@ -275,26 +291,29 @@ pub fn build_memory_context_snippet(
         return None;
     }
 
+    let mut primed: Vec<PrimedMemory> = Vec::new();
     let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
     for mem in &selected {
         let label = resolve_stored_label(mem.egress_label.as_ref(), cfg);
-        let content = match filter_or_indicate_for_sink(
+        let error_lesson = is_error_lesson_scope(&mem.scope);
+        let (content, withheld) = match filter_or_indicate_for_sink(
             &mem.content,
             &label,
             sink,
             Some("memory.priming"),
             IndicationVerbosity::Descriptive,
         ) {
-            FilteredStoredContent::Allowed(c) => c,
-            FilteredStoredContent::Withheld { indication } => indication,
+            FilteredStoredContent::Allowed(c) => (c, false),
+            FilteredStoredContent::Withheld { indication } => (indication, true),
         };
         let truncated: String = content.chars().take(500).collect();
-        let session_ref = mem
+        let session_tag = mem
             .tags
             .iter()
             .find_map(|t| t.strip_prefix("session:"))
-            .map(|sid| sid.chars().take(8).collect::<String>());
-        let prefix = if is_error_lesson_scope(&mem.scope) {
+            .map(str::to_string);
+        let session_ref = session_tag.as_deref().map(|sid| sid.chars().take(8).collect::<String>());
+        let prefix = if error_lesson {
             "(error lesson) "
         } else {
             ""
@@ -303,8 +322,16 @@ pub fn build_memory_context_snippet(
             Some(sid) => parts.push(format!("- {prefix}{truncated} [from session {sid}]")),
             None => parts.push(format!("- {prefix}{truncated}")),
         }
+        primed.push(PrimedMemory {
+            scope: mem.scope.clone(),
+            error_lesson,
+            source_session: session_tag,
+            chars: truncated.chars().count(),
+            withheld,
+            content: truncated,
+        });
     }
-    Some(parts.join("\n"))
+    Some((parts.join("\n"), primed))
 }
 
 /// Backward-compatible wrapper: composes system instructions with an optional
@@ -731,7 +758,10 @@ impl AgentExecutor {
     }
 
     /// Build memory context snippet from Tier-2 global memories for session continuity.
-    pub(crate) fn build_memory_context_snippet(&self) -> Option<String> {
+    /// Also emits a Detail-altitude `memory.primed` timeline event whenever the
+    /// recalled set differs from the last one, so the operator UI can show what
+    /// entered the agent's context (deduplicated — steady-state turns are quiet).
+    pub(crate) fn build_memory_context_snippet(&mut self) -> Option<String> {
         let store = self.gateway_store.as_ref()?;
         let config = self.config.as_ref()?;
         let agent_id = &self.manifest.agent.id;
@@ -761,6 +791,66 @@ impl AgentExecutor {
             query_sink,
             Some(&config.egress),
         )
+        .map(|(snippet, primed)| {
+            self.record_memory_primed(&primed, task_matched);
+            snippet
+        })
+    }
+
+    /// Operator visibility for memory priming: emit a Detail-altitude
+    /// `memory.primed` timeline event describing exactly which memories entered
+    /// the system prompt (post-egress-filter text, as the model saw it). Called
+    /// only when the recalled set is non-empty; the content-signature dedup
+    /// keeps steady-state turns from re-emitting the same block every turn.
+    fn record_memory_primed(&mut self, primed: &[PrimedMemory], task_matched: bool) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for m in primed {
+            m.scope.hash(&mut hasher);
+            m.source_session.hash(&mut hasher);
+            m.content.hash(&mut hasher);
+        }
+        let signature = hasher.finish();
+        if self.last_primed_signature == signature {
+            return;
+        }
+        self.last_primed_signature = signature;
+
+        let Some(store) = self.gateway_store.as_ref() else {
+            return;
+        };
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        let root = crate::runtime::content_store::root_session_id(&session_id).to_string();
+        let principal =
+            autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+        let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+        let payload = serde_json::json!({
+            "memory_count": primed.len(),
+            "task_matched": task_matched,
+            "memories": primed,
+        });
+        let event = crate::runtime::session_timeline::build_timeline_event(
+            root,
+            session_id,
+            Some(crate::runtime::checkpoint::turn_id_for(self.turn_counter)),
+            &principal,
+            &role,
+            "memory.primed",
+            // Pinned Detail (the workflow.signal precedent): context-plumbing
+            // observability, not an operator alert — invisible at Normal+.
+            Some(autonoetic_types::session_timeline::Altitude::Detail),
+            Some(payload),
+            Default::default(),
+        );
+        if let Err(err) = store.create_live_digest_event(&event) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %err,
+                "memory.primed timeline emit failed"
+            );
+        }
     }
 
     /// Compose, sign, and render the R++1 state-attestation tail for the
@@ -1522,7 +1612,7 @@ mod injected_recall_tests {
             "2026-06-01T00:00:00Z",
         );
 
-        let snippet = build_memory_context_snippet(
+        let (snippet, _primed) = build_memory_context_snippet(
             &store,
             agent_id,
             1,
@@ -1558,7 +1648,7 @@ mod injected_recall_tests {
             "2026-01-01T00:00:00Z",
         );
 
-        let snippet = build_memory_context_snippet(
+        let (snippet, _primed) = build_memory_context_snippet(
             &store,
             agent_id,
             1,
@@ -1604,7 +1694,7 @@ mod injected_recall_tests {
             "2026-06-01T00:00:00Z",
         );
 
-        let snippet =
+        let (snippet, _primed) =
             build_memory_context_snippet(
             &store,
             "coder.default",
@@ -1646,7 +1736,7 @@ mod injected_recall_tests {
             "2026-06-01T00:00:00Z",
         );
 
-        let snippet = build_memory_context_snippet(
+        let (snippet, _primed) = build_memory_context_snippet(
             &store,
             agent_id,
             2,
