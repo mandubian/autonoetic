@@ -66,6 +66,7 @@ fn test_manifest() -> AgentManifest {
             fallback_model: None,
             chat_only: false,
             context_window_tokens: None,
+            max_tokens: None,
             base_url: None,
             api_key_env: None,
             routing_preset: None,

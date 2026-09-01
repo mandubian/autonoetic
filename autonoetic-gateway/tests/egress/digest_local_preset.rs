@@ -18,6 +18,7 @@ fn local_preset(model: &str) -> LlmPreset {
         fallback_model: None,
         chat_only: Some(true),
         context_window_tokens: None,
+        max_tokens: None,
         base_url: None,
         api_key_env: None,
         thinking: None,
