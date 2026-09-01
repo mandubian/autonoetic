@@ -2095,6 +2095,36 @@ fn bounded_child_summary(reply: &str, max_chars: usize, full_ref: Option<&str>) 
     summarize_oversized_reply(reply, max_chars, full_ref)
 }
 
+/// Derive the task status for a completed child from its reply — mechanically,
+/// never by LLM judgment.
+///
+/// Only a structured reply (the `io.returns` JSON a script agent emits) can
+/// downgrade the status: a top-level `"status"` of `"failed"`/`"error"` or a
+/// top-level `"ok": false`. Anything else — prose replies, unparseable
+/// payloads, absent reply, any other `status` value (`"partial"`,
+/// `"completed"`, …) — stays `Succeeded`, exactly the pre-existing behavior.
+/// "The session ended normally" and "the work succeeded" are different facts;
+/// this keeps the task row honest about the second without second-guessing
+/// free-form replies.
+fn derive_child_task_status(assistant_reply: Option<&str>) -> autonoetic_types::workflow::TaskRunStatus {
+    use autonoetic_types::workflow::TaskRunStatus;
+    let Some(reply) = assistant_reply else {
+        return TaskRunStatus::Succeeded;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(reply) else {
+        return TaskRunStatus::Succeeded;
+    };
+    let failed = matches!(
+        v.get("status").and_then(|s| s.as_str()),
+        Some("failed") | Some("error")
+    ) || v.get("ok") == Some(&serde_json::Value::Bool(false));
+    if failed {
+        TaskRunStatus::Failed
+    } else {
+        TaskRunStatus::Succeeded
+    }
+}
+
 /// Write `reply` to the content store under the child session, visible to the
 /// parent, and return its short `cnt_` ref.
 fn spill_child_reply(
@@ -2654,19 +2684,36 @@ async fn spawn_task_execution(
                 }
             }
 
+            // Mechanical child-failure surfacing: a child whose structured
+            // reply reports failure (`status: "failed"|"error"` or
+            // `ok: false` — the io.returns shape) must not be recorded as a
+            // Succeeded task. The task row is what the parent's join, the
+            // Session Room and `workflow_state` read; recording Succeeded
+            // there masked real child failures (e.g. a sandbox that died at
+            // mount setup) and sent the parent down a re-delegation loop.
+            let task_status =
+                derive_child_task_status(spawn_result.assistant_reply.as_deref());
+            if task_status == autonoetic_types::workflow::TaskRunStatus::Failed {
+                tracing::warn!(
+                    target: "workflow",
+                    task_id = %t_id,
+                    "Child session ended normally but its structured reply reports failure; \
+                     recording task as failed"
+                );
+            }
             if let Err(e) = workflow_store::update_task_run_status(
                 &cfg,
                 store,
                 &wf_id,
                 &t_id,
-                autonoetic_types::workflow::TaskRunStatus::Succeeded,
+                task_status,
                 summary,
                 None,
                 None,
             ) {
                 tracing::warn!(target: "workflow", error = %e, "Failed to persist async task completion");
             }
-            tracing::info!(target: "workflow", task_id = %t_id, "Async task completed successfully");
+            tracing::info!(target: "workflow", task_id = %t_id, status = task_status.as_str(), "Async task completed");
             let _ = workflow_store::checkpoint_task(
                 &cfg,
                 store,
@@ -2674,7 +2721,7 @@ async fn spawn_task_execution(
                 &t_id,
                 "completed".to_string(),
                 serde_json::json!({
-                    "status": "succeeded",
+                    "status": task_status.as_str(),
                     "result_summary": spawn_result.assistant_reply.as_ref().map(|s| {
                         bounded_child_summary(
                             s,
@@ -3882,6 +3929,49 @@ mod child_reply_spill_tests {
             workflow_store::full_result_ref(&task),
             Some("cnt_abcd1234")
         );
+    }
+
+    #[test]
+    fn structured_failure_reply_derives_failed_task() {
+        use autonoetic_types::workflow::TaskRunStatus;
+        let failed = r#"{"status":"failed","error":"bwrap: Can't mkdir /opt/wrapper-out"}"#;
+        assert_eq!(
+            derive_child_task_status(Some(failed)),
+            TaskRunStatus::Failed
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"error"}"#)),
+            TaskRunStatus::Failed
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"ok":false,"reason":"no files"}"#)),
+            TaskRunStatus::Failed
+        );
+    }
+
+    #[test]
+    fn non_failure_replies_stay_succeeded() {
+        use autonoetic_types::workflow::TaskRunStatus;
+        // The adapter's honest "partial" must NOT be downgraded — only an
+        // explicit failure shape changes the task status.
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"partial","artifact_ref":"ar.9e12"}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"ok":true}"#)),
+            TaskRunStatus::Succeeded
+        );
+        // Prose, unparseable, absent reply — all stay Succeeded.
+        assert_eq!(
+            derive_child_task_status(Some("All three attempts failed identically.")),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some("{not json")),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(derive_child_task_status(None), TaskRunStatus::Succeeded);
     }
 }
 
