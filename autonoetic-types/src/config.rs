@@ -2556,20 +2556,20 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub allowed_mount_roots_rw: Vec<String>,
 
-    /// Host-filesystem exposure mode (#1002 slice 4): `"legacy"` ro-binds the
-    /// whole host `/` into bubblewrap sandboxes (current behaviour, deprecated
-    /// — a deprecation warning is logged at startup); `"allow_set"` mounts only
-    /// the gateway-asserted set (workspace, toolchain roots, layers, SDK,
-    /// declared+granted mounts, session content). Docker/microvm/wasm already
+    /// Host-filesystem exposure mode (#1002 slice 4): `"allow_set"` (default)
+    /// mounts only the gateway-asserted set (workspace, toolchain roots, layers,
+    /// SDK, declared+granted mounts, session content). `"legacy"` ro-binds the
+    /// whole host `/` — deprecated opt-out for pre-launch deployments, with a
+    /// deprecation warning logged at startup. Docker/microvm/wasm always
     /// behave like `allow_set` (no host `/` bind), so this key only changes
-    /// the bubblewrap tier. Default flips after launch (RFC
-    /// sandbox-mount-allow-set.md DP-1).
+    /// the bubblewrap tier (RFC sandbox-mount-allow-set.md DP-1: default
+    /// flipped post-launch).
     #[serde(default = "default_host_fs_mode")]
     pub host_fs: String,
 }
 
 fn default_host_fs_mode() -> String {
-    "legacy".to_string()
+    "allow_set".to_string()
 }
 
 impl Default for SandboxConfig {

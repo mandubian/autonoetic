@@ -83,10 +83,8 @@ them binds the host root, so the key changes the bubblewrap tier only.
 
 | Mode | Behaviour |
 |---|---|
-| `legacy` (current default) | `--ro-bind / /` — the whole host filesystem is readable inside the sandbox. Deprecated; a warning is logged at startup, and the secret mask is the stopgap that keeps credentials out |
-| `allow_set` | Nothing of the host exists except what the gateway asserts |
-
-The default flips after launch (DP-1 in the originating proposal).
+| `allow_set` (default, DP-1) | Nothing of the host exists except what the gateway asserts |
+| `legacy` (deprecated opt-out) | `--ro-bind / /` — the whole host filesystem is readable inside the sandbox. A warning is logged at startup, and the secret mask is the stopgap that keeps credentials out |
 
 ### What the allow-set contains
 
