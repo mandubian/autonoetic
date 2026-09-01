@@ -44,7 +44,7 @@ instead of claiming `ok` from LLM judgment. Verdicts:
                       type-invalid) — no mapper is emitted for that direction
 
 Generated mapping hooks are fail-loud: a payload that violates the declared
-contract (unparseable, non-object, missing a required mapped field) makes the
+contract (unparseable, non-object, missing a required field) makes the
 hook exit non-zero so the turn fails closed instead of letting the LLM
 improvise on untransformed data. Optional fields may be absent.
 
@@ -233,8 +233,9 @@ def validate_subset(
 
 LOUD_DOC = (
     "Fail-loud: any structural mismatch (unparseable input, non-object payload,\n"
-    "missing required mapped field) exits non-zero — the turn fails closed\n"
-    "instead of passing untransformed data through. Optional fields may be absent."
+    "missing a required field — renamed or not) exits non-zero — the turn fails\n"
+    "closed instead of passing untransformed data through. Optional fields may\n"
+    "be absent."
 )
 SOFT_DOC = (
     "Fail-soft: on any structural mismatch the input passes through unchanged."
@@ -245,10 +246,11 @@ _PRE_VERBATIM_LOUD = '''#!/usr/bin/env python3
 
 Contract: verbatim stdin -> stdout at the script-mode payload boundary.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -286,10 +288,11 @@ _PRE_ENVELOPE_LOUD = '''#!/usr/bin/env python3
 Contract: LLM completion request envelope (reasoning-mode middleware); the
 last message's JSON content is mapped in place.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -338,10 +341,11 @@ _POST_VERBATIM_LOUD = '''#!/usr/bin/env python3
 
 Contract: verbatim stdin -> stdout at the script-mode payload boundary.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -379,10 +383,11 @@ _POST_ENVELOPE_LOUD = '''#!/usr/bin/env python3
 Contract: LLM completion response envelope (reasoning-mode middleware); the
 JSON `text` field is mapped in place.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -430,10 +435,11 @@ _PRE_VERBATIM_SOFT = '''#!/usr/bin/env python3
 
 Contract: verbatim stdin -> stdout at the script-mode payload boundary.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -455,10 +461,11 @@ _PRE_ENVELOPE_SOFT = '''#!/usr/bin/env python3
 
 Contract: LLM completion request envelope (reasoning-mode middleware).
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -483,10 +490,11 @@ _POST_VERBATIM_SOFT = '''#!/usr/bin/env python3
 
 Contract: verbatim stdin -> stdout at the script-mode payload boundary.
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -508,10 +516,11 @@ _POST_ENVELOPE_SOFT = '''#!/usr/bin/env python3
 
 Contract: LLM completion response envelope (reasoning-mode middleware).
 %(loudness_doc)s
-
-Generated notes:
-%(notes_block)s
 """
+
+# Generated notes (inert comments — schema-derived notes are newline-stripped
+# and comment-prefixed so they can never become code):
+%(notes_block)s
 import json
 import sys
 
@@ -542,6 +551,18 @@ _HOOK_TEMPLATES = {
 }
 
 
+def _note_as_comment(note: Any) -> str:
+    """Render one generated-script note as an inert `#` comment line.
+
+    Notes carry schema-derived text (field names, schema-diff output), so a
+    hostile schema could otherwise smuggle newlines (or, inside the old
+    docstring placement, `\"\"\"` terminators) into the generated source.
+    Collapsing whitespace keeps every note on a single comment-prefixed line.
+    """
+    collapsed = " ".join(str(note).split())
+    return f"# - {collapsed}" if collapsed else "# - (empty note)"
+
+
 def render_hook(
     role: str,
     contract: str,
@@ -551,7 +572,9 @@ def render_hook(
     notes: List[str],
 ) -> str:
     template = _HOOK_TEMPLATES[(role, contract, fail_loud)]
-    notes_block = "\n".join(f"# - {note}" for note in notes[:8]) or "# - (none)"
+    notes_block = (
+        "\n".join(_note_as_comment(note) for note in notes[:8]) or "# - (none)"
+    )
     return template % {
         "loudness_doc": LOUD_DOC if fail_loud else SOFT_DOC,
         "notes_block": notes_block,
@@ -695,7 +718,18 @@ def process_direction(
         hook_pairs = [(dst, src) for src, dst in kept]
         synthetic_schema = dest_schema
         validate_against = source_schema
+    # Fail-loud REQUIRED_SOURCES covers *every* caller-side required field —
+    # renamed or not — so a payload omitting an unrenamed required field also
+    # fails closed instead of reaching the base partially-conforming. When the
+    # payload-side schema is unavailable, the mapped sources are the only
+    # requirement we can honestly enforce (under-claim).
+    payload_schema = source_schema if role == "pre" else dest_schema
     required_sources = [src for src, _ in hook_pairs]
+    enforced = set(required_sources)
+    for name in required_fields(payload_schema):
+        if name not in enforced:
+            required_sources.append(name)
+            enforced.add(name)
 
     # Optional fields the flat renames cannot cover stay unmapped — name them.
     props = schema_properties(source_schema)

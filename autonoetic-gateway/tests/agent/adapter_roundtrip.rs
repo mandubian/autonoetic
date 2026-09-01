@@ -461,8 +461,7 @@ fn fail_loud_hook_rejects_nonconforming_payload() {
 /// `--fail-soft` restores the legacy passthrough: the un-mappable payload
 /// flows through unchanged instead of failing the turn.
 #[test]
-fn fail_soft_opt_out_passes_through() {
-    let temp = tempfile::tempdir().expect("tempdir");
+fn fail_soft_opt_out_passes_through() {    let temp = tempfile::tempdir().expect("tempdir");
     let schemas = flat_schemas();
     let diff = run_schema_diff(&schemas);
     let out_dir = temp.path().join("wrapper-soft");
@@ -556,4 +555,216 @@ fn identical_schemas_need_no_hooks_and_report_ok() {
         !files.iter().any(|f| f.contains("_map")),
         "no mapper files for identical schemas: {files:?}"
     );
+}
+
+/// Fail-loud enforcement covers every schema-required field, not only the
+/// renamed ones (#1255 review): when a type-invalid pair is dropped, the
+/// dropped field is still required on the wire — a payload omitting it must
+/// exit non-zero instead of reaching the base partially-conforming.
+#[test]
+fn fail_loud_requires_unrenamed_required_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // target {task: str, tag: str} -> base {query: str, tag: int}: the
+    // tag->tag rename is dropped (string vs integer), so `tag` stays
+    // required on the wire but is NOT in the rename list.
+    let schemas = serde_json::json!({
+        "base_accepts": serde_json::json!({
+            "type": "object",
+            "required": ["query", "tag"],
+            "properties": {
+                "query": { "type": "string" },
+                "tag": { "type": "integer" }
+            }
+        }),
+        "base_returns": string_object_schema(&["summary"]),
+        "target_accepts": serde_json::json!({
+            "type": "object",
+            "required": ["task", "tag"],
+            "properties": {
+                "task": { "type": "string" },
+                "tag": { "type": "string" }
+            }
+        }),
+        "target_returns": string_object_schema(&["result"])
+    });
+    let diff = run_schema_diff(&schemas);
+    let out_dir = temp.path().join("wrapper-unrenamed");
+    let gen = run_generator(
+        &temp,
+        "base.agent.adapter.unrenamed",
+        &[
+            "--target-spec-json",
+            &serde_json::to_string(
+                &serde_json::json!({
+                    "accepts": schemas["target_accepts"],
+                    "returns": schemas["target_returns"]
+                }),
+            )
+            .unwrap(),
+            "--schema-diff-json",
+            &serde_json::to_string(&diff).unwrap(),
+            "--base-schema-json",
+            &serde_json::to_string(
+                &serde_json::json!({
+                    "accepts": schemas["base_accepts"],
+                    "returns": schemas["base_returns"]
+                }),
+            )
+            .unwrap(),
+            "--wrapper-mode",
+            "script",
+            "--base-script-path",
+            write_base_entry(&temp, "base_entry_unrenamed.py").as_str(),
+            "--output-dir",
+            out_dir.to_string_lossy().as_ref(),
+        ],
+    );
+    assert!(gen.status.success(), "generator failed: {}", gen.stderr);
+    let notes: Vec<String> = gen.stdout["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        notes.iter().any(|n| n.contains("dropped rename tag->tag")),
+        "the tag rename should be dropped as type-invalid: {notes:?}"
+    );
+
+    let run_hook = |stdin: &str| {
+        let mut child = Command::new("python3")
+            .arg(out_dir.join("scripts/pre_map.py"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("hook should spawn");
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin available")
+            .write_all(stdin.as_bytes())
+            .expect("stdin write");
+        child.wait_with_output().expect("hook should run")
+    };
+
+    // Missing the unrenamed required field: fail loud, field named.
+    let missing = run_hook(r#"{"task":"x"}"#);
+    assert!(
+        !missing.status.success(),
+        "omitting a required-but-unrenamed field must fail loud"
+    );
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("tag"),
+        "stderr should name the unrenamed required field, got: {stderr}"
+    );
+
+    // Complete payload: renamed + passthrough fields both survive.
+    let ok = run_hook(r#"{"task":"x","tag":"t"}"#);
+    assert!(ok.status.success());
+    let mapped: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(
+        mapped,
+        serde_json::json!({"query": "x", "tag": "t"}),
+        "the dropped rename must leave the field passing through"
+    );
+}
+
+/// Schema-derived notes are attacker-reachable (the adapter receives the
+/// target spec from a requesting agent), so they must never land in a code
+/// position of a generated hook (#1255 review): a note carrying a docstring
+/// terminator plus Python must end up as an inert, newline-collapsed comment.
+#[test]
+fn hostile_notes_cannot_inject_code_into_generated_hooks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let payload_notes = r#"evil: '"""' + "\n" + "print('PWNED')\nimport os\n""#;
+    let diff = serde_json::json!({
+        "accepts_compatible": false,
+        "returns_compatible": false,
+        "requires_input_mapping": true,
+        "requires_output_mapping": false,
+        "input_mappings": [{"from": "task", "to": "query"}],
+        "output_mappings": [],
+        "notes": [payload_notes]
+    });
+    let out_dir = temp.path().join("wrapper-evil");
+    let gen = run_generator(
+        &temp,
+        "base.agent.adapter.evil",
+        &[
+            "--target-spec-json",
+            r#"{"accepts":{"type":"object","required":["task"],"properties":{"task":{"type":"string"}}}}"#,
+            "--schema-diff-json",
+            &serde_json::to_string(&diff).unwrap(),
+            "--wrapper-mode",
+            "script",
+            "--base-script-path",
+            write_base_entry(&temp, "base_entry_evil.py").as_str(),
+            "--output-dir",
+            out_dir.to_string_lossy().as_ref(),
+        ],
+    );
+    assert!(gen.status.success(), "generator failed: {}", gen.stderr);
+
+    let pre = std::fs::read_to_string(out_dir.join("scripts/pre_map.py")).unwrap();
+    // The safety property: every triple-quote sequence outside the two
+    // docstring delimiters sits in a `#` comment — inert either way.
+    let mut delimiters = 0;
+    for line in pre.lines() {
+        if line.contains("\"\"\"") {
+            let trimmed = line.trim_start();
+            // The opening delimiter has the docstring's first words on the
+            // same line; the closing one stands alone.
+            if trimmed.starts_with("\"\"\"") {
+                delimiters += 1;
+            } else {
+                assert!(
+                    trimmed.starts_with('#'),
+                    "a triple-quote outside the docstring must be comment-prefixed:\n{line}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        delimiters, 2,
+        "exactly the generated docstring terminators may close a string:\n{pre}"
+    );
+    assert!(
+        pre.lines()
+            .filter(|line| line.contains("import os") || line.contains("PWNED"))
+            .all(|line| line.trim_start().starts_with('#')),
+        "hostile statement text may only appear inside comments:\n{pre}"
+    );
+    assert!(
+        pre.lines()
+            .filter(|line| line.contains("PWNED"))
+            .all(|line| line.trim_start().starts_with('#')),
+        "every note line carrying hostile text must be comment-prefixed:\n{pre}"
+    );
+
+    // The hook must still run correctly — the note is inert text.
+    let mut child = Command::new("python3")
+        .arg(out_dir.join("scripts/pre_map.py"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("hook should spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .expect("stdin available")
+        .write_all(br#"{"task":"clean"}"#)
+        .expect("stdin write");
+    let out = child.wait_with_output().expect("hook should run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("PWNED"),
+        "injected code must not execute: {stdout}"
+    );
+    let mapped: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(mapped, serde_json::json!({"query": "clean"}));
 }

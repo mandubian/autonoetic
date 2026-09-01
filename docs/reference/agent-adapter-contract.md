@@ -189,12 +189,17 @@ Additional mechanical guards:
 ### Fail-loud mapping hooks
 
 Generated mappers default to fail-loud: a payload that violates the declared
-contract (unparseable JSON, non-object payload, missing a required mapped
-field) makes the hook exit non-zero, so the turn **fails closed** — in script
-mode the hook failure fails the turn; in reasoning mode the middleware error
-fails the completion. The old behavior — silently passing untransformed data
-through so the LLM improvises — is available only via `--fail-soft`, and is
-discouraged. Absent *optional* fields never fail.
+contract (unparseable JSON, non-object payload, missing a required field —
+whether that field is renamed or passes through unmapped) makes the hook exit
+non-zero, so the turn **fails closed** — in script mode the hook failure fails
+the turn; in reasoning mode the middleware error fails the completion. The old
+behavior — silently passing untransformed data through so the LLM improvises —
+is available only via `--fail-soft`, and is discouraged. Absent *optional*
+fields never fail.
+
+Note injection safety: generated hooks carry schema-derived notes only as
+newline-collapsed, `#`-prefixed comment lines — never inside code positions —
+so a hostile schema cannot inject Python into the generated bundle.
 
 ### Script-mode wrappers
 
