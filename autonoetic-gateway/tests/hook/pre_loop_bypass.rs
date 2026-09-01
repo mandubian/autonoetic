@@ -145,8 +145,10 @@ async fn bypass_hook_answers_without_building_a_completion() {
         "  pre_process: \"python3 scripts/hook.py\"\n  bypass: true\n",
         r#"import json, sys
 req = json.load(sys.stdin)
-# The probe envelope carries the conversation only — assert that contract.
+# The probe envelope carries the conversation only — assert that contract:
+# a CompletionRequest-shaped envelope with NO advertised tools.
 assert "tools" in req, "probe must be a CompletionRequest-shaped envelope"
+assert req["tools"] == [], "the probe must not advertise any tools"
 print(json.dumps({"skip_llm": True, "assistant_reply": "deterministic bypass reply"}))
 "#,
     );

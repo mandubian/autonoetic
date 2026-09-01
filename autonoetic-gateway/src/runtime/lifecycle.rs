@@ -2086,50 +2086,50 @@ impl AgentExecutor {
                     let note = disclosure_state.filter_reply(&note);
                     history.push(Message::assistant(note.clone()));
                 }
+            }
 
-                // Children spawned by EARLIER turns may still be pending — the
-                // bypass must not mark the task completed over them (#845).
-                if let Some(waiting_reason) = waiting_for_child_yield_reason(
+            // Checked at the cfg level, OUTSIDE the summary branch — children
+            // spawned by EARLIER turns may still be pending even when no
+            // summary is injectable, and the bypass must not mark the task
+            // completed over them (#845).
+            if let Some(waiting_reason) =
+                waiting_for_child_yield_reason(cfg, self.gateway_store.as_deref(), session_id)
+            {
+                turn_yield_reason = waiting_reason;
+            }
+
+            // Durable planner checkpoint at turn end
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            if let Ok(Some(wf_id)) =
+                crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+            {
+                let planner_intent = response.text.trim();
+                let context = serde_json::json!({
+                    "turn_id": turn_id,
+                    "session_id": session_id,
+                    "assistant_message_len": planner_intent.len(),
+                });
+                if let Err(e) = crate::scheduler::checkpoint_planner(
                     cfg,
-                    self.gateway_store.as_deref(),
-                    session_id,
-                ) {
-                    turn_yield_reason = waiting_reason;
-                }
-
-                // Durable planner checkpoint at turn end
-                let root = crate::runtime::content_store::root_session_id(session_id);
-                if let Ok(Some(wf_id)) =
-                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                {
-                    let planner_intent = response.text.trim();
-                    let context = serde_json::json!({
-                        "turn_id": turn_id,
-                        "session_id": session_id,
-                        "assistant_message_len": planner_intent.len(),
-                    });
-                    if let Err(e) = crate::scheduler::checkpoint_planner(
-                        cfg,
-                        None,
-                        &wf_id,
-                        if planner_intent.is_empty() {
-                            format!("Turn {} ended", &turn_id[..turn_id.len().min(8)])
+                    None,
+                    &wf_id,
+                    if planner_intent.is_empty() {
+                        format!("Turn {} ended", &turn_id[..turn_id.len().min(8)])
+                    } else {
+                        let truncated = if planner_intent.len() > 200 {
+                            format!("{}…", safe_prefix_by_bytes(planner_intent, 200))
                         } else {
-                            let truncated = if planner_intent.len() > 200 {
-                                format!("{}…", safe_prefix_by_bytes(planner_intent, 200))
-                            } else {
-                                planner_intent.to_string()
-                            };
-                            truncated
-                        },
-                        context,
-                    ) {
-                        tracing::debug!(
-                            target: "workflow",
-                            error = %e,
-                            "Planner checkpoint skipped (no workflow or save failed)"
-                        );
-                    }
+                            planner_intent.to_string()
+                        };
+                        truncated
+                    },
+                    context,
+                ) {
+                    tracing::debug!(
+                        target: "workflow",
+                        error = %e,
+                        "Planner checkpoint skipped (no workflow or save failed)"
+                    );
                 }
             }
         }
