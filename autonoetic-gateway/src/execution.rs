@@ -3038,6 +3038,7 @@ impl GatewayExecutionService {
                 agent_id,
                 digest_turn_count,
                 is_suspended,
+                close_outcome,
             )
             .await;
         }
