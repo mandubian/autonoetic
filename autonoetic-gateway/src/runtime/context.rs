@@ -214,8 +214,8 @@ pub fn build_memory_context_snippet(
     let cfg = egress_cfg.unwrap_or(&default_cfg);
     let agent_tag = format!("agent:{agent_id}");
 
-    // `search_memories_by_tags` ORs its tags, so the two-tag queries below
-    // can return other agents' rows and crowd this agent's older-but-relevant
+    // `search_memories_by_tags` ORs its tags, so the digest query below can
+    // return other agents' rows and crowd this agent's older-but-relevant
     // memories out of the candidate pool — re-require the conjunction here.
     let has_both = |m: &autonoetic_types::memory::MemoryObject, source_tag: &str| {
         m.tags.iter().any(|t| t == agent_tag.as_str())
@@ -230,18 +230,15 @@ pub fn build_memory_context_snippet(
         .filter(|m| has_both(m, "source:post_session_digest"))
         .collect();
 
-    let agent_signals: Vec<_> = store.search_memories_by_tags(
-        &[agent_tag.as_str(), "source:quality_signal"],
-        MEMORY_CANDIDATE_POOL,
-    ).ok().unwrap_or_default()
-        .into_iter()
-        .filter(|m| has_both(m, "source:quality_signal"))
-        .collect();
+    // `source:quality_signal` rows are deliberately NOT priming candidates:
+    // they are per-session telemetry (turn/tool/error counts) persisted for the
+    // evolution curator and trend reports, not knowledge a model can act on.
+    // Emitting one per clean session close under recency ranking, they evict
+    // genuinely useful digest/error-lesson memories from the priming slots.
 
     let mut seen = std::collections::HashSet::new();
     let mut memories: Vec<_> = agent_digests
         .into_iter()
-        .chain(agent_signals)
         .filter(|m| seen.insert(m.memory_id.clone()))
         .collect();
 
@@ -1740,6 +1737,97 @@ mod injected_recall_tests {
         assert!(
             lines[0].contains("newer fact") && lines[1].contains("older fact"),
             "expected recency (newest first) order preserved when task_text is None: {snippet}"
+        );
+    }
+
+    fn seed_quality_signal(
+        store: &GatewayStore,
+        id: &str,
+        agent_id: &str,
+        content: &str,
+        session: &str,
+        updated_at: &str,
+    ) {
+        let mut mem = MemoryObject::new(
+            id.to_string(),
+            "quality_signals".to_string(),
+            agent_id.to_string(),
+            "gateway".to_string(),
+            format!("session:{session}:quality_signal"),
+            content.to_string(),
+        );
+        mem.source_type = MemorySourceType::QualitySignal;
+        mem.tags = vec![
+            "source:quality_signal".to_string(),
+            format!("session:{session}"),
+            format!("agent:{agent_id}"),
+        ];
+        mem.visibility = MemoryVisibility::Global;
+        mem.created_at = updated_at.to_string();
+        mem.updated_at = updated_at.to_string();
+        store.memory_upsert(&mem).unwrap();
+    }
+
+    #[test]
+    fn quality_signals_are_not_priming_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        // Quality signals alone must not prime anything — they are curator
+        // telemetry, not context-worthy knowledge.
+        seed_quality_signal(
+            &store,
+            "qs-1",
+            agent_id,
+            r#"{"turn_count": 7, "error_count": 1}"#,
+            "sess-qs-1",
+            "2026-08-01T00:00:00Z",
+        );
+        assert!(
+            build_memory_context_snippet(&store, agent_id, 3, None, None, None).is_none(),
+            "quality signal must not be injected into the prompt"
+        );
+
+        // And they must not crowd out an older digest when both exist.
+        seed_memory(
+            &store,
+            "mem-digest",
+            agent_id,
+            "digest.fact",
+            "digest fact about api retries",
+            "sess-digest-1",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_quality_signal(
+            &store,
+            "qs-2",
+            agent_id,
+            r#"{"turn_count": 2, "error_count": 0}"#,
+            "sess-qs-2",
+            "2026-08-02T00:00:00Z",
+        );
+        let (snippet, primed) = build_memory_context_snippet(
+            &store,
+            agent_id,
+            3,
+            None,
+            None,
+            None,
+        )
+        .expect("expected snippet from digest");
+        assert!(
+            snippet.contains("digest fact about api retries"),
+            "digest expected: {snippet}"
+        );
+        assert!(
+            !snippet.contains("turn_count"),
+            "quality signal must not be injected alongside digests: {snippet}"
+        );
+        assert!(
+            primed.iter().all(|m| m.scope != "quality_signals"),
+            "no primed row may carry the quality_signals scope: {:?}",
+            primed
         );
     }
 }
