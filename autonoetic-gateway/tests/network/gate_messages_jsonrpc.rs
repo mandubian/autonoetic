@@ -6,7 +6,7 @@ use crate::support::TestWorkspace;
 
 struct SharedEnv {
     _ws: TestWorkspace,
-    store: Arc<GatewayStore>,
+    _store: Arc<GatewayStore>,
     router: JsonRpcRouter,
     router_no_store: JsonRpcRouter,
 }
@@ -22,7 +22,7 @@ fn shared() -> &'static SharedEnv {
         let router_no_store = JsonRpcRouter::new(config, None);
         SharedEnv {
             _ws: ws,
-            store,
+            _store: store,
             router,
             router_no_store,
         }

@@ -48,7 +48,13 @@ pub struct ConstitutionLock {
 
 #[derive(Debug)]
 struct ConstitutionRuntime {
+    // Read only by `ensure_same_runtime_config`, which is reached only from
+    // the `#[cfg(not(test))]` arm of `initialize_constitution` -- so both the
+    // fields and the check read as dead in the lib-test build while being
+    // live in production.
+    #[cfg_attr(test, allow(dead_code))]
     source_path: PathBuf,
+    #[cfg_attr(test, allow(dead_code))]
     lock_path: PathBuf,
     gateway_dir: PathBuf,
     configured_source_label: String,
@@ -171,6 +177,7 @@ pub fn is_constitution_initialized() -> bool {
         .is_some()
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn ensure_same_runtime_config(
     existing: &ConstitutionRuntime,
     loaded: &ConstitutionRuntime,

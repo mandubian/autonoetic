@@ -69,13 +69,6 @@ fn run_generator(temp: &tempfile::TempDir, wrapper_id: &str, extra_args: &[&str]
     }
 }
 
-fn string_schema(required: &[&str]) -> serde_json::Value {
-    let properties: serde_json::Map<String, serde_json::Value> = required
-        .iter()
-        .map(|name| (name.to_string(), serde_json::json!({ "type": "string" })))
-        .collect();
-    serde_json::json!({ "type": "object", "required": required, "properties": properties })
-}
 
 struct Scenario {
     temp: tempfile::TempDir,
