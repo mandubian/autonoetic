@@ -767,6 +767,7 @@ around the LLM call:
 middleware:
   pre_process: "python3 scripts/normalize.py"
   post_process: "python3 scripts/format.py"
+  bypass: true                   # optional — see below
 ```
 
 - **`pre_process`** runs on the user input before it reaches the LLM. Setting
@@ -776,15 +777,26 @@ middleware:
   [`reference/budgets.md`](reference/budgets.md)).
 - **`post_process`** runs on the LLM output before it returns to the caller, and
   may transform or filter it.
+- **`bypass: true`** (#1223) declares the pre-hook a *pure function of the
+  conversation payload* that either answers (`skip_llm` + `assistant_reply`) or
+  declines. The hook is then evaluated **once per turn, before the reasoning
+  loop** assembles tool schemas, composes the system prompt and accounts the
+  prompt budget: a `skip` ends the turn without building a completion at all;
+  a `proceed` hands the request to the loop unmodified (the hook is not run a
+  second time). The probe envelope carries the conversation history only — no
+  system prompt, no tools; hooks that transform the request or need the full
+  envelope must not declare `bypass`. The round is still causal-visible
+  (`pre_hook_skip_llm`), still produces the checkpoint/history/attestation
+  bookkeeping, and still yields `WaitingForChild` when earlier turns left
+  pending children.
 
 Script-mode agents (`execution_mode: script`) run the same hooks at their
 payload boundary: `pre_process` transforms the normalized task payload before
 the entry script runs (via `AUTONOETIC_INPUT_PATH`/stdin/argv), and
 `post_process` transforms the script's stdout before it becomes the reply.
-The hook contract there is verbatim stdin→stdout — no JSON envelope — so
-hooks must be written for that contract (e.g. the adapter generator's current
-LLM-envelope `pre_map`/`post_map` scripts pass script-mode payloads through
-unchanged rather than mapping them). A failing hook fails the turn
+The hook contract there is verbatim stdin→stdout — no JSON envelope — and the
+adapter generator emits script-mode hooks written to exactly that contract
+(#1251). A failing hook fails the turn
 (fail-closed), hooks inherit the entry script's isolation overrides and
 emergency-stop registration, and the run's egress label covers the hook
 scripts too: a hook touching a labeled path narrows the result label, never
