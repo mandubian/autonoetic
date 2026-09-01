@@ -695,6 +695,11 @@ max_session_turns: 25
 #  # (paraphrased content defeats fingerprint detectors; ok:true resets the
 #  # no-progress counter). 0 disables. (#1092)
 #  annotation_repeat_floor: 3
+#  # A loop iteration that consumed at least this many seconds of wall clock
+#  # (blocking workflow_wait, slow child join, slow LLM round) resets the
+#  # no-progress counter: a spin is fast iterations, real waiting throttles
+#  # itself. 0 disables.
+#  idle_loop_floor_secs: 60
 
 # ── Native Tool Registration (#1120) ────────────────────────────────────
 # Fleet-wide removal of built-in native tools, applied at registry

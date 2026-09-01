@@ -2733,6 +2733,15 @@ pub struct LoopGuardConfig {
     /// fire — a successful no-op loop. 0 disables.
     #[serde(default = "default_annotation_repeat_floor")]
     pub annotation_repeat_floor: u32,
+
+    /// Idle-loop floor in seconds. A loop iteration whose wall-clock span
+    /// between consecutive `check_loop` calls reached this floor is treated
+    /// as sanctioned waiting (blocking `workflow_wait`, a slow child join, a
+    /// slow LLM round) and resets `current_loops` before the increment. A
+    /// spin is *fast* no-progress iterations; real waiting throttles itself.
+    /// Set to 0 to disable.
+    #[serde(default = "default_idle_loop_floor_secs")]
+    pub idle_loop_floor_secs: u64,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2766,8 +2775,16 @@ impl Default for LoopGuardConfig {
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
             annotation_repeat_floor: default_annotation_repeat_floor(),
+            idle_loop_floor_secs: default_idle_loop_floor_secs(),
         }
     }
+}
+
+/// Idle-loop floor: see `LoopGuardConfig::idle_loop_floor_secs`. 60 s means
+/// only iterations that yielded at least a minute of wall clock count as
+/// idle waiting.
+fn default_idle_loop_floor_secs() -> u64 {
+    60
 }
 
 fn default_max_loops_without_progress() -> u32 {
