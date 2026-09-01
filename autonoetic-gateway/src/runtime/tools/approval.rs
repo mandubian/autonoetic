@@ -259,7 +259,6 @@ impl NativeTool for ApprovalWithdrawTool {
                 }
 
                 let reason = args.reason.as_deref().unwrap_or("Withdrawn by agent");
-                let _task_id_copy = r.task_id.clone();
                 let decided_by = format!("agent:{}", manifest.agent.id);
 
                 let decision = crate::scheduler::approval::cancel_approval_request(

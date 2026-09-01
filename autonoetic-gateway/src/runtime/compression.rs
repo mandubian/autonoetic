@@ -784,10 +784,6 @@ mod tests {
 
     #[test]
     fn test_compression_disabled() {
-        let _gateway = ContextCompressionConfig {
-            enabled: false,
-            ..Default::default()
-        };
         let history = vec![Message::user("hello"), Message::assistant("hi")];
         let result = CompressionResult {
             history: history.clone(),

@@ -9721,13 +9721,6 @@ mod tests {
         };
         store.save_workbench(&wb).unwrap();
 
-        let _overview = WorkbenchOverview {
-            workbench_id: "wb-test-1".to_string(),
-            status: "active".to_string(),
-            base_artifact_id: "art-base-1".to_string(),
-            file_count: 1,
-            changed_files: 1,
-        };
         let status =
             prepare_return_to_agent_wakeup(&store, "wb-test-1", false, None);
         match status {
@@ -9776,13 +9769,6 @@ mod tests {
         };
         store.save_workbench(&wb).unwrap();
 
-        let _overview = WorkbenchOverview {
-            workbench_id: "wb-test-2".to_string(),
-            status: "active".to_string(),
-            base_artifact_id: "art-base-2".to_string(),
-            file_count: 1,
-            changed_files: 1,
-        };
         let status =
             prepare_return_to_agent_wakeup(&store, "wb-test-2", true, Some("ok"));
         match status {

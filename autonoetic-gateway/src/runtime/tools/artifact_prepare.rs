@@ -236,8 +236,6 @@ impl NativeTool for ArtifactPrepareTool {
             _ => Vec::new(),
         };
 
-        let _root_sid = crate::runtime::content_store::root_session_id(sid);
-
         let mut pre_validated = false;
         let mut fingerprint_for_backfill: Option<String> = None;
         if let crate::runtime::remote_access::NetworkCoverage::Concrete { targets } = &coverage {
