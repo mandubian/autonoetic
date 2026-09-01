@@ -313,7 +313,15 @@ impl Report {
 /// `(turn-1 ceiling, working ceiling, steady-state ceiling)` per agent. **Ratcheted down** as RFC
 /// phases land — #1085 (collaborative trim) and P2 (this pass) are both locked in
 /// below.
-const PLANNER_CEILINGS: (usize, usize, usize) = (74_000, 90_000, 102_500);
+///
+/// PLANNER raised 2026-09-01 (74000→75500 / 90000→92000 / 102500→104000) with
+/// cause, per this harness's own protocol: the growth is deliberate,
+/// planner-scoped doctrine that pays every turn by design — #1210 taught the
+/// planner the adaptation route (+885 ch core, +239 extended) and #1215 added
+/// roster-drift doctrine (+336 ch) — plus accumulated tool-schema weight (31
+/// tools, 34 tool commits since the 74000 ratchet was set at #1089). Measured
+/// headroom is ~1%, matching the tight-ratchet style of the other agents.
+const PLANNER_CEILINGS: (usize, usize, usize) = (75_500, 92_000, 104_000);
 const CODER_CEILINGS: (usize, usize, usize) = (60_000, 70_000, 70_000);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
