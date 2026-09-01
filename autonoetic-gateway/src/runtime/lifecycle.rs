@@ -4222,7 +4222,7 @@ impl AgentExecutor {
                     }
                 };
 
-                let mut last_err = None;
+                let mut last_err;
                 if let Err(e) = self
                     .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
                     .await

@@ -97,7 +97,6 @@ pub fn extract_and_mount_layers(
         });
 
         // Discover Python site-packages inside the layer.
-        let mut found_site_packages = false;
         if let Ok(lib_entries) = std::fs::read_dir(layer_temp_base.join("lib")) {
             for entry in lib_entries.flatten() {
                 let name = entry.file_name();
@@ -109,7 +108,6 @@ pub fn extract_and_mount_layers(
                         .join("site-packages");
                     if site.starts_with("/") {
                         python_paths.push(site.to_string_lossy().to_string());
-                        found_site_packages = true;
                     }
                 }
             }

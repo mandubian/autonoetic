@@ -140,7 +140,14 @@ pub fn looks_like_markdown(s: &str) -> bool {
         if trimmed.len() >= 4
             && trimmed
                 .chars()
-                .all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{2550}' | '\u{2594}' | '\u{2014}' | '\u{2013}' | '─' | '━' | '═'))
+                .all(|c| {
+                    // ─ ━ ═ ▔ — –  (the first three were also spelled as
+                    // literals here, which the compiler read as dead arms)
+                    matches!(
+                        c,
+                        '\u{2500}' | '\u{2501}' | '\u{2550}' | '\u{2594}' | '\u{2014}' | '\u{2013}'
+                    )
+                })
         {
             return true;
         }

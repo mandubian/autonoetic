@@ -558,7 +558,7 @@ fn store_deployment_ticket(
     Ok(())
 }
 
-pub fn resolve_deployment_ticket(
+pub(crate) fn resolve_deployment_ticket(
     store: &GatewayStore,
     ticket_id: &str,
 ) -> anyhow::Result<Option<DeploymentTicket>> {
@@ -598,7 +598,7 @@ pub fn resolve_deployment_ticket(
     }))
 }
 
-pub struct DeploymentTicket {
+pub(crate) struct DeploymentTicket {
     pub artifact_id: String,
     pub entrypoint: String,
     pub credential_env: Vec<CredentialEnvMapping>,

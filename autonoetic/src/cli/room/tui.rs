@@ -1449,7 +1449,6 @@ impl LiveContentPane {
         let mut visible = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
-        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in self.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -1459,13 +1458,11 @@ impl LiveContentPane {
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
-                    last_artifact_id = None;
                     if *is_latest || !self.is_folded(plan_id) {
                         visible.push(idx);
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
-                    last_artifact_id = None;
                     // Only hide steps under a folded older (non-latest) plan.
                     if let Some(ref pid) = last_plan_id {
                         if !last_plan_was_latest && self.is_folded(pid) {
@@ -1474,15 +1471,13 @@ impl LiveContentPane {
                     }
                     visible.push(idx);
                 }
-                LiveContentNode::Artifact { artifact_id, .. } => {
+                LiveContentNode::Artifact { .. } => {
                     last_plan_id = None;
-                    last_artifact_id = Some(artifact_id.clone());
                     // Parent is always visible.
                     visible.push(idx);
                 }
                 LiveContentNode::ArtifactFile { artifact_id, .. }
                 | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
-                    last_artifact_id = Some(artifact_id.clone());
                     // Hide a file/layer child when its artifact is folded.
                     if self.is_artifact_folded(artifact_id) {
                         continue;
@@ -1491,7 +1486,6 @@ impl LiveContentPane {
                 }
                 _ => {
                     last_plan_id = None;
-                    last_artifact_id = None;
                     visible.push(idx);
                 }
             }
@@ -4252,7 +4246,6 @@ pub fn run(
                                         let (lines, ids) = list_wiki_proposals_detail(client, root_session_id);
                                         detail = Some(DetailPane::event(lines, None));
                                         session_pick_list = None;
-                                        wiki_request_ids = None;
                                         wiki_request_ids = Some(ids);
                                         status = Some(
                                             "wiki proposals: press number to view details · Esc close"
@@ -6126,10 +6119,18 @@ pub fn run(
                                 status = None;
                             }
                         }
-                        KeyCode::Char('p') => {
-                            if let Some(g) =
-                                view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
-                            {
+                        // The plan-gate test is a match *guard*, not an `if`
+                        // inside the arm: an arm that matches bare `p` and then
+                        // does nothing still consumes the key, which swallowed
+                        // every `p` press that was not a plan review — including
+                        // the pause binding further down. Guarding lets those
+                        // fall through.
+                        KeyCode::Char('p')
+                            if view_gate
+                                .as_ref()
+                                .is_some_and(|g| g.kind == GateKind::Plan) =>
+                        {
+                            if let Some(g) = view_gate.as_ref() {
                                 if open_plan_review(
                                     client,
                                     root_session_id,
@@ -10836,7 +10837,6 @@ fn draw(
         let mut visible_nodes: Vec<(usize, &LiveContentNode)> = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
-        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in pane.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -10846,13 +10846,11 @@ fn draw(
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
-                    last_artifact_id = None;
                     if *is_latest || !pane.is_folded(plan_id) {
                         visible_nodes.push((idx, node));
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
-                    last_artifact_id = None;
                     // Plan steps only appear under the latest plan version;
                     // hide them if the parent plan is a folded older revision.
                     if let Some(ref pid) = last_plan_id {
@@ -10862,15 +10860,13 @@ fn draw(
                     }
                     visible_nodes.push((idx, node));
                 }
-                LiveContentNode::Artifact { artifact_id, .. } => {
+                LiveContentNode::Artifact { .. } => {
                     last_plan_id = None;
-                    last_artifact_id = Some(artifact_id.clone());
                     // Parent is always visible.
                     visible_nodes.push((idx, node));
                 }
                 LiveContentNode::ArtifactFile { artifact_id, .. }
                 | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
-                    last_artifact_id = Some(artifact_id.clone());
                     if pane.is_artifact_folded(artifact_id) {
                         continue;
                     }
@@ -10878,7 +10874,6 @@ fn draw(
                 }
                 _ => {
                     last_plan_id = None;
-                    last_artifact_id = None;
                     visible_nodes.push((idx, node));
                 }
             }
@@ -11734,7 +11729,7 @@ fn draw_gate_modal(
         if entry.event_type == "escalation.pending" {
             let synthesis_raw = payload_field_str(entry, "synthesis")
                 .unwrap_or_else(|| "operator decision".into());
-            let _synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
+            let synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
 
             let field = |key: &str| payload_field_str(entry, key);
             if let Some(id) = field("escalation_id") {
@@ -11782,6 +11777,13 @@ fn draw_gate_modal(
                 "synthesis:",
                 Style::default().fg(Color::DarkGray),
             )));
+            // The body under that label, which was computed and dropped. The
+            // fallback further down deliberately withholds `inspect_lines`
+            // when the payload carries a synthesis, so nothing else filled the
+            // gap: the modal showed a bare "synthesis:" header.
+            for line in synthesis_plain.lines() {
+                content_lines.push(Line::from(line.to_string()));
+            }
         } else {
             let spec = render::render_spec(entry);
             content_lines.push(Line::from(Span::styled(

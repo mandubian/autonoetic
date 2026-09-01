@@ -8909,13 +8909,15 @@ async fn check_signals(
                                         }
                                         if event.event_type == "planframe.amended" {
                                             if let Some(st) = store {
-                                                if merge_pending_plan_frames(
+                                                // Called for the merge itself;
+                                                // the enclosing block sets
+                                                // `processed_any` below either
+                                                // way.
+                                                let _ = merge_pending_plan_frames(
                                                     app,
                                                     st,
                                                     session_id,
-                                                ) {
-                                                    processed_any = true;
-                                                }
+                                                );
                                             }
                                         }
                                     } else if event.event_type == "planframe.approved" {
