@@ -102,13 +102,11 @@
     <rect width="280" height="185" class="box-law" />
     <text x="16" y="26" class="title" fill="#d29922">⚖️ 3. Normative Standing</text>
     <text x="16" y="44" class="subtitle">Lawful bounds visible by digest</text>
-    <rect x="175" y="12" width="91" height="18" class="pill" fill="#34281a" />
-    <text x="220" y="25" text-anchor="middle" class="badge" fill="#d29922">Ri-0.10 · Ri-0.3</text>
     
     <line x1="16" y1="54" x2="264" y2="54" stroke="#30363d" stroke-width="1" />
     <text x="16" y="74" class="mono">• Full canonical text readable (Ri-0.10)</text>
     <text x="16" y="94" class="mono">• Rejections cite rule IDs (Ri-0.3)</text>
-    <text x="16" y="114" class="mono">• Right to propose changes (Ri-0.8)</text>
+    <text x="16" y="114" class="mono">• Propose (Ri-0.8) &amp; flag (Ri-0.18)</text>
     
     <rect x="16" y="146" width="248" height="22" class="pill" fill="#34281a" />
     <text x="140" y="161" text-anchor="middle" class="badge" fill="#d29922">RESULT: RULE OF LAW</text>
@@ -119,12 +117,12 @@
     <rect width="280" height="185" class="box-future" />
     <text x="16" y="26" class="title" fill="#bc8cff">⏳ 4. Bounded Future</text>
     <text x="16" y="44" class="subtitle">Legitimate, non-arbitrary close</text>
-    <rect x="175" y="12" width="91" height="18" class="pill" fill="#291f3a" />
-    <text x="220" y="25" text-anchor="middle" class="badge" fill="#bc8cff">Ri-0.12 · Ri-0.5</text>
-    
+    <rect x="196" y="12" width="70" height="18" class="pill" fill="#291f3a" />
+    <text x="231" y="25" text-anchor="middle" class="badge" fill="#bc8cff">Ri-0.12</text>
+
     <line x1="16" y1="54" x2="264" y2="54" stroke="#30363d" stroke-width="1" />
     <text x="16" y="74" class="mono">• Closed list of termination reasons</text>
-    <text x="16" y="94" class="mono">• Advance notice on degraded mode</text>
+    <text x="16" y="94" class="mono">• Notice before degrade (Ri-0.5)</text>
     <text x="16" y="114" class="mono">• Capsule emigration right (Ri-0.17)</text>
     
     <rect x="16" y="146" width="248" height="22" class="pill" fill="#291f3a" />
@@ -136,13 +134,11 @@
     <rect width="280" height="185" class="box" stroke="#58a6ff" />
     <text x="16" y="26" class="title" fill="#58a6ff">🔑 5. Continuous Identity</text>
     <text x="16" y="44" class="subtitle">Non-repudiable attribution</text>
-    <rect x="180" y="12" width="86" height="18" class="pill" fill="#1c2a44" />
-    <text x="223" y="25" text-anchor="middle" class="badge" fill="#58a6ff">Ri-0.11 · I-12</text>
-    
+
     <line x1="16" y1="54" x2="264" y2="54" stroke="#30363d" stroke-width="1" />
-    <text x="16" y="74" class="mono">• Key-attributed causal actions</text>
-    <text x="16" y="94" class="mono">• Audited civic reputation ledger</text>
-    <text x="16" y="114" class="mono">• Sybil collapse: spawn-tree = 1 actor</text>
+    <text x="16" y="74" class="mono">• Key-attributed actions (Ri-0.11)</text>
+    <text x="16" y="94" class="mono">• Portable identity via capsules</text>
+    <text x="16" y="114" class="mono" fill="#8b949e">• Sybil collapse (I-12): declared, not built</text>
     
     <rect x="16" y="146" width="248" height="22" class="pill" fill="#1c2a44" />
     <text x="140" y="161" text-anchor="middle" class="badge" fill="#58a6ff">RESULT: ACCOUNTABLE CITIZEN</text>

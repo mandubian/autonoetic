@@ -52,8 +52,8 @@
     <rect width="420" height="175" class="box-propose" />
     
     <text x="18" y="26" class="title" fill="#d29922">1. Reason &amp; Propose</text>
-    <rect x="250" y="12" width="154" height="18" class="pill" fill="#34281a" />
-    <text x="327" y="25" text-anchor="middle" class="badge" fill="#d29922">STAGE 1 · LOW PRIVILEGE</text>
+    <rect x="290" y="12" width="114" height="18" class="pill" fill="#34281a" />
+    <text x="347" y="25" text-anchor="middle" class="badge" fill="#d29922">LOW PRIVILEGE</text>
     
     <text x="18" y="46" class="subtitle">🤖 Autonomous AI Reasoners</text>
     <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
@@ -71,14 +71,14 @@
     <rect width="420" height="175" class="box-gw" />
     
     <text x="18" y="26" class="title" fill="#58a6ff">2. Gateway Policy &amp; Sandbox</text>
-    <rect x="250" y="12" width="154" height="18" class="pill" fill="#1c2a44" />
-    <text x="327" y="25" text-anchor="middle" class="badge" fill="#58a6ff">STAGE 2 · HIGH PRIVILEGE</text>
+    <rect x="286" y="12" width="118" height="18" class="pill" fill="#1c2a44" />
+    <text x="345" y="25" text-anchor="middle" class="badge" fill="#58a6ff">HIGH PRIVILEGE</text>
     
     <text x="18" y="46" class="subtitle">⚙️ Lawful Executor Engine</text>
     <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
     
     <text x="18" y="74" class="mono">• Validates capabilities &amp; bounds (<tspan fill="#f0f6fc">Rule Zero</tspan>)</text>
-    <text x="18" y="94" class="mono">• Bubblewrap / Docker sandbox container execution</text>
+    <text x="18" y="94" class="mono">• Sandbox drivers: bubblewrap / docker / microvm / wasm</text>
     <text x="18" y="114" class="mono">• Injects ephemeral secrets without exposing to model</text>
     
     <rect x="18" y="136" width="384" height="22" class="pill" fill="#1c2a44" />
@@ -90,8 +90,8 @@
     <rect width="420" height="175" class="box-ledger" />
     
     <text x="18" y="26" class="title" fill="#3fb950">3. Immutable Causal Ledger</text>
-    <rect x="240" y="12" width="164" height="18" class="pill" fill="#17322e" />
-    <text x="322" y="25" text-anchor="middle" class="badge" fill="#3fb950">STAGE 3 · SHA-256 HASH CHAIN</text>
+    <rect x="258" y="12" width="146" height="18" class="pill" fill="#17322e" />
+    <text x="331" y="25" text-anchor="middle" class="badge" fill="#3fb950">SHA-256 HASH CHAIN</text>
     
     <text x="18" y="46" class="subtitle">📜 Tamper-Evident Event Spine (P-8.1)</text>
     <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
@@ -109,8 +109,8 @@
     <rect width="420" height="175" class="box-promote" />
     
     <text x="18" y="26" class="title" fill="#bc8cff">4. Verification &amp; Promotion</text>
-    <rect x="240" y="12" width="164" height="18" class="pill" fill="#291f3a" />
-    <text x="322" y="25" text-anchor="middle" class="badge" fill="#bc8cff">STAGE 4 · SINGLE-DOOR GATE</text>
+    <rect x="270" y="12" width="134" height="18" class="pill" fill="#291f3a" />
+    <text x="337" y="25" text-anchor="middle" class="badge" fill="#bc8cff">SINGLE-DOOR GATE</text>
     
     <text x="18" y="46" class="subtitle">⚖️ Human &amp; Agent Governance Seats</text>
     <line x1="18" y1="54" x2="402" y2="54" stroke="#30363d" stroke-width="1" />
@@ -132,7 +132,7 @@
     
     <text x="24" y="50" class="mono">• <tspan fill="#d29922" font-weight="600">Agents have Voice:</tspan> Ri-0.8 proposals cannot be dropped; O-6 mandates review SLA.</text>
     <text x="24" y="68" class="mono">• <tspan fill="#58a6ff" font-weight="600">Recompute Lock:</tspan> Digest changes update canonical law across federated nodes.</text>
-    <text x="24" y="86" class="mono">• <tspan fill="#3fb950" font-weight="600">Entrenched Core:</tspan> Correction mechanisms can only be strengthened, never weakened.</text>
+    <text x="24" y="86" class="mono">• <tspan fill="#3fb950" font-weight="600">Entrenched Core:</tspan> Weakening a correction clause needs a dated justification in RATIFY.md — friction, not a lock.</text>
   </g>
 
   <!-- CONNECTING ARROWS -->

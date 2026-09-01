@@ -76,6 +76,37 @@ whatever ships next.
 | [`implicit-artifacts-agent-evolution.md`](implicit-artifacts-agent-evolution.md) | Partial | Part 1 shipped; Part 2 (closed-loop evolution automation) open |
 | [`agent-adaptation-composition.md`](agent-adaptation-composition.md) | Partial | Adaptation (middleware) vs composition (provenance) split. Phases 0–3 shipped (#1204, #1203, #1202, #1221): first-class `adapter` provenance, planner + self_describe discovery, roster `stale_base` + `derived_from` card, promotion-time drift event + spawn-time advisory. Open: steward/operator notification route (#1221) |
 
+## Diagrams
+
+[`diagrams/`](diagrams) holds the proposed pedagogical visuals for the community
+and constitutional story — one interactive map plus five vector schematics:
+
+| Asset | What it shows |
+|---|---|
+| [`diagrams/community-and-constitution.html`](diagrams/community-and-constitution.html) | The interactive hub: clickable bind-direction map, three lifecycle walkthroughs, the searchable clause catalog, and the schematic gallery |
+| [`diagrams/constitutional-peer-blueprint.svg`](diagrams/constitutional-peer-blueprint.svg) | Hero plate, drawn as a drafting sheet: both figures dimensioned `EQ` on a common datum under the constitution seal, standing on the causal ledger, with a clause schedule and notes |
+| [`diagrams/human-ai-peers.svg`](diagrams/human-ai-peers.svg) | The labelled counterpart: the four one-way bindings as arrows, plus the co-evolution cycle |
+| [`diagrams/community-governance.svg`](diagrams/community-governance.svg) | The four-party governance map: served party, agents, gateway, governance seats |
+| [`diagrams/diagram-functional-autonoesis.svg`](diagrams/diagram-functional-autonoesis.svg) | The six preconditions of the verified per-turn self-model |
+| [`diagrams/diagram-coevolution-lifecycle.svg`](diagrams/diagram-coevolution-lifecycle.svg) | Propose → gate → ledger → promote, and the amendment track |
+
+Two rules these assets are held to, because a diagram is read as fact:
+
+- **Every printed clause ID must exist** in the active constitution.
+  `docs_link_guard::tests::every_clause_id_in_a_diagram_resolves` scans every
+  `.svg`/`.html` under `docs/` and fails on an ID the constitution does not
+  declare. Use `§3` for a section and `P-*` for a family; a bare `P-3` reads as
+  a clause and will fail.
+- **Declared ≠ enforced.** A clause whose status is `MISSING`/`PARTIAL`/
+  `DESIGN DEBT` — `U-1`–`U-3`, `I-12` — is labelled as such inline. Showing the
+  §12 charter as live erases the sequencing constraint that makes it matter
+  (`../concepts/philosophy.md` §5: enforce §U *before* any decider franchise
+  widens).
+
+The published site under [`../diagrams/`](../diagrams) is a different, live set
+(architecture, runtime dynamics, federation, technical map) reached from
+`../index.html`.
+
 ## Archived from here
 
 Nine proposals were archived when this folder was created, each because the

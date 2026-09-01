@@ -148,8 +148,11 @@ cargo test -p autonoetic --bins docs_coverage            # every CLI subcommand 
 What they enforce: a cited `docs/…` path or relative link resolves; a `#anchor`
 matches a real heading; a link label that names a file names *the* file linked; a
 backticked type name exists in Rust or SDK sources; every proposal is listed in
-`docs/proposals/README.md`; every wiki page names a `canonical` doc and stays
-under 200 lines; every `autonoetic` subcommand appears in `docs/reference/cli.md`.
+`docs/proposals/README.md`; **every clause ID printed on a `.svg`/`.html` under
+`docs/` is declared by the active constitution** (so `§3` for a section, `P-*`
+for a family — a bare `P-3` reads as a clause and fails); every wiki page names a
+`canonical` doc and stays under 200 lines; every `autonoetic` subcommand appears
+in `docs/reference/cli.md`.
 
 Intentional exceptions go in `docs/.link-guard-allow` / `docs/.symbol-guard-allow`
 with a reason each — prefer rewording over an entry. `docs/archived/**` and

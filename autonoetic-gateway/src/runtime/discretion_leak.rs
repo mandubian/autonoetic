@@ -3,7 +3,7 @@
 //! The constitution names the gateway's own judgment lapses in prose at
 //! their site (P-5.2: the gateway reshaping agent input; P-5.8: the gateway
 //! driving repair of agent output) — named debts, not accepted behavior
-//! (`docs/concepts/philosophy.md` §5.4). Until now they were not *monitored*: the
+//! (`docs/concepts/philosophy.md` §3.1). Until now they were not *monitored*: the
 //! M1 doctrine (#619) made every normalization observable in traces via
 //! `note_llm_normalization`, but traces are ephemeral and uncounted. This
 //! module is the register: every recorded normalization/repair intervention

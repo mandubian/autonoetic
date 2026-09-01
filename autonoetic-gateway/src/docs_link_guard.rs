@@ -28,11 +28,25 @@
 //!   literals are covered (operator-facing error messages cite docs too, e.g.
 //!   `constitution_digest.rs`), while test fixture data that merely looks like
 //!   a doc path is out of scope by construction.
+//! - **Rendered diagrams** (`.svg` / `.html` under `docs/`), for a different
+//!   property: not whether a cited path resolves, but whether a printed
+//!   **clause ID** exists in the active constitution. See
+//!   `every_clause_id_in_a_diagram_resolves`.
 //!
 //! A citation counts when it ends in `.md` / `.toml` / `.json` / `.py`, or when
 //! it names an extensionless **pointer file** by the uppercase convention
 //! (`docs/constitution/CURRENT`) — see [`is_pointer_file`] for why the rule is
 //! not simply "no extension".
+//!
+//! # Why clause IDs get the same treatment
+//!
+//! Diagrams were the only doc assets with no mechanical check, because the
+//! path/symbol scans read `.md` and `.rs` only. Unguarded, a pedagogical map
+//! accumulated a fabricated `U-4` marked "enforced", Rule Zero mislabelled as
+//! `I-1`, and section numbers (`§3`) printed as clause IDs (`P-3`) — a reader
+//! who looked any of them up landed nowhere. That is the same defect class as a
+//! dangling path, in the artefact whose whole subject is that every denial
+//! names a real rule (Ri-0.3).
 //!
 //! # What is not scanned, and why
 //!
@@ -64,6 +78,115 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("gateway crate always has a workspace parent")
         .to_path_buf()
+}
+
+/// Collect rendered diagram sources (`.svg`, `.html`) under `docs/`.
+///
+/// Kept separate from [`collect_sources`] because these files are scanned for a
+/// different property: not whether a cited path resolves, but whether a cited
+/// **clause ID** exists. See `every_clause_id_in_a_diagram_resolves`.
+fn collect_diagram_sources(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("docs")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if kind.is_dir() {
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                if SKIP_PREFIXES
+                    .iter()
+                    .any(|p| rel.starts_with(p.trim_end_matches('/')))
+                {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            if name.ends_with(".svg") || name.ends_with(".html") {
+                out.push(PathBuf::from(rel));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every clause ID declared by the **active** constitution: `Ri-*` rights,
+/// `P-*` rules, `O-*` decider obligations, `U-*` served-party rights (from the
+/// leading cell of a table row), plus `I-*` cross-cutting invariants (declared
+/// as `**I-N**` bullets rather than table rows).
+fn active_constitution_clause_ids(root: &Path) -> BTreeSet<String> {
+    let path = root.join(autonoetic_types::config::default_constitution_source_path());
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read active constitution at {}: {e}", path.display()));
+
+    let mut ids = BTreeSet::new();
+    for line in text.lines() {
+        // Table rows: `| P-2.20 | … |`. The ID is the first cell.
+        if let Some(rest) = line.strip_prefix("| ") {
+            let cell = rest.split('|').next().unwrap_or_default().trim();
+            if parse_clause_id(cell).is_some_and(|len| len == cell.len()) {
+                ids.insert(cell.to_string());
+            }
+        }
+        // Invariant bullets: `- **I-12** Any collective decision mechanism …`.
+        let mut hay = line;
+        while let Some(at) = hay.find("**I-") {
+            let after = &hay[at + 2..];
+            if let Some(len) = parse_clause_id(after) {
+                ids.insert(after[..len].to_string());
+            }
+            hay = &hay[at + 2..];
+        }
+    }
+    ids
+}
+
+/// If `s` starts with a clause ID (`Ri-0.2`, `P-2.20`, `O-1`, `U-3`, `I-12`),
+/// return its byte length. Returns `None` otherwise.
+fn parse_clause_id(s: &str) -> Option<usize> {
+    let family = ["Ri-", "P-", "O-", "U-", "I-"]
+        .into_iter()
+        .find(|f| s.starts_with(f))?;
+    let mut len = family.len();
+    let bytes = s.as_bytes();
+
+    let digits = |len: &mut usize| {
+        let start = *len;
+        while *len < bytes.len() && bytes[*len].is_ascii_digit() {
+            *len += 1;
+        }
+        *len > start
+    };
+
+    if !digits(&mut len) {
+        return None;
+    }
+    // Optional `.N` minor part — `O-1` and `I-12` have none, `P-2.20` does.
+    if len < bytes.len() && bytes[len] == b'.' {
+        let mut probe = len + 1;
+        if digits(&mut probe) {
+            len = probe;
+        }
+    }
+    Some(len)
 }
 
 /// Collect `.md` and `.rs` files worth scanning, as workspace-relative paths.
@@ -512,6 +635,117 @@ mod tests {
     }
 
     #[test]
+    fn clause_id_parser_accepts_every_family_and_rejects_lookalikes() {
+        // Both shapes: major-only (`O-1`, `I-12`) and major.minor (`P-2.20`).
+        for (input, want) in [
+            ("Ri-0.2", Some(6)),
+            ("Ri-0.18 rest", Some(7)),
+            ("P-2.20", Some(6)),
+            ("P-15.1)", Some(6)),
+            ("O-1", Some(3)),
+            ("O-7 owes", Some(3)),
+            ("U-3", Some(3)),
+            ("I-12", Some(4)),
+            ("I-1 bullet", Some(3)),
+            // Section shorthand: `P-3` parses as an ID and is *meant* to fail
+            // the resolution check, not the parse.
+            ("P-3", Some(3)),
+            // Not clause IDs.
+            ("P-*", None),
+            ("Ri-*", None),
+            ("Inter", None),
+            ("-apple-system", None),
+            ("stroke-width", None),
+        ] {
+            assert_eq!(parse_clause_id(input), want, "parsing {input:?}");
+        }
+
+        // A trailing dot with no digits is not part of the ID.
+        assert_eq!(parse_clause_id("P-15. and"), Some(4));
+    }
+
+    #[test]
+    fn constitution_clause_extraction_covers_all_five_families() {
+        let ids = active_constitution_clause_ids(&workspace_root());
+        for expect in [
+            "Ri-0.1", "Ri-0.18", "P-8.1", "O-1", "O-7", "U-1", "U-3", "I-1", "I-14",
+        ] {
+            assert!(ids.contains(expect), "missing {expect} from extracted set");
+        }
+        // The defects this guard was written for must not resolve.
+        for reject in ["U-4", "P-3", "P-1", "P-7", "O-3", "Ri-0.19"] {
+            assert!(!ids.contains(reject), "unexpectedly resolved {reject}");
+        }
+    }
+
+    /// A clause ID printed on a diagram is the same promise as a `docs/…` path:
+    /// a reader can look it up. Nothing checked the rendered assets, so a
+    /// pedagogical map accumulated a fabricated `U-4` marked "enforced", Rule
+    /// Zero mislabelled as `I-1`, and section numbers (`§3`) printed as clause
+    /// IDs (`P-3`) — the exact defect Ri-0.3 exists to prevent, in the artefact
+    /// that teaches Ri-0.3.
+    ///
+    /// Wildcards (`Ri-*`, `P-15.*`) are prose, not citations, and are skipped.
+    #[test]
+    fn every_clause_id_in_a_diagram_resolves() {
+        let root = workspace_root();
+        let known = active_constitution_clause_ids(&root);
+        assert!(
+            known.len() > 100,
+            "clause-ID extraction produced only {} ids — the constitution's table \
+             format probably changed and this guard has gone blind",
+            known.len()
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+        for rel in collect_diagram_sources(&root) {
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for (col, _) in line.char_indices() {
+                    // Only start a match at a boundary, so `SHA-256` and
+                    // `-apple-system` cannot masquerade as clause IDs.
+                    if col > 0 && line.as_bytes()[col - 1].is_ascii_alphanumeric() {
+                        continue;
+                    }
+                    let tail = &line[col..];
+                    let Some(len) = parse_clause_id(tail) else {
+                        continue;
+                    };
+                    // `P-15.*` — a family reference, not a clause citation.
+                    if tail[len..].starts_with(".*") {
+                        continue;
+                    }
+                    let id = &tail[..len];
+                    if known.contains(id) {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} cites clause `{}`, which the active constitution \
+                         ({}) does not declare\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        id,
+                        autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} diagram(s) cite a clause ID that does not exist. A printed \
+             clause ID is a promise a reader can look it up — fix the ID, or \
+             reword to a section reference (`§3`) or a family (`P-*`) if no \
+             single clause is meant.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    #[test]
     fn every_relative_markdown_link_resolves() {
         let root = workspace_root();
         let (allow_exact, allow_globs) = load_allowlist(&root);
@@ -606,7 +840,9 @@ mod tests {
             };
             for (lineno, line) in text.lines().enumerate() {
                 for (_label, link) in extract_labelled_links(line) {
-                    if link.contains("://") || link.starts_with(['/', '<', '$']) || link.contains('{')
+                    if link.contains("://")
+                        || link.starts_with(['/', '<', '$'])
+                        || link.contains('{')
                     {
                         continue;
                     }
@@ -689,9 +925,10 @@ mod tests {
                     let p = e.path();
                     if p.is_dir() {
                         stack.push(p);
-                    } else if p.extension().is_some_and(|x| {
-                        matches!(x.to_str(), Some("rs") | Some("py") | Some("ts"))
-                    }) {
+                    } else if p
+                        .extension()
+                        .is_some_and(|x| matches!(x.to_str(), Some("rs") | Some("py") | Some("ts")))
+                    {
                         if let Ok(t) = std::fs::read_to_string(&p) {
                             // Production prefix only. Test modules contain
                             // fixture strings naming deliberately-absent
@@ -825,7 +1062,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", index_path.display()));
 
         let mut unlisted: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect("docs/proposals must exist").flatten() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("docs/proposals must exist")
+            .flatten()
+        {
             let name = entry.file_name().to_string_lossy().to_string();
             if name == "README.md" || !name.ends_with(".md") {
                 continue;
@@ -901,7 +1141,10 @@ mod tests {
         let src = "struct GatewayStore; impl GatewayStore { fn contract_health() {} } \
                    enum SessionRole { Operator } fn run() {}";
         // Literal qualified form present.
-        assert!(symbol_resolves("SessionRole::Operator", "SessionRole::Operator"));
+        assert!(symbol_resolves(
+            "SessionRole::Operator",
+            "SessionRole::Operator"
+        ));
         // Not literal, but every segment exists (the `impl Type` case).
         assert!(symbol_resolves("GatewayStore::contract_health", src));
         // The permissiveness this replaced: last segment alone must NOT pass.
