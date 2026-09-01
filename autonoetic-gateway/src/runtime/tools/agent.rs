@@ -95,6 +95,12 @@ struct SpawnAgentArgs {
     /// Used for smoke-testing Candidate revisions before promotion.
     #[serde(default)]
     revision_id: Option<String>,
+    /// Keep the spawned session addressable by `agent_message` after its task
+    /// completes: it parks idle for this many seconds instead of terminating.
+    /// Applies only when the target's manifest declares no residency of its
+    /// own — a bundle-declared `agent.resident_idle_ttl_secs` always wins.
+    #[serde(default)]
+    resident_idle_ttl_secs: Option<u64>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -221,7 +227,8 @@ the single join already does that."
                         },
                         "description": "Bind specific credentials to the child agent. Overrides runtime.lock service-level resolution."
                     },
-                    "revision_id": { "type": "string", "description": "Optional specific revision_id to execute. Bypasses alias resolution and runs the candidate revision directly. Used for smoke-testing before promotion." }
+                    "revision_id": { "type": "string", "description": "Optional specific revision_id to execute. Bypasses alias resolution and runs the candidate revision directly. Used for smoke-testing before promotion." },
+                    "resident_idle_ttl_secs": { "type": "integer", "description": "Keep the spawned session addressable by agent_message after its task completes: it parks idle for this many seconds instead of terminating. Set this when you plan to message the child after spawn returns — otherwise a completed child is unreachable. Applies only when the target bundle declares no residency of its own; clamped to 3600." }
                 },
                 "required": ["agent_id", "message"],
                 "additionalProperties": false
@@ -813,6 +820,10 @@ the single join already does that."
             }
             if let Some(ref rev_id) = args.revision_id {
                 spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
+            }
+            if let Some(ttl) = args.resident_idle_ttl_secs {
+                spawn_metadata[crate::execution::SPAWN_RESIDENT_TTL_METADATA_KEY] =
+                    serde_json::json!(ttl);
             }
             fill_promotion_role_if_missing(&mut spawn_metadata, &target_agent_id);
             // Persist the RAW spawn message (before [Context]/[Metadata] framing
@@ -1561,8 +1572,11 @@ has no agent binding, so the gateway cannot tell who owns it), \
 `recipient_refuses_peer_messages` (that agent's manifest declines peer mail from you — see \
 below), `recipient_consent_unverifiable` (its manifest could not be read, so consent could not \
 be checked and nothing was queued).\n\n\
-A child session you spawned is usually finished by the time you would message it. If you need work \
-done, `agent_spawn`; `agent_message` only reaches a session that is still running.\n\n\
+A child session you spawned is usually finished by the time you would message it. If you plan to \
+message the child after spawn returns, pass `resident_idle_ttl_secs` to `agent_spawn` so it parks \
+idle and stays addressable instead of terminating. A message that reaches a child during its final \
+turn still lands: the session parks briefly at close to drain it. Otherwise `agent_message` only \
+reaches a session that is still running or parked.\n\n\
 Your `AgentMessage` capability `patterns` are enforced on the receiving agent's id in both \
 addressing modes — with `target_session_id` the gateway resolves the session's bound agent and \
 checks that. A session id does not widen your grant. A pattern ending in `*` is a prefix \

@@ -21,5 +21,6 @@ mod install_smoke_test_gate;
 mod message_midturn_delivery;
 mod messaging;
 mod residency_enablement;
+mod residency_spawn;
 mod singleton_dedup;
 mod suspend_rpc;

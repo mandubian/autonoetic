@@ -33,6 +33,48 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+/// Spawn metadata key carrying a caller-requested residency TTL for the
+/// spawned session (`agent_spawn` arg `resident_idle_ttl_secs`). Follows the
+/// `_autonoetic_spawn_*` convention (`_autonoetic_spawn_revision_id`): the
+/// queue persists metadata, so the flag survives async scheduling.
+pub const SPAWN_RESIDENT_TTL_METADATA_KEY: &str = "_autonoetic_spawn_resident_ttl_secs";
+
+/// Ceiling for a spawn-requested residency TTL. Bundles declare their own TTL
+/// freely; a spawn-time override is caller-controlled, so it is clamped to
+/// bound checkpoint/history retention.
+pub const MAX_SPAWN_RESIDENT_TTL_SECS: u64 = 3600;
+
+/// Park TTL applied at close when a non-resident session terminates with
+/// undelivered inbound messages still queued for it. The wake signal was
+/// written when the message was queued, so the scheduler resume sweep needs
+/// only seconds — this is generous margin.
+pub const PENDING_INBOUND_PARK_TTL_SECS: u64 = 300;
+
+/// Extract and clamp a spawn-requested residency TTL from spawn metadata.
+/// `None` when absent, malformed, or zero — matching the manifest semantics
+/// of `resident_idle_ttl_secs`.
+fn spawn_resident_ttl_override(metadata: Option<&serde_json::Value>) -> Option<u64> {
+    metadata
+        .and_then(|m| m.get(SPAWN_RESIDENT_TTL_METADATA_KEY))
+        .and_then(|v| v.as_u64())
+        .filter(|ttl| *ttl > 0)
+        .map(|ttl| ttl.min(MAX_SPAWN_RESIDENT_TTL_SECS))
+}
+
+/// Park TTL for a non-resident session closing with peer messages still
+/// queued for it: the wake signal written when the message was queued can
+/// then resume the parked session and drain them, instead of stranding the
+/// delivery rows on a terminated session that never runs another turn.
+fn pending_inbound_park_ttl_secs(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: &str,
+) -> Option<u64> {
+    match store.fetch_undelivered_messages(session_id) {
+        Ok(msgs) if !msgs.is_empty() => Some(PENDING_INBOUND_PARK_TTL_SECS),
+        _ => None,
+    }
+}
+
 /// Inject `approval_ref` into the last tool_call's arguments in the history,
 /// then append a user message confirming the approval.  This fixes the
 /// LLM-dependent relay bug where the model ignores the text-only hint and
@@ -2859,7 +2901,16 @@ impl GatewayExecutionService {
         // finished, so the failure would read as "still running" to every
         // downstream reader (#902 review).
         let park_ttl_secs = if close_outcome.is_clean_completion() {
-            runtime.resident_idle_ttl_secs()
+            // Manifest (or spawn-requested) residency first. When neither
+            // declares one but peers queued messages for this session, park
+            // briefly anyway so the wake signal written at queue time can
+            // resume and drain them — terminating here strands those delivery
+            // rows on a session that never runs another turn.
+            runtime.resident_idle_ttl_secs().or_else(|| {
+                self.gateway_store
+                    .as_deref()
+                    .and_then(|store| pending_inbound_park_ttl_secs(store, &session_id))
+            })
         } else {
             None
         };
@@ -4324,6 +4375,17 @@ impl GatewayExecutionService {
             // Propagate the resolved llm_config (with context_window_tokens and any
             // overrides) back into the manifest so the context governor can use it.
             loaded.manifest.llm_config = Some(inference.llm_config.clone());
+
+            // Spawn-requested residency (`agent_spawn` arg
+            // `resident_idle_ttl_secs`, carried in metadata): keeps the child
+            // addressable by `agent_message` after its task completes. Applies
+            // only when the bundle declares no residency of its own — the
+            // manifest contract wins where it exists.
+            if loaded.manifest.agent.resident_idle_ttl_secs.is_none() {
+                if let Some(ttl) = spawn_resident_ttl_override(metadata) {
+                    loaded.manifest.agent.resident_idle_ttl_secs = Some(ttl);
+                }
+            }
 
             let openrouter_catalog =
                 Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
@@ -7126,5 +7188,75 @@ mod tests {
         assert!(!spawn_err.is_suspended());
         assert!(spawn_err.is_error());
         assert!(!spawn_err.is_completed());
+    }
+
+    #[test]
+    fn spawn_resident_ttl_override_absent_zero_and_malformed_are_none() {
+        assert_eq!(spawn_resident_ttl_override(None), None);
+        let empty = serde_json::json!({});
+        assert_eq!(spawn_resident_ttl_override(Some(&empty)), None);
+        let zero = serde_json::json!({SPAWN_RESIDENT_TTL_METADATA_KEY: 0});
+        assert_eq!(spawn_resident_ttl_override(Some(&zero)), None);
+        let wrong_type = serde_json::json!({SPAWN_RESIDENT_TTL_METADATA_KEY: "900"});
+        assert_eq!(spawn_resident_ttl_override(Some(&wrong_type)), None);
+    }
+
+    #[test]
+    fn spawn_resident_ttl_override_reads_and_clamps() {
+        let md = serde_json::json!({SPAWN_RESIDENT_TTL_METADATA_KEY: 900});
+        assert_eq!(spawn_resident_ttl_override(Some(&md)), Some(900));
+        let over = serde_json::json!({SPAWN_RESIDENT_TTL_METADATA_KEY: 999_999});
+        assert_eq!(
+            spawn_resident_ttl_override(Some(&over)),
+            Some(MAX_SPAWN_RESIDENT_TTL_SECS)
+        );
+    }
+
+    fn queue_inbound_message(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        target_session_id: &str,
+        message_id: &str,
+    ) {
+        store
+            .save_agent_message(&crate::scheduler::gateway_store::AgentMessageRecord {
+                message_id: message_id.to_string(),
+                sender_session_id: "session-sender".to_string(),
+                sender_agent_id: "planner.default".to_string(),
+                target_pattern: format!("session:{target_session_id}"),
+                message: "ping".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                egress_label: None,
+            })
+            .unwrap();
+        store
+            .insert_message_delivery(message_id, target_session_id)
+            .unwrap();
+    }
+
+    #[test]
+    fn pending_inbound_park_ttl_none_without_queued_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        assert_eq!(pending_inbound_park_ttl_secs(&store, "session-none"), None);
+    }
+
+    #[test]
+    fn pending_inbound_park_ttl_some_with_undelivered_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        queue_inbound_message(&store, "session-target", "msg-1");
+        assert_eq!(
+            pending_inbound_park_ttl_secs(&store, "session-target"),
+            Some(PENDING_INBOUND_PARK_TTL_SECS)
+        );
+    }
+
+    #[test]
+    fn pending_inbound_park_ttl_none_once_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        queue_inbound_message(&store, "session-target", "msg-1");
+        store.mark_message_delivered("msg-1", "session-target").unwrap();
+        assert_eq!(pending_inbound_park_ttl_secs(&store, "session-target"), None);
     }
 }

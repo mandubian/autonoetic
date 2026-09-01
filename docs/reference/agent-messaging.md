@@ -152,6 +152,22 @@ deliberately stay non-resident: there is nothing to be reachable for. Workers
 by contract, and a peer that needs their attention spawns them with a kickoff
 message.
 
+Two runtime paths keep a session addressable even when its bundle declares no
+residency:
+
+- **Spawn-requested residency.** `agent_spawn` accepts
+  `resident_idle_ttl_secs` (clamped to 3600): the spawned session parks on
+  completion as if its bundle declared the TTL. Use it when you already know
+  you will message the child after spawn returns. A bundle-declared TTL always
+  wins over the spawn flag.
+- **Pending-inbound parking.** A session that closes with undelivered
+  `agent_message`s still queued for it parks briefly (300 s) regardless of its
+  bundle. The wake signal was written when the message was queued, so the
+  notification pump resumes the parked session and the drain injects the
+  message. Without this, a message sent during the recipient's final turn
+  stranded its delivery row (`delivered_at` NULL) on a terminated session that
+  would never run another turn.
+
 **The cost view that justified enabling it (#1247):** a parked session holds its
 checkpoint and its accumulated history until the TTL reaps it, and while parked
 it writes no `session_outcomes` row — so any reader that treats that row as
