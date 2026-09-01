@@ -1760,7 +1760,7 @@ pub fn verify_decider_session_binding(
 mod tests {
     use super::*;
     use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-    use autonoetic_types::capability::Capability;
+
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
@@ -2482,7 +2482,7 @@ mod tests {
         let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
         let svc = GateService::new(store.clone());
 
-        let id1 = svc.add_gate_message(
+        let _id1 = svc.add_gate_message(
             "apr-test123",
             "operator",
             "Why does the agent need localhost?",

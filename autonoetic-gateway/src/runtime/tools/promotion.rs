@@ -8,7 +8,7 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::promotion::{
-    PromotionQueryArgs, PromotionQueryResponse, PromotionRecordArgs, PromotionRecordResponse,
+    PromotionQueryArgs, PromotionRecordArgs,
 };
 use std::path::Path;
 

@@ -184,7 +184,7 @@ disclosure:
     let mut client = JsonRpcClient::connect(listen_addr).await.unwrap();
 
     // First, write the test content to the content store using content.write
-    let write_secret_resp = client
+    let _write_secret_resp = client
         .event_ingest(
             "0a",
             agent_id,
@@ -216,7 +216,7 @@ disclosure:
 
     // Even if content.read fails (because content wasn't pre-populated),
     // we verify the system doesn't crash and returns a valid response
-    let text1 = resp1.result.unwrap().to_string();
+    let _text1 = resp1.result.unwrap().to_string();
 
     // The key test: verify that IF a secret was returned, it would be redacted.
     // Since we can't easily pre-populate content store in this test setup,

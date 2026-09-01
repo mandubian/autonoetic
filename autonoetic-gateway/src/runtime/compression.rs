@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_compression_disabled() {
-        let gateway = ContextCompressionConfig {
+        let _gateway = ContextCompressionConfig {
             enabled: false,
             ..Default::default()
         };

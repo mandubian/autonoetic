@@ -133,7 +133,7 @@ impl GatewayStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::scheduler::gateway_store::GatewayStore;
     use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
 

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
 };
 
 pub const SDK_BRIDGE_RATE_LIMIT_PER_SEC: u32 = 100;
@@ -1638,7 +1638,7 @@ mod compose_mount_set_tests {
 mod tests {
     use super::*;
     use serde_json::json;
-    use serial_test::serial;
+
 
     #[test]
     fn spawn_driver_process_explains_missing_driver() {

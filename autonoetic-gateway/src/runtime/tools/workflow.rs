@@ -6,7 +6,6 @@ use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
-use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::workflow::TaskRun;
 use serde::Deserialize;
@@ -471,7 +470,7 @@ impl NativeTool for WorkflowWaitTool {
         &self,
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
+        _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
@@ -659,7 +658,7 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
         &self,
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
+        _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
@@ -1409,7 +1408,7 @@ impl NativeTool for WorkflowForceCompleteTool {
 
 #[cfg(test)]
 mod force_complete_gate_tests {
-    use super::*;
+
 
     /// Verifies the gate logic: when session_completed is false, only "failed" is allowed.
     #[test]

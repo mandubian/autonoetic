@@ -281,7 +281,7 @@ fn annotate_baseline_agreed(current_raw: &mut RawSweepFindings, agreed: &HashSet
 mod tests {
     use super::*;
     use autonoetic_types::security::{
-        AffectedEntities, EvidenceAnchor, FindingSeverity, FindingType, Reproducibility,
+        EvidenceAnchor, FindingSeverity, FindingType, Reproducibility,
         SecurityFinding,
     };
 

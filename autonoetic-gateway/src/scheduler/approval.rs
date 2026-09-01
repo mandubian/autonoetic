@@ -1653,7 +1653,7 @@ pub fn cancel_pending_approval_for_workflow_task(
 }
 
 pub(crate) fn cancel_approval_request(
-    config: &GatewayConfig,
+    _config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     request_id: &str,
     cancelled_by: &str,
@@ -1730,7 +1730,7 @@ fn unblock_task_on_approval(
     if let Ok(Some(existing)) =
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
-        use autonoetic_types::workflow::TaskRunStatus;
+
         if existing.status.is_terminal() {
             tracing::debug!(
                 target: "approval",

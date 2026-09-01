@@ -206,7 +206,7 @@ impl NativeTool for ApprovalWithdrawTool {
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         _arguments_json: &str,
-        session_id: Option<&str>,
+        _session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -259,7 +259,7 @@ impl NativeTool for ApprovalWithdrawTool {
                 }
 
                 let reason = args.reason.as_deref().unwrap_or("Withdrawn by agent");
-                let task_id_copy = r.task_id.clone();
+                let _task_id_copy = r.task_id.clone();
                 let decided_by = format!("agent:{}", manifest.agent.id);
 
                 let decision = crate::scheduler::approval::cancel_approval_request(

@@ -555,7 +555,7 @@ impl<'a> ToolCallProcessor<'a> {
                 Err(e) => {
                     let tool_error = decorate_tool_error(e.into());
                     let error_json = tool_error.to_json_string();
-                    let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
+                    let _failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
                     // Safety net: never let a single tool error kill the agent
                     // session or the bound workflow. Surface the error as a
                     // normal tool result so the agent can see it and decide how
@@ -2428,7 +2428,7 @@ mod tests {
     }
 
     fn make_degraded_test_processor() -> ToolCallProcessor<'static> {
-        let mut mcp_runtime = Box::leak(Box::new(crate::runtime::mcp::McpToolRuntime::empty()));
+        let mcp_runtime = Box::leak(Box::new(crate::runtime::mcp::McpToolRuntime::empty()));
         let manifest = Box::leak(Box::new(test_manifest()));
         let registry = Box::leak(Box::new(default_registry()));
         let ds = Box::leak(Box::new(

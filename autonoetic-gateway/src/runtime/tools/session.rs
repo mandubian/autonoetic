@@ -67,7 +67,7 @@ impl NativeTool for SessionEscalateTool {
         &self,
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
+        _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,

@@ -4,7 +4,6 @@
 //! various remote model providers (OpenAI, Anthropic, Gemini, etc.).
 
 use autonoetic_types::agent::LlmConfig;
-use serde::{Deserialize, Serialize};
 use std::error::Error as _;
 use std::sync::Arc;
 

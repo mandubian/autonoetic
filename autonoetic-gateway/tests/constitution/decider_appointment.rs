@@ -6,7 +6,6 @@
 //! delegable at all, and phase 1 is advisory-only — plus the coverage and
 //! expiry semantics that routing (#1197) will depend on.
 
-use std::path::PathBuf;
 
 use autonoetic_gateway::decider_appointment::{
     active_appointment_for_gate, agent_is_appointed_for_scope, appoint, revoke,

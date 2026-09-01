@@ -179,7 +179,7 @@ fn r10_rate_limited_returns_error() {
     });
 
     let mut last_response = String::new();
-    for i in 0..5 {
+    for _i in 0..5 {
         let mut client = UnixStream::connect(&socket_path).unwrap();
         let request = make_sdk_request("memory_list_keys", serde_json::json!({}));
         writeln!(client, "{}", request).unwrap();

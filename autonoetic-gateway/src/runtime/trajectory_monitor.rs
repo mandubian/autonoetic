@@ -615,7 +615,7 @@ fn shannon_entropy_bits(window: &VecDeque<u64>) -> f32 {
 mod tests {
     use super::*;
     use autonoetic_types::tool_error::ToolErrorType;
-    use std::collections::HashMap;
+
 
     fn cfg() -> TrajectoryConfig {
         TrajectoryConfig::default()

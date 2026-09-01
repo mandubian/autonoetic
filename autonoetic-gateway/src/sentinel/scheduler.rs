@@ -20,7 +20,6 @@
 //! { "sentinel": true, "mode": "incremental" }
 //! ```
 
-use anyhow::Result;
 use autonoetic_types::config::SentinelConfig;
 use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
 use std::path::PathBuf;

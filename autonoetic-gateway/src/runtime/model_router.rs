@@ -7,7 +7,7 @@
 use crate::llm::{CompletionRequest, Message, Role};
 use autonoetic_types::agent::LlmConfig;
 use autonoetic_types::config::{
-    ApprovalGatesConfig, CapabilityTier, DeterministicRoutingConfig, HybridRoutingConfig,
+    ApprovalGatesConfig, CapabilityTier, DeterministicRoutingConfig,
     LlmRoutingConfig, RoutingContext, RoutingPresetConfig, RoutingStrategy,
 };
 use serde::{Deserialize, Serialize};
@@ -698,8 +698,7 @@ pub fn decision_to_llm_config(
 mod tests {
     use super::*;
     use autonoetic_types::config::{
-        ApprovalGatesConfig, BudgetState, CapabilityTier, ComplexitySignals,
-        DeterministicRoutingConfig, ModelCost, RoutingStrategy, TimeSignals,
+        BudgetState, CapabilityTier, ComplexitySignals, TimeSignals,
     };
 
     fn resolved_models() -> Vec<ResolvedModelEntry> {

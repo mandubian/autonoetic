@@ -11,7 +11,7 @@ use crate::runtime::tools::{
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::{AgentManifest, RemoteAccessApprovalMode};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalRequest, LayerMountScopeInfo, ScheduledAction,
+    ApprovalDecision, LayerMountScopeInfo, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::LayerApprovalScope;
@@ -1940,8 +1940,6 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             }
         }
 
-        let dep_packages: Option<Vec<String>> =
-            args.dependencies.as_ref().map(|d| d.packages.clone());
         // Parse runtime.lock once — used for both dependency plan and layer mounting.
         let parsed_lock: Option<autonoetic_types::runtime_lock::RuntimeLock> = {
             if args.dependencies.is_none() {

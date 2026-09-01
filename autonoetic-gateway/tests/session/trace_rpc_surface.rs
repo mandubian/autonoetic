@@ -6,7 +6,6 @@
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::causal_chain::CausalEventRecord;
-use autonoetic_types::principal::Principal;
 use std::sync::Arc;
 
 fn service() -> &'static GatewayExecutionService {

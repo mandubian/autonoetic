@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crossterm::{
-    cursor::{Hide, Show},
+    cursor::Hide,
     event::{self, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{enable_raw_mode, EnterAlternateScreen},
@@ -30,9 +30,8 @@ use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
 use autonoetic_gateway::runtime::workbench_return::{
-    build_return_to_agent_wakeup, prepare_return_to_agent_wakeup,
-    read_return_to_agent_input, summarize_contract_changes, ReturnToAgentInput,
-    ReturnToAgentStatus, ReturnToAgentWakeup,
+    prepare_return_to_agent_wakeup,
+    ReturnToAgentStatus,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::LlmExchangeUsage;
@@ -42,7 +41,6 @@ use autonoetic_types::background::{
 };
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::PlanFrame;
-use autonoetic_types::semantic_diff::SemanticSummary;
 
 // ============================================================================
 // Constants
@@ -9721,7 +9719,7 @@ mod tests {
         };
         store.save_workbench(&wb).unwrap();
 
-        let overview = WorkbenchOverview {
+        let _overview = WorkbenchOverview {
             workbench_id: "wb-test-1".to_string(),
             status: "active".to_string(),
             base_artifact_id: "art-base-1".to_string(),
@@ -9776,7 +9774,7 @@ mod tests {
         };
         store.save_workbench(&wb).unwrap();
 
-        let overview = WorkbenchOverview {
+        let _overview = WorkbenchOverview {
             workbench_id: "wb-test-2".to_string(),
             status: "active".to_string(),
             base_artifact_id: "art-base-2".to_string(),
@@ -9850,7 +9848,7 @@ mod tests {
         };
         store.save_workbench(&wb).unwrap();
 
-        let overview = WorkbenchOverview {
+        let _overview = WorkbenchOverview {
             workbench_id: "wb-test-3".to_string(),
             status: "reconciled".to_string(),
             base_artifact_id: "art-base-3".to_string(),

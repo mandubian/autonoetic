@@ -10,7 +10,7 @@
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
 use crate::support::{seed_agent_revision, TestWorkspace};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 
 /// The adapter shape: caller speaks `{location}`, the base speaks `{city}` /

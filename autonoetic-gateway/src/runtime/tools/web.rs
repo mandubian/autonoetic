@@ -977,7 +977,7 @@ impl NativeTool for WebSearchTool {
                 || approved_host_override.as_deref() == Some(host)
         };
 
-        let mut maybe_suspend_for_engine = |provider: WebSearchProvider,
+        let maybe_suspend_for_engine = |provider: WebSearchProvider,
                                             engine_url: &str,
                                             max_results: usize|
          -> anyhow::Result<Option<String>> {

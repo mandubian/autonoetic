@@ -311,10 +311,10 @@ pub fn redact_fixture(record: &mut FixtureRecord) -> Vec<String> {
     // Redact sensitive query parameters from the request URL.
     if let Some(query_start) = record.request.url.find('?') {
         let (base, query) = record.request.url.split_at(query_start);
-        let mut params: Vec<String> = query[1..]
+        let params: Vec<String> = query[1..]
             .split('&')
             .map(|pair| {
-                if let Some((key, value)) = pair.split_once('=') {
+                if let Some((key, _value)) = pair.split_once('=') {
                     if SENSITIVE_QUERY_PARAMS
                         .iter()
                         .any(|sensitive| key.eq_ignore_ascii_case(sensitive))

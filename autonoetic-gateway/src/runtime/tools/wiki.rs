@@ -451,7 +451,7 @@ impl NativeTool for WikiProposeTool {
                 })
                 .to_string())
             }
-            GateResult::Suspended { gate_id, response_json, .. } => {
+            GateResult::Suspended { gate_id: _, response_json, .. } => {
                 // Return the gate_id — the agent is NOT suspended for wiki proposals
                 let mut resp: serde_json::Value =
                     serde_json::from_str(&response_json).unwrap_or_default();

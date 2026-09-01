@@ -3,7 +3,6 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::human_gate::{DecisionContext, GateKind, GateRequest, GateResult, GateService};
 use crate::runtime::promotion_governor::GovernorRejection;
-use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, AdapterProvenance, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,

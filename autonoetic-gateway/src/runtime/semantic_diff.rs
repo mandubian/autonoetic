@@ -67,7 +67,7 @@ use autonoetic_types::semantic_diff::{
     ContractChange, ContractImpact, FileClassification, FileRole, SemanticSummarizer,
     SemanticSummary, SemanticSummaryInputs, ValidationState,
 };
-use autonoetic_types::workbench::{FileChangeType, WorkbenchFileDiff};
+use autonoetic_types::workbench::FileChangeType;
 
 use crate::runtime::remote_access::default_remote_access_detector;
 

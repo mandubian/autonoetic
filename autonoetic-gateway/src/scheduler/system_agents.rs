@@ -1,7 +1,7 @@
 use crate::agent::repository::AgentRepository;
 use crate::scheduler::cron_parser;
 use crate::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::config::{GatewayConfig, SystemAgentEntry};
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
 use std::sync::Arc;
 
@@ -18,7 +18,6 @@ pub fn reconcile_system_agents(
     store: &Arc<GatewayStore>,
 ) -> Vec<ReconcileResult> {
     let mut results = Vec::new();
-    let agents_dir = &config.agents_dir;
     let repo = AgentRepository::from_config(config);
 
     for entry in &config.system_agents {

@@ -1,5 +1,5 @@
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::info;
 
 // The audit report and its builder live in the gateway crate so the CLI and the

@@ -295,7 +295,7 @@ fn sanitize_scope_segment(s: &str) -> String {
 
 async fn apply_digest_output(
     gateway_dir: &Path,
-    store: &Arc<GatewayStore>,
+    _store: &Arc<GatewayStore>,
     memory_store: &dyn MemoryStore,
     session_id: &str,
     source_agent_id: &str,

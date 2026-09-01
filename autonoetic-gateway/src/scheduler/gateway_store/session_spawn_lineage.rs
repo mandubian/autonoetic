@@ -79,7 +79,7 @@ impl GatewayStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::scheduler::gateway_store::GatewayStore;
     use tempfile::tempdir;
 

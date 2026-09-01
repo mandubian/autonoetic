@@ -61,7 +61,6 @@ mod workflow;
 
 use anyhow::Result;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::notification::NotificationStatus;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::path::Path;
@@ -2109,7 +2108,7 @@ mod tests {
             },
         ];
 
-        let mut escalation = EscalationMessage::new(
+        let escalation = EscalationMessage::new(
             "esc_test_001".to_string(),
             "art_artifact123".to_string(),
             "my.agent".to_string(),

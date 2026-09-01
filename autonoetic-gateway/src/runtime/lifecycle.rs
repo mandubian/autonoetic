@@ -32,7 +32,7 @@ use autonoetic_types::agent::{
     AgentManifest, ExecutionMode, LlmExchangeUsage, Middleware, SessionLifecycleState,
 };
 use autonoetic_types::background::ScheduledAction;
-use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::disclosure::DisclosurePolicy;
 use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::path::PathBuf;
@@ -2023,7 +2023,7 @@ impl AgentExecutor {
         &mut self,
         response: crate::llm::CompletionResponse,
         history: &mut Vec<Message>,
-        mut disclosure_state: DisclosureState,
+        disclosure_state: DisclosureState,
         tracer: &mut SessionTracer,
         session_id: &str,
         turn_id: &str,

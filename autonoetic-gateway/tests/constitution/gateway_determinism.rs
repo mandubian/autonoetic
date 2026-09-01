@@ -14,7 +14,7 @@ use autonoetic_gateway::runtime::prompt_budget::tool_tier;
 use autonoetic_gateway::runtime::tool_call_processor::is_degraded_mode_tool_blocked;
 use autonoetic_gateway::runtime::tools::ToolTierFilter;
 use autonoetic_types::agent::{
-    AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier,
+    AgentIdentity, AgentManifest, SessionState, ToolTier,
 };
 use autonoetic_types::capability::Capability;
 use proptest::prelude::*;

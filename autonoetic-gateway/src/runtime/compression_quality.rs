@@ -251,7 +251,7 @@ fn check_tool_sequence_preserved(original: &[GoldenToolCall], compressed: &[Mess
         })
         .collect();
 
-    for (i, orig_tc) in original.iter().enumerate() {
+    for (_i, orig_tc) in original.iter().enumerate() {
         if !compressed_tool_calls.iter().any(|id| *id == orig_tc.id) {
             return false;
         }

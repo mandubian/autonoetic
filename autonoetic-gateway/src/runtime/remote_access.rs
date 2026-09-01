@@ -780,7 +780,7 @@ const GLOBAL_FETCH_RECEIVERS: &[&str] = &["globalThis", "window", "self"];
 fn is_global_fetch_receiver(code: &str, fetch_pos: usize) -> bool {
     let bytes = code.as_bytes();
     // `fetch_pos` indexes 'f' in `fetch(`; the byte before it must be '.'.
-    let mut end = match fetch_pos.checked_sub(2) {
+    let end = match fetch_pos.checked_sub(2) {
         Some(e) if e < bytes.len() => e,
         _ => return false,
     };

@@ -11,7 +11,7 @@ use crate::runtime::tools::{
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+    ApprovalRequest, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
@@ -102,7 +102,7 @@ impl NativeTool for ArtifactPrepareTool {
     fn execute(
         &self,
         manifest: &AgentManifest,
-        policy: &PolicyEngine,
+        _policy: &PolicyEngine,
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
@@ -236,7 +236,7 @@ impl NativeTool for ArtifactPrepareTool {
             _ => Vec::new(),
         };
 
-        let root_sid = crate::runtime::content_store::root_session_id(sid);
+        let _root_sid = crate::runtime::content_store::root_session_id(sid);
 
         let mut pre_validated = false;
         let mut fingerprint_for_backfill: Option<String> = None;

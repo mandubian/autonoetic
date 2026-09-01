@@ -401,7 +401,7 @@ impl EgressLabeler {
         // to prior labeled envelopes. Two deterministic signals:
         // 1. Handle reference — prior tool_call_id appears in the args JSON.
         // 2. Verbatim content — prior result content snippet appears in args.
-        let (taint_label, mut parent_envelope_ids) =
+        let (taint_label, parent_envelope_ids) =
             argument_taint_from_prior(req.arguments_json, prior_labels);
         if !parent_envelope_ids.is_empty() {
             resolution.label = resolution.label.restrict(&taint_label);

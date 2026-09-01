@@ -1,12 +1,12 @@
 //! Integration tests for session envelope locking and materialization (#505).
 
 use autonoetic_gateway::runtime::session_envelope::{
-    envelope_expansion_hint, lock_session_envelope, propose_discovered_envelope,
+    envelope_expansion_hint, propose_discovered_envelope,
     revoke_session_envelope,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::scheduler::{
-    list_session_envelopes, lock_session_envelope_operator, propose_session_envelope,
+    list_session_envelopes, propose_session_envelope,
 };
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::causal_chain::ExecutionTraceRecord;

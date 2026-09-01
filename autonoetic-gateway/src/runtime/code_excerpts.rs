@@ -62,7 +62,7 @@ pub fn build_code_excerpts(
     gateway_dir: &Path,
 ) -> Option<Vec<CodeExcerpt>> {
     let artifact_store = ArtifactStore::new(gateway_dir).ok()?;
-    let bundle = artifact_store.inspect(artifact_id).ok()?;
+    let _bundle = artifact_store.inspect(artifact_id).ok()?;
     let files = artifact_store.resolve_files(artifact_id).ok()?;
 
     let mut excerpts: Vec<CodeExcerpt> = Vec::new();

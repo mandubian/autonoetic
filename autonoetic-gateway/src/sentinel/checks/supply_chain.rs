@@ -303,7 +303,7 @@ mod tests {
     use rusqlite::Connection;
 
     fn open_db() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE approvals (
                 request_id TEXT PRIMARY KEY,

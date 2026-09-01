@@ -2374,6 +2374,7 @@ impl GatewayStore {
         Ok(results)
     }
 }
+#[cfg(test)]
 mod fts_fallback_tests {
     use super::*;
 

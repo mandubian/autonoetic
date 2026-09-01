@@ -11,14 +11,12 @@ use super::client::RoomClient;
 use super::markdown;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
-use autonoetic_types::principal::Principal;
 use autonoetic_types::session_timeline::{
-    Altitude, SessionRole, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
+    Altitude, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
 };
 use crossterm::{
     event::{
-        self, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEvent, MouseEventKind,
+        self, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{enable_raw_mode, EnterAlternateScreen},
@@ -2796,7 +2794,7 @@ fn current_egress_policy(
     client: &RoomClient,
     root_session_id: &str,
 ) -> Option<autonoetic_types::egress::EgressSessionPolicy> {
-    use autonoetic_types::egress::EgressSessionPolicy;
+
     match rpc(
         client,
         "session.egress_policy.get",
@@ -10405,8 +10403,8 @@ fn draw(
     turn_boundaries: &HashMap<usize, bool>,
     show_reasoning: bool,
     stats: &SessionStats,
-    pending_plan_count: usize,
-    selected_spawn_agent: Option<&str>,
+    _pending_plan_count: usize,
+    _selected_spawn_agent: Option<&str>,
     info_panel: Option<&InfoPanel>,
     info_scroll: u16,
     gate_count: usize,
@@ -11736,7 +11734,7 @@ fn draw_gate_modal(
         if entry.event_type == "escalation.pending" {
             let synthesis_raw = payload_field_str(entry, "synthesis")
                 .unwrap_or_else(|| "operator decision".into());
-            let synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
+            let _synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
 
             let field = |key: &str| payload_field_str(entry, key);
             if let Some(id) = field("escalation_id") {
@@ -12074,6 +12072,8 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::principal::Principal;
+    use autonoetic_types::session_timeline::SessionRole;
 
     // ---- LLM activity strip (#1081): stuck vs slow ----
 
@@ -12824,7 +12824,7 @@ mod tests {
             .to_string(),
         );
         let entries = vec![msg];
-        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        let resolved = HashSet::from(["plan-1:v1".to_string()]);
         let gate = find_active_gate(&entries, &resolved, &HashSet::new()).unwrap();
         assert_eq!(gate.id, "plan-1");
         assert_eq!(gate.kind, GateKind::Plan);
@@ -13002,7 +13002,7 @@ mod tests {
                 visibility: "session".into(),
             },
         ];
-        let mut pane = LiveContentPane {
+        let pane = LiveContentPane {
             nodes,
             sections: vec![(0, "Plans"), (5, "Artifacts"), (6, "Drafts")],
             selected: 0,
@@ -14369,7 +14369,7 @@ mod tests {
     #[test]
     fn unlabeled_trace_rows_render_no_marker() {
         let turn_boundaries = HashMap::new();
-        let mut spec = render::RowSpec {
+        let spec = render::RowSpec {
             altitude: Altitude::Normal,
             actor: render::ActorKind::Tool,
             tone: RowTone::Default,

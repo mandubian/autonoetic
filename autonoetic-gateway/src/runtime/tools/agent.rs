@@ -746,7 +746,7 @@ the single join already does that."
         // `agents_dir`, which silently gave the spawned execution a different
         // gateway dir (and so a different store, vault and revision root) than
         // the engine that created it.
-        let execution = crate::execution::GatewayExecutionService::new(
+        let _execution = crate::execution::GatewayExecutionService::new(
             gw_config.clone(),
             gateway_store.clone(),
         );
