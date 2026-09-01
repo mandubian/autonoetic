@@ -8,7 +8,12 @@
 //!
 //! Run locally with:
 //! ```bash
+//! # libtest substring-matches the filter against the FULL test name, and the
+//! # module path is part of it (`exec_stdin::artifact_exec_...`), so the
+//! # `exec_stdin` filter below selects exactly the three tests in this module.
 //! cargo test -p autonoetic-gateway --test artifact exec_stdin -- --ignored --nocapture
+//! # Equivalent: run every ignored e2e in the artifact domain binary.
+//! cargo test -p autonoetic-gateway --test artifact -- --ignored --nocapture
 //! ```
 //!
 //! What they prove (the session-ed19b4ca silent-empty-stdin class):
