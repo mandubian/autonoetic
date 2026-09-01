@@ -3385,6 +3385,8 @@ struct ApprovalRow {
     summary: String,
     reason: Option<String>,
     resolved_at: Option<String>,
+    /// Populated from the approval row but not rendered anywhere in the
+    /// report — see #1266.
     resolution_summary: Option<String>,
 }
 

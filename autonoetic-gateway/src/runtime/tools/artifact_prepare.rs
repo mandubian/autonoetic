@@ -600,6 +600,10 @@ pub(crate) fn resolve_deployment_ticket(
 
 pub(crate) struct DeploymentTicket {
     pub artifact_id: String,
+    /// The entrypoint the operator approved. **Recorded but not yet enforced**
+    /// — `execute_with_ticket` builds its command from the caller's
+    /// `args.entrypoint` without comparing it to this. Tracked by #1263; the
+    /// `never read` warning is left in place until that lands.
     pub entrypoint: String,
     pub credential_env: Vec<CredentialEnvMapping>,
     pub approved_domains: Vec<String>,

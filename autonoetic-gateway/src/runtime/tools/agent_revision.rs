@@ -5328,6 +5328,9 @@ impl NativeTool for AgentRevisionDiffTool {
 /// Resolve `(root_session_id, workflow_id, task_id)` for approval rows created
 /// from native tools. Mirrors `human_gate::resolve_execution_context` so
 /// workflow-bound promote gates unblock via `unblock_task_on_approval`.
+///
+/// **Tested but never called from production** — whether that means the
+/// context is resolved elsewhere or not resolved at all is open: #1265.
 fn approval_execution_context(
     run_context: Option<&NativeToolRunContext>,
     session_id: Option<&str>,

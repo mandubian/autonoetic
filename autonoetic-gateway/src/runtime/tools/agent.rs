@@ -107,6 +107,9 @@ struct SpawnAgentArgs {
 ///
 /// Without this, long post-processing tails can look like a stale Running task and trigger
 /// false stuck-task auto-resolution.
+///
+/// **Never constructed** — the protection described above is inactive. Wire it
+/// up or delete it: #1264.
 struct SyncTaskHeartbeat {
     stop_tx: Option<mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
