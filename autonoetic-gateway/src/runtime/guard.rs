@@ -299,6 +299,18 @@ pub struct LoopGuard {
     /// the trip reason can name it (single-tool class today).
     #[serde(default)]
     pub last_annotation_tool: String,
+    /// Idle-loop floor in seconds. A loop iteration whose wall-clock span
+    /// (measured between consecutive `check_loop` calls) reached this floor
+    /// is treated as sanctioned waiting — a blocking `workflow_wait`, a slow
+    /// child join, a slow LLM round — and resets `current_loops` before the
+    /// increment. A spin is *fast* no-progress iterations; real waiting
+    /// throttles itself. 0 disables.
+    #[serde(default = "default_idle_loop_floor_secs")]
+    pub idle_loop_floor_secs: u64,
+    /// Epoch-millis timestamp of the previous `check_loop` call, for
+    /// `idle_loop_floor_secs`. Absent in legacy snapshots.
+    #[serde(default)]
+    pub last_loop_at_ms: Option<u64>,
 }
 
 impl LoopGuard {
@@ -333,6 +345,8 @@ impl LoopGuard {
             consecutive_annotation_rounds: 0,
             annotation_repeat_floor: default_annotation_repeat_floor(),
             last_annotation_tool: String::new(),
+            idle_loop_floor_secs: default_idle_loop_floor_secs(),
+            last_loop_at_ms: None,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -370,6 +384,8 @@ impl LoopGuard {
             consecutive_annotation_rounds: 0,
             annotation_repeat_floor: cfg.annotation_repeat_floor,
             last_annotation_tool: String::new(),
+            idle_loop_floor_secs: cfg.idle_loop_floor_secs,
+            last_loop_at_ms: None,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -400,6 +416,25 @@ impl LoopGuard {
             self.repair_loops += 1;
             return Ok(());
         }
+
+        // Idle-loop accounting: a spin is *fast* no-progress iterations. When
+        // the previous iteration consumed at least `idle_loop_floor_secs` of
+        // wall clock (a blocking `workflow_wait`, a slow child join, a slow
+        // LLM round), the agent yielded real time to the system — reset the
+        // no-progress counter so sanctioned waiting cannot accumulate into a
+        // P-7.18 sub-trip.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if self.idle_loop_floor_secs > 0 {
+            if let Some(prev) = self.last_loop_at_ms {
+                if now_ms.saturating_sub(prev) >= self.idle_loop_floor_secs.saturating_mul(1000) {
+                    self.current_loops = 0;
+                }
+            }
+        }
+        self.last_loop_at_ms = Some(now_ms);
 
         if self.current_loops >= self.max_loops_without_progress {
             let reason = LoopGuardTripReason::NoMeaningfulProgress {
@@ -912,6 +947,8 @@ impl Default for LoopGuard {
             consecutive_annotation_rounds: 0,
             annotation_repeat_floor: default_annotation_repeat_floor(),
             last_annotation_tool: String::new(),
+            idle_loop_floor_secs: default_idle_loop_floor_secs(),
+            last_loop_at_ms: None,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -1078,6 +1115,14 @@ fn default_max_spawn_identity_repeats() -> u32 {
 /// shape; one or two interleaved annotations are legitimate audit notes.
 fn default_annotation_repeat_floor() -> u32 {
     3
+}
+
+/// Default idle-loop floor. The observed false positive: a planner polling a
+/// slow child in ~30 s rounds reached the 80% sub-trip threshold even though
+/// each round carried real wait time. 60 s means only iterations that yielded
+/// at least a minute of wall clock count as idle.
+fn default_idle_loop_floor_secs() -> u64 {
+    60
 }
 
 /// Annotation tools (#1092): successes whose only effect is appending a note
@@ -2449,5 +2494,74 @@ mod tests {
                 .register_spawn_attempt("coder.default", &expected, "same")
                 .is_none());
         }
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn fast_no_progress_iterations_reach_sub_trip() {
+        let mut guard = LoopGuard::new(10);
+        // Fast consecutive iterations: each check_loop runs immediately after
+        // the previous one, so the idle floor never applies.
+        for _ in 0..8 {
+            guard.check_loop().expect("below trip threshold");
+        }
+        assert!(guard.is_sub_trip_warning(), "8 fast idle loops of 10 must raise the P-7.18 sub-trip warning");
+    }
+
+    #[test]
+    fn idle_loop_span_resets_no_progress_counter() {
+        let mut guard = LoopGuard::new(10);
+        for _ in 0..6 {
+            guard.check_loop().expect("below trip threshold");
+        }
+        assert_eq!(guard.current_loops, 6);
+        // Simulate an iteration that consumed the idle floor (a blocking
+        // workflow_wait, a slow child join): the next check_loop resets.
+        guard.last_loop_at_ms = Some(now_ms().saturating_sub(61_000));
+        guard.check_loop().expect("idle iteration resets the counter");
+        assert_eq!(guard.current_loops, 1, "counter must restart from the idle reset");
+        assert!(!guard.is_sub_trip_warning());
+    }
+
+    #[test]
+    fn idle_floor_accumulates_across_slow_iterations() {
+        let mut guard = LoopGuard::new(10);
+        // Repeated slow-but-idle iterations never accumulate: each reset
+        // brings the counter back to 1 after increment.
+        for i in 0..12 {
+            guard.last_loop_at_ms = Some(now_ms().saturating_sub(90_000));
+            guard.check_loop().expect("slow iterations are idle, not spinning");
+            assert_eq!(guard.current_loops, 1, "iteration {i}");
+            assert!(!guard.is_sub_trip_warning());
+        }
+    }
+
+    #[test]
+    fn idle_floor_zero_disables_time_accounting() {
+        let mut guard = LoopGuard::new(10);
+        guard.idle_loop_floor_secs = 0;
+        for i in 0..8 {
+            guard.last_loop_at_ms = Some(now_ms().saturating_sub(600_000));
+            guard.check_loop().expect("below trip threshold");
+            assert_eq!(guard.current_loops, i + 1, "no reset when disabled");
+        }
+        assert!(guard.is_sub_trip_warning());
+    }
+
+    #[test]
+    fn idle_reset_does_not_clear_tool_failure_budgets() {
+        let mut guard = LoopGuard::new(10);
+        guard.register_failure("sandbox_exec", "", None);
+        guard.register_failure("sandbox_exec", "", None);
+        guard.last_loop_at_ms = Some(now_ms().saturating_sub(120_000));
+        guard.check_loop().expect("idle reset applies to loops only");
+        assert_eq!(guard.current_loops, 1);
+        assert_eq!(guard.tool_failure_counts.get("sandbox_exec"), Some(&2));
     }
 }

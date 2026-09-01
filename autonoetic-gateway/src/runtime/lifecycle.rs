@@ -100,6 +100,31 @@ pub fn session_close_outcome_from_turn_outcome(
     }
 }
 
+/// Whether `session_id` runs in degraded mode (P-7.18), given the two
+/// degradation origins:
+///
+/// - **operator/security** (`operator_set`): a deliberate `degrade_session`
+///   on a session or its root — a soft emergency stop that freezes the whole
+///   subtree, so both the session's own id and its root's id match.
+/// - **loop-guard sub-trip** (`guard_set`): the guard's own warning about
+///   this session's loop health. Session-local by design — a fresh child
+///   spawned after its root flailed inherits no punishment; it faces its own
+///   capability and approval gates.
+pub(crate) fn session_is_degraded(
+    operator_set: Option<&std::collections::HashSet<String>>,
+    guard_set: Option<&std::collections::HashSet<String>>,
+    session_id: &str,
+) -> bool {
+    let operator = operator_set
+        .map(|s| {
+            s.contains(session_id)
+                || s.contains(crate::runtime::content_store::root_session_id(session_id))
+        })
+        .unwrap_or(false);
+    let guard = guard_set.map(|s| s.contains(session_id)).unwrap_or(false);
+    operator || guard
+}
+
 /// Pre-send overflow guard. When the context governor is exhausted
 /// (`GovernorResult::Overflow`), decide whether the post-reduction prompt would
 /// still exceed the model's assumed context window (`effective_limit + margin`).
@@ -138,6 +163,13 @@ pub struct AgentExecutor {
     pub guard: LoopGuard,
     pub session_state: autonoetic_types::agent::SessionState,
     pub degraded_sessions: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
+    /// Loop-guard self-degradations (P-7.18 sub-trip). Session-local by
+    /// design: a guard sub-trip is evidence about this session's loop
+    /// health, not about its children — those face their own capability and
+    /// approval gates. Only operator/security degradation
+    /// (`degraded_sessions`) carries subtree semantics.
+    pub guard_degraded_sessions:
+        Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
     pub session_id: Option<String>,
     pub session_started: bool,
     pub turn_counter: u64,
@@ -510,6 +542,7 @@ impl AgentExecutor {
             guard: LoopGuard::new(5),
             session_state: autonoetic_types::agent::SessionState::Normal,
             degraded_sessions: None,
+            guard_degraded_sessions: None,
             session_id: None,
             session_started: false,
             turn_counter: 0,
@@ -701,6 +734,14 @@ impl AgentExecutor {
 
     pub fn with_degraded_sessions(mut self, set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>) -> Self {
         self.degraded_sessions = set;
+        self
+    }
+
+    pub fn with_guard_degraded_sessions(
+        mut self,
+        set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
+    ) -> Self {
+        self.guard_degraded_sessions = set;
         self
     }
 
@@ -5133,18 +5174,35 @@ impl AgentExecutor {
                         tracing::debug!(target: "session_timeline", error = %err, "session.degraded timeline emit failed");
                     }
                 }
-                if let Some(ds) = self.degraded_sessions.as_ref() {
+                // Guard self-degradation is session-local: the sub-trip is
+                // evidence about THIS session's loop health, so it lands in
+                // the guard set only. Operator/security degradation
+                // (`degraded_sessions`) keeps its subtree semantics — see the
+                // resolution below.
+                if let Some(ds) = self.guard_degraded_sessions.as_ref() {
                     ds.lock().await.insert(session_id.clone());
                 }
             }
 
-            if let Some(ds) = self.degraded_sessions.as_ref() {
-                let set = ds.lock().await;
-                let in_set = set.contains(&session_id)
-                    || set.contains(crate::runtime::content_store::root_session_id(&session_id));
+            {
+                let operator_guard = match self.degraded_sessions.as_ref() {
+                    Some(ds) => Some(ds.lock().await),
+                    None => None,
+                };
+                let guard_guard = match self.guard_degraded_sessions.as_ref() {
+                    Some(ds) => Some(ds.lock().await),
+                    None => None,
+                };
+                let in_set = session_is_degraded(
+                    operator_guard.as_deref(),
+                    guard_guard.as_deref(),
+                    &session_id,
+                );
                 if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
                     self.session_state = autonoetic_types::agent::SessionState::Degraded;
-                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
+                } else if !in_set
+                    && self.session_state == autonoetic_types::agent::SessionState::Degraded
+                {
                     self.session_state = autonoetic_types::agent::SessionState::Normal;
                 }
             }
@@ -6449,6 +6507,59 @@ fn waiting_for_child_yield_reason(
 mod tests {
     use super::*;
     use autonoetic_types::agent::SessionState;
+
+    // -- session_is_degraded (P-7.18 scope) --------------------------------
+
+    fn set(items: &[&str]) -> std::collections::HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn operator_root_degradation_floods_subtree() {
+        let operator = set(&["adapter"]);
+        assert!(session_is_degraded(
+            Some(&operator),
+            None,
+            "adapter/agent-adapter.default-835202ee"
+        ));
+        assert!(session_is_degraded(Some(&operator), None, "adapter"));
+    }
+
+    #[test]
+    fn guard_root_degradation_does_not_reach_children() {
+        // The observed failure: the root `adapter` sub-tripped, and the fresh
+        // retry child inherited the CodeExecution block. Guard entries are
+        // session-local now.
+        let guard = set(&["adapter"]);
+        assert!(!session_is_degraded(
+            None,
+            Some(&guard),
+            "adapter/agent-adapter.default-835202ee"
+        ));
+        assert!(session_is_degraded(None, Some(&guard), "adapter"));
+    }
+
+    #[test]
+    fn guard_degradation_applies_to_exact_session_only() {
+        let guard = set(&["adapter/child-1"]);
+        assert!(session_is_degraded(None, Some(&guard), "adapter/child-1"));
+        assert!(!session_is_degraded(None, Some(&guard), "adapter/child-2"));
+        assert!(!session_is_degraded(None, Some(&guard), "adapter"));
+    }
+
+    #[test]
+    fn operator_degradation_on_child_does_not_degrade_parent() {
+        let operator = set(&["adapter/child-1"]);
+        assert!(session_is_degraded(Some(&operator), None, "adapter/child-1"));
+        assert!(!session_is_degraded(Some(&operator), None, "adapter"));
+    }
+
+    #[test]
+    fn empty_sets_are_never_degraded() {
+        let empty = std::collections::HashSet::new();
+        assert!(!session_is_degraded(Some(&empty), Some(&empty), "adapter"));
+        assert!(!session_is_degraded(None, None, "adapter"));
+    }
 
     // -- overflow_presend_block ------------------------------------------------
 
