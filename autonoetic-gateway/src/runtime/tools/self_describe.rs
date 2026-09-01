@@ -73,6 +73,12 @@ enum PathEnactor {
     },
     /// Advertised historically but implemented by nothing. Reported as
     /// unavailable, naming the issue that tracks it.
+    ///
+    /// Unconstructed is the *correct* state: it means every path in the
+    /// self-description table is currently implemented. Kept because the
+    /// unavailable-reporting arm and its guard test are written against this
+    /// variant, and the next unimplemented path must have somewhere to land.
+    #[allow(dead_code)]
     Unimplemented(&'static str),
 }
 

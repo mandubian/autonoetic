@@ -35,6 +35,10 @@ use serde::Deserialize;
 /// `layer_mount` approval (shape of `LayerMountScopeInfo` serialised to JSON).
 #[derive(Debug, Deserialize)]
 struct LayerApprovalEntry {
+    /// Deserialize-only: this struct mirrors the on-the-wire shape so the
+    /// payload round-trips faithfully. The check keys off `digest`, not
+    /// `layer_id`, so the field is parsed but never read.
+    #[allow(dead_code)]
     #[serde(default)]
     layer_id: String,
     #[serde(default)]
