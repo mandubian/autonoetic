@@ -232,7 +232,7 @@ fn child_terminal_transition_wakes_paused_parent_task() -> anyhow::Result<()> {
     let parent_session = format!("{root}/agent-factory");
     let child_session = format!("{parent_session}/specialized_builder");
 
-    let mut parent_task = make_task(
+    let parent_task = make_task(
         &wf_id,
         "task-parent",
         &parent_session,

@@ -5609,7 +5609,7 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                let store = match self.execution.gateway_store() {
+                let _store = match self.execution.gateway_store() {
                     Some(s) => s,
                     None => {
                         return JsonRpcResponse::error(

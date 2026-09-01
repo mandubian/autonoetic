@@ -1,8 +1,7 @@
 use crate::scheduler::gateway_store::GatewayStore;
-use crate::scheduler::store::{read_json_file, write_json_file};
+use crate::scheduler::store::read_json_file;
 use crate::scheduler::workflow_store::{load_task_run, workflow_run_dir, workflows_root};
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::workflow::TaskRunStatus;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -367,6 +366,7 @@ fn reservation_path(config: &GatewayConfig, workflow_id: &str, dedupe_key: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::store::write_json_file;
     use crate::scheduler::workflow_store::{ensure_workflow_for_root_session, save_task_run};
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
     use tempfile::tempdir;

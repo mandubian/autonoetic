@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 
 use autonoetic_types::capability::Capability;
 use autonoetic_types::plan_frame::{
-    PlanFrame, PlanStatus, PlanStep, StepOwner, ValidationClass, ValidationEntry,
-    ValidationPolicy, ValidationRequirement,
+    PlanFrame, PlanStatus, PlanStep,
+    ValidationPolicy,
 };
 
 const SELECT_COLS: &str = "\

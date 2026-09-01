@@ -276,7 +276,7 @@ fn test_hook_dispatch_publishes_report() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
-    let config = GatewayConfig::default();
+    let _config = GatewayConfig::default();
 
     let session_id = "hook-test-session";
     let session_dir = gateway_dir.join("sessions").join(session_id);

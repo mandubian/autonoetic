@@ -5,11 +5,10 @@ use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
 use crate::runtime::remote_access::{
-    approval_remote_operator_suffix, classify_network_coverage, default_remote_access_detector,
-    is_safe_inspection_command, NetworkCoverage,
+    approval_remote_operator_suffix, classify_network_coverage, default_remote_access_detector, NetworkCoverage,
 };
 use crate::runtime::tools::{
-    build_approval_details, load_session_content_mounts,
+    build_approval_details,
     promotion::{
         manifest_may_exec_artifact_in_promotion_gate, manifest_may_record_promotion_verdicts,
         manifest_sandbox_allows_tool,
@@ -19,13 +18,12 @@ use crate::runtime::tools::{
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+    ApprovalDecision, ApprovalStatus, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -572,7 +570,7 @@ impl NativeTool for ArtifactExecTool {
                             &manifest.capabilities,
                         );
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                            if let Some(entry) = cache.find(
+                            if let Some(_entry) = cache.find(
                                 &fingerprint,
                                 crate::runtime::approved_exec_cache::cache_ttl_secs(config),
                             ) {

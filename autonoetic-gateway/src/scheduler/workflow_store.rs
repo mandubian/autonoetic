@@ -315,15 +315,13 @@ pub fn load_workflow_events(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<WorkflowEventRecord>> {
-    let mut owned_store = None;
+    let owned_store;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = Some(crate::scheduler::gateway_store::GatewayStore::open(
-                &gateway_dir
-            )?);
-            owned_store.as_ref().unwrap()
+            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
     };
 
@@ -602,15 +600,13 @@ pub fn append_workflow_event(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     event: &WorkflowEventRecord,
 ) -> anyhow::Result<()> {
-    let mut owned_store = None;
+    let owned_store;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = Some(crate::scheduler::gateway_store::GatewayStore::open(
-                &gateway_dir
-            )?);
-            owned_store.as_ref().unwrap()
+            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
     };
     store.append_workflow_event(event)?;
@@ -903,13 +899,13 @@ pub fn save_task_run(
     store: Option<&GatewayStore>,
     task: &TaskRun,
 ) -> anyhow::Result<()> {
-    let mut owned_store = None;
+    let owned_store;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = Some(GatewayStore::open(&gateway_dir)?);
-            owned_store.as_ref().unwrap()
+            owned_store = GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
     };
     store.upsert_task_run(task)?;
@@ -949,13 +945,13 @@ pub fn load_task_run(
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<Option<TaskRun>> {
-    let mut owned_store = None;
+    let owned_store;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = Some(GatewayStore::open(&gateway_dir)?);
-            owned_store.as_ref().unwrap()
+            owned_store = GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
     };
 
@@ -980,13 +976,13 @@ pub fn list_task_runs_for_workflow(
     store: Option<&GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<TaskRun>> {
-    let mut owned_store = None;
+    let owned_store;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = Some(GatewayStore::open(&gateway_dir)?);
-            owned_store.as_ref().unwrap()
+            owned_store = GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
     };
 
@@ -6178,7 +6174,7 @@ mod tests {
         let cfg = test_config(&agents);
         let wf = ensure_workflow_for_root_session(&cfg, None, "op-retry-root", None).unwrap();
 
-        let mut task = TaskRun {
+        let task = TaskRun {
             task_id: "task-op-retry".to_string(),
             workflow_id: wf.workflow_id.clone(),
             agent_id: "coder.default".to_string(),

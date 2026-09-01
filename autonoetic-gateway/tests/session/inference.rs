@@ -5,7 +5,7 @@ use autonoetic_gateway::runtime::inference_profile::{
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{
-    AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, RuntimeDeclaration,
+    AgentIdentity, AgentManifest, ExecutionMode,
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{GatewayConfig, LlmPreset};

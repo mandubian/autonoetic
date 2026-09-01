@@ -6,7 +6,7 @@ use crate::execution::{gateway_actor_id, init_gateway_causal_logger, GatewayExec
 use crate::runtime::reevaluation_state::persist_reevaluation_state;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalLevel, ApprovalRequest, BackgroundMode, BackgroundPolicy,
+    ApprovalDecision, ApprovalRequest, BackgroundMode, BackgroundPolicy,
     BackgroundState, ReevaluationState, WakeReason,
 };
 use chrono::{DateTime, Duration, Utc};

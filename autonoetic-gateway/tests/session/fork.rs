@@ -2,7 +2,7 @@
 
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
-    list_checkpoints, load_latest_checkpoint, prune_checkpoints, save_checkpoint, turn_id_for,
+    load_latest_checkpoint, save_checkpoint, turn_id_for,
     SessionCheckpoint, SessionFork, YieldReason,
 };
 use autonoetic_gateway::runtime::content_store::ContentStore;

@@ -3,7 +3,7 @@
 //! Provides observability into what consumes the context window budget
 //! before each LLM call, and tool tiering for dynamic tool filtering.
 
-use crate::llm::{Message, Role, ToolCall, ToolDefinition};
+use crate::llm::{Message, Role, ToolDefinition};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -919,6 +919,7 @@ impl BudgetEnforcementStrategy for DemoteToolsStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::ToolCall;
 
     #[test]
     fn test_estimate_tokens_empty() {

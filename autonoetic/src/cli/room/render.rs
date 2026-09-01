@@ -337,15 +337,6 @@ fn payload_field_json(p: &serde_json::Value, key: &str) -> Option<serde_json::Va
     }
 }
 
-/// Plaintext projection of a summary field (markdown stripped when detected).
-fn summary_plaintext(s: &str) -> String {
-    if super::markdown::looks_like_markdown(s) {
-        super::markdown::strip_markdown(s)
-    } else {
-        s.to_string()
-    }
-}
-
 /// Short list-row title from a summary — only explicit `#` markdown headings.
 /// Everything else renders as formatted body (models often glue section titles
 /// onto the first sentence without newlines).
@@ -1288,13 +1279,6 @@ pub(crate) fn message_list_rows(entry: &SessionTimelineEntry, key: &str) -> (Str
         return (String::new(), Some(body));
     }
     (summarize(entry), None)
-}
-
-/// Full agent/operator message text for multiline row display. Strips markdown
-/// to plain text and preserves intentional newlines.
-pub(crate) fn narrative_body(entry: &SessionTimelineEntry, key: &str) -> Option<String> {
-    let (_, detail) = message_list_rows(entry, key);
-    detail
 }
 
 /// Collapse a possibly multi-line string into a single timeline line: runs of
@@ -2558,7 +2542,7 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
             }
         }
         // Agent/operator narrative bodies are assembled in `render_spec` via
-        // [`narrative_body`] — not duplicated here.
+        // [`message_list_rows`] — not duplicated here.
         "agent.message" | "operator.message" => None,
         "workflow.child_state" => s("summary")
             .filter(|r| !r.is_empty())

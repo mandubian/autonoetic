@@ -110,7 +110,7 @@ pub trait ReductionStrategy: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{Message, Role, ToolDefinition};
+    use crate::llm::Message;
     use crate::runtime::prompt_budget::PromptBudgetBreakdown;
     use autonoetic_types::config::PromptBudgetConfig;
 
@@ -226,7 +226,7 @@ mod tests {
     async fn test_hard_limit_binding_when_soft_budget_is_higher() {
         // Soft budget (500) is above the hard limit (100), so the hard limit
         // is binding and strategies should still see the hard limit.
-        let mut ctx = make_context_with_soft_budget(150, 100, 500);
+        let ctx = make_context_with_soft_budget(150, 100, 500);
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(AssertLimitStrategy { expected: 100 }),
         ];

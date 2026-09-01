@@ -1477,7 +1477,7 @@ impl GatewayExecutionService {
         // Non-schema violations (prohibited_text_pattern, required_artifacts, etc.)
         // are still enforced.
         if returns_enforcement == IoReturnsEnforcement::Advisory {
-            let (schema_violations, mut policy_violations): (Vec<_>, Vec<_>) = violations
+            let (schema_violations, policy_violations): (Vec<_>, Vec<_>) = violations
                 .iter()
                 .partition(|v| v.rule == "output_schema");
 

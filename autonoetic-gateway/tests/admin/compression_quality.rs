@@ -21,7 +21,7 @@ use std::collections::HashMap;
 fn get_test_llm_config() -> Option<(LlmPreset, reqwest::Client)> {
     let provider = std::env::var("AUTONOETIC_TEST_LLM_PROVIDER").ok()?;
     let model = std::env::var("AUTONOETIC_TEST_LLM_MODEL").ok()?;
-    let api_key = std::env::var("AUTONOETIC_TEST_LLM_API_KEY").ok()?;
+    let _api_key = std::env::var("AUTONOETIC_TEST_LLM_API_KEY").ok()?;
 
     let preset = LlmPreset {
         provider: Some(provider),

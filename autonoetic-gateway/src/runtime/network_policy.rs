@@ -1,7 +1,6 @@
 use autonoetic_types::agent::{
     AgentManifest, RemoteAccessApprovalMode, RemoteAccessDeclaration,
 };
-use autonoetic_types::background::GrantTarget;
 use autonoetic_types::capability::Capability;
 use std::path::Path;
 
@@ -299,6 +298,7 @@ pub enum CapabilityHostCheck {
 mod tests {
     use super::*;
     use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
+    use autonoetic_types::background::GrantTarget;
 
     fn manifest(network: bool) -> AgentManifest {
         AgentManifest {

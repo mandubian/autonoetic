@@ -101,6 +101,10 @@ struct IndexEntry {
     /// the prompt: `index.toml` is parsed, never served.
     ///
     /// Validated by `every_page_names_a_canonical_doc_that_exists`.
+    ///
+    /// Read by that docs-guard test, never at runtime — `index.toml` is parsed
+    /// but the canonical pointer is deliberately not served into the prompt.
+    #[allow(dead_code)]
     #[serde(default)]
     canonical: Option<String>,
 }
@@ -451,7 +455,7 @@ impl NativeTool for WikiProposeTool {
                 })
                 .to_string())
             }
-            GateResult::Suspended { gate_id, response_json, .. } => {
+            GateResult::Suspended { gate_id: _, response_json, .. } => {
                 // Return the gate_id — the agent is NOT suspended for wiki proposals
                 let mut resp: serde_json::Value =
                     serde_json::from_str(&response_json).unwrap_or_default();

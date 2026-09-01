@@ -11,7 +11,7 @@ use crate::runtime::tools::{
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::{AgentManifest, RemoteAccessApprovalMode};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalRequest, LayerMountScopeInfo, ScheduledAction,
+    ApprovalDecision, LayerMountScopeInfo, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::LayerApprovalScope;
@@ -97,7 +97,6 @@ pub fn extract_and_mount_layers(
         });
 
         // Discover Python site-packages inside the layer.
-        let mut found_site_packages = false;
         if let Ok(lib_entries) = std::fs::read_dir(layer_temp_base.join("lib")) {
             for entry in lib_entries.flatten() {
                 let name = entry.file_name();
@@ -109,7 +108,6 @@ pub fn extract_and_mount_layers(
                         .join("site-packages");
                     if site.starts_with("/") {
                         python_paths.push(site.to_string_lossy().to_string());
-                        found_site_packages = true;
                     }
                 }
             }
@@ -1940,8 +1938,6 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             }
         }
 
-        let dep_packages: Option<Vec<String>> =
-            args.dependencies.as_ref().map(|d| d.packages.clone());
         // Parse runtime.lock once — used for both dependency plan and layer mounting.
         let parsed_lock: Option<autonoetic_types::runtime_lock::RuntimeLock> = {
             if args.dependencies.is_none() {

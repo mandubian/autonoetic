@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
-use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
+use crate::runtime::remote_access::DetectedPattern;
 
 /// A cached approved sandbox exec entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -391,6 +391,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::remote_access::DetectedPatternCategory;
 
     #[test]
     fn test_normalize_targets_urls() {

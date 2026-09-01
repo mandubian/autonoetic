@@ -830,7 +830,7 @@ async fn emergency_stop_cancels_active_scheduled_jobs() -> anyhow::Result<()> {
     )?;
 
     let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let _past = (Utc::now() - Duration::hours(1)).to_rfc3339();
 
     let job_active = ScheduledJob {
         job_id: "sj-emstop-1".to_string(),

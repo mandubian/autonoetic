@@ -12,7 +12,7 @@ use autonoetic_gateway::runtime::active_execution_registry::{
 use autonoetic_gateway::scheduler::approval::{apply_decision, ApproveOptions, DecisionContext};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, GrantScope,
+    ApprovalDecision, ApprovalLevel, ApprovalStatus, GrantScope,
     ScheduledAction,
 };
 use autonoetic_types::config::GatewayConfig;

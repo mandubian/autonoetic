@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use autonoetic_gateway::policy::PolicyEngine;
-use autonoetic_gateway::runtime::tools::{NativeTool, NativeToolRegistry};
+use autonoetic_gateway::runtime::tools::NativeToolRegistry;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 

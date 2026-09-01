@@ -6,11 +6,8 @@
 
 use crate::llm::StopReason;
 use crate::runtime::lifecycle::AgentExecutor;
-use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::session_tracer::SessionTracer;
-use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::GatewayConfig;
-use std::sync::Arc;
 
 pub(crate) const LLM_OTHER_EMPTY_RETRY_ENV: &str = "AUTONOETIC_LLM_OTHER_EMPTY_RETRIES";
 pub(crate) const LLM_OTHER_EMPTY_RETRY_DEFAULT: usize = 1;
@@ -81,38 +78,6 @@ pub(crate) fn llm_context_window_env_tokens() -> Option<u32> {
             .ok()
             .and_then(|s| s.trim().parse().ok())
     })
-}
-
-pub(crate) fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
-    if let Some(cfg) = &manifest.llm_config {
-        if let Some(w) = cfg.context_window_tokens {
-            return Some(w);
-        }
-    }
-    llm_context_window_env_tokens()
-}
-
-/// Manifest/env first; if still unknown and provider is OpenRouter, use the public models API cache.
-pub(crate) async fn resolve_context_window_for_run(
-    manifest: &AgentManifest,
-    model: &str,
-    catalog: Option<&Arc<OpenRouterCatalog>>,
-) -> Option<u32> {
-    if let Some(w) = resolve_context_window_tokens(manifest) {
-        return Some(w);
-    }
-    let use_openrouter = manifest
-        .llm_config
-        .as_ref()
-        .map(|c| c.provider.eq_ignore_ascii_case("openrouter"))
-        .unwrap_or(false);
-    if !use_openrouter {
-        return None;
-    }
-    match catalog {
-        Some(cat) => cat.context_length_for_model(model).await,
-        None => None,
-    }
 }
 
 /// Maps provider prompt (`input`) token count to % of a declared context window.

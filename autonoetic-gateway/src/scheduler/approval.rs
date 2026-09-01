@@ -1653,7 +1653,7 @@ pub fn cancel_pending_approval_for_workflow_task(
 }
 
 pub(crate) fn cancel_approval_request(
-    config: &GatewayConfig,
+    _config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     request_id: &str,
     cancelled_by: &str,
@@ -1730,7 +1730,7 @@ fn unblock_task_on_approval(
     if let Ok(Some(existing)) =
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
-        use autonoetic_types::workflow::TaskRunStatus;
+
         if existing.status.is_terminal() {
             tracing::debug!(
                 target: "approval",
@@ -2068,25 +2068,6 @@ fn emit_decider_obligation_event(
         reason: Some(format!("§O (O-1) decider motivation {action}")),
     };
     let _ = store.create_causal_event(&event);
-}
-
-fn decide_request(
-    config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    request_id: &str,
-    decided_by: &str,
-    reason: Option<String>,
-    status: ApprovalStatus,
-) -> anyhow::Result<ApprovalDecision> {
-    decide_request_with_options(
-        config,
-        gateway_store,
-        request_id,
-        decided_by,
-        reason,
-        status,
-        ApproveOptions::default(),
-    )
 }
 
 fn decide_request_with_options(

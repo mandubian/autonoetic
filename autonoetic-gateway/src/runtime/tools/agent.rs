@@ -107,6 +107,9 @@ struct SpawnAgentArgs {
 ///
 /// Without this, long post-processing tails can look like a stale Running task and trigger
 /// false stuck-task auto-resolution.
+///
+/// **Never constructed** — the protection described above is inactive. Wire it
+/// up or delete it: #1264.
 struct SyncTaskHeartbeat {
     stop_tx: Option<mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
@@ -742,14 +745,11 @@ the single join already does that."
             return serde_json::to_string(&dedup_resp).map_err(Into::into);
         }
 
-        // Run on the operator's actual config. This used to fabricate one from
-        // `agents_dir`, which silently gave the spawned execution a different
-        // gateway dir (and so a different store, vault and revision root) than
-        // the engine that created it.
-        let execution = crate::execution::GatewayExecutionService::new(
-            gw_config.clone(),
-            gateway_store.clone(),
-        );
+        // The spawn runs on the operator's actual config: `gw_config` is handed
+        // to `save_task_run` / `enqueue_task` below. This used to fabricate one
+        // from `agents_dir`, which silently gave the spawned execution a
+        // different gateway dir (and so a different store, vault and revision
+        // root) than the engine that created it.
 
         let kickoff_message = match (&args.context, &args.metadata) {
             (Some(ctx), Some(meta)) => {

@@ -11,14 +11,12 @@ use super::client::RoomClient;
 use super::markdown;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
-use autonoetic_types::principal::Principal;
 use autonoetic_types::session_timeline::{
-    Altitude, SessionRole, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
+    Altitude, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
 };
 use crossterm::{
     event::{
-        self, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEvent, MouseEventKind,
+        self, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{enable_raw_mode, EnterAlternateScreen},
@@ -1299,15 +1297,12 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 struct ArtifactFileEntry {
     name: String,
-    alias: String,
 }
 
 /// A dependency layer reference shown in the artifact viewer popup.
 #[derive(Clone)]
 struct ArtifactLayerEntry {
-    layer_id: String,
     name: String,
-    mount_path: String,
     digest: String,
 }
 
@@ -1319,7 +1314,6 @@ struct ArtifactViewer {
     /// Dependency layers attached to this artifact (rendered above files).
     layers: Vec<ArtifactLayerEntry>,
     selected: usize,
-    scroll: u16,
 }
 
 struct ArtifactFileView {
@@ -1352,62 +1346,33 @@ enum LiveContentNode {
     },
     ArtifactFile {
         name: String,
-        alias: String,
         artifact_id: String,
         artifact_ref: String,
     },
-    /// A dependency layer attached to the preceding `Artifact` node.
-    /// Carries back-references like `ArtifactFile` so the `o` handler can act
-    /// on it standalone.
+    /// A dependency layer attached to the preceding `Artifact` node. Carries
+    /// the owning `artifact_id` so the `o` handler can act on it standalone.
     ArtifactLayer {
         layer_id: String,
         name: String,
         mount_path: String,
         digest: String,
         artifact_id: String,
-        artifact_ref: String,
     },
     Draft {
         name: String,
-        alias: String,
         visibility: String,
     },
 }
 
-impl LiveContentNode {
-    /// Human-readable label for the node.
-    fn label(&self) -> String {
-        match self {
-            LiveContentNode::Plan { title, status, version, is_latest, .. } => {
-                let latest_tag = if *is_latest { " · latest" } else { "" };
-                let label = if title.is_empty() {
-                    format!("plan v{version}")
-                } else {
-                    title.clone()
-                };
-                format!("📋 {} v{}{} [{}]", label, version, latest_tag, status)
-            }
-            LiveContentNode::PlanStep { title } => {
-                format!("  📄 {}", title)
-            }
-            LiveContentNode::Artifact { name, kind, .. } => {
-                format!("📦 {} ({})", name, kind)
-            }
-            LiveContentNode::ArtifactFile { name, .. } => {
-                format!("  📄 {}", name)
-            }
-            LiveContentNode::ArtifactLayer { name, digest, .. } => {
-                format!("  🧱 {} · {}", name, short_digest(digest))
-            }
-            LiveContentNode::Draft { name, visibility, .. } => {
-                let vis_tag = match visibility.as_str() {
-                    "private" => " 🔒",
-                    "global" => " 🌐",
-                    _ => "",
-                };
-                format!("📝 {}{}", name, vis_tag)
-            }
-        }
+/// A plan row's display label: the plan title, or `plan v<n>` when the plan
+/// carries no title. Untitled plans are common (the planner names a plan only
+/// once it has a subject), and a row reading just `v3 [pending]` is unreadable
+/// — so the version stands in for the name.
+fn plan_node_label(title: &str, version: u32) -> String {
+    if title.is_empty() {
+        format!("plan v{version}")
+    } else {
+        title.to_string()
     }
 }
 
@@ -1435,14 +1400,13 @@ struct LiveContentPane {
     /// nodes[0..3] are Plans, nodes[3..7] are Artifacts, nodes[7..10] are Drafts.
     sections: Vec<(usize, &'static str)>,
     selected: usize,
-    scroll: u16,
-/// Plan_id -> set of folded (hidden) older versions. The latest version per
-/// plan_id is always shown; older versions are hidden by default and can be
-/// toggled with `x` when a plan node is selected.
-folded: std::collections::HashMap<String, bool>,
-/// artifact_id -> folded (children hidden). Defaults to expanded (false),
-/// so artifacts show their files/layers on first open; `x` collapses them.
-artifact_folded: std::collections::HashMap<String, bool>,
+    /// Plan_id -> set of folded (hidden) older versions. The latest version per
+    /// plan_id is always shown; older versions are hidden by default and can be
+    /// toggled with `x` when a plan node is selected.
+    folded: std::collections::HashMap<String, bool>,
+    /// artifact_id -> folded (children hidden). Defaults to expanded (false),
+    /// so artifacts show their files/layers on first open; `x` collapses them.
+    artifact_folded: std::collections::HashMap<String, bool>,
 }
 
 impl LiveContentPane {
@@ -1451,7 +1415,6 @@ impl LiveContentPane {
         let mut visible = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
-        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in self.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -1461,13 +1424,11 @@ impl LiveContentPane {
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
-                    last_artifact_id = None;
                     if *is_latest || !self.is_folded(plan_id) {
                         visible.push(idx);
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
-                    last_artifact_id = None;
                     // Only hide steps under a folded older (non-latest) plan.
                     if let Some(ref pid) = last_plan_id {
                         if !last_plan_was_latest && self.is_folded(pid) {
@@ -1476,15 +1437,13 @@ impl LiveContentPane {
                     }
                     visible.push(idx);
                 }
-                LiveContentNode::Artifact { artifact_id, .. } => {
+                LiveContentNode::Artifact { .. } => {
                     last_plan_id = None;
-                    last_artifact_id = Some(artifact_id.clone());
                     // Parent is always visible.
                     visible.push(idx);
                 }
                 LiveContentNode::ArtifactFile { artifact_id, .. }
                 | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
-                    last_artifact_id = Some(artifact_id.clone());
                     // Hide a file/layer child when its artifact is folded.
                     if self.is_artifact_folded(artifact_id) {
                         continue;
@@ -1493,7 +1452,6 @@ impl LiveContentPane {
                 }
                 _ => {
                     last_plan_id = None;
-                    last_artifact_id = None;
                     visible.push(idx);
                 }
             }
@@ -1814,7 +1772,6 @@ fn open_content_pane_node(
                                 arr.iter().filter_map(|f| {
                                     Some(ArtifactFileEntry {
                                         name: f.get("name")?.as_str()?.to_string(),
-                                        alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
                                     })
                                 }).collect()
                             })
@@ -1824,11 +1781,10 @@ fn open_content_pane_node(
                             .and_then(|l| l.as_array())
                             .map(|arr| {
                                 arr.iter().filter_map(|l| {
-                                    let layer_id = l.get("layer_id")?.as_str()?.to_string();
+                                    // A layer without an id is malformed — skip it.
+                                    l.get("layer_id")?.as_str()?;
                                     Some(ArtifactLayerEntry {
-                                        layer_id,
                                         name: l.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                        mount_path: l.get("mount_path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                         digest: l.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                     })
                                 }).collect()
@@ -1844,7 +1800,6 @@ fn open_content_pane_node(
                                 files,
                                 layers,
                                 selected: 0,
-                                scroll: 0,
                             });
                             *status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
                             *live_content_pane = None;
@@ -2796,7 +2751,7 @@ fn current_egress_policy(
     client: &RoomClient,
     root_session_id: &str,
 ) -> Option<autonoetic_types::egress::EgressSessionPolicy> {
-    use autonoetic_types::egress::EgressSessionPolicy;
+
     match rpc(
         client,
         "session.egress_policy.get",
@@ -4254,7 +4209,6 @@ pub fn run(
                                         let (lines, ids) = list_wiki_proposals_detail(client, root_session_id);
                                         detail = Some(DetailPane::event(lines, None));
                                         session_pick_list = None;
-                                        wiki_request_ids = None;
                                         wiki_request_ids = Some(ids);
                                         status = Some(
                                             "wiki proposals: press number to view details · Esc close"
@@ -6128,10 +6082,18 @@ pub fn run(
                                 status = None;
                             }
                         }
-                        KeyCode::Char('p') => {
-                            if let Some(g) =
-                                view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
-                            {
+                        // The plan-gate test is a match *guard*, not an `if`
+                        // inside the arm: an arm that matches bare `p` and then
+                        // does nothing still consumes the key, which swallowed
+                        // every `p` press that was not a plan review — including
+                        // the pause binding further down. Guarding lets those
+                        // fall through.
+                        KeyCode::Char('p')
+                            if view_gate
+                                .as_ref()
+                                .is_some_and(|g| g.kind == GateKind::Plan) =>
+                        {
+                            if let Some(g) = view_gate.as_ref() {
                                 if open_plan_review(
                                     client,
                                     root_session_id,
@@ -6757,17 +6719,14 @@ pub fn run(
                                                             mount_path,
                                                             digest,
                                                             artifact_id: aid.clone(),
-                                                            artifact_ref: aid.clone(),
                                                         });
                                                     }
                                                 }
                                                 if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
                                                     for file in files {
                                                         let fname = file.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                                        let alias = file.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string();
                                                         all_nodes.push(LiveContentNode::ArtifactFile {
                                                             name: fname,
-                                                            alias,
                                                             artifact_id: aid.clone(),
                                                             artifact_ref: aid.clone(),
                                                         });
@@ -6803,7 +6762,6 @@ pub fn run(
                                                 }
                                                 Some(LiveContentNode::Draft {
                                                     name: name.to_string(),
-                                                    alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
                                                     visibility: f.get("visibility").and_then(|v| v.as_str()).unwrap_or("session").to_string(),
                                                 })
                                             }).collect()
@@ -6832,7 +6790,6 @@ pub fn run(
                                         nodes: all_nodes,
                                         sections,
                                         selected: prev_selected,
-                                        scroll: 0,
                                         folded,
                                         artifact_folded: std::collections::HashMap::new(),
                                     };
@@ -6911,7 +6868,6 @@ pub fn run(
                                                         arr.iter().filter_map(|item| {
                                                             Some(ArtifactFileEntry {
                                                                 name: item.get("name")?.as_str()?.to_string(),
-                                                                alias: item.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
                                                             })
                                                         }).collect()
                                                     })
@@ -6920,11 +6876,10 @@ pub fn run(
                                                     .and_then(|l| l.as_array())
                                                     .map(|arr| {
                                                         arr.iter().filter_map(|item| {
-                                                            let layer_id = item.get("layer_id")?.as_str()?.to_string();
+                                                            // A layer without an id is malformed — skip it.
+                                                            item.get("layer_id")?.as_str()?;
                                                             Some(ArtifactLayerEntry {
-                                                                layer_id,
                                                                 name: item.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                                                mount_path: item.get("mount_path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                                                 digest: item.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                                             })
                                                         }).collect()
@@ -6941,7 +6896,6 @@ pub fn run(
                                                         files,
                                                         layers,
                                                         selected: 0,
-                                                        scroll: 0,
                                                     });
                                                     status = Some("artifact: o to view · Esc close".to_string());
                                                 }
@@ -7065,7 +7019,10 @@ pub fn run(
                             detail = None;
                             selected = 0;
                         }
-                        KeyCode::Char('G') | KeyCode::End => {
+                        // End only: `G` is owned by the grants panel arm above,
+                        // which matches first, so listing it here never fired.
+                        // `g`/Home still jumps to the top.
+                        KeyCode::End => {
                             follow = true;
                             detail = None;
                         }
@@ -10405,8 +10362,8 @@ fn draw(
     turn_boundaries: &HashMap<usize, bool>,
     show_reasoning: bool,
     stats: &SessionStats,
-    pending_plan_count: usize,
-    selected_spawn_agent: Option<&str>,
+    _pending_plan_count: usize,
+    _selected_spawn_agent: Option<&str>,
     info_panel: Option<&InfoPanel>,
     info_scroll: u16,
     gate_count: usize,
@@ -10838,7 +10795,6 @@ fn draw(
         let mut visible_nodes: Vec<(usize, &LiveContentNode)> = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
-        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in pane.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -10848,13 +10804,11 @@ fn draw(
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
-                    last_artifact_id = None;
                     if *is_latest || !pane.is_folded(plan_id) {
                         visible_nodes.push((idx, node));
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
-                    last_artifact_id = None;
                     // Plan steps only appear under the latest plan version;
                     // hide them if the parent plan is a folded older revision.
                     if let Some(ref pid) = last_plan_id {
@@ -10864,15 +10818,13 @@ fn draw(
                     }
                     visible_nodes.push((idx, node));
                 }
-                LiveContentNode::Artifact { artifact_id, .. } => {
+                LiveContentNode::Artifact { .. } => {
                     last_plan_id = None;
-                    last_artifact_id = Some(artifact_id.clone());
                     // Parent is always visible.
                     visible_nodes.push((idx, node));
                 }
                 LiveContentNode::ArtifactFile { artifact_id, .. }
                 | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
-                    last_artifact_id = Some(artifact_id.clone());
                     if pane.is_artifact_folded(artifact_id) {
                         continue;
                     }
@@ -10880,7 +10832,6 @@ fn draw(
                 }
                 _ => {
                     last_plan_id = None;
-                    last_artifact_id = None;
                     visible_nodes.push((idx, node));
                 }
             }
@@ -10908,11 +10859,7 @@ fn draw(
                         version,
                         is_latest,
                     } => {
-                        let label = if title.is_empty() {
-                            format!("plan v{version}")
-                        } else {
-                            title.clone()
-                        };
+                        let label = plan_node_label(title, *version);
                         let latest_tag = if *is_latest { " ✦" } else { "" };
                         let count = pane
                             .nodes
@@ -10968,13 +10915,11 @@ fn draw(
                         mount_path: _,
                         digest,
                         artifact_id: _,
-                        artifact_ref: _,
                     } => {
                         format!("    🧱 {name} · {}", short_digest(digest))
                     }
                     LiveContentNode::ArtifactFile {
                         name,
-                        alias: _,
                         artifact_id: _,
                         artifact_ref: _,
                     } => {
@@ -10982,7 +10927,6 @@ fn draw(
                     }
                     LiveContentNode::Draft {
                         name,
-                        alias: _,
                         visibility,
                     } => {
                         let lock = match visibility.as_str() {
@@ -11784,6 +11728,13 @@ fn draw_gate_modal(
                 "synthesis:",
                 Style::default().fg(Color::DarkGray),
             )));
+            // The body under that label, which was computed and dropped. The
+            // fallback further down deliberately withholds `inspect_lines`
+            // when the payload carries a synthesis, so nothing else filled the
+            // gap: the modal showed a bare "synthesis:" header.
+            for line in synthesis_plain.lines() {
+                content_lines.push(Line::from(line.to_string()));
+            }
         } else {
             let spec = render::render_spec(entry);
             content_lines.push(Line::from(Span::styled(
@@ -12074,6 +12025,8 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::principal::Principal;
+    use autonoetic_types::session_timeline::SessionRole;
 
     // ---- LLM activity strip (#1081): stuck vs slow ----
 
@@ -12824,7 +12777,7 @@ mod tests {
             .to_string(),
         );
         let entries = vec![msg];
-        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        let resolved = HashSet::from(["plan-1:v1".to_string()]);
         let gate = find_active_gate(&entries, &resolved, &HashSet::new()).unwrap();
         assert_eq!(gate.id, "plan-1");
         assert_eq!(gate.kind, GateKind::Plan);
@@ -12998,15 +12951,13 @@ mod tests {
             },
             LiveContentNode::Draft {
                 name: "notes.md".into(),
-                alias: "".into(),
                 visibility: "session".into(),
             },
         ];
-        let mut pane = LiveContentPane {
+        let pane = LiveContentPane {
             nodes,
             sections: vec![(0, "Plans"), (5, "Artifacts"), (6, "Drafts")],
             selected: 0,
-            scroll: 0,
             folded: std::collections::HashMap::from([("plan-1".into(), true)]),
             artifact_folded: std::collections::HashMap::new(),
         };
@@ -13022,17 +12973,11 @@ mod tests {
 
     #[test]
     fn live_content_plan_label_includes_version_even_without_title() {
-        let node = LiveContentNode::Plan {
-            plan_id: "plan-1".into(),
-            title: "".into(),
-            status: "pending".into(),
-            version: 3,
-            is_latest: false,
-        };
-        let label = node.label();
-        assert!(label.contains("plan v3"), "{label}");
-        assert!(label.contains("v3"), "{label}");
-        assert!(label.contains("[pending]"), "{label}");
+        // Asserts the helper the live-content renderer actually calls. The
+        // surrounding `v{version} [{status}]` decoration is the renderer's
+        // format string, not this function's business.
+        assert_eq!(plan_node_label("", 3), "plan v3");
+        assert_eq!(plan_node_label("Roadmap", 3), "Roadmap");
     }
 
     #[test]
@@ -14369,7 +14314,7 @@ mod tests {
     #[test]
     fn unlabeled_trace_rows_render_no_marker() {
         let turn_boundaries = HashMap::new();
-        let mut spec = render::RowSpec {
+        let spec = render::RowSpec {
             altitude: Altitude::Normal,
             actor: render::ActorKind::Tool,
             tone: RowTone::Default,

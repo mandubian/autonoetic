@@ -286,7 +286,7 @@ fn canonical_artifact_ids(
         return Vec::new();
     };
     let mut ids: Vec<String> = Vec::new();
-    let mut push = |id: String, ids: &mut Vec<String>| {
+    let push = |id: String, ids: &mut Vec<String>| {
         if !id.is_empty() && !ids.iter().any(|existing| *existing == id) {
             ids.push(id);
         }

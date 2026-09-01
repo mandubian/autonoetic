@@ -173,6 +173,10 @@ impl RawSweepFindings {
             .chain(&self.supply_chain)
     }
 
+    /// Phase 1 **and** Phase 2. Currently unused: every call site takes
+    /// `all_phase1`, so `prompt_injection` and `behavioral_anomaly` findings
+    /// reach no aggregate — including the Critical count. Whether that is
+    /// deliberate per call site is open: #1267.
     pub fn all(&self) -> impl Iterator<Item = &SecurityFinding> {
         self.credential
             .iter()

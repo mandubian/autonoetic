@@ -654,6 +654,11 @@ fn cap_chars(s: &str, max: usize) -> String {
 /// without its declared credentials only produced cryptic "missing env var"
 /// script errors and agent onboarding loops — the typed failure surfaces the
 /// real cause immediately.
+///
+/// Production callers pass their bindings to
+/// `resolve_credential_env_with_bindings` directly; this no-bindings shim
+/// exists only so the unit tests can spell the common case.
+#[cfg(test)]
 pub(crate) fn resolve_credential_env(
     agent_dir: &Path,
     gateway_dir: &Path,

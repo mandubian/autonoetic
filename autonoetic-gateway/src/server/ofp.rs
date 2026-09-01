@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;

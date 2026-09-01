@@ -243,7 +243,7 @@ pub fn resolve_followup(
 }
 
 fn resolve_interaction_followup(
-    interaction_id: &str,
+    _interaction_id: &str,
     answer: Option<&str>,
     root: &str,
 ) -> Vec<SessionTimelineEntry> {

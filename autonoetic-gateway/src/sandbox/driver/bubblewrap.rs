@@ -168,34 +168,6 @@ impl SandboxDriver for BubblewrapDriver {
     }
 }
 
-/// Direct-exec form: run `entrypoint` split into program + args, without a shell.
-fn bubblewrap_command(
-    agent_dir: &str,
-    gateway_dir: &Path,
-    entrypoint: &str,
-    overrides: Option<&BwrapIsolationOverrides>,
-) -> anyhow::Result<(String, Vec<String>)> {
-    let (program, args) = split_entrypoint(entrypoint)?;
-    let mode = host_fs_mode(overrides);
-    let mut argv = base_argv(agent_dir, mode);
-    append_bwrap_isolation_flags(&mut argv, overrides);
-    if mode == HostFsMode::Legacy {
-        // Mask gateway-internal secrets + operator deny paths (stopgap for
-        // #1002). Must come after the ro-bind of `/` so the destinations
-        // resolve, and before any explicit re-expose mounts so they can layer
-        // back on top.
-        //
-        // Skipped in AllowSet mode: the host `/` is not mounted, so masked
-        // paths are simply absent — and bwrap would ERROR on a mask whose
-        // destination parent doesn't exist in the namespace.
-        argv.extend(bwrap_deny_path_flags(gateway_dir));
-    }
-    argv.push("--".to_string());
-    argv.push(program);
-    argv.extend(args);
-    Ok(("bwrap".to_string(), argv))
-}
-
 /// Shell form: run `shell_command` under `sh -c`, with extra bind mounts.
 fn bubblewrap_shell_command(
     agent_dir: &str,
@@ -454,14 +426,6 @@ fn parse_bwrap_dev_mode(value: Option<&str>) -> BwrapDevMode {
     }
 }
 
-fn split_entrypoint(entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let parts: Vec<&str> = entrypoint.split_whitespace().collect();
-    anyhow::ensure!(!parts.is_empty(), "entrypoint must not be empty");
-    let program = parts[0].to_string();
-    let args = parts[1..].iter().map(|s| s.to_string()).collect();
-    Ok((program, args))
-}
-
 /// Sensitive files inside the gateway directory that a sandboxed process must
 /// never read: the credential vault key + encrypted blob, the SQLite session
 /// DB (and its WAL/shm sidecars), and the Ed25519 attestation identity key.
@@ -558,29 +522,6 @@ fn bwrap_deny_path_flags(gateway_dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_bubblewrap_command_shape() {
-        // Empty gateway dir: nothing exists to mask, so the fixed argv
-        // positions stay stable regardless of the host's /tmp state.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent_dir = tmp.path().join("agent");
-        let gateway_dir = tmp.path().join("runtime");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_command(&agent_dir_str, &gateway_dir, "python main.py", None)
-            .expect("bubblewrap command should build");
-        assert_eq!(argv[0], "--ro-bind");
-        assert_eq!(argv[3], "--bind");
-        assert_eq!(argv[4], agent_dir_str);
-        assert_eq!(argv[5], "/tmp");
-        assert_eq!(argv[6], "--chdir");
-        assert_eq!(argv[7], "/tmp");
-        assert_eq!(argv[8], "--unshare-all");
-        assert_eq!(argv[9], "--");
-        assert_eq!(argv[10], "python");
-        assert_eq!(argv[11], "main.py");
-    }
 
     #[test]
     fn test_bubblewrap_shell_command_shape() {

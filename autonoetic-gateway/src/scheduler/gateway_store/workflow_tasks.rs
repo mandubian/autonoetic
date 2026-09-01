@@ -2,7 +2,7 @@ use super::GatewayStore;
 use anyhow::Result;
 use autonoetic_types::tool_error::{FailureClass, SideEffectState};
 use autonoetic_types::workflow::{QueuedTaskRun, TaskRun, TaskRunStatus};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::Deserialize;
 
 /// Durable execution claim for a queued task. Moved here from workflow_store so

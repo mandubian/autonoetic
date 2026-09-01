@@ -17,7 +17,6 @@ use serde::Serialize;
 
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::config::PostPromotionReviewConfig;
-use autonoetic_types::escalation::RoleVerdictSummary;
 
 /// Result of a single agent's post-promotion review.
 #[derive(Debug, Clone, Serialize)]
@@ -237,18 +236,6 @@ pub fn run_post_promotion_review(
         let critical_findings: Vec<&ReviewFinding> =
             findings.iter().filter(|f| f.severity == "critical").collect();
         if !critical_findings.is_empty() {
-            let verdicts: Vec<RoleVerdictSummary> = findings.iter().map(|f| {
-                RoleVerdictSummary {
-                    role: autonoetic_types::promotion::PromotionRole::Evaluator,
-                    agent_id: "security_sentinel".to_string(),
-                    passed: false,
-                    findings_summary: f.message.clone(),
-                    evidence_ref: None,
-                    recorded_at: chrono::Utc::now().to_rfc3339(),
-                    carried_from: None,
-                }
-            }).collect();
-
             let synthesis = format!(
                 "Post-promotion review for '{}': {} critical and {} warning findings. {}",
                 agent_id,

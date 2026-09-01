@@ -5,7 +5,6 @@
 //! can be layered on later if needed.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -18,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::checkpoint::{list_checkpoints, load_checkpoint, SessionCheckpoint};
 use crate::runtime::content_store::root_session_id;
-use crate::scheduler::gateway_store::{EmergencyStopRecord, GatewayStore, LiveDigestEventRecord};
+use crate::scheduler::gateway_store::{EmergencyStopRecord, GatewayStore};
 
 /// Export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

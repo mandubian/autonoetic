@@ -1080,7 +1080,7 @@ fn test_federation_escalation_rejected_does_not_allow_promotion() {
 // ====================================================================================
 
 use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ApprovalStatus, RevisionPromoteFederationContext,
+    ApprovalLevel, ApprovalRequest, RevisionPromoteFederationContext,
     ScheduledAction,
 };
 use autonoetic_types::agent_revision::AgentAliasRecord;

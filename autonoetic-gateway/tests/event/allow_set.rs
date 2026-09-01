@@ -45,7 +45,7 @@ fn allow_set_exec_sees_only_the_asserted_set() {
         force_network_off: false,
         host_fs_allow_set: true,
     };
-    use autonoetic_gateway::sandbox::driver::{SandboxDriver, SpawnSpec};
+    use autonoetic_gateway::sandbox::driver::SpawnSpec;
     let spec = SpawnSpec {
         agent_dir: workspace_root.to_str().unwrap(),
         gateway_dir: &gw,
