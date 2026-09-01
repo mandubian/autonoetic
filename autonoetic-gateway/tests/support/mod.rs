@@ -299,7 +299,17 @@ fn extract_script_entry_from_skill(skill_text: &str) -> Option<String> {
     let end = after_first.find("\n---")?;
     let frontmatter = &skill_text[3 + first_nl..3 + first_nl + end];
     let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
-    yaml.get("script_entry")?.as_str().map(|s| s.to_string())
+    // Mirrors SkillParser's dual-format support: the entry may sit at the
+    // top level (flat fixtures) or under metadata.autonoetic (generated
+    // bundles, e.g. the adapter generator's SKILL.md template).
+    if let Some(entry) = yaml.get("script_entry").and_then(|v| v.as_str()) {
+        return Some(entry.to_string());
+    }
+    yaml.get("metadata")?
+        .get("autonoetic")?
+        .get("script_entry")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 pub fn seed_agent_revision(

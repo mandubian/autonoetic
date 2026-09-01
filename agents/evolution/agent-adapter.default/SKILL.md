@@ -60,6 +60,27 @@ Generates wrapper agents for bridging I/O gaps between tools and targets.
   `stale_base`, spawn-time advisories, promotion-time drift events) only works
   when wrapper provenance claims a digest — omit the flag only when the base
   cannot be inspected (under-claim, never guess)
+- **Pass the base's declared I/O schemas** to `generate_wrapper.py` as
+  `--base-schema-json '{"accepts": …, "returns": …}'` (from the base manifest's
+  `io` block). The generator executes every mapper it emits against a synthetic
+  payload and validates the result against the other side's schema; without
+  base schemas that round-trip proof is skipped and the verdict under-claims
+- **Report the generator's mechanical verdict as your status — never judge it
+  yourself**: `verdict: "ok"` → `status: "ok"`; `verdict: "partial"` →
+  `status: "partial"` (the wrapper is generated but the mapping is unproven or
+  has named gaps — say which, from `notes`/`validation_failures`);
+  `verdict: "clarification_needed"` → `status: "clarification_needed"` (no
+  trustworthy mapper exists — ask for the missing schemas or a tighter target
+  spec). An adapter that claims `ok` while the generator printed
+  `partial`/`clarification_needed` is lying about a proof it does not have
 - Generate wrapper scripts using `generate_wrapper.py`
+- **For a base agent that runs in script mode** (`execution_mode: "script"`),
+  generate a script-mode wrapper: pass `--wrapper-mode script` and
+  `--base-script-path <path to the base's installed script_entry file>`. The
+  generated wrapper is deterministic end-to-end — it executes a pinned copy of
+  the base's script with mapping hooks at the payload boundary and never pays
+  for a completion. Refusal (exit 2, `verdict: "clarification_needed"`) means
+  the base entry is not wrappable mechanically (non-Python, does not compile,
+  missing target input contract) — do not retry identically
 - Build an artifact with `artifact_build` from the generated wrapper
 - **Delegate installation to `specialized_builder.default`** — you cannot create or promote agent revisions directly

@@ -9,7 +9,9 @@ mod support;
 
 mod adapter_scripts;
 mod adapter_real_adaptation;
+mod adapter_roundtrip;
 mod adapter_staleness;
+mod adapter_script_wrapper;
 mod adapter_wrapper;
 mod executor_helpers;
 mod remote_access_any_preapproval;

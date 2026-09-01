@@ -107,6 +107,18 @@ Generates wrapper agent files from base skill text + schema diff metadata.
 - `--target-spec-json <json>`: wrapper target I/O schema object.
 - `--schema-diff-json <json>`: output from `schema_diff.py`.
 - `--base-manifest-json <json>` (optional): used to inherit base capabilities.
+- `--base-schema-json <json>` (optional): the base's declared
+  `{"accepts": …, "returns": …}` schemas. Without it, round-trip validation is
+  skipped and the verdict under-claims to `partial`.
+- `--base-revision-digest <digest>` (optional): promoted revision digest of the
+  base at generation time.
+- `--wrapper-mode reasoning|script` (optional, default `reasoning`): script
+  mode emits a deterministic wrapper around a copy of the base's script entry
+  (see [Script-mode wrappers](#script-mode-wrappers)).
+- `--base-script-path <path>` (script mode): the base agent's installed
+  `script_entry` file, copied verbatim into the wrapper bundle.
+- `--fail-soft` (optional): emit legacy fail-soft mapping hooks instead of the
+  default fail-loud ones. Discouraged.
 - `--output-dir <path>` (optional): writes generated files to disk.
 
 ### Generated files
@@ -116,10 +128,118 @@ Always:
 - `SKILL.md`
 - `runtime.lock` (sha256 computed on first gateway load)
 
-Conditionally (when mapping is needed):
+Conditionally (when a mapper was generated for that direction):
 
 - `scripts/pre_map.py`
 - `scripts/post_map.py`
+
+Script mode additionally generates:
+
+- `scripts/entry.py` (the executable entry shim)
+- `scripts/base_entry.py` (the digest-pinned copy of the base's entry)
+
+### Mechanical verdict (round-trip validation)
+
+Nothing LLM-judged decides whether a generated mapping works. For every
+generated mapper the generator:
+
+1. builds a **synthetic payload** from the declaring schema (required fields
+   only, type-respecting, deterministic — strings take their field name),
+2. executes the *emitted* hook file against it (same bytes that ship),
+3. validates the mapped output against the other side's schema with a
+   stdlib-only validator (required fields, primitive types, enums, one
+   object/array level).
+
+The stdout JSON carries the mechanically derived result:
+
+```json
+{
+  "wrapper_id": "base.agent.adapter",
+  "wrapper_mode": "reasoning",
+  "requires_input_mapping": true,
+  "requires_output_mapping": true,
+  "verdict": "ok",
+  "validation_failures": [],
+  "notes": ["accepts: round-trip validation passed (1 rename(s) proven …)"],
+  "files": ["SKILL.md", "runtime.lock", "scripts/pre_map.py", "scripts/post_map.py"]
+}
+```
+
+Verdicts, and what the adapter must report (its `io.returns.status` mirrors
+them — the adapter's SKILL.md pins this mapping):
+
+| Verdict | Meaning | Mapper emitted? |
+|---------|---------|-----------------|
+| `ok` | every emitted mapper proven on a synthetic payload | yes |
+| `partial` | mapper emitted but unproven — validation failed (paths in `validation_failures`), or skipped because a schema was unavailable | yes |
+| `clarification_needed` | no trustworthy mapper exists — schema missing on one side, nothing derivable, or every inferred rename type-invalid | no (for that direction) |
+
+Additional mechanical guards:
+
+- **Type-guard on renames**: a mapping pair whose two sides declare differing
+  property types (e.g. `string` vs `integer`) is dropped, not emitted — a
+  confidently wrong rename is worse than no rename. Dropped pairs are named in
+  notes.
+- **Refuse, don't passthrough**: when mapping is required but no mapper can be
+  generated, the generator no longer emits an identity passthrough hook under
+  `status: "ok"` — the passthrough fork must not masquerade as an adapter.
+- **Optional-field gaps**: optional target fields not covered by any rename
+  pass through unmapped; the note names them.
+
+### Fail-loud mapping hooks
+
+Generated mappers default to fail-loud: a payload that violates the declared
+contract (unparseable JSON, non-object payload, missing a required mapped
+field) makes the hook exit non-zero, so the turn **fails closed** — in script
+mode the hook failure fails the turn; in reasoning mode the middleware error
+fails the completion. The old behavior — silently passing untransformed data
+through so the LLM improvises — is available only via `--fail-soft`, and is
+discouraged. Absent *optional* fields never fail.
+
+### Script-mode wrappers
+
+`--wrapper-mode script` produces a wrapper that is deterministic end-to-end
+(#1251): the composition cheap path — mapping at the payload boundary without
+ever paying for a completion.
+
+Design: **bundle copy** (shape 1). The base's installed `script_entry` file is
+copied verbatim into the wrapper bundle (`scripts/base_entry.py`); the
+wrapper's `script_entry` is a generated shim (`scripts/entry.py`) that runs
+the copy in-process via `runpy`, so stdin/stdout/environment/argv pass through
+verbatim and the gateway's spawn accounting stays at the #1222 shape (pre
+hook, entry, post hook — up to three spawns, no new fee surface). The hooks
+are written to the script-mode contract: verbatim stdin→stdout, no
+`CompletionRequest`/`CompletionResponse` envelope.
+
+Why a copy rather than a sandbox mount or exec-by-alias: the generated bundle
+must be self-contained (exec-by-alias is impossible — script mode has no
+tools), and the copy is pinned by `adapter.base_revision_digest`, so the
+existing drift machinery — roster `stale_base`, promotion-time
+`adapter_drift_detected` events, `adapter_drift_notice` — works unchanged when
+the base is re-promoted. A sandbox mount would need operator-approved
+`allowed_mount_roots` and wouldn't travel with the bundle.
+
+Capability containment: the wrapper inherits the base's *declared* capabilities
+through the existing `--base-manifest-json` copy, so whatever the entry shim
+executes is governed by the wrapper's own manifest — the base's privileges are
+not smuggled through composition. The P-2.25 promotion card's `derived_from`
+capability delta is empty when the adapter copies capabilities, and shows the
+delta when it doesn't. Isolation overrides are derived from the wrapper's
+capabilities, never the base's.
+
+Mechanical refusals (exit code 2, `verdict: "clarification_needed"`, no files
+written): missing/absent `--base-script-path`, non-`.py` base entry,
+base source that does not compile, or a target spec without an object
+`io.accepts` (script agents without an input contract are rejected at
+install — the generator refuses earlier with the same verdict). The manifest
+carries `execution_mode: "script"`, `script_entry`, the base's
+`script_input_mode` when declared, the middleware block, and the same
+`adapter:` provenance (including the base revision digest) as reasoning-mode
+wrappers.
+
+Single-file boundary: the copy ships the entry script only. A base whose entry
+imports sibling modules from its bundle needs manual refinement — the import
+fails loudly at runtime rather than misbehaving silently.
 
 ### Wrapper Traceability
 
@@ -185,27 +305,30 @@ without requiring gateway binaries at generation time.
 ### Middleware behavior in generated scripts
 
 - `pre_map.py`:
-  - reads completion request JSON from stdin,
-  - parses the last user message content as JSON,
-  - applies all inferred input mappings (`from -> to`) when possible.
+  - reasoning wrappers: reads the completion request envelope from stdin,
+    parses the last user message content as JSON, applies the inferred input
+    mappings (`from -> to`) in place;
+  - script wrappers: reads the verbatim task payload from stdin and writes the
+    mapped payload to stdout.
 - `post_map.py`:
-  - reads completion response JSON from stdin,
-  - parses `response.text` as JSON,
-  - applies all inferred output mappings in reverse (`to -> from`) so caller
-    receives target shape.
+  - reasoning wrappers: reads the completion response envelope from stdin,
+    parses `response.text` as JSON, applies the inferred output mappings in
+    reverse (`to -> from`) so the caller receives the target shape;
+  - script wrappers: reads the entry script's verbatim stdout payload and
+    writes the target-shape payload to stdout.
 
-If parsing fails, scripts are fail-soft and pass data through unchanged.
+Generated mappers are fail-loud by default (see above); `--fail-soft` restores
+the legacy pass-through-on-mismatch behavior.
 
-Script-mode wrappers (#1222): script-mode agents can now carry the same
-`middleware` block, with the hooks running at the script boundary —
-`pre_process` receives the normalized task payload on stdin and its stdout
-replaces it before the entry script runs; `post_process` receives the entry
-script's stdout and its stdout becomes the reply. The script-mode contract is
-verbatim stdin→stdout (no `CompletionRequest`/`CompletionResponse` envelope);
-a hook failure there is fail-closed (the turn fails) rather than fail-soft.
-Note the generator's current scripts read the LLM envelopes, so on a
-script-mode agent they pass data through unchanged — emitting
-script-mode-aware hooks is a follow-up for the generator.
+Script-mode wrappers (#1222/#1251): script-mode agents run the same
+`middleware` block at their payload boundary — `pre_process` receives the
+normalized task payload on stdin and its stdout replaces it before the entry
+script runs; `post_process` receives the entry script's stdout and its stdout
+becomes the reply. The contract is verbatim stdin→stdout, and the generator's
+script-mode hooks are written to exactly that contract. A failing hook is
+fail-closed (the turn fails), hooks inherit the entry script's isolation
+overrides and emergency-stop registration, and the run's egress label covers
+the hook scripts too.
 
 ## Capability Inheritance
 
@@ -217,13 +340,27 @@ compatible with the base specialist security envelope.
 
 - Middleware runs relative to the wrapper agent directory.
 - Wrapper generation is deterministic for the currently implemented schema diff
-  and required-field mapping strategy.
-- For complex schema transforms (nested objects, arrays, one-to-many mappings),
-  manual refinement of generated scripts is expected.
+  and required-field mapping strategy — and every generated mapping is proven
+  (or named as unproven) by the mechanical round-trip verdict.
+- For complex schema transforms (nested objects, arrays, one-to-many mappings)
+  the generator either proves the flat rename mechanically or refuses/downgrades
+  the verdict; manual refinement of generated scripts is expected there.
 
 ## Validation
 
-Current tests covering adapter script behavior:
+Current tests covering adapter script behavior (domain binary
+`autonoetic-gateway/tests/agent/`, #922):
 
-- `autonoetic-gateway/tests/agent_adapter_scripts_integration.rs`
-- `autonoetic-gateway/tests/agent_adapter_wrapper_integration.rs`
+- `adapter_scripts.rs` — generator/diff CLI contracts, inference inheritance,
+  digest-capture instruction pinning, verdict-instruction pinning
+- `adapter_roundtrip.rs` — round-trip validation verdicts, fail-loud hook
+  behavior, refusal paths
+- `adapter_script_wrapper.rs` — script-mode wrapper generation and hooks
+- `adapter_wrapper.rs` — generated wrapper execution through the LLM path,
+  provenance parsing
+- `adapter_real_adaptation.rs` — install → adapt → promote → drift loop with
+  the real scripts
+- `adapter_staleness.rs` — roster `stale_base` verdicts
+
+Script-mode wrapper end-to-end (spawn through the gateway with no LLM):
+`autonoetic-gateway/tests/script/middleware_hooks.rs`.

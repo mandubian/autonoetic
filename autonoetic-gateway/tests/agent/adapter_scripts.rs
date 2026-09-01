@@ -299,3 +299,35 @@ fn adapter_skill_md_instructs_base_revision_digest_capture() {
          promoted revision"
     );
 }
+
+/// The generator's round-trip verdict (#1234) is mechanical; the adapter's
+/// io.returns.status must mirror it, not override it with LLM judgment. If
+/// the instruction disappears from the SKILL.md, adapters regress to claiming
+/// `ok` for under-proven mappings — pin the wiring the same way the digest
+/// capture is pinned.
+#[test]
+fn adapter_skill_md_pins_mechanical_verdict_to_reported_status() {
+    let skill_path = script_path("../SKILL.md");
+    let skill = std::fs::read_to_string(&skill_path)
+        .expect("agent-adapter.default SKILL.md should exist");
+
+    assert!(
+        skill.contains("--base-schema-json"),
+        "SKILL.md must instruct passing the base's I/O schemas to \
+         generate_wrapper.py — without them the round-trip proof is skipped \
+         and every verdict under-claims"
+    );
+    for verdict in ["partial", "clarification_needed"] {
+        assert!(
+            skill.contains(&format!("\"{verdict}\"")),
+            "SKILL.md must explain the generator's `{verdict}` verdict and the \
+             status it maps to — without it an adapter can claim `ok` for a \
+             mapping the generator could not prove"
+        );
+    }
+    assert!(
+        skill.contains("--wrapper-mode script"),
+        "SKILL.md must instruct generating script-mode wrappers for script \
+         bases (#1251) — the deterministic wrapper never pays for a completion"
+    );
+}
