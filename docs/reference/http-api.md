@@ -57,6 +57,7 @@ Content-Type: application/json
   "session_id": "sess-http-123",
   "target_agent_id": "planner.default",
   "async_mode": true,
+  "served_party": "user:alice",
   "metadata": {
     "channel": {
       "kind": "http",
@@ -67,6 +68,23 @@ Content-Type: application/json
   }
 }
 ```
+
+**`served_party`** (optional) — on whose behalf the run executes. Use
+`user:<id>` when the end-user is distinct from the operator (a hosted or
+multi-tenant deployment), or `operator` to say so explicitly. Omitted, the
+operator is recorded as the served party and the row is marked a *default*
+rather than a declaration.
+
+Bound **once per root session**: the first ingest answers "who is this for?"
+and later ones cannot rewrite it — a run whose served party could change
+mid-flight would be worthless as evidence. A conflicting later value is logged
+and ignored, never applied.
+
+This is **attributive only**. §12 (`U-1`–`U-3`) is `MISSING` in the active
+constitution — nothing yet honours a refusal, packages an account, or exits
+with data — so the binding enforces no clause and its causal event names none.
+It exists because attribution cannot be backfilled: see
+[`../concepts/philosophy.md`](../concepts/philosophy.md) §4.7.
 
 ### `GET /api/session/stream/{session_id}` (SSE)
 
