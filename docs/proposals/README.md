@@ -79,13 +79,12 @@ whatever ships next.
 ## Diagrams
 
 [`diagrams/`](diagrams) holds the proposed pedagogical visuals for the community
-and constitutional story — one interactive map plus five vector schematics:
+and constitutional story — one interactive map plus four vector schematics:
 
 | Asset | What it shows |
 |---|---|
 | [`diagrams/community-and-constitution.html`](diagrams/community-and-constitution.html) | The interactive hub: clickable bind-direction map, three lifecycle walkthroughs, the searchable clause catalog, and the schematic gallery |
-| [`diagrams/constitutional-peer-blueprint.svg`](diagrams/constitutional-peer-blueprint.svg) | Hero plate, drawn as a drafting sheet: both figures dimensioned `EQ` on a common datum under the constitution seal, standing on the causal ledger, with a clause schedule and notes |
-| [`diagrams/human-ai-peers.svg`](diagrams/human-ai-peers.svg) | The labelled counterpart: the four one-way bindings as arrows, plus the co-evolution cycle |
+| [`diagrams/human-ai-peers.svg`](diagrams/human-ai-peers.svg) | Hero plate: the four one-way bindings as arrows, both parties dimensioned to the same height, plus the co-evolution cycle |
 | [`diagrams/community-governance.svg`](diagrams/community-governance.svg) | The four-party governance map: served party, agents, gateway, governance seats |
 | [`diagrams/diagram-functional-autonoesis.svg`](diagrams/diagram-functional-autonoesis.svg) | The six preconditions of the verified per-turn self-model |
 | [`diagrams/diagram-coevolution-lifecycle.svg`](diagrams/diagram-coevolution-lifecycle.svg) | Propose → gate → ledger → promote, and the amendment track |
@@ -103,9 +102,21 @@ Two rules these assets are held to, because a diagram is read as fact:
   (`../concepts/philosophy.md` §5: enforce §U *before* any decider franchise
   widens).
 
+**Promoted from here.** `constitutional-peer-blueprint.svg` — the drafting-sheet
+plate with both parties dimensioned `EQ` on a common datum — was promoted into
+[`../diagrams/architecture-map.html`](../diagrams/architecture-map.html)
+§ "The peer interface, dimensioned", and retired from this folder. It lives
+inline there (class-namespaced `bp-*`) so the published page stays self-contained.
+Edit it there, not here.
+
 The published site under [`../diagrams/`](../diagrams) is a different, live set
 (architecture, runtime dynamics, federation, technical map) reached from
-`../index.html`.
+`../index.html`. It is the **reference** account and is more complete than this
+folder: the four schematics above overlap sections `architecture-map.html`
+already covers, and it carries the whole-system correction-loop graph, the
+standing offices and the discretion-leak register, which they do not. What this
+set adds is a different *mode* — an interactive, clickable walkthrough rather
+than a static map. Where the two disagree, the published map wins.
 
 ## Archived from here
 
