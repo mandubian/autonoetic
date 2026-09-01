@@ -190,25 +190,31 @@ async fn pending_inbound_message_parks_non_resident_session_body() -> anyhow::Re
     // Queue the message from inside the stub responder: at that point the
     // session is mid-LLM-call of its final turn — the wake-time drain has
     // already run and no further turn will, which is exactly the race that
-    // stranded delivery rows before this fix.
+    // stranded delivery rows before this fix. The responder also fires on the
+    // resume turn, so queue only once.
     let store_for_stub = store.clone();
+    let queued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let queued_for_stub = queued.clone();
     let stub = OpenAiStub::spawn(move |_raw, _body| {
         let store = store_for_stub.clone();
+        let queued = queued_for_stub.clone();
         async move {
-            store
-                .save_agent_message(&AgentMessageRecord {
-                    message_id: "msg-midturn".to_string(),
-                    sender_session_id: "sess-parent".to_string(),
-                    sender_agent_id: "planner.default".to_string(),
-                    target_pattern: "session:sess-pending-inbound".to_string(),
-                    message: "ping".to_string(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    egress_label: None,
-                })
-                .unwrap();
-            store
-                .insert_message_delivery("msg-midturn", "sess-pending-inbound")
-                .unwrap();
+            if !queued.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                store
+                    .save_agent_message(&AgentMessageRecord {
+                        message_id: "msg-midturn".to_string(),
+                        sender_session_id: "sess-parent".to_string(),
+                        sender_agent_id: "planner.default".to_string(),
+                        target_pattern: "session:sess-pending-inbound".to_string(),
+                        message: "ping".to_string(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        egress_label: None,
+                    })
+                    .unwrap();
+                store
+                    .insert_message_delivery("msg-midturn", "sess-pending-inbound")
+                    .unwrap();
+            }
             serde_json::json!({
                 "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 3}
@@ -243,6 +249,47 @@ async fn pending_inbound_message_parks_non_resident_session_body() -> anyhow::Re
         "a session closing with undelivered inbound messages must park"
     );
     assert!(store.is_session_addressable("sess-pending-inbound")?);
+    assert_eq!(
+        store.fetch_undelivered_messages("sess-pending-inbound")?.len(),
+        1,
+        "the message is still queued — the session parked mid-drain"
+    );
+
+    // Mirror what the notification pump does with the queued wake signal
+    // (`build_delivery_request` for Signal::AgentMessage → event.ingest of the
+    // wake notice onto the parked session): resume the parked session and let
+    // the wake-time drain inject the queued message.
+    let wake_notice = "[Gateway] Wake-up: direct message msg-midturn from agent \
+                       'planner.default' (session sess-parent). Its content follows below as a \
+                       `[Direct Message from Agent ...]` block; this line is only the notice \
+                       that one arrived.";
+    let result = execution
+        .spawn_agent_once(
+            "resident.flag",
+            wake_notice,
+            "sess-pending-inbound",
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await?;
+    assert!(result.assistant_reply.is_some());
+
+    assert!(
+        store
+            .fetch_undelivered_messages("sess-pending-inbound")?
+            .is_empty(),
+        "the wake-time drain must consume the queued message"
+    );
+    assert!(
+        store.get_session_residency("sess-pending-inbound")?.is_none(),
+        "no pending inbound and no residency TTL: the resumed session terminates for real"
+    );
     Ok(())
 }
 

@@ -71,7 +71,19 @@ fn pending_inbound_park_ttl_secs(
 ) -> Option<u64> {
     match store.fetch_undelivered_messages(session_id) {
         Ok(msgs) if !msgs.is_empty() => Some(PENDING_INBOUND_PARK_TTL_SECS),
-        _ => None,
+        Ok(_) => None,
+        Err(e) => {
+            // Fail open: a spurious park costs one retained checkpoint for a
+            // few minutes; mistaking a query failure for an empty queue
+            // strands deliveries on a terminated session.
+            tracing::warn!(
+                target: "session_residency",
+                session_id = %session_id,
+                error = %e,
+                "undelivered-message check failed; parking briefly rather than stranding deliveries"
+            );
+            Some(PENDING_INBOUND_PARK_TTL_SECS)
+        }
     }
 }
 
@@ -7258,5 +7270,18 @@ mod tests {
         queue_inbound_message(&store, "session-target", "msg-1");
         store.mark_message_delivered("msg-1", "session-target").unwrap();
         assert_eq!(pending_inbound_park_ttl_secs(&store, "session-target"), None);
+    }
+
+    #[test]
+    fn pending_inbound_park_ttl_fails_open_on_store_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        let raw = rusqlite::Connection::open(tmp.path().join("gateway.db")).unwrap();
+        raw.execute_batch("DROP TABLE agent_message_deliveries").unwrap();
+        drop(raw);
+        assert_eq!(
+            pending_inbound_park_ttl_secs(&store, "session-target"),
+            Some(PENDING_INBOUND_PARK_TTL_SECS)
+        );
     }
 }
