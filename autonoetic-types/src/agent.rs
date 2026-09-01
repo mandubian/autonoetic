@@ -583,6 +583,20 @@ pub struct Middleware {
     /// Script/command to run on LLM output before returning to the user.
     #[serde(default)]
     pub post_process: Option<String>,
+    /// Declare the `pre_process` hook a bypass candidate (#1223): the hook is
+    /// a pure function of the conversation payload that either answers
+    /// directly (`skip_llm` + `assistant_reply` in its JSON output) or
+    /// declines (`skip_llm: false`). Bypass-declared hooks are evaluated
+    /// exactly once per turn, BEFORE the reasoning loop assembles tool
+    /// schemas, composes the system prompt and runs prompt-budget accounting:
+    /// a `skip` ends the turn without building a completion at all (no
+    /// tokens, no budget pressure); a `proceed` hands the request to the loop
+    /// unmodified — the hook is not run a second time. The probe envelope
+    /// carries the conversation history only (no system prompt, no tools);
+    /// hooks that transform the request or need the full envelope must NOT
+    /// declare this — undeclared (default) keeps the legacy in-loop contract.
+    #[serde(default)]
+    pub bypass: Option<bool>,
 }
 
 /// Composition provenance for a wrapper agent derived from a base agent

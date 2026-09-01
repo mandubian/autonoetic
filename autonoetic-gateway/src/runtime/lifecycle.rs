@@ -28,7 +28,9 @@ use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
-use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware, SessionLifecycleState};
+use autonoetic_types::agent::{
+    AgentManifest, ExecutionMode, LlmExchangeUsage, Middleware, SessionLifecycleState,
+};
 use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
@@ -1963,6 +1965,223 @@ impl AgentExecutor {
     }
 
 
+    /// Commit a #1223 pre-loop bypass reply and finish the turn.
+    ///
+    /// The bypass round never enters the reasoning loop (no tool schemas, no
+    /// system composition, no prompt-budget accounting), but its bookkeeping
+    /// must be indistinguishable from an in-loop `skip_llm` round that ended
+    /// with EndTurn: post-hook, output-schema validation, artifact detection,
+    /// completion trace + digest round, assistant message committed to history
+    /// (no egress response label — same as `skip_llm`), hibernate events,
+    /// workflow summary + planner checkpoint, WaitingForChild detection for
+    /// children spawned by earlier turns, history persistence, yield
+    /// checkpoint, and the disclosure-filtered reply. This mirrors the loop's
+    /// `StopReason::EndTurn` arm — keep the two in sync.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_pre_loop_bypass_turn(
+        &mut self,
+        response: crate::llm::CompletionResponse,
+        history: &mut Vec<Message>,
+        mut disclosure_state: DisclosureState,
+        tracer: &mut SessionTracer,
+        session_id: &str,
+        turn_id: &str,
+        model: &str,
+        has_declared_output_contract: bool,
+        notice_message_ids: &[String],
+    ) -> anyhow::Result<TurnOutcome> {
+        // Post-process hook: transform output after the (skipped) LLM call —
+        // same treatment as an in-loop skip reply.
+        let response = if let Some(post_hook) = self.middleware.post_process.as_ref() {
+            self.apply_middleware_post(
+                response,
+                post_hook,
+                &self.agent_dir,
+                session_id,
+                turn_id,
+                tracer,
+            )?
+        } else {
+            response
+        };
+
+        // skip_llm semantics: no cost estimate, no session/root budget record
+        // (a bypass round records no token spend and no budget pressure).
+
+        self.log_output_schema_validation(&response, tracer);
+
+        let new_artifacts = extract_artifacts_from_text(&response.text);
+        for artifact in &new_artifacts {
+            tracer.log_artifact_detected(artifact)?;
+        }
+
+        tracer.log_llm_completion(
+            model,
+            &format!("{:?}", response.stop_reason),
+            &response.text,
+            0,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            &[],
+            None,
+            None,
+            response.reasoning_content.as_deref(),
+            response.usage.cached_tokens,
+            response.usage.reasoning_tokens,
+        )?;
+        let _ = tracer.record_digest_llm_round(
+            model,
+            &format!("{:?}", response.stop_reason),
+            0,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        );
+
+        if response.text.trim().is_empty() {
+            tracing::warn!(
+                target: "autonoetic::llm",
+                agent_id = %self.manifest.agent.id,
+                session_id = %session_id,
+                "pre-loop bypass hook produced an empty assistant_reply"
+            );
+            let _ = tracer.log_llm_empty_response(model, "EndTurn", 0, 0);
+        }
+
+        // Strip inline <think> reasoning blocks before the text enters
+        // history or the reply (parity with the loop tail).
+        let clean_text: String = if response.text.contains("<think>") {
+            crate::runtime::response_validation::strip_think_blocks(&response.text).into_owned()
+        } else {
+            response.text.clone()
+        };
+        let latest_assistant_text = (!clean_text.trim().is_empty()).then(|| clean_text.clone());
+
+        if !clean_text.trim().is_empty() {
+            let mut assistant_msg = Message::assistant(clean_text);
+            // No egress response label — identical to the in-loop skip path.
+            commit_assistant_egress(&mut assistant_msg, &None, &mut self.egress_labels);
+            history.push(assistant_msg);
+        }
+        tracer.log_hibernate(&format!("{:?}", response.stop_reason));
+
+        let mut turn_yield_reason = YieldReason::Hibernation;
+        if let Some(cfg) = self.config.as_ref() {
+            if let Ok(Some(summary)) =
+                crate::scheduler::compact_workflow_summary(cfg, None, session_id)
+            {
+                if let Some(first) = history.get_mut(0) {
+                    if matches!(first.role, crate::llm::Role::System) {
+                        first.content.push_str("\n\n[workflow status] ");
+                        first.content.push_str(&summary);
+                    } else {
+                        history.insert(
+                            0,
+                            Message::system(format!("[workflow status] {}", summary)),
+                        );
+                    }
+                }
+                if !has_declared_output_contract {
+                    let planner_empty = response.text.trim().is_empty();
+                    let note = workflow_status_user_message_for_chat(&summary, planner_empty);
+                    let note = disclosure_state.filter_reply(&note);
+                    history.push(Message::assistant(note.clone()));
+                }
+            }
+
+            // Checked at the cfg level, OUTSIDE the summary branch — children
+            // spawned by EARLIER turns may still be pending even when no
+            // summary is injectable, and the bypass must not mark the task
+            // completed over them (#845).
+            if let Some(waiting_reason) =
+                waiting_for_child_yield_reason(cfg, self.gateway_store.as_deref(), session_id)
+            {
+                turn_yield_reason = waiting_reason;
+            }
+
+            // Durable planner checkpoint at turn end
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            if let Ok(Some(wf_id)) =
+                crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+            {
+                let planner_intent = response.text.trim();
+                let context = serde_json::json!({
+                    "turn_id": turn_id,
+                    "session_id": session_id,
+                    "assistant_message_len": planner_intent.len(),
+                });
+                if let Err(e) = crate::scheduler::checkpoint_planner(
+                    cfg,
+                    None,
+                    &wf_id,
+                    if planner_intent.is_empty() {
+                        format!("Turn {} ended", &turn_id[..turn_id.len().min(8)])
+                    } else {
+                        let truncated = if planner_intent.len() > 200 {
+                            format!("{}…", safe_prefix_by_bytes(planner_intent, 200))
+                        } else {
+                            planner_intent.to_string()
+                        };
+                        truncated
+                    },
+                    context,
+                ) {
+                    tracing::debug!(
+                        target: "workflow",
+                        error = %e,
+                        "Planner checkpoint skipped (no workflow or save failed)"
+                    );
+                }
+            }
+        }
+
+        // Persist history to content store at hibernate points
+        if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+            if let Err(e) = persist_history_to_content_store(
+                &self.agent_dir,
+                session_id,
+                history,
+                gateway_dir,
+                tracer,
+                &disclosure_state,
+                self.gateway_store.as_deref(),
+                Some(&self.manifest.agent.id),
+                self.session_started_at.as_deref(),
+            ) {
+                tracing::warn!("Failed to persist history: {}", e);
+            }
+        }
+
+        let waiting_for_child = matches!(
+            turn_yield_reason,
+            YieldReason::WaitingForChild { .. }
+        );
+        let _ = self.save_yield_checkpoint(history, turn_id, turn_yield_reason, None);
+        if let Some(config) = self.config.as_ref() {
+            let _ = prune_checkpoints(config, session_id, 3);
+        }
+
+        let _ = tracer.end_digest_turn();
+
+        // Keep the reply payload strictly equal to the hook output
+        // (disclosure-filtered), like the post-loop outcome builder.
+        let reply = latest_assistant_text.map(|t| disclosure_state.filter_reply(&t));
+
+        self.record_ri09_last_word_response_if_applicable(
+            session_id,
+            turn_id,
+            notice_message_ids,
+            reply.as_deref(),
+        );
+
+        self.last_history = history.clone();
+        if waiting_for_child {
+            // Reply intentionally dropped: it was in-progress narrative, not
+            // the task's final output (same contract as the EndTurn arm).
+            return Ok(TurnOutcome::WaitingForChild);
+        }
+        Ok(TurnOutcome::Completed(reply))
+    }
+
     /// When an Ri-0.9 last-word gateway notice was injected this wake and the
     /// turn completes, persist `session.last_word_response` referencing the notice
     /// message IDs plus a disclosure-filtered excerpt of the assistant reply.
@@ -2769,6 +2988,111 @@ impl AgentExecutor {
                 autonoetic_types::capability::Capability::BudgetNoPriceAvailableAllow
             )
         });
+
+        // --- #1223: pre-loop bypass probe -----------------------------------
+        // A hook that declares `middleware.bypass: true` is a deterministic
+        // function of the conversation payload: it either answers directly
+        // (`skip_llm` + `assistant_reply` in its JSON output) or declines.
+        // Evaluate it here — BEFORE the loop assembles tool schemas, composes
+        // the system prompt and runs prompt-budget accounting — so a bypassed
+        // turn builds no completion at all: those layers are neither computed
+        // nor observed as prompt weight (no tokens, no budget pressure), while
+        // the round stays causal-visible like any other.
+        //
+        // Contract:
+        // - the probe envelope carries the conversation history only — no
+        //   composed system prompt, no tool list. A deterministic answer must
+        //   not depend on them; that is exactly what declaring `bypass`
+        //   asserts.
+        // - the hook is evaluated exactly once per turn: when it declines,
+        //   the loop below runs with the pre-hook suppressed and the request
+        //   continues unmodified. The label-plane re-attach after the in-loop
+        //   hook is untouched for every request that reaches a completion —
+        //   a bypass-declared hook can neither transform the request nor
+        //   strip the label map.
+        // - the bypass reply carries no egress response label, exactly like
+        //   the in-loop `skip_llm` path (`response_egress_label` stays None).
+        // - a failing hook fails the turn, same as the in-loop contract.
+        let mut bypass_response: Option<crate::llm::CompletionResponse> = None;
+        let mut bypass_hook_evaluated = false;
+        if self.manifest.execution_mode == ExecutionMode::Reasoning
+            && self.middleware.bypass == Some(true)
+        {
+            if let Some(pre_hook) = self.middleware.pre_process.clone() {
+                let probe = crate::llm::CompletionRequest {
+                    model: model.clone(),
+                    messages: history.clone(),
+                    tools: vec![],
+                    max_tokens: None,
+                    temperature: None,
+                    metadata: None,
+                    thinking: None,
+                    prompt_cache_key: None,
+                    system_cache_prefix_bytes: None,
+                };
+                match self.apply_middleware_pre(
+                    probe,
+                    &pre_hook,
+                    &active_agent_dir,
+                    &session_id,
+                    &turn_id,
+                    &mut tracer,
+                ) {
+                    Ok(req) => {
+                        bypass_hook_evaluated = true;
+                        let skip = req
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("skip_llm"))
+                            .and_then(|v| v.as_bool())
+                            == Some(true);
+                        if skip {
+                            let reply = req
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.get("assistant_reply"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let _ = tracer.log_event(
+                                "agent.process",
+                                "pre_hook_skip_llm",
+                                autonoetic_types::causal_chain::EntryStatus::Success,
+                                Some(serde_json::json!({ "bypass": "pre_loop" })),
+                            );
+                            bypass_response = Some(crate::llm::CompletionResponse {
+                                text: reply,
+                                tool_calls: vec![],
+                                reasoning_content: None,
+                                reasoning_details: None,
+                                usage: crate::llm::TokenUsage::default(),
+                                stop_reason: crate::llm::StopReason::EndTurn,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        // Same semantics as an in-loop hook failure: the turn
+                        // fails closed rather than continuing unverified.
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        if let Some(response) = bypass_response {
+            return self
+                .finish_pre_loop_bypass_turn(
+                    response,
+                    history,
+                    disclosure_state,
+                    &mut tracer,
+                    &session_id,
+                    &turn_id,
+                    &model,
+                    has_declared_output_contract,
+                    &ri_0_9_notice_message_ids,
+                )
+                .await;
+        }
 
         loop {
             // Drain peer messages at the top of EVERY turn, not just at wake.
@@ -3621,7 +3945,14 @@ impl AgentExecutor {
             };
 
             // --- Pre-process hook: transform input before LLM call ---
-            let pre_hook = self.middleware.pre_process.as_ref();
+            // #1223: a bypass-declared hook was already evaluated once this
+            // turn (pre-loop probe); its `proceed` means the request continues
+            // unmodified — running it again would give it two votes.
+            let pre_hook = if bypass_hook_evaluated {
+                None
+            } else {
+                self.middleware.pre_process.as_ref()
+            };
             let mut req = if let Some(pre_hook) = pre_hook {
                 self.apply_middleware_pre(
                     req,

@@ -4129,6 +4129,7 @@ mod tests {
         let middleware = autonoetic_types::agent::Middleware {
             pre_process: Some("python3 scripts/pre_map.py".to_string()),
             post_process: None,
+            bypass: None,
         };
         let mut req = script_req(&config, &agent_dir, &gateway_dir, "hello.py");
         req.middleware = Some(&middleware);
@@ -4166,6 +4167,7 @@ mod tests {
         let middleware = autonoetic_types::agent::Middleware {
             pre_process: None,
             post_process: Some("python3 scripts/post_map.py".to_string()),
+            bypass: None,
         };
         let mut req = script_req(&config, &agent_dir, &gateway_dir, "fetch_mail.py");
         req.middleware = Some(&middleware);

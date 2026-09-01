@@ -8,4 +8,5 @@ mod issue_652;
 mod issue_803;
 mod knowledge_revision_provenance;
 mod live_digest;
+mod pre_loop_bypass;
 mod sentinel_suppression;
