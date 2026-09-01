@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_chat_session_scores_as_completed_normally() {
+    fn completed_normally_true_adds_completion_bonus() {
         let tmp = tempfile::tempdir().unwrap();
         let store = GatewayStore::open(tmp.path()).unwrap();
         let sid = "session-test-clean";
