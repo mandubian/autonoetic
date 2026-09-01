@@ -622,17 +622,14 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
 1. **Run the correctness gate first.** Spawn `unit_test_runner.default` alone (`async=true`) and call `workflow_wait(task_ids=[<unit_test_task>], timeout_secs=300)`. This is a sequential gate, not a fan-out. If it fails, stop and route findings to `coder.default` (code bug) or `packager.default` (missing dependency layer) — do not spawn `auditor.default` or `static_evaluator.default` on a broken artifact. If it returns `unable_to_evaluate` (no tests in artifact), proceed to step 2.
 2. **Run the review gates in parallel.** Only after `unit_test_runner` passes or is inapplicable, spawn `auditor.default` + `static_evaluator.default` (`async=true`) and join with one `workflow_wait`. Then `promotion_query({artifact_ref})`.
 3. Verify records: execution roles need `execution_trace_id`; auditor needs `pass: true` with no `critical` findings. Use `promotion_query` — not child reply JSON.
-4. Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` to
-   seed the revision, then call `federation_escalate` with role verdicts, `planner_synthesis`,
-   the `artifact_ref` (ar.*), and the returned `revision_id` (`rev_sha256:...`). The create
-   call returns `status: "created" | "already_exists" | "reactivated"` — all three yield a
-   valid `revision_id` to pass on. **Always seed and pass the revision_id — for both new
-   and existing agents.** This routes the escalation through the seeded path (capabilities
-   read from the revision record) instead of the fragile unseeded path that parses the
-   artifact's `SKILL.md` frontmatter at escalate time. Do **not** omit `revision_id` or
-   invent a placeholder. If `agent_revision_create` returns
-   `promotion_gate_content_digest_would_change`, the artifact changed since the gates ran —
-   re-run federation on the current `artifact_ref` rather than reseeding. Save the returned
+4. Call `federation_escalate` with the role verdicts, `planner_synthesis`, and the `artifact_ref`
+   (ar.*). **Omit `revision_id`** — you do not hold the `AgentRevision` capability
+   (`specialized_builder.default` is the only agent that does), so `agent_revision_create` is
+   `policy_denied` for you (`do_not_retry`). Escalating with just the `artifact_ref` binds the
+   review to the artifact under `unseeded:<artifact>`: capabilities are read from the artifact's
+   `SKILL.md` frontmatter (already validated by `artifact_build` at build time), and the approved
+   escalation is honored at promote time after agent-factory seeds the revision. Do **not** pass
+   a placeholder or invented `revision_id` — an unknown id is rejected. Save the returned
    `approval_request_id` (`apr-esc-*`). Do **not** use `session_escalate` for promotion review.
 5. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
    decision — `user_ask` does not resolve `apr-esc-*` gates.

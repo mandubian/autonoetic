@@ -213,7 +213,7 @@ real advertised set).
 | `promotion.record_protocol` | `promotion_record` | `ToolPresent` | how to call `promotion_record` (role+pass required) |
 | `resumption.workflow_state_first` | `workflow_state` | `ToolPresent` | on wake, call `workflow_state` first; never restart |
 | `orchestration.coordinate_children` | `agent_spawn` | `ToolPresent` | yield/Ri-0.14: spawn async → end turn → auto-wake; one `workflow_wait` join; never poll |
-| `federation.escalate_procedure` | `federation_escalate` | ToolPresent **+ Phase** `artifact_built` | how to escalate: read verdicts via `promotion_query`, seed the revision first, worked payload — renders in the phase tail |
+| `federation.escalate_procedure` | `federation_escalate` | ToolPresent **+ Phase** `artifact_built` | how to escalate: read verdicts via `promotion_query`, escalate unseeded with `artifact_ref` (seeding requires `AgentRevision`, which planners lack), worked payload — renders in the phase tail |
 
 ### 2.2 Section gates — phase gating for `SKILL.md` role doctrine
 
