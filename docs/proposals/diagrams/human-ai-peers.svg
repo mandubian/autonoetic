@@ -1,139 +1,226 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" width="100%" height="100%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 740" width="100%" height="100%">
+  <!--
+    Autonoetic — Humans and AI Agents as Constitutional Peers.
+
+    The claim this drawing makes, and does not overstate:
+      - ONE law over both parties (the seal, Rule Zero).
+      - EQUAL STANDING, not identical rights: the two figures are dimensioned
+        to the same height because authority attaches to the seat, not the
+        species (P-2.20, I-12). Each party is bound by a *different* clause
+        family — that asymmetry is the design (bind-direction discipline,
+        docs/concepts/philosophy.md §2), and it is what produces symmetry of
+        standing rather than a vague "shared rights".
+      - A community that EVOLVES, via the correction core.
+
+    Every clause ID here resolves in docs/constitution/versions/2026.08.30/.
+    Clauses not yet mechanically enforced are marked "declared" inline.
+  -->
   <defs>
     <style>
-      .bg { fill: #0d1117; }
-      .box { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 6px; }
-      .box-human { fill: #1f1b14; stroke: #e0a355; stroke-width: 2; rx: 6px; }
-      .box-agent { fill: #101c2c; stroke: #58a6ff; stroke-width: 2; rx: 6px; }
-      .box-seal { fill: #161224; stroke: #bc8cff; stroke-width: 2.2; rx: 8px; }
-      .box-bottom { fill: #152219; stroke: #3fb950; stroke-width: 1.8; rx: 6px; }
-      
-      .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; font-weight: 700; fill: #f0f6fc; }
-      .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11.5px; fill: #8b949e; }
-      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; fill: #c9d1d9; }
-      .badge { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
-      .section-hdr { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
-      
-      .edge { fill: none; stroke-width: 2; }
-      .edge-gold { stroke: #e0a355; }
-      .edge-blue { stroke: #58a6ff; }
-      .edge-purple { stroke: #bc8cff; stroke-dasharray: 4 3; }
-      .edge-green { stroke: #3fb950; }
-      
-      .pill { rx: 3px; }
+      .bg      { fill: #0d1117; }
+      .frame   { fill: none; stroke: #21262d; stroke-width: 1; }
+      .card    { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 6px; }
+      .card-law{ fill: #1a1610; stroke: #d29922; stroke-width: 1.6; rx: 6px; }
+      .card-hum{ fill: #1b1417; stroke: #e3919b; stroke-width: 1.6; rx: 6px; }
+      .card-ai { fill: #101c2c; stroke: #58a6ff; stroke-width: 1.6; rx: 6px; }
+      .card-gw { fill: #12161c; stroke: #8b949e; stroke-width: 1.6; rx: 6px; }
+      .card-evo{ fill: #16121f; stroke: #bc8cff; stroke-width: 1.6; rx: 6px; }
+
+      .h1   { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #f0f6fc; }
+      .dek  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #8b949e; }
+      .h3   { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #f0f6fc; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #c9d1d9; }
+      .tag  { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.10em; }
+      .dim  { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 8.5px; letter-spacing: 0.08em; fill: #6e7681; }
+
+      .fig-hum { fill: none; stroke: #e3919b; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .fig-ai  { fill: none; stroke: #58a6ff; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+      .dimline { stroke: #484f58; stroke-width: 0.9; }
+      .ground  { stroke: #30363d; stroke-width: 1.2; }
+      .guide   { stroke: #21262d; stroke-width: 1; stroke-dasharray: 5 4; }
+
+      .e-hum { fill: none; stroke: #e3919b; stroke-width: 1.5; }
+      .e-ai  { fill: none; stroke: #58a6ff; stroke-width: 1.5; }
+      .e-law { fill: none; stroke: #d29922; stroke-width: 1.5; }
+      .e-evo { fill: none; stroke: #bc8cff; stroke-width: 1.5; }
     </style>
 
-    <marker id="peer-gold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M 0 1 L 10 5 L 0 9 z" fill="#e0a355" />
+    <marker id="m-hum" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#e3919b" />
     </marker>
-    <marker id="peer-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <marker id="m-ai" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto">
       <path d="M 0 1 L 10 5 L 0 9 z" fill="#58a6ff" />
     </marker>
-    <marker id="peer-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M 0 1 L 10 5 L 0 9 z" fill="#bc8cff" />
+    <marker id="m-law" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#d29922" />
     </marker>
-    <marker id="peer-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M 0 1 L 10 5 L 0 9 z" fill="#3fb950" />
+    <marker id="m-evo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#bc8cff" />
     </marker>
   </defs>
 
   <rect width="100%" height="100%" class="bg" />
 
-  <!-- HEADER -->
-  <text x="480" y="34" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="700" fill="#f0f6fc">Symmetric Citizenship: Humans &amp; AI under Common Law</text>
-  <text x="480" y="54" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" fill="#8b949e">First-class participants operating at the same peer level of rights, rules, and obligations</text>
+  <!-- Blueprint frame + corner ticks -->
+  <rect x="14" y="14" width="972" height="712" class="frame" />
+  <path d="M 14 44 L 44 44 M 44 14 L 44 44" class="frame" />
+  <path d="M 986 44 L 956 44 M 956 14 L 956 44" class="frame" />
+  <path d="M 14 696 L 44 696 M 44 726 L 44 696" class="frame" />
+  <path d="M 986 696 L 956 696 M 956 726 L 956 696" class="frame" />
 
-  <!-- TOP SEAL: THE CONSTITUTION & LAWFUL GATEWAY -->
-  <g transform="translate(280, 80)">
-    <rect width="400" height="96" class="box-seal" />
-    <text x="200" y="28" text-anchor="middle" class="title" fill="#e9d5ff">🏛️ The Constitutional Seal</text>
-    <rect x="130" y="38" width="140" height="18" class="pill" fill="#291f3a" />
-    <text x="200" y="51" text-anchor="middle" class="badge" fill="#c1a3ec">SHARED DIGEST P-10.9</text>
-    
-    <text x="200" y="74" text-anchor="middle" class="mono">• <tspan fill="#f0f6fc" font-weight="600">Rule Zero (I-1):</tspan> Invariants apply equally without exception</text>
-    <text x="200" y="88" text-anchor="middle" class="mono">• <tspan fill="#3fb950" font-weight="600">Lawful Executor:</tspan> Deterministic runtime with zero improvised policy</text>
+  <!-- ── HEADER ───────────────────────────────────────────────────────── -->
+  <text x="500" y="52" text-anchor="middle" class="h1">Humans and AI Agents as Constitutional Peers</text>
+  <text x="500" y="74" text-anchor="middle" class="dek">One law over both parties · equal standing, not identical rights · a community that can correct itself</text>
+
+  <!-- ── THE SEAL (the law) ───────────────────────────────────────────── -->
+  <g>
+    <circle cx="500" cy="166" r="78" fill="#1a1610" stroke="#d29922" stroke-width="2" />
+    <circle cx="500" cy="166" r="68" fill="none" stroke="#d29922" stroke-width="0.8" opacity="0.55" />
+    <text x="500" y="146" text-anchor="middle" class="tag" fill="#d29922">THE CONSTITUTION</text>
+    <line x1="462" y1="153" x2="538" y2="153" stroke="#d29922" stroke-width="0.7" opacity="0.5" />
+    <text x="500" y="173" text-anchor="middle" class="h3" fill="#f0f6fc">RULE ZERO</text>
+    <text x="500" y="194" text-anchor="middle" class="dim" fill="#8b949e">one law, no exceptions</text>
+    <text x="500" y="210" text-anchor="middle" class="dim" fill="#6e7681">digest · P-10.9</text>
   </g>
 
-  <!-- LEFT COLUMN: HUMAN CITIZEN -->
-  <g transform="translate(60, 220)">
-    <rect width="390" height="260" class="box-human" />
-    
-    <!-- Title & Badge -->
-    <text x="20" y="28" class="title" fill="#e0a355">👤 Human Participant</text>
-    <rect x="250" y="14" width="120" height="18" class="pill" fill="#34281a" />
-    <text x="310" y="27" text-anchor="middle" class="badge" fill="#e0a355">CARBON CITIZEN</text>
-    
-    <text x="20" y="48" class="subtitle">Operator · Auditor · Served Principal</text>
-    <line x1="20" y1="56" x2="370" y2="56" stroke="#30363d" stroke-width="1" />
-    
-    <!-- Symmetrical Rights -->
-    <text x="20" y="76" class="section-hdr" fill="#3fb950">COMMON RIGHTS (Ri-*):</text>
-    <text x="20" y="96" class="mono">• Unconditional right to audit full causal history (<tspan fill="#f0f6fc">Ri-0.2</tspan>)</text>
-    <text x="20" y="114" class="mono">• Right to submit constitutional proposals (<tspan fill="#f0f6fc">Ri-0.8</tspan>)</text>
-    <text x="20" y="132" class="mono">• Right to refuse outcomes &amp; export data (<tspan fill="#f0f6fc">U-1 / U-3</tspan>)</text>
-    
-    <line x1="20" y1="146" x2="370" y2="146" stroke="#30363d" stroke-width="0.8" stroke-dasharray="3 3" />
-    
-    <!-- Symmetrical Obligations -->
-    <text x="20" y="168" class="section-hdr" fill="#bc8cff">SYMMETRIC OBLIGATIONS (§O):</text>
-    <text x="20" y="188" class="mono">• Must provide motivated reasons for rejections (<tspan fill="#f0f6fc">O-1</tspan>)</text>
-    <text x="20" y="206" class="mono">• Decisions bound to verified principal ID (<tspan fill="#f0f6fc">O-2</tspan>)</text>
-    <text x="20" y="224" class="mono">• Bound by adjudication SLAs on proposals (<tspan fill="#f0f6fc">O-6</tspan>)</text>
-    <text x="20" y="242" class="mono">• Bound by Rule Zero: cannot bypass safety rules</text>
+  <!-- Strapline -->
+  <rect x="288" y="252" width="424" height="26" class="card-law" />
+  <text x="500" y="269" text-anchor="middle" class="tag" fill="#d29922">EQUAL STANDING&#160;&#160;·&#160;&#160;SYMMETRIC DUTIES&#160;&#160;·&#160;&#160;ONE LAW</text>
+
+  <!-- Rays: the law binds both parties -->
+  <path d="M 452 226 L 300 252 L 220 300" class="e-law" marker-end="url(#m-law)" />
+  <path d="M 548 226 L 700 252 L 780 300" class="e-law" marker-end="url(#m-law)" />
+
+  <!-- ── EQUAL-HEIGHT GUIDES ─────────────────────────────────────────── -->
+  <line x1="64" y1="316" x2="936" y2="316" class="guide" />
+  <line x1="40" y1="486" x2="960" y2="486" class="ground" />
+
+  <!-- Left dimension line -->
+  <path d="M 64 316 L 64 486" class="dimline" />
+  <path d="M 56 316 L 72 316 M 56 486 L 72 486" class="dimline" />
+  <path d="M 64 316 L 61 324 M 64 316 L 67 324 M 64 486 L 61 478 M 64 486 L 67 478" class="dimline" />
+  <text x="52" y="405" text-anchor="middle" class="dim" transform="rotate(-90 52 405)">PEER LEVEL</text>
+
+  <!-- Right dimension line -->
+  <path d="M 936 316 L 936 486" class="dimline" />
+  <path d="M 928 316 L 944 316 M 928 486 L 944 486" class="dimline" />
+  <path d="M 936 316 L 933 324 M 936 316 L 939 324 M 936 486 L 933 478 M 936 486 L 939 478" class="dimline" />
+  <text x="948" y="405" text-anchor="middle" class="dim" transform="rotate(-90 948 405)">PEER LEVEL</text>
+
+  <!-- ── HUMAN FIGURE (cx 170, top 316, baseline 486) ────────────────── -->
+  <g class="fig-hum">
+    <circle cx="170" cy="334" r="18" />
+    <path d="M 170 352 L 170 362" />
+    <path d="M 144 362 L 196 362 L 202 428 L 138 428 Z" />
+    <path d="M 144 364 L 124 410" />
+    <path d="M 196 364 L 220 410" />
+    <path d="M 155 428 L 152 484" />
+    <path d="M 185 428 L 188 484" />
+    <path d="M 143 485 L 161 485" />
+    <path d="M 179 485 L 197 485" />
+  </g>
+  <text x="170" y="304" text-anchor="middle" class="tag" fill="#e3919b">HUMAN</text>
+
+  <!-- ── AI FIGURE (cx 830, top 316, baseline 486) ───────────────────── -->
+  <g class="fig-ai">
+    <rect x="810" y="316" width="40" height="40" rx="7" />
+    <circle cx="821" cy="336" r="3" />
+    <circle cx="839" cy="336" r="3" />
+    <path d="M 830 356 L 830 362" />
+    <rect x="798" y="362" width="64" height="66" rx="3" />
+    <path d="M 806 386 L 854 386" opacity="0.55" />
+    <path d="M 806 406 L 854 406" opacity="0.55" />
+    <path d="M 798 371 L 778 412" />
+    <path d="M 862 371 L 882 412" />
+    <path d="M 813 428 L 810 484" />
+    <path d="M 847 428 L 850 484" />
+    <path d="M 801 485 L 819 485" />
+    <path d="M 841 485 L 859 485" />
+  </g>
+  <text x="830" y="304" text-anchor="middle" class="tag" fill="#58a6ff">AI AGENT</text>
+
+  <!-- ── THE GATEWAY (neutral executor, between the law and the citizens) -->
+  <g>
+    <rect x="390" y="352" width="220" height="134" class="card-gw" />
+    <text x="500" y="374" text-anchor="middle" class="h3">Gateway</text>
+    <text x="500" y="390" text-anchor="middle" class="tag" fill="#8b949e">LAWFUL EXECUTOR</text>
+    <line x1="406" y1="400" x2="594" y2="400" stroke="#30363d" stroke-width="1" />
+    <text x="500" y="418" text-anchor="middle" class="mono" fill="#8b949e">Deterministic enforcement,</text>
+    <text x="500" y="433" text-anchor="middle" class="mono" fill="#8b949e">no improvised judgment.</text>
+    <text x="500" y="455" text-anchor="middle" class="mono">It is a bound party too —</text>
+    <text x="500" y="470" text-anchor="middle" class="mono">§0 rights bind the gateway.</text>
+  </g>
+  <!-- law → gateway, broken around the strapline band -->
+  <path d="M 500 240 L 500 252" class="e-law" />
+  <path d="M 500 278 L 500 348" class="e-law" marker-end="url(#m-law)" />
+
+  <!-- ── THE FOUR BIND-DIRECTIONS ────────────────────────────────────── -->
+  <!-- Human → Gateway : decides -->
+  <path d="M 224 392 L 384 392" class="e-hum" marker-end="url(#m-hum)" />
+  <text x="304" y="386" text-anchor="middle" class="tag" fill="#e3919b">DECIDES&#160;(O-*)</text>
+  <!-- Gateway → Human : accounts -->
+  <path d="M 384 444 L 224 444" class="e-hum" marker-end="url(#m-hum)" />
+  <text x="304" y="460" text-anchor="middle" class="tag" fill="#e3919b">ACCOUNTS&#160;(U-*, declared)</text>
+
+  <!-- AI → Gateway : proposes -->
+  <path d="M 776 392 L 616 392" class="e-ai" marker-end="url(#m-ai)" />
+  <text x="696" y="386" text-anchor="middle" class="tag" fill="#58a6ff">PROPOSES&#160;(P-*)</text>
+  <!-- Gateway → AI : attests -->
+  <path d="M 616 444 L 776 444" class="e-ai" marker-end="url(#m-ai)" />
+  <text x="696" y="460" text-anchor="middle" class="tag" fill="#58a6ff">ATTESTS&#160;(Ri-*)</text>
+
+  <!-- Equal-standing caption under the ground line -->
+  <text x="500" y="506" text-anchor="middle" class="dim" fill="#8b949e">BOTH FIGURES DIMENSIONED TO THE SAME HEIGHT — AUTHORITY ATTACHES TO THE SEAT, NOT THE SPECIES&#160;(P-2.20&#160;·&#160;I-12)</text>
+
+  <!-- ── CITIZEN CAPTION BLOCKS ──────────────────────────────────────── -->
+  <g transform="translate(52, 520)">
+    <rect width="300" height="80" class="card-hum" />
+    <text x="14" y="20" class="h3" fill="#e3919b">Human citizen</text>
+    <text x="14" y="38" class="mono">Seats: operator · decider · auditor</text>
+    <text x="14" y="55" class="mono">As decider, owes <tspan fill="#f0f6fc">O-1 · O-2 · O-6 · O-7</tspan></text>
+    <text x="14" y="72" class="mono">Served party, owed <tspan fill="#f0f6fc">U-1…U-3</tspan> <tspan fill="#8b949e">(declared)</tspan></text>
   </g>
 
-  <!-- RIGHT COLUMN: AI AGENT CITIZEN -->
-  <g transform="translate(510, 220)">
-    <rect width="390" height="260" class="box-agent" />
-    
-    <!-- Title & Badge -->
-    <text x="20" y="28" class="title" fill="#58a6ff">🤖 AI Agent Participant</text>
-    <rect x="250" y="14" width="120" height="18" class="pill" fill="#1c2a44" />
-    <text x="310" y="27" text-anchor="middle" class="badge" fill="#58a6ff">SILICON CITIZEN</text>
-    
-    <text x="20" y="48" class="subtitle">Reasoner · Planner · Specialist Agent</text>
-    <line x1="20" y1="56" x2="370" y2="56" stroke="#30363d" stroke-width="1" />
-    
-    <!-- Symmetrical Rights -->
-    <text x="20" y="76" class="section-hdr" fill="#3fb950">COMMON RIGHTS (Ri-*):</text>
-    <text x="20" y="96" class="mono">• Unconditional right to read own causal history (<tspan fill="#f0f6fc">Ri-0.2</tspan>)</text>
-    <text x="20" y="114" class="mono">• Right to submit constitutional proposals (<tspan fill="#f0f6fc">Ri-0.8</tspan>)</text>
-    <text x="20" y="132" class="mono">• Right to private-under-law reasoning (<tspan fill="#f0f6fc">Ri-0.13</tspan>)</text>
-    
-    <line x1="20" y1="146" x2="370" y2="146" stroke="#30363d" stroke-width="0.8" stroke-dasharray="3 3" />
-    
-    <!-- Symmetrical Obligations -->
-    <text x="20" y="168" class="section-hdr" fill="#bc8cff">SYMMETRIC OBLIGATIONS (§O &amp; P-*):</text>
-    <text x="20" y="188" class="mono">• Must provide motivated reasons if holding decider seat (<tspan fill="#f0f6fc">O-1</tspan>)</text>
-    <text x="20" y="206" class="mono">• Actions non-repudiably attributed to actor key (<tspan fill="#f0f6fc">Ri-0.11</tspan>)</text>
-    <text x="20" y="224" class="mono">• Bound by finite forbidden actions (no raw secrets, P-3)</text>
-    <text x="20" y="242" class="mono">• Bound by Rule Zero: cannot bypass safety rules</text>
+  <g transform="translate(372, 520)">
+    <rect width="256" height="80" class="card" />
+    <text x="128" y="20" text-anchor="middle" class="h3">Bound equally</text>
+    <text x="128" y="38" text-anchor="middle" class="mono" fill="#8b949e">Rules apply without exception;</text>
+    <text x="128" y="55" text-anchor="middle" class="mono" fill="#8b949e">every denial cites its clause</text>
+    <text x="128" y="72" text-anchor="middle" class="mono" fill="#f0f6fc">Ri-0.3</text>
   </g>
 
-  <!-- BOTTOM BAR: SHARED CAUSAL LEDGER & EQUAL STANDING -->
-  <g transform="translate(140, 505)">
-    <rect width="680" height="90" class="box-bottom" />
-    <text x="340" y="26" text-anchor="middle" class="title" fill="#3fb950">📜 The Immutable Causal Chain: Non-Repudiable Ground Truth</text>
-    <text x="340" y="48" text-anchor="middle" class="mono">
-      <tspan fill="#f0f6fc" font-weight="600">Office Before Occupant:</tspan> Authority attaches to seats (P-2.20 GateDecider), not species.
-    </text>
-    <text x="340" y="66" text-anchor="middle" class="mono">
-      <tspan fill="#e0a355">Humans</tspan> and <tspan fill="#58a6ff">AI Agents</tspan> build, review, and evolve the system together under verifiable mechanical law.
-    </text>
-    <text x="340" y="82" text-anchor="middle" class="badge" fill="#3fb950">TRUST IS STRUCTURAL, NOT PERSONAL</text>
+  <g transform="translate(648, 520)">
+    <rect width="300" height="80" class="card-ai" />
+    <text x="14" y="20" class="h3" fill="#58a6ff">AI agent citizen</text>
+    <text x="14" y="38" class="mono">Seats: reasoner · decider <tspan fill="#f0f6fc">(P-2.20)</tspan> · auditor</text>
+    <text x="14" y="55" class="mono">Bound by <tspan fill="#f0f6fc">P-*</tspan>; owed <tspan fill="#f0f6fc">Ri-0.1…Ri-0.18</tspan></text>
+    <text x="14" y="72" class="mono">May propose <tspan fill="#f0f6fc">(Ri-0.8)</tspan> and flag <tspan fill="#f0f6fc">(Ri-0.18)</tspan></text>
   </g>
 
-  <!-- SYMMETRIC CONNECTING ARROWS -->
-  <!-- Seal -> Human -->
-  <path d="M 380 176 L 255 214" class="edge edge-gold" marker-end="url(#peer-gold)" />
-  
-  <!-- Seal -> AI Agent -->
-  <path d="M 580 176 L 705 214" class="edge edge-blue" marker-end="url(#peer-blue)" />
+  <!-- ── THE COMMUNITY EVOLVES TOGETHER ─────────────────────────────── -->
+  <g transform="translate(52, 622)">
+    <rect width="896" height="94" class="card-evo" />
+    <text x="16" y="21" class="h3" fill="#bc8cff">…and the community evolves together</text>
 
-  <!-- Human -> Causal Chain -->
-  <path d="M 255 480 L 340 502" class="edge edge-green" marker-end="url(#peer-green)" />
+    <g transform="translate(16, 32)">
+      <rect x="0"   y="0" width="148" height="28" rx="3" fill="#1d1729" stroke="#3a2f52" stroke-width="1" />
+      <text x="74"  y="18" text-anchor="middle" class="tag" fill="#c9a9f5">PROPOSE&#160;Ri-0.8</text>
+      <rect x="179" y="0" width="148" height="28" rx="3" fill="#1d1729" stroke="#3a2f52" stroke-width="1" />
+      <text x="253" y="18" text-anchor="middle" class="tag" fill="#c9a9f5">ADJUDICATE&#160;O-1</text>
+      <rect x="358" y="0" width="148" height="28" rx="3" fill="#1d1729" stroke="#3a2f52" stroke-width="1" />
+      <text x="432" y="18" text-anchor="middle" class="tag" fill="#c9a9f5">RECORD&#160;P-8.1</text>
+      <rect x="537" y="0" width="148" height="28" rx="3" fill="#1d1729" stroke="#3a2f52" stroke-width="1" />
+      <text x="611" y="18" text-anchor="middle" class="tag" fill="#c9a9f5">PROMOTE&#160;P-9.15</text>
+      <rect x="716" y="0" width="148" height="28" rx="3" fill="#1d1729" stroke="#3a2f52" stroke-width="1" />
+      <text x="790" y="18" text-anchor="middle" class="tag" fill="#c9a9f5">AMEND&#160;P-10.9</text>
 
-  <!-- AI Agent -> Causal Chain -->
-  <path d="M 705 480 L 620 502" class="edge edge-green" marker-end="url(#peer-green)" />
+      <path d="M 150 14 L 175 14" class="e-evo" marker-end="url(#m-evo)" />
+      <path d="M 329 14 L 354 14" class="e-evo" marker-end="url(#m-evo)" />
+      <path d="M 508 14 L 533 14" class="e-evo" marker-end="url(#m-evo)" />
+      <path d="M 687 14 L 712 14" class="e-evo" marker-end="url(#m-evo)" />
+    </g>
 
+    <text x="16" y="84" class="mono" fill="#8b949e">Correctability over perfection — the entrenched core <tspan fill="#f0f6fc">Ri-0.2 · Ri-0.3 · Ri-0.8 · Ri-0.11 · P-8.1 · O-1</tspan> keeps the cycle turning.</text>
+  </g>
 </svg>

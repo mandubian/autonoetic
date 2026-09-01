@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 680" width="100%" height="100%">
   <defs>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@500;700&amp;family=Newsreader:ital,wght@1,500;1,600&amp;display=swap');
-      
+      /* System stacks only — no external font fetch, so this renders identically
+         offline and under a strict CSP. */
       .bg { fill: #0b0f19; }
       .grid-pattern { stroke: #1e293b; stroke-width: 0.5; stroke-dasharray: 4 4; opacity: 0.4; }
       .card { fill: #111827; stroke: #1f2937; stroke-width: 1.5; rx: 8px; }
@@ -11,11 +11,11 @@
       .card-agent { fill: #181611; stroke: #e0a355; stroke-width: 1.8; rx: 8px; }
       .card-decider { fill: #161224; stroke: #c1a3ec; stroke-width: 1.8; rx: 8px; }
       
-      .title { font-family: 'Inter', sans-serif; font-size: 20px; font-weight: 700; fill: #f3f4f6; }
-      .subtitle { font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500; fill: #9ca3af; }
-      .body { font-family: 'Inter', sans-serif; font-size: 12px; fill: #d1d5db; line-height: 1.4; }
-      .mono { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
-      .tag { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #f3f4f6; }
+      .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 500; fill: #9ca3af; }
+      .body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #d1d5db; line-height: 1.4; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; }
+      .tag { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 700; }
       
       .edge { fill: none; stroke-width: 2; }
       .edge-rule { stroke: #e0a355; stroke-dasharray: 6 3; }
@@ -54,9 +54,9 @@
   <line x1="550" y1="0" x2="550" y2="680" class="grid-pattern" />
 
   <!-- Header / Super Title -->
-  <text x="550" y="38" text-anchor="middle" font-family="'Inter', sans-serif" font-size="11" font-weight="700" letter-spacing="3" fill="#60a5fa">AUTONOETIC GOVERNANCE ARCHITECTURE</text>
-  <text x="550" y="66" text-anchor="middle" font-family="'Inter', sans-serif" font-size="22" font-weight="700" fill="#f8fafc">A Constitutional Community of Agents &amp; Humans</text>
-  <text x="550" y="88" text-anchor="middle" font-family="'Inter', sans-serif" font-size="12" fill="#94a3b8">Shared Rule of Law · Bind-Direction Discipline · Separation of Powers · Chartered Profession</text>
+  <text x="550" y="38" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" letter-spacing="3" fill="#60a5fa">AUTONOETIC GOVERNANCE ARCHITECTURE</text>
+  <text x="550" y="66" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="700" fill="#f8fafc">A Constitutional Community of Agents &amp; Humans</text>
+  <text x="550" y="88" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" fill="#94a3b8">Shared Rule of Law · Bind-Direction Discipline · Separation of Powers · Chartered Profession</text>
 
   <!-- TOP LAYER: SERVED USER (CHARTERED PROFESSION MODEL) -->
   <g class="glow-user" transform="translate(300, 115)">
@@ -65,14 +65,13 @@
     <text x="28" y="32" text-anchor="middle" font-size="14">👤</text>
     
     <text x="54" y="27" class="title" font-size="15" fill="#fca5a5">Served Party (The End-User)</text>
-    <text x="54" y="42" class="tag" fill="#e3919b">PRINCIPAL · SECTION §U SERVICE CHARTER</text>
-    
+    <text x="54" y="42" class="tag" fill="#e3919b">PRINCIPAL · §12 RIGHTS OF THE SERVED · DECLARED, NOT YET ENFORCED</text>
+
     <text x="28" y="66" class="body" font-size="11.5">
-      • <tspan font-weight="600" fill="#fecdd3">Right of Refusal (U-1):</tspan> Absolute power to reject outcomes
-      • <tspan font-weight="600" fill="#fecdd3">Full Auditability (U-2):</tspan> Inspect what was done
+      • <tspan font-weight="600" fill="#fecdd3">Refusal (U-1)</tspan> · <tspan font-weight="600" fill="#fecdd3">Auditability (U-2)</tspan> · <tspan font-weight="600" fill="#fecdd3">Exit with data (U-3)</tspan>
     </text>
     <text x="28" y="82" class="body" font-size="11.5">
-      • <tspan font-weight="600" fill="#fecdd3">Exit &amp; Data Locality (U-3 / Phase 5):</tspan> Monotonic egress label boundary &amp; zero lock-in
+      All three are status <tspan font-weight="600" fill="#fecdd3">MISSING</tspan> — no capability or gate honours them yet.
     </text>
   </g>
 
@@ -100,7 +99,7 @@
     </text>
     <text x="20" y="198" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Ri-0.8:</tspan> Right to propose amendments</text>
     <text x="20" y="216" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Ri-0.13:</tspan> Private-under-law reasoning</text>
-    <text x="20" y="234" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Ri-0.11:</tspan> Non-repudiable attribution</text>
+    <text x="20" y="234" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Ri-0.18:</tspan> Flag anomalies — no capability needed</text>
   </g>
 
   <!-- MIDDLE CENTER: GATEWAY (LAWFUL EXECUTOR) -->
@@ -116,9 +115,9 @@
       <tspan font-weight="700" fill="#bfdbfe">Mechanical Enforcement:</tspan>
     </text>
     <text x="20" y="88" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Rule Zero:</tspan> Invariants apply to all equally</text>
-    <text x="20" y="106" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Sandbox:</tspan> Bwrap / Docker / MicroVM</text>
+    <text x="20" y="106" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Sandbox:</tspan> Bwrap / Docker / MicroVM / Wasm</text>
     <text x="20" y="124" class="mono" fill="#93c5fd">• <tspan fill="#93c5fd">Vault:</tspan> Secrets injected, never shown</text>
-    <text x="20" y="142" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Egress Plane:</tspan> Labeled lattice chokepoint</text>
+    <text x="20" y="142" class="mono" fill="#cbd5e1">• <tspan fill="#93c5fd">Egress (P-15.*):</tspan> Labels never widen</text>
     
     <path d="M 15 156 L 265 156" stroke="#1e3a8a" stroke-width="1" />
     
@@ -127,7 +126,7 @@
     </text>
     <text x="20" y="198" class="mono" fill="#6ee7b7">• Causal chain read (Ri-0.2)</text>
     <text x="20" y="216" class="mono" fill="#6ee7b7">• Named rule citation on rejection (Ri-0.3)</text>
-    <text x="20" y="234" class="mono" fill="#6ee7b7">• Signed turn attestation (P-6.23)</text>
+    <text x="20" y="234" class="mono" fill="#6ee7b7">• Own state, every turn (Ri-0.1 via P-6.23)</text>
     <text x="20" y="252" class="mono" fill="#6ee7b7">• Wake-up notifications (Ri-0.14)</text>
   </g>
 
@@ -144,8 +143,8 @@
       <tspan font-weight="700" fill="#e9d5ff">Office Before Occupant:</tspan>
     </text>
     <text x="20" y="88" class="mono" fill="#cbd5e1">• <tspan fill="#c084fc">P-2.20 GateDecider:</tspan> Capability for seats</text>
-    <text x="20" y="106" class="mono" fill="#cbd5e1">• <tspan fill="#c084fc">Earned Weight:</tspan> Ledger-computed standing</text>
-    <text x="20" y="124" class="mono" fill="#c084fc">• <tspan fill="#c084fc">Democratic Arc:</tspan> Monarchy → Sortition</text>
+    <text x="20" y="106" class="mono" fill="#cbd5e1">• <tspan fill="#c084fc">Run-scoped appointment:</tspan> per-run seats</text>
+    <text x="20" y="124" class="mono" fill="#64748b">• <tspan fill="#64748b">Earned weight / sortition: NOT BUILT</tspan></text>
     
     <path d="M 15 140 L 305 140" stroke="#374151" stroke-width="1" />
     
@@ -153,23 +152,26 @@
       <tspan font-weight="700" fill="#e9d5ff">Symmetric Obligations (§O):</tspan>
     </text>
     <text x="20" y="182" class="mono" fill="#cbd5e1">• <tspan fill="#f472b6">O-1:</tspan> Motivated decision (reasons mandatory)</text>
-    <text x="20" y="200" class="mono" fill="#f472b6">• <tspan fill="#f472b6">O-6:</tspan> Adjudication duty for Ri-0.8 proposals</text>
-    <text x="20" y="218" class="mono" fill="#f472b6">• <tspan fill="#f472b6">Ri-0.16:</tspan> Sentinel observes, never blocks</text>
-    <text x="20" y="236" class="mono" fill="#f472b6">• <tspan fill="#f472b6">P-2.11:</tspan> Strict SLA timeout on pending gates</text>
+    <text x="20" y="200" class="mono" fill="#cbd5e1">• <tspan fill="#f472b6">O-2:</tspan> Attributed to the deciding principal</text>
+    <text x="20" y="218" class="mono" fill="#cbd5e1">• <tspan fill="#f472b6">O-6:</tspan> Adjudicate Ri-0.8 proposals on time</text>
+    <text x="20" y="236" class="mono" fill="#cbd5e1">• <tspan fill="#f472b6">O-7:</tspan> Adjudicate Ri-0.18 flags on time</text>
   </g>
 
   <!-- BOTTOM FOUNDATION: IMMUTABLE CAUSAL CHAIN & CONSTITUTION -->
   <g transform="translate(180, 540)">
-    <rect width="740" height="110" class="card" fill="#090d16" stroke="#2563eb" stroke-dasharray="4 2" />
+    <rect width="740" height="122" class="card" fill="#090d16" stroke="#2563eb" stroke-dasharray="4 2" />
     <text x="370" y="26" text-anchor="middle" class="title" font-size="14" fill="#93c5fd">🏛️ The Constitutional Substrate &amp; Immutable Causal Chain (P-8.1)</text>
-    
-    <text x="30" y="52" class="mono" fill="#e2e8f0">
-      <tspan fill="#fcd34d" font-weight="700">Entrenched Correction Core:</tspan> Ri-0.2 · Ri-0.3 · Ri-0.8 · Ri-0.11 · P-8.1 · O-1 (Can only be strengthened)
+
+    <text x="30" y="50" class="mono" fill="#e2e8f0">
+      <tspan fill="#fcd34d" font-weight="700">Entrenched Correction Core:</tspan> Ri-0.2 · Ri-0.3 · Ri-0.8 · Ri-0.11 · P-8.1 · O-1
     </text>
-    <text x="30" y="74" class="mono" fill="#94a3b8">
+    <text x="30" y="68" class="mono" fill="#94a3b8">
+      Weakening one needs a dated justification in RATIFY.md — procedural friction, not a cryptographic lock
+    </text>
+    <text x="30" y="92" class="mono" fill="#94a3b8">
       <tspan fill="#60a5fa">Trust is Structural:</tspan> Compatible Constitution Digest Handshake (P-10.9) enables federated cross-organization trust
     </text>
-    <text x="30" y="94" class="mono" fill="#94a3b8">
+    <text x="30" y="110" class="mono" fill="#94a3b8">
       <tspan fill="#4ade80">Correctability over Perfection:</tspan> The gateway is fallible; errors are recorded, attributable, and lawfully amendable
     </text>
   </g>
@@ -179,20 +181,27 @@
   <!-- Served User -> Gateway/Community -->
   <path d="M 550 205 L 550 248" class="edge edge-user" marker-end="url(#arrow-user)" />
   
+  <!-- Edge labels sit in a 40px gutter between cards, so each gets a plate in
+       the page background colour to stay legible over the card borders. -->
+
   <!-- Agents -> Gateway (Rules & Intents) -->
   <path d="M 370 320 L 408 320" class="edge edge-rule" marker-end="url(#arrow-rule)" />
-  <text x="389" y="312" class="tag" text-anchor="middle" fill="#e0a355">PROPOSE (P-*)</text>
-  
+  <rect x="341" y="292" width="96" height="14" rx="2" fill="#0b0f19" />
+  <text x="389" y="302" class="tag" text-anchor="middle" fill="#e0a355">PROPOSE (P-*)</text>
+
   <!-- Gateway -> Agents (Rights & Self-Model) -->
   <path d="M 408 380 L 372 380" class="edge edge-right" marker-end="url(#arrow-right)" />
+  <rect x="343" y="386" width="92" height="14" rx="2" fill="#0b0f19" />
   <text x="389" y="396" class="tag" text-anchor="middle" fill="#5cc7b6">ATTEST (Ri-*)</text>
-  
+
   <!-- Deciders -> Gateway (Gate Resolution) -->
   <path d="M 730 320 L 692 320" class="edge edge-oblig" marker-end="url(#arrow-oblig)" />
-  <text x="711" y="312" class="tag" text-anchor="middle" fill="#c1a3ec">RESOLVE (O-*)</text>
-  
+  <rect x="663" y="292" width="96" height="14" rx="2" fill="#0b0f19" />
+  <text x="711" y="302" class="tag" text-anchor="middle" fill="#c1a3ec">RESOLVE (O-*)</text>
+
   <!-- Gateway -> Deciders (Escalations & Audit Context) -->
   <path d="M 692 380 L 728 380" class="edge edge-right" marker-end="url(#arrow-right)" />
+  <rect x="650" y="386" width="122" height="14" rx="2" fill="#0b0f19" />
   <text x="711" y="396" class="tag" text-anchor="middle" fill="#5cc7b6">CONTEXT (Ri-0.15)</text>
 
   <!-- Gateway -> Causal Chain -->
