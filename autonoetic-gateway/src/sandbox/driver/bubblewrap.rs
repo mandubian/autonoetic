@@ -194,6 +194,8 @@ fn bubblewrap_shell_command(
     }
 
     // Add extra bind mounts for session content
+    let mut provisioned_parents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut bound_dests: Vec<String> = Vec::new();
     for mount in extra_mounts {
         // Create the source directory if needed
         if let Some(parent) = mount.source.parent() {
@@ -207,6 +209,18 @@ fn bubblewrap_shell_command(
                 let _ = std::fs::create_dir_all(&mount.source);
             }
         }
+        // Provision the destination before binding — bwrap must be able to
+        // mkdir the mount target inside the namespace, or the whole sandbox
+        // dies at setup before any command runs (observed as
+        // `bwrap: Can't mkdir /opt/wrapper-out: Read-only file system` under
+        // legacy's `--ro-bind / /`, killing even `echo ok`).
+        let provisioning = mount_destination_flags(
+            mode,
+            &mount.dest,
+            &bound_dests,
+            &mut provisioned_parents,
+        )?;
+        argv.extend(provisioning);
         let bind_flag = if mount.readonly {
             "--ro-bind".to_string()
         } else {
@@ -215,6 +229,7 @@ fn bubblewrap_shell_command(
         argv.push(bind_flag);
         argv.push(mount.source.to_string_lossy().to_string());
         argv.push(mount.dest.clone());
+        bound_dests.push(mount.dest.clone());
     }
 
     argv.extend(vec![
@@ -224,6 +239,82 @@ fn bubblewrap_shell_command(
         shell_command.to_string(),
     ]);
     Ok(("bwrap".to_string(), argv))
+}
+
+/// Provision a mount destination so bwrap can create it inside the namespace.
+///
+/// Fail-loud with a teaching message rather than letting bwrap die at setup:
+/// a sandbox that cannot assemble its mounts fails *every* command (including
+/// `echo ok`), and the raw bwrap stderr gives the agent no lawful next move.
+///
+/// - Workspace-subtree destinations need nothing: the workspace bind is a
+///   writable host directory, so bwrap can mkdir freely.
+/// - Legacy mode: `/` is ro-bound, so any destination outside the workspace
+///   gets a one-shot `--tmpfs <parent>` (deduped; emitted before the first
+///   bind under that parent so later binds compose onto it). The tmpfs
+///   shadows the host parent inside the namespace — that subtree is exactly
+///   what the layer provides, so nothing else is missed. A destination
+///   directly under `/` (parent `/`) or under a read-only toolchain bind
+///   cannot be provisioned safely → structured refusal.
+/// - AllowSet mode: the root is an empty writable tmpfs, so bwrap creates
+///   ancestor dirs freely; only toolchain-shadowing destinations refuse.
+fn mount_destination_flags(
+    mode: HostFsMode,
+    dest: &str,
+    bound_dests: &[String],
+    provisioned_parents: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<String>> {
+    let workspace = BWRAP_WORKSPACE_DIR;
+    if dest == workspace || dest.starts_with(&format!("{workspace}/")) {
+        return Ok(Vec::new());
+    }
+    let dest_path = std::path::Path::new(dest);
+    let Some(parent) = dest_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let parent = parent.to_string_lossy().to_string();
+
+    // A destination shadowing (or shadowed by) a toolchain bind breaks the
+    // sandbox in every mode: refuse with the fix named.
+    if ALLOW_SET_TOOLCHAIN_ROOTS
+        .iter()
+        .any(|root| dest == *root || dest.starts_with(&format!("{root}/")))
+    {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' overlaps a read-only toolchain bind; \
+             choose a mount_as outside {ALLOW_SET_TOOLCHAIN_ROOTS:?}"
+        );
+    }
+    // A destination nested under an earlier bind's destination: the parent
+    // would live inside that (read-only layer) bind — mkdir fails there.
+    if bound_dests
+        .iter()
+        .any(|d| parent == *d || parent.starts_with(&format!("{d}/")))
+    {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' nests under the earlier mount \
+             '{parent}'; give each mount_as an independent parent path"
+        );
+    }
+
+    match mode {
+        HostFsMode::AllowSet => Ok(Vec::new()),
+        HostFsMode::Legacy => {
+            if parent == "/" {
+                anyhow::bail!(
+                    "sandbox mount destination '{dest}' cannot be created inside the \
+                     legacy whole-host ro-bind (bwrap: Can't mkdir). Use a mount_as whose \
+                     parent directory exists (e.g. /opt/..., /mnt/...) or set \
+                     sandbox.host_fs: allow_set"
+                );
+            }
+            if provisioned_parents.insert(parent.clone()) {
+                Ok(vec!["--tmpfs".to_string(), parent])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
 }
 
 /// Mount prologue shared by both command forms: ro-bind the host `/`, bind the
@@ -544,6 +635,164 @@ mod tests {
         assert_eq!(argv[10], "sh");
         assert_eq!(argv[11], "-c"); // Non-login shell
         assert_eq!(argv[12], "echo hi");
+    }
+
+    #[test]
+    fn legacy_mode_provisions_tmpfs_parent_for_layer_mount() {
+        // The adapter-session failure: a layer with mount_as /opt/wrapper-out
+        // under legacy's `--ro-bind / /` used to die at setup with
+        // `bwrap: Can't mkdir /opt/wrapper-out: Read-only file system`,
+        // failing every command including `echo ok`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let gateway_dir = tmp.path().join("runtime");
+        let mounts = vec![SandboxMount {
+            source: tmp.path().join("layer"),
+            dest: "/opt/wrapper-out".to_string(),
+            readonly: true,
+        }];
+        let (_bin, argv) = bubblewrap_shell_command(
+            &agent_dir_str,
+            &gateway_dir,
+            "echo ok",
+            &mounts,
+            None, // legacy
+        )
+        .expect("shell command should build");
+        let tmpfs_pos = argv.iter().position(|a| a == "--tmpfs").expect("tmpfs provisioning expected");
+        assert_eq!(argv[tmpfs_pos + 1], "/opt");
+        let bind_pos = argv
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[2] == "/opt/wrapper-out")
+            .expect("layer bind expected");
+        assert!(
+            tmpfs_pos < bind_pos,
+            "tmpfs parent must precede the bind onto it"
+        );
+    }
+
+    #[test]
+    fn legacy_mode_provisions_each_parent_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let gateway_dir = tmp.path().join("runtime");
+        let mounts = vec![
+            SandboxMount {
+                source: tmp.path().join("l1"),
+                dest: "/opt/a".to_string(),
+                readonly: true,
+            },
+            SandboxMount {
+                source: tmp.path().join("l2"),
+                dest: "/opt/b".to_string(),
+                readonly: true,
+            },
+        ];
+        let (_bin, argv) = bubblewrap_shell_command(
+            &agent_dir_str,
+            &gateway_dir,
+            "echo ok",
+            &mounts,
+            None,
+        )
+        .expect("shell command should build");
+        let count = argv.iter().filter(|a| *a == "--tmpfs").count();
+        assert_eq!(count, 1, "shared parent provisioned exactly once: {argv:?}");
+    }
+
+    #[test]
+    fn legacy_mode_refuses_root_level_mount_destination() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let gateway_dir = tmp.path().join("runtime");
+        let mounts = vec![SandboxMount {
+            source: tmp.path().join("layer"),
+            dest: "/wrapper-out".to_string(),
+            readonly: true,
+        }];
+        let err = bubblewrap_shell_command(
+            &agent_dir_str,
+            &gateway_dir,
+            "echo ok",
+            &mounts,
+            None,
+        )
+        .expect_err("root-level mount_as must be refused in legacy mode");
+        assert!(err.to_string().contains("allow_set"), "{err}");
+    }
+
+    #[test]
+    fn allow_set_mode_needs_no_provisioning_for_fresh_dest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let gateway_dir = tmp.path().join("runtime");
+        let mounts = vec![SandboxMount {
+            source: tmp.path().join("layer"),
+            dest: "/opt/wrapper-out".to_string(),
+            readonly: true,
+        }];
+        let overrides = BwrapIsolationOverrides {
+            host_fs_allow_set: true,
+            ..Default::default()
+        };
+        let (_bin, argv) = bubblewrap_shell_command(
+            &agent_dir_str,
+            &gateway_dir,
+            "echo ok",
+            &mounts,
+            Some(&overrides),
+        )
+        .expect("shell command should build");
+        // allow_set's base argv starts with its own `--tmpfs /`; the only
+        // tmpfs present must be that root, never a per-mount provisioning.
+        let tmpfs_parents: Vec<&String> = argv
+            .windows(2)
+            .filter(|w| w[0] == "--tmpfs")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(
+            tmpfs_parents,
+            vec!["/"],
+            "only the allow_set root tmpfs expected: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn mount_destination_refuses_toolchain_overlap_in_both_modes() {
+        let mut provisioned = std::collections::HashSet::new();
+        for mode in [HostFsMode::Legacy, HostFsMode::AllowSet] {
+            let err = mount_destination_flags(
+                mode,
+                "/usr/share/layer",
+                &[],
+                &mut provisioned,
+            )
+            .expect_err("toolchain overlap must refuse");
+            assert!(err.to_string().contains("toolchain"), "{err}");
+        }
+    }
+
+    #[test]
+    fn mount_destination_allows_workspace_subtree() {
+        let mut provisioned = std::collections::HashSet::new();
+        for mode in [HostFsMode::Legacy, HostFsMode::AllowSet] {
+            let flags = mount_destination_flags(
+                mode,
+                "/tmp/autonoetic_content/session/file.txt",
+                &[],
+                &mut provisioned,
+            )
+            .expect("workspace subtree needs no provisioning");
+            assert!(flags.is_empty());
+        }
     }
 
     /// The driver's `build_command` must produce exactly the shell form — the
