@@ -86,23 +86,43 @@ pub enum BindOutcome {
     Conflict { existing: Principal },
 }
 
+/// What an ingress-supplied served-party token meant.
+///
+/// Three states, not two, because "the caller said nothing" and "the caller
+/// said something I don't understand" must not collapse: both end up recording
+/// the operator, but the second is a caller bug worth surfacing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServedPartyToken {
+    /// No token supplied.
+    Unspecified,
+    /// A recognized principal.
+    Party(Principal),
+    /// A token was supplied in a form this gateway does not accept.
+    Unrecognized,
+}
+
 /// Interpret an ingress-supplied served-party token.
 ///
-/// Follows the `user:<id>` convention `principal::decider_principal_kind`
-/// already recognizes, so one spelling means one thing across the codebase.
-/// An empty or whitespace token is "unspecified", not an empty id.
-pub fn parse_served_party_token(token: &str) -> Option<Principal> {
+/// **Exactly two forms are accepted**: `user:<id>` for a served user (the
+/// convention `principal::decider_principal_kind` already recognizes, so one
+/// spelling means one thing across the codebase), and the bare word `operator`.
+///
+/// A bare token is deliberately *not* read as a user id. Rule Zero — "rejection
+/// is cheap; permission is explicit… never grant 'probably okay'" — applies to
+/// parsing too: guessing would silently turn a typo (`operatorr`) into a served
+/// user of that name, and this row is meant to be *evidence*. One character of
+/// prefix buys the difference between a record and a guess.
+pub fn parse_served_party_token(token: &str) -> ServedPartyToken {
     let s = token.trim();
     if s.is_empty() {
-        return None;
+        return ServedPartyToken::Unspecified;
     }
     match s.strip_prefix("user:") {
         // `user:` with nothing after it names no one.
-        Some(rest) if rest.trim().is_empty() => None,
-        Some(rest) => Some(Principal::served_user(rest.trim())),
-        // A bare token is the operator seat spelled out, or an explicit human.
-        None if s == "operator" => Some(Principal::human("operator")),
-        None => Some(Principal::served_user(s)),
+        Some(rest) if rest.trim().is_empty() => ServedPartyToken::Unrecognized,
+        Some(rest) => ServedPartyToken::Party(Principal::served_user(rest.trim())),
+        None if s == "operator" => ServedPartyToken::Party(Principal::human("operator")),
+        None => ServedPartyToken::Unrecognized,
     }
 }
 
@@ -191,9 +211,24 @@ pub fn record_at_ingress(
     token: Option<&str>,
     now: &str,
 ) -> Option<BindOutcome> {
-    let (principal, source) = match token.and_then(parse_served_party_token) {
-        Some(p) => (p, ServedPartySource::Declared),
-        None => (operator_default(), ServedPartySource::OperatorDefault),
+    let (principal, source) = match token.map(parse_served_party_token) {
+        Some(ServedPartyToken::Party(p)) => (p, ServedPartySource::Declared),
+        // The caller tried to name someone and got the form wrong. Record the
+        // operator like any unspecified run — attribution must not fail a turn —
+        // but never silently: a dropped intent that looks like a successful
+        // declaration is worse than no declaration at all.
+        Some(ServedPartyToken::Unrecognized) => {
+            tracing::warn!(
+                target: "served_party",
+                session_id = %root_session_id,
+                "served_party token not in an accepted form (`user:<id>` or `operator`); \
+                 recording the operator as the served party"
+            );
+            (operator_default(), ServedPartySource::OperatorDefault)
+        }
+        Some(ServedPartyToken::Unspecified) | None => {
+            (operator_default(), ServedPartySource::OperatorDefault)
+        }
     };
 
     let outcome = match store.bind_served_party(root_session_id, &principal, source, now) {
@@ -281,30 +316,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_parsing_follows_the_user_prefix_convention() {
+    fn token_parsing_accepts_only_the_two_declared_forms() {
+        use ServedPartyToken::*;
+
         assert_eq!(
             parse_served_party_token("user:alice"),
-            Some(Principal::served_user("alice"))
+            Party(Principal::served_user("alice"))
         );
         // A dotted user id must not be mistaken for an agent, matching
         // `decider_principal_kind`'s ordering.
         assert_eq!(
             parse_served_party_token("user:alice.smith"),
-            Some(Principal::served_user("alice.smith"))
+            Party(Principal::served_user("alice.smith"))
         );
         assert_eq!(
             parse_served_party_token("operator"),
-            Some(Principal::human("operator"))
+            Party(Principal::human("operator"))
         );
-        assert_eq!(
-            parse_served_party_token("acme-tenant-7"),
-            Some(Principal::served_user("acme-tenant-7"))
-        );
-        // Unspecified, not an empty id.
-        assert_eq!(parse_served_party_token(""), None);
-        assert_eq!(parse_served_party_token("   "), None);
-        assert_eq!(parse_served_party_token("user:"), None);
-        assert_eq!(parse_served_party_token("user:   "), None);
+
+        // Nothing said.
+        assert_eq!(parse_served_party_token(""), Unspecified);
+        assert_eq!(parse_served_party_token("   "), Unspecified);
+
+        // Said badly. A bare token is *not* guessed at as a user id: a typo
+        // must never become a served party of that name (Rule Zero — never
+        // grant "probably okay"), and `user:` with nothing after it names no
+        // one.
+        assert_eq!(parse_served_party_token("acme-tenant-7"), Unrecognized);
+        assert_eq!(parse_served_party_token("operatorr"), Unrecognized);
+        assert_eq!(parse_served_party_token("alice"), Unrecognized);
+        assert_eq!(parse_served_party_token("user:"), Unrecognized);
+        assert_eq!(parse_served_party_token("user:   "), Unrecognized);
+    }
+
+    /// A malformed token must not masquerade as a successful declaration: it
+    /// records the operator, and records it as a *default*, so nothing
+    /// downstream reads it as "the caller named this party".
+    #[test]
+    fn unrecognized_token_records_the_operator_as_a_default() {
+        let (_d, store) = open_store();
+        record_at_ingress(&store, "root-bad", "planner.default", Some("alice"), "t0");
+
+        let bound = store.get_served_party("root-bad").unwrap().unwrap();
+        assert_eq!(bound.principal, operator_default());
+        assert_eq!(bound.source, ServedPartySource::OperatorDefault);
+        assert!(!is_distinct_served_user(&bound));
     }
 
     #[test]

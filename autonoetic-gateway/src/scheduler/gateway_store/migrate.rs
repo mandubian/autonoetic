@@ -3821,8 +3821,11 @@ fn apply_session_served_party_v86(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_served_party (
             root_session_id TEXT PRIMARY KEY,
-            -- Equals the causal-chain `actor_id` convention; `user:<id>` for a
-            -- served user distinct from the operator.
+            -- The bare id, *without* the `user:` wire prefix — that prefix is
+            -- only how ingress spells the kind, and the kind has its own column.
+            -- So a served user `alice` stores ('alice', 'served_user'), not
+            -- ('user:alice', …). Reassemble the `user:<id>` form when comparing
+            -- against a causal-chain `actor_id` or an approval's `decided_by`.
             principal_id    TEXT NOT NULL,
             -- `Principal::kind_to_storage()` round-trips this column.
             principal_kind  TEXT NOT NULL,
@@ -4102,8 +4105,7 @@ mod tests {
         assert!(dup.is_err(), "a second park row for one session must be rejected");
     }
 
-    /// v73 creates `egress_session_policies` and bumps SCHEMA_VERSION_LATEST.
-    #[test]
+    /// v86 creates `session_served_party` and bumps SCHEMA_VERSION_LATEST.
     #[test]
     fn v86_creates_session_served_party_and_bumps_supported_version() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -4160,6 +4162,7 @@ mod tests {
         assert_eq!(id, "alice");
     }
 
+    /// v73 creates `egress_session_policies` and bumps SCHEMA_VERSION_LATEST.
     #[test]
     fn v73_creates_egress_session_policies_and_bumps_supported_version() {
         let mut conn = Connection::open_in_memory().unwrap();

@@ -69,11 +69,20 @@ Content-Type: application/json
 }
 ```
 
-**`served_party`** (optional) — on whose behalf the run executes. Use
-`user:<id>` when the end-user is distinct from the operator (a hosted or
-multi-tenant deployment), or `operator` to say so explicitly. Omitted, the
-operator is recorded as the served party and the row is marked a *default*
-rather than a declaration.
+**`served_party`** (optional) — on whose behalf the run executes. Exactly two
+forms are accepted:
+
+| Value | Meaning |
+|---|---|
+| `user:<id>` | a served user distinct from the operator (hosted or multi-tenant deployment) |
+| `operator` | the operator seat, stated explicitly |
+
+Anything else — a bare `alice`, a typo like `operatorr` — is **not** guessed at
+as a user id. It is logged and treated as unspecified, because a record built on
+a guess is not evidence: one character of prefix is the difference. Omitted or
+unrecognized, the operator is recorded as the served party and the row is marked
+a *default* rather than a declaration, so nothing downstream can mistake it for
+something the caller said.
 
 Bound **once per root session**: the first ingest answers "who is this for?"
 and later ones cannot rewrite it — a run whose served party could change

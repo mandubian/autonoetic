@@ -6398,11 +6398,15 @@ struct EventIngestParams {
     /// can only restrict what the room already declared, never widen it.
     #[serde(default)]
     egress_label: Option<autonoetic_types::egress::NamedEgressLabel>,
-    /// On whose behalf this run executes (#822). `user:<id>` for a served user
-    /// distinct from the operator, following the convention
-    /// `principal::decider_principal_kind` already recognizes; `operator` for
-    /// the operator seat explicitly. Absent ⇒ the operator is recorded as the
-    /// served party, marked as a default rather than a declaration.
+    /// On whose behalf this run executes (#822). Exactly two forms are
+    /// accepted: `user:<id>` for a served user distinct from the operator
+    /// (the convention `principal::decider_principal_kind` already
+    /// recognizes), and the bare word `operator`. Anything else is *not*
+    /// guessed at as a user id — it is logged and treated as unspecified, so a
+    /// typo can never become a served party of that name.
+    ///
+    /// Absent or unrecognized ⇒ the operator is recorded as the served party,
+    /// marked as a default rather than a declaration.
     ///
     /// Bound once per *root* session and purely attributive — see
     /// `gateway_store::served_party`.

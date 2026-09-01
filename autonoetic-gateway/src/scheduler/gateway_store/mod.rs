@@ -88,7 +88,7 @@ pub use residency::SessionResidency;
 pub use served_party::{
     is_distinct_served_user, operator_default, parse_served_party_token,
     record_at_ingress as record_served_party_at_ingress, BindOutcome, ServedParty,
-    ServedPartySource,
+    ServedPartySource, ServedPartyToken,
 };
 pub(crate) use row_decode::memory_object_from_row;
 pub(crate) use util::escape_sqlite_like_fragment;
