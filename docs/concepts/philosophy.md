@@ -78,9 +78,10 @@ clause binds exactly one party.
   enforcer owes every agent, revocable only by amendment.
 - **Obligations** (`O-*`) bind the *decider*: whoever exercises authority over
   an agent owes duties mirroring the agent's own.
-- *(Planned — see §5)* a **service charter** binding the community toward the
-  *served party*: the end-user, human or not, whom the whole arrangement
-  exists to serve.
+- **A service charter** (`U-*`) binds the *community* — the gateway and the
+  agents together — toward the *served party*: the end-user, human or not,
+  whom the whole arrangement exists to serve. Declared as §12; not yet
+  mechanically enforced (see §5).
 
 Most agent-safety frameworks are rules-only: pure constraint, where the
 enforcer owes nothing. Making the enforcer a bound party — and tracking the
@@ -116,13 +117,16 @@ them.**
 Legitimacy, on this view, does not come from the enforcer being right; it
 comes from errors being *reportable, attributable, and correctable*. The
 machinery already exists: contract health (the standing tally of what is
-actually enforced), DISCRETION LEAK *naming* (the gateway's own failures
-named in prose at their site — `P-5.2`, `P-5.8`; aggregation into a
-monitored register is the §5.4 door, not yet built), Ri-0.8 (any capable
-agent may propose amendments, durably, un-droppably), the amendment process
-(agreement with tests and review), and the causal chain (the shared
-evidence base that lets disagreements be resolved by facts rather than by
-authority).
+actually enforced), the DISCRETION LEAK register (the gateway's own judgment
+lapses — `P-5.2`, `P-5.8` — named in prose at their site *and* counted as
+durable causal events, queryable via `autonoetic trace contract-health`),
+Ri-0.18 (any agent may file an anomaly report holding *no capability at
+all*, un-droppably, and is never sanctioned for an honest-but-wrong one),
+Ri-0.8 (any capable agent may propose amendments, durably, un-droppably),
+O-6/O-7 (both a proposal and a flag are owed a motivated decision within a
+bounded window), the amendment process (agreement with tests and review),
+and the causal chain (the shared evidence base that lets disagreements be
+resolved by facts rather than by authority).
 
 This commitment has a structural consequence: **if correctability is the
 source of legitimacy, the clauses that enable correction are not ordinary
@@ -133,7 +137,9 @@ amendment process itself are the machinery through which every other error
 gets fixed. If any of these erodes, the system loses the property this
 whole section rests on — and no later amendment can restore it from
 inside. They form an **entrenched correction core**: amendable only to be
-strengthened, never weakened (see §5).
+strengthened, never weakened. That rule is enforced procedurally today — a
+dated justification recorded in the version's `RATIFY.md`, backed by a
+structural test — not cryptographically; closing that gap is a door in §5.
 
 The list spans all three bind-directions deliberately. The first four bind
 the *gateway* (it must let you read, explain, propose, and not reattribute).
@@ -222,8 +228,15 @@ data may flow, distinct from who may read it. *"An agent may read my emails,
 but their content must never reach a remote model"* is neither refuse, audit,
 nor exit; it is a standing egress constraint the gateway enforces
 mechanically — labels are declared metadata it alone manipulates, never
-model-inferred (the Lawful-Executor line, §2). It is a check the served party
-holds over the community, so its home is §U, and it inherits the same
+model-inferred (the Lawful-Executor line, §2).
+
+It is a check the served party holds over the community — but the mechanism
+landed on the *other* side of the bind-direction, and that is worth noting.
+It was constitutionalized as §15 (`P-15.1`–`P-15.3`) plus the gateway-only
+invariant `I-14`, which bind the **gateway**, not the community toward the
+served. That is what makes it mechanical rather than aspirational: an
+entitlement in §12 would be a claim, whereas an invariant on the enforcer is
+a guarantee. The entitlement half still has no home, and it inherits the same
 sequencing rule: real and entrenched before decider power spreads inward.
 
 ### 3.4 Iterative constitutionalism
@@ -285,40 +298,65 @@ Compact statements of what §3 implies, usable as review criteria:
 
 The five doors below were the original growth agenda. The 2026.07.08
 amendment **opened all five** at once — each as a drafted clause or
-mechanism, declared now while it is cheap so the architecture does not have
-to move when the need becomes urgent. They are listed here with their
-current status, followed by the doors that remain.
+mechanism, declared while it was cheap so the architecture would not have to
+move when the need became urgent. Under the active version (`2026.08.30`)
+two of the five are now mechanically enforced, and two further mechanisms
+shipped that were not on the original list. Status below, then what remains.
 
 Status of the original five (drafted in `docs/constitution/versions/2026.07.08/`,
 enacted by the signed lock `gateway-constitution.lock.json`):
 
 1. **A served-party section** (`§12` / `U-1`/`U-2`/`U-3`, bind-direction:
    the community toward the served) — the right to refuse a result, to
-   audit what was done on one's behalf, to exit with one's data. Declared
-   `MISSING` (not yet enforced): the principal-kind attribution
-   (`PrincipalKind::ServedUser`) is in place, but no call site emits it and
-   no mechanism honours a refusal yet. Cheap now (operator ≈ user);
-   critical before §3.2 advances.
+   audit what was done on one's behalf, to exit with one's data. Still
+   `MISSING`: the principal-kind attribution (`PrincipalKind::ServedUser`)
+   is in place, but no call site emits it and no mechanism honours a refusal
+   yet. Cheap now (operator ≈ user); critical before §3.2 advances.
 2. **An entrenchment tier** in the amendment process — correction-core
    clauses (`P-8.1`, `Ri-0.2`/`0.3`/`0.8`/`0.11`, `O-1`) tagged and
    requiring an explicit, dated justification to weaken or remove. The
    declaration is enacted; mechanical *prevention* of a weakening amendment
-   at the lock level is not yet built (the guard is structural test +
+   at the lock level is still not built (the guard is a structural test +
    register marker, not a signature gate).
-3. **Adjudication duty for proposals** — `O-6`: a proposal review
-   authority owes every `Ri-0.8` proposal a recorded
-   approved/rejected/deferred/under_review decision. The recording half is
-   wired (`constitution.resolve_proposal`); **no timeliness/SLA** yet, so a
-   proposal may still sit pending indefinitely.
-4. **Emigration** — `Ri-0.17`: the right to request export of one's own
-   cognitive capsule. Declared `PARTIAL`: the export tool exists but is
-   broader than self-export (a scoped capability is named, not yet
-   enacted). Request-as-right is declared; portability-across-gateways is
-   not yet real.
+3. **Adjudication duty for proposals** — `O-6`. **Enforced, including the
+   timeliness bound that was originally missing.** A review authority owes
+   every `Ri-0.8` proposal a recorded, motivated decision *within a bounded
+   window*: `scheduler.rs::check_adjudication_sla_breaches` stamps
+   `sla_breached_at` once past `decider_obligations.adjudication_sla_secs`,
+   emits a `decider_obligation`/`sla_breached` event attributed to the
+   adjudicating seat, and notifies the proposer. The breach does not
+   resolve the proposal — the decision is still owed.
+4. **Emigration** — `Ri-0.17`. **Enforced**, and no longer request-only:
+   `CapsuleExportTool` carries a two-tier gate in which the scoped
+   `Capability::SelfCapsuleExport` restricts export to the caller's own
+   identity (`policy.rs::can_use_capsule_self`) — the piece that was named
+   but unenacted. A signature-verified import path exists too
+   (`capsule/import.rs`), so a bundle and its revision history can actually
+   move between gateways. What remains is Phase 4 of that pipeline — memory
+   merge under a conflict policy, and replay-mode session resume — so
+   leaving *with one's memory intact* is still not real.
 5. **Sybil collapse for collective decisions** — `I-12`: an agent and its
    spawn-descendants collapse to a single principal for any future
-   decision-weight purpose. Declared as `DESIGN DEBT`: the precondition
-   exists before the mechanism it guards, which is the point.
+   decision-weight purpose. Still `DESIGN DEBT`: the precondition exists
+   before the mechanism it guards, which is the point.
+
+Two mechanisms shipped that were not among the original five:
+
+- **A reporting channel no capability can filter** — `Ri-0.18`: any agent
+  may file an anomaly report (`anomaly_flag`) *while holding no capability
+  at all*, attributed non-repudiably, and the flag can be neither silently
+  dropped nor grounds for sanctioning an honest-but-wrong reporter. Its
+  adjudication duty is `O-7`, on the same SLA machinery as `O-6`. This bears
+  directly on §3.1: the agent most likely to witness misbehaviour may be the
+  least privileged in the room, so a channel gated by capability filters out
+  precisely the witnesses that matter.
+- **The DISCRETION LEAK register** (`runtime/discretion_leak.rs`) — every
+  gateway normalization or repair intervention now becomes a durable
+  `discretion_leak` causal event carrying the rule ID of its closest named
+  site, queryable as a standing agenda through
+  `autonoetic trace contract-health`. Fuller's congruence requirement — the
+  distance between declared rule and official action as a *measured*
+  quantity — is now measured rather than a prose footnote.
 
 Doors still to open, in rough priority order:
 
@@ -327,29 +365,24 @@ Doors still to open, in rough priority order:
    agents (§3.2/§4.8), the served party's refusal/audit/exit must be
    *real* and *entrenched* — the sequencing constraint that keeps
    self-governance from becoming self-serving.
-2. **Adjudication timeliness.** `O-6` records a decision but sets no
-   deadline; pair it with an SLA so the duty to decide is not satisfied by
-   never deciding. (The approval system already has timeouts —
-   `P-2.11`/`P-7.11`; proposals have none.)
-3. **Emigration as a right, not a request.** Move from "may request
-   export" to "may leave with a portable capsule", completing the
-   social-contract framing (consent-by-staying means little if leaving is
-   impossible).
-4. **A real DISCRETION LEAK register.** Today leaks are named in prose at
-   their site (`P-5.2`, `P-5.8`) and listed in an audit doc — Popperian in
-   spirit but not monitored. Fuller's congruence requirement (the distance
-   between declared rule and official action is a *measured* quantity)
-   wants a causal-event category or register column that counts them.
+2. **Give the data-locality guarantee an owner.** The mechanism shipped: §15
+   (`P-15.1`–`P-15.3`) plus the gateway-only invariant `I-14` enforce that
+   labelled content never reaches a sink its label excludes, widening only
+   through an operator-approved declassification grant. What is missing is
+   the *entitlement* — nothing in §12 yet gives the served party a claim on
+   it, so today it is a guarantee the gateway keeps rather than a right the
+   served party holds. Sequence with door 1.
+3. **Emigration with memory.** Finish the capsule pipeline (Phase 4: memory
+   merge, replay-mode resume). Leaving without one's history is a weak form
+   of exit, and consent-by-staying is only as meaningful as exit is real.
+4. **Mechanical prevention of a weakening amendment.** Entrenchment is
+   procedural friction today — a dated justification in `RATIFY.md`, backed
+   by a structural test. A signature-level gate is what would put the
+   correction core genuinely out of reach, as §4.1 asks.
 5. **Sortition / earned-weight mechanisms**, once §U is entrenched and
    qualification is auditable: the §3.2 horizon this whole section points
-   at.
-6. **A data-locality invariant.** The data-envelope track
-   (`docs/proposals/data-envelopes-egress-localization.md`) already enforces, in
-   code, that content labeled for a set of sinks never reaches a sink outside
-   it — with a full causal-audit trail (§3.1). Its phase 5 constitutionalizes
-   this as a `P-x.y` rule plus an `I-x` gateway-only invariant (#910), making
-   the served party's data-sovereignty check law. The mechanism is built; the
-   entrenchment is the door — sequence it with §U.
+   at. None of it exists yet — there is no reputation, voting-weight, or
+   decision-weight machinery anywhere in the codebase.
 
 ## 6. Intellectual lineage
 
