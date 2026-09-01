@@ -1003,12 +1003,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     },
                     "capture_paths": {
                         "type": "array",
-                        "description": "Paths inside the sandbox to capture as layers after execution completes. Each path is archived as a separate layer with its content-addressed digest. Use this to capture installed dependencies (e.g., venv/, site-packages/, node_modules/).",
+                        "description": "Paths inside the sandbox to capture as layers after execution completes. Each path is archived as a separate layer with its content-addressed digest. Use this to capture installed dependencies (e.g., venv/, site-packages/, node_modules/). Explicitly captured files are ALSO registered as session content: each captured_layers entry carries content_files with cnt_ refs you can resolve (include=content) or pass to artifact_build as inputs — the only way to read your own sandbox output back.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "path": { "type": "string", "description": "Absolute path inside the sandbox to capture (e.g., '/tmp/venv'). The path must exist and be accessible when capture occurs." },
-                                "mount_as": { "type": "string", "description": "The mount paths where this layer will be mounted inside the sandbox when the artifact is later used (e.g., '/opt/venv'). This must match the expected path the artifact consumer expects." }
+                                "mount_as": { "type": "string", "description": "The mount paths where this layer will be mounted inside the sandbox when the artifact is later used (e.g., '/opt/venv'). This must match the expected path the artifact consumer expects, AND be creatable inside the sandbox: the parent directory must exist or be creatable — never a path directly under '/' and never under a read-only toolchain bind (/usr, /lib, /bin, …); such mounts are refused at exec time." }
                             },
                             "required": ["path", "mount_as"]
                         }
@@ -2782,11 +2782,16 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
                     match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
                         Ok(layer_store) => {
+                            // Explicit captures are deliberate egress intent:
+                            // register the files as session content so the
+                            // agent can resolve them without a second exec.
+                            let session_key = session_id.unwrap_or(&manifest.agent.id);
                             let captured = capture_layers_from_paths(
                                 &layer_store,
                                 capture_paths,
                                 agent_dir,
                                 capture_approval_scope.as_ref(),
+                                Some((gw_dir, session_key)),
                             );
                             if !captured.is_empty() {
                                 body["captured_layers"] = serde_json::Value::Array(captured);
@@ -2819,11 +2824,15 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
                     match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
                         Ok(layer_store) => {
+                            // Inferred auto-capture: layer-only. Registering a
+                            // dependency tree (node_modules, …) as per-file
+                            // session content would bloat every later exec.
                             let captured = capture_layers_from_paths(
                                 &layer_store,
                                 &inferred,
                                 agent_dir,
                                 capture_approval_scope.as_ref(),
+                                None,
                             );
                             if !captured.is_empty() {
                                 tracing::info!(
@@ -3233,11 +3242,22 @@ mod approval_message_tests {
 
 /// Execute layer capture for a list of paths. Returns JSON objects for
 /// `captured_layers`.
+///
+/// When `content_egress` is `Some((gateway_dir, session_key))`, every captured
+/// file is ALSO registered as session content: the layer digest alone is a
+/// write-only artifact (mountable, but not addressable via `resolve` and not
+/// ingestible by `artifact_build`), which stranded the adapter agent's
+/// generated files in its own sandbox. Registered content gives the agent
+/// `cnt_` refs it can resolve, read, and pass to `artifact_build` directly.
+/// Auto-capture (inferred dependency layers) passes `None` — registering a
+/// whole node_modules tree as per-file content mounts would bloat every
+/// subsequent exec.
 fn capture_layers_from_paths(
     layer_store: &crate::layer_store::LayerStore,
     capture_paths: &[crate::runtime::tools::CapturePath],
     agent_dir: &Path,
     approval_scope: Option<&LayerApprovalScope>,
+    content_egress: Option<(&Path, &str)>,
 ) -> Vec<serde_json::Value> {
     let mut captured = Vec::new();
     for cap in capture_paths {
@@ -3262,6 +3282,12 @@ fn capture_layers_from_paths(
             continue;
         }
 
+        let content_files = content_egress
+            .map(|(gw_dir, session_key)| {
+                register_captured_files_as_content(gw_dir, session_key, &host_path, &cap.path)
+            })
+            .unwrap_or_default();
+
         match layer_store.create_from_dir(
             &host_path,
             &cap.path,
@@ -3275,6 +3301,7 @@ fn capture_layers_from_paths(
                     mount_as = %cap.mount_as,
                     layer_id = %layer.layer_id,
                     has_scope = layer.approval_scope.is_some(),
+                    content_files = content_files.len(),
                     "Captured sandbox path as layer"
                 );
                 captured.push(serde_json::json!({
@@ -3286,6 +3313,9 @@ fn capture_layers_from_paths(
                     "size_bytes": layer.size_bytes,
                     "approval_scope": layer.approval_scope,
                     "resolved_packages": layer.resolved_packages,
+                    // Readable handles: `resolve` each ref (include=content) or
+                    // pass the names to artifact_build as inputs.
+                    "content_files": content_files,
                 }));
             }
             Err(e) => {
@@ -3299,6 +3329,122 @@ fn capture_layers_from_paths(
         }
     }
     captured
+}
+
+/// Bounds for the capture→content egress: a capture path is deliberate agent
+/// intent, but a runaway generator must not mount hundreds of files into
+/// every subsequent exec in the session.
+const CAPTURE_CONTENT_MAX_FILES: usize = 64;
+const CAPTURE_CONTENT_MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
+/// Register every file under a captured directory as session content.
+/// Returns one `{path, name, ref, bytes}` descriptor per registered file so
+/// the tool result can hand the agent resolvable handles.
+fn register_captured_files_as_content(
+    gw_dir: &Path,
+    session_key: &str,
+    host_dir: &Path,
+    sandbox_path: &str,
+) -> Vec<serde_json::Value> {
+    use crate::runtime::content_store::{ContentStore, ContentVisibility};
+
+    // Content names allow alphanumerics, '_', '-', '.', '/'; sanitize the
+    // sandbox path into a deterministic prefix (`/tmp/wrapper-out` →
+    // `wrapper-out`). The sandbox workspace root IS `/tmp`, and content
+    // mounts back at `/tmp/<name>` — so the leading `tmp/` component is
+    // workspace framing, not part of the name.
+    let stripped = sandbox_path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .strip_prefix("tmp/")
+        .unwrap_or_else(|| sandbox_path.trim_start_matches('/').trim_end_matches('/'));
+    let prefix: String = stripped
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(store) = ContentStore::new(gw_dir) else {
+        return Vec::new();
+    };
+
+    // Deterministic order; do not follow symlinks.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![host_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+
+    let mut registered = Vec::new();
+    let mut total_bytes = 0usize;
+    for file in files {
+        if registered.len() >= CAPTURE_CONTENT_MAX_FILES {
+            tracing::warn!(
+                target: "sandbox",
+                path = %sandbox_path,
+                max = CAPTURE_CONTENT_MAX_FILES,
+                "Capture content registration hit the file cap; remaining files are layer-only"
+            );
+            break;
+        }
+        let Ok(bytes) = std::fs::read(&file) else {
+            continue;
+        };
+        if total_bytes + bytes.len() > CAPTURE_CONTENT_MAX_TOTAL_BYTES {
+            tracing::warn!(
+                target: "sandbox",
+                path = %sandbox_path,
+                max = CAPTURE_CONTENT_MAX_TOTAL_BYTES,
+                "Capture content registration hit the byte cap; remaining files are layer-only"
+            );
+            break;
+        }
+        let Ok(rel) = file.strip_prefix(host_dir) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let name = format!("{prefix}/{rel_str}");
+        let Ok(handle) = store.write(&bytes) else {
+            continue;
+        };
+        if store
+            .register_name_with_visibility(session_key, &name, &handle, ContentVisibility::Session)
+            .is_err()
+        {
+            continue;
+        }
+        total_bytes += bytes.len();
+        let alias = ContentStore::get_short_alias(&handle);
+        registered.push(serde_json::json!({
+            "path": rel_str,
+            "name": name,
+            "ref": format!("cnt_{}", alias),
+            "bytes": bytes.len(),
+        }));
+    }
+    registered
 }
 
 /// Detect package install commands that deposit files into a known directory
@@ -3508,6 +3654,83 @@ mod approval_ref_binding_tests {
         let decision = decision("coder.default", "root/coder.default-1", "root");
         validate_approval_ref_context(&decision, "coder.default", Some("root/coder.default-1"))
             .expect("same agent + same root should be accepted");
+    }
+}
+
+#[cfg(test)]
+mod capture_content_tests {
+    use super::register_captured_files_as_content;
+
+    #[test]
+    fn registers_captured_files_as_resolvable_session_content() {
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let capture = tempfile::tempdir().expect("capture tempdir");
+        let scripts = capture.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(capture.path().join("SKILL.md"), b"manifest").unwrap();
+        std::fs::write(scripts.join("pre_map.py"), b"print('pre')").unwrap();
+        std::fs::write(scripts.join("post_map.py"), b"print('post')").unwrap();
+
+        let registered = register_captured_files_as_content(
+            gw.path(),
+            "session-test/session-1",
+            capture.path(),
+            "/tmp/wrapper-out",
+        );
+
+        assert_eq!(registered.len(), 3, "all files registered: {registered:?}");
+        let names: Vec<&str> = registered
+            .iter()
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"wrapper-out/SKILL.md"), "{names:?}");
+        assert!(names.contains(&"wrapper-out/scripts/pre_map.py"), "{names:?}");
+        for f in &registered {
+            assert!(f.get("ref").and_then(|r| r.as_str()).unwrap().starts_with("cnt_"));
+        }
+
+        // Registered content is readable by name — the resolve/artifact_build path.
+        let store =
+            crate::runtime::content_store::ContentStore::new(gw.path()).expect("content store");
+        let bytes = store
+            .read_by_name("session-test/session-1", "wrapper-out/scripts/pre_map.py")
+            .expect("registered content must be readable by name");
+        assert_eq!(bytes, b"print('pre')");
+    }
+
+    #[test]
+    fn sanitizes_unsafe_path_characters_into_content_prefix() {
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let capture = tempfile::tempdir().expect("capture tempdir");
+        std::fs::write(capture.path().join("a.txt"), b"data").unwrap();
+
+        let registered = register_captured_files_as_content(
+            gw.path(),
+            "session-test/session-2",
+            capture.path(),
+            "/tmp/weird path!",
+        );
+        assert_eq!(registered.len(), 1);
+        let name = registered[0].get("name").and_then(|n| n.as_str()).unwrap();
+        assert_eq!(name, "weird_path_/a.txt", "unsafe chars replaced: {name}");
+    }
+
+    #[test]
+    fn file_cap_stops_registration_but_keeps_layer_independent() {
+        // The cap is a bound, not a failure: registration stops, and the
+        // caller proceeds with the layer capture regardless.
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let capture = tempfile::tempdir().expect("capture tempdir");
+        for i in 0..(super::CAPTURE_CONTENT_MAX_FILES + 10) {
+            std::fs::write(capture.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let registered = register_captured_files_as_content(
+            gw.path(),
+            "session-test/session-3",
+            capture.path(),
+            "/tmp/bulk",
+        );
+        assert_eq!(registered.len(), super::CAPTURE_CONTENT_MAX_FILES);
     }
 }
 
