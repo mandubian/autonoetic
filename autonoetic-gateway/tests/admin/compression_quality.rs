@@ -31,6 +31,7 @@ fn get_test_llm_config() -> Option<(LlmPreset, reqwest::Client)> {
         fallback_model: None,
         chat_only: None,
         context_window_tokens: None,
+        max_tokens: None,
         base_url: None,
         api_key_env: None,
         thinking: None,

@@ -10,6 +10,7 @@
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
 use crate::support::{seed_agent_revision, TestWorkspace};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 /// The adapter shape: caller speaks `{location}`, the base speaks `{city}` /
@@ -226,6 +227,149 @@ async fn broken_pre_hook_fails_the_turn_without_running_the_entrypoint() -> anyh
                 msg.contains("pre_process"),
                 "error should name the failed hook, got: {msg}"
             );
+        }
+    }
+    Ok(())
+}
+
+/// The full #1251 cheap path with the real generator: schema_diff →
+/// generate_wrapper --wrapper-mode script → install → spawn. The reply must
+/// be the deterministic mapped output of the copied base script — no LLM
+/// anywhere in the turn.
+#[tokio::test]
+async fn generated_script_wrapper_runs_end_to_end_without_an_llm() -> anyhow::Result<()> {
+    let adapter_scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("agents")
+        .join("evolution")
+        .join("agent-adapter.default")
+        .join("scripts");
+
+    // The base speaks `{city} -> {summary}`; the caller wants `{location} ->
+    // {result}`. The base entry is a deterministic script.
+    let workspace = TestWorkspace::new()?;
+    let wrapper_id = "generated-script-wrapper";
+    let wrapper_dir = workspace.agents_dir.join(wrapper_id);
+    let base_entry = workspace.path().join("base_weather.py");
+    std::fs::write(
+        &base_entry,
+        r#"#!/usr/bin/env python3
+import json, sys
+payload = json.load(sys.stdin)
+print(json.dumps({"summary": f"forecast:{payload['city']}"}))
+"#,
+    )?;
+
+    let diff_input = serde_json::json!({
+        "base_accepts": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}},
+        "base_returns": {"type": "object", "required": ["summary"], "properties": {"summary": {"type": "string"}}},
+        "target_accepts": {"type": "object", "required": ["location"], "properties": {"location": {"type": "string"}}},
+        "target_returns": {"type": "object", "required": ["result"], "properties": {"result": {"type": "string"}}}
+    });
+    let diff = {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("python3")
+            .arg(adapter_scripts.join("schema_diff.py"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(serde_json::to_string(&diff_input).unwrap().as_bytes())?;
+        let out = child.wait_with_output()?;
+        assert!(out.status.success());
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)?
+    };
+
+    let target_spec = serde_json::json!({
+        "accepts": diff_input["target_accepts"],
+        "returns": diff_input["target_returns"]
+    });
+    let base_schemas = serde_json::json!({
+        "accepts": diff_input["base_accepts"],
+        "returns": diff_input["base_returns"]
+    });
+    let gen = Command::new("python3")
+        .arg(adapter_scripts.join("generate_wrapper.py"))
+        .arg("--base-skill")
+        .arg({
+            let p = workspace.path().join("base-skill.md");
+            std::fs::write(&p, "---\nname: \"base.weather\"\n---\n# Weather\n")?;
+            p
+        }.to_string_lossy().to_string())
+        .arg("--base-agent-id")
+        .arg("base.weather")
+        .arg("--wrapper-id")
+        .arg(wrapper_id)
+        .arg("--target-spec-json")
+        .arg(serde_json::to_string(&target_spec).unwrap())
+        .arg("--schema-diff-json")
+        .arg(serde_json::to_string(&diff).unwrap())
+        .arg("--base-schema-json")
+        .arg(serde_json::to_string(&base_schemas).unwrap())
+        .arg("--base-manifest-json")
+        .arg(r#"{"capabilities": []}"#)
+        .arg("--base-revision-digest")
+        .arg("rev_sha256:testbase")
+        .arg("--wrapper-mode")
+        .arg("script")
+        .arg("--base-script-path")
+        .arg(base_entry.to_string_lossy().to_string())
+        .arg("--output-dir")
+        .arg(wrapper_dir.to_string_lossy().to_string())
+        .output()?;
+    assert!(
+        gen.status.success(),
+        "generate_wrapper.py failed: {}",
+        String::from_utf8_lossy(&gen.stderr)
+    );
+    let gen_json: serde_json::Value = serde_json::from_slice(&gen.stdout)?;
+    assert_eq!(
+        gen_json["verdict"], "ok",
+        "the flat rename should be proven by the round-trip: {gen_json}"
+    );
+
+    let config = workspace.gateway_config();
+    let store = setup_store(&config, &workspace.agents_dir, wrapper_id)?;
+
+    let execution = GatewayExecutionService::new(config, store);
+    let result = execution
+        .spawn_agent_once(
+            wrapper_id,
+            r#"{"location":"Paris"}"#,
+            "session-generated-script-wrapper",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await;
+
+    match result {
+        Ok(spawn_result) => {
+            let reply = spawn_result.assistant_reply.expect("should have reply");
+            assert!(
+                reply.contains("forecast:Paris") && reply.contains("\"result\""),
+                "reply should be the target-shape mapped output, got: {reply}"
+            );
+            assert!(
+                !reply.contains("summary") && !reply.contains("city"),
+                "base-shape fields must not leak past the mapping hooks, got: {reply}"
+            );
+        }
+        Err(e) => {
+            if is_bwrap_unavailable(&e) {
+                eprintln!("skipping generated_script_wrapper_runs_end_to_end_without_an_llm: bwrap not available");
+                return Ok(());
+            }
+            return Err(e);
         }
     }
     Ok(())

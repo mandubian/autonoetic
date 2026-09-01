@@ -468,8 +468,9 @@ fn mixed_acceptance_smoke_remote_paths_never_see_local_only() -> anyhow::Result<
     )
     .expect("snippet");
     assert!(
-        !snippet.contains(CANARY),
-        "memory priming leaked canary: {snippet}"
+        !snippet.0.contains(CANARY),
+        "memory priming leaked canary: {}",
+        snippet.0
     );
     Ok(())
 }
