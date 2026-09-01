@@ -429,7 +429,7 @@ impl LoopGuard {
             .unwrap_or(0);
         if self.idle_loop_floor_secs > 0 {
             if let Some(prev) = self.last_loop_at_ms {
-                if now_ms.saturating_sub(prev) >= self.idle_loop_floor_secs * 1000 {
+                if now_ms.saturating_sub(prev) >= self.idle_loop_floor_secs.saturating_mul(1000) {
                     self.current_loops = 0;
                 }
             }

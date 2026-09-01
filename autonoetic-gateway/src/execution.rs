@@ -1136,12 +1136,18 @@ impl GatewayExecutionService {
     }
 
     pub async fn is_session_degraded(&self, session_id: &str) -> bool {
-        self.degraded_sessions.lock().await.contains(session_id)
-            || self
-                .guard_degraded_sessions
-                .lock()
-                .await
-                .contains(session_id)
+        // Same scope rule as the executor's turn-start check
+        // (`lifecycle::session_is_degraded`): operator/security degradation
+        // covers the subtree (root id matches children), guard degradation
+        // is exact-session. The scheduler's escape-threshold sweep relies on
+        // this to avoid re-degrading children of an already-degraded root.
+        let operator = self.degraded_sessions.lock().await;
+        let guard = self.guard_degraded_sessions.lock().await;
+        crate::runtime::lifecycle::session_is_degraded(
+            Some(&operator),
+            Some(&guard),
+            session_id,
+        )
     }
 
     fn resolve_inference_agent_id(
@@ -6323,6 +6329,49 @@ fn validate_against_schema(input: &str, schema: &serde_json::Value) -> SchemaVal
 mod tests {
     use super::*;
     use crate::runtime::session_context::session_context_path;
+
+    #[tokio::test]
+    async fn is_session_degraded_scope_matches_turn_start_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: temp.path().to_path_buf(),
+            agents_dir: temp.path().join("agents"),
+            ..Default::default()
+        };
+        let service = GatewayExecutionService::new(config, None);
+        let child = "adapter/agent-adapter.default-835202ee";
+
+        service
+            .degraded_sessions
+            .lock()
+            .await
+            .insert("adapter".to_string());
+        assert!(
+            service.is_session_degraded(child).await,
+            "operator root degradation must reach children"
+        );
+        service
+            .degraded_sessions
+            .lock()
+            .await
+            .remove("adapter");
+
+        service
+            .guard_degraded_sessions
+            .lock()
+            .await
+            .insert("adapter".to_string());
+        assert!(
+            !service.is_session_degraded(child).await,
+            "guard root degradation must stay session-local"
+        );
+        service
+            .guard_degraded_sessions
+            .lock()
+            .await
+            .insert(child.to_string());
+        assert!(service.is_session_degraded(child).await);
+    }
 
     #[test]
     fn test_build_initial_history_injects_session_context_before_user_message() {

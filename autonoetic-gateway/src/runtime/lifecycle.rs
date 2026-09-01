@@ -110,7 +110,7 @@ pub fn session_close_outcome_from_turn_outcome(
 ///   this session's loop health. Session-local by design — a fresh child
 ///   spawned after its root flailed inherits no punishment; it faces its own
 ///   capability and approval gates.
-fn session_is_degraded(
+pub(crate) fn session_is_degraded(
     operator_set: Option<&std::collections::HashSet<String>>,
     guard_set: Option<&std::collections::HashSet<String>>,
     session_id: &str,
