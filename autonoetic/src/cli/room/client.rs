@@ -7,24 +7,17 @@
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse};
 use autonoetic_gateway::server::transport::BoxedConnection;
 use autonoetic_types::config::GatewayConfig;
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::sync::Mutex as StdMutex;
+use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::sync::Mutex;
 
 /// The async path stores a type-erased transport connection (#1122): the
 /// RoomClient is transport-agnostic on the Tokio side, so a Unix-socket or
-/// in-process gateway transport drops in without touching call logic. The
-/// sync TUI path keeps a plain blocking `TcpStream` — no nested runtime.
+/// in-process gateway transport drops in without touching call logic.
 struct AsyncPersistedConn {
     reader: AsyncBufReader<tokio::io::ReadHalf<BoxedConnection>>,
     writer: tokio::io::WriteHalf<BoxedConnection>,
-}
-
-struct SyncPersistedConn {
-    stream: TcpStream,
 }
 
 pub struct RoomClient {
@@ -32,8 +25,6 @@ pub struct RoomClient {
     token: String,
     /// Async path (`handle_room` drain / follow) — main Tokio runtime.
     conn: Mutex<Option<AsyncPersistedConn>>,
-    /// Sync path (Session Room TUI) — plain blocking TCP, no nested runtime.
-    sync_conn: StdMutex<Option<SyncPersistedConn>>,
 }
 
 impl Clone for RoomClient {
@@ -42,7 +33,6 @@ impl Clone for RoomClient {
             addr: self.addr.clone(),
             token: self.token.clone(),
             conn: Mutex::new(None),
-            sync_conn: StdMutex::new(None),
         }
     }
 }
@@ -59,41 +49,7 @@ impl RoomClient {
             addr: format!("127.0.0.1:{}", config.port),
             token,
             conn: Mutex::new(None),
-            sync_conn: StdMutex::new(None),
         })
-    }
-
-    /// A non-connecting client for unit tests of pure call sites (paths that
-    /// return before any RPC). Calling `.call()` on it will fail to connect.
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self {
-            addr: "127.0.0.1:0".to_string(),
-            token: "test".to_string(),
-            conn: Mutex::new(None),
-            sync_conn: StdMutex::new(None),
-        }
-    }
-
-    /// Blocking RPC for the sync Session Room TUI. Uses a dedicated blocking
-    /// TCP connection so the TUI never nests `block_on` inside `#[tokio::main]`.
-    pub fn call_sync(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-        timeout: Duration,
-    ) -> anyhow::Result<serde_json::Value> {
-        for attempt in 0..2 {
-            match self.call_sync_once(method, &params, timeout) {
-                Ok(value) => return Ok(value),
-                Err(e) if attempt == 0 && is_transport_error(&e) => {
-                    self.drop_sync_conn();
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!("at most two sync call attempts")
     }
 
     /// One JSON-RPC round-trip. Returns the `result` value, or an error carrying
@@ -134,80 +90,6 @@ impl RoomClient {
                 timeout.as_secs()
             ),
         }
-    }
-
-    fn call_sync_once(
-        &self,
-        method: &str,
-        params: &serde_json::Value,
-        timeout: Duration,
-    ) -> anyhow::Result<serde_json::Value> {
-        let mut guard = self
-            .sync_conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("room sync connection mutex poisoned"))?;
-        self.ensure_sync_conn(&mut guard)?;
-        let conn = guard.as_mut().expect("sync connection established");
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: format!("room-{}", uuid::Uuid::new_v4()),
-            method: method.to_string(),
-            params: params.clone(),
-            auth_token: Some(self.token.clone()),
-        };
-        let encoded = serde_json::to_string(&request)?;
-
-        if conn.stream.set_write_timeout(Some(Duration::from_secs(5))).is_err() {
-            *guard = None;
-            anyhow::bail!("cannot set write timeout for {method}");
-        }
-        if let Err(e) = conn.stream.write_all(encoded.as_bytes()) {
-            *guard = None;
-            return Err(e.into());
-        }
-        if let Err(e) = conn.stream.write_all(b"\n") {
-            *guard = None;
-            return Err(e.into());
-        }
-        if let Err(e) = conn.stream.flush() {
-            *guard = None;
-            return Err(e.into());
-        }
-
-        if conn.stream.set_read_timeout(Some(timeout)).is_err() {
-            *guard = None;
-            anyhow::bail!("cannot set read timeout for {method}");
-        }
-        let mut reader = BufReader::new(
-            conn.stream
-                .try_clone()
-                .map_err(|e| io::Error::other(e.to_string()))?,
-        );
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                *guard = None;
-                anyhow::bail!("gateway closed the connection with no response to {method}");
-            }
-            Ok(_) => {}
-            Err(e)
-                if e.kind() == io::ErrorKind::TimedOut
-                    || e.kind() == io::ErrorKind::WouldBlock =>
-            {
-                *guard = None;
-                anyhow::bail!(
-                    "{method} timed out after {}s (gateway not responding)",
-                    timeout.as_secs()
-                );
-            }
-            Err(e) => {
-                *guard = None;
-                return Err(e.into());
-            }
-        }
-
-        decode_response(method, &line)
     }
 
     async fn call_on_conn_async(
@@ -257,25 +139,6 @@ impl RoomClient {
         decode_response(method, &line)
     }
 
-    fn ensure_sync_conn(
-        &self,
-        guard: &mut Option<SyncPersistedConn>,
-    ) -> anyhow::Result<()> {
-        if guard.is_some() {
-            return Ok(());
-        }
-        let addr: SocketAddr = self
-            .addr
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid gateway addr {}: {}", self.addr, e))?;
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
-            anyhow::anyhow!("cannot reach gateway at {}: {}", self.addr, e)
-        })?;
-        let _ = stream.set_nodelay(true);
-        *guard = Some(SyncPersistedConn { stream });
-        Ok(())
-    }
-
     async fn ensure_async_conn(
         &self,
         guard: &mut Option<AsyncPersistedConn>,
@@ -294,12 +157,6 @@ impl RoomClient {
             writer: write_half,
         });
         Ok(())
-    }
-
-    fn drop_sync_conn(&self) {
-        if let Ok(mut guard) = self.sync_conn.lock() {
-            *guard = None;
-        }
     }
 
     async fn drop_async_conn(&self) {

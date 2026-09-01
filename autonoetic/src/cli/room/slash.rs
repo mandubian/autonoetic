@@ -1202,6 +1202,10 @@ mod tests {
 
 /// Minimal realistic catalog for completion tests: a couple of registry
 /// tools, one MCP server, the path families, and the restrictive labels.
+///
+/// The `#[test]` functions below it are stripped from non-test builds, so
+/// without this gate the helper compiles into the binary with no callers.
+#[cfg(test)]
 fn sample_catalog() -> EgressSourceCatalog {
     EgressSourceCatalog {
         tools: vec![
