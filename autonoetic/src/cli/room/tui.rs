@@ -7064,7 +7064,10 @@ pub fn run(
                             detail = None;
                             selected = 0;
                         }
-                        KeyCode::Char('G') | KeyCode::End => {
+                        // End only: `G` is owned by the grants panel arm above,
+                        // which matches first, so listing it here never fired.
+                        // `g`/Home still jumps to the top.
+                        KeyCode::End => {
                             follow = true;
                             detail = None;
                         }
