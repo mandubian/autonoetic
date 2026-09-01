@@ -38,15 +38,16 @@ pub fn escalate_procedure_block() -> crate::runtime::guidance::GuidanceBlock {
         ]),
         prose: "**Escalating federation verdicts.** Read the verdicts with `promotion_query({artifact_ref})` \
 — not from child reply JSON. Execution roles (`unit_test_runner`, `sealed_evaluator`) need an \
-`execution_trace_id`; the gateway derives `pass` from it. Then **seed the revision before escalating**: \
-call `agent_revision_create({agent_id, artifact_ref})` and pass the returned `revision_id` to \
-`federation_escalate`. Seeding routes the escalation through the robust path (capabilities read from the \
-revision record) instead of parsing the artifact's `SKILL.md` frontmatter at escalate time, which fails \
-opaquely and only after the operator has been bothered. Never invent placeholder ids like `rev-initial`.\n\n\
+`execution_trace_id`; the gateway derives `pass` from it. Then escalate: **omit `revision_id` and pass \
+the `artifact_ref`** — for a new agent the review binds to the artifact (`unseeded:<artifact>`) and \
+capabilities are read from its `SKILL.md` frontmatter, which `artifact_build` already validated at build \
+time. The approved escalation is honored at promote time after the revision is seeded downstream. Only \
+seed via `agent_revision_create` yourself if your manifest holds the `AgentRevision` capability — the \
+planner does not, so a seed attempt is `policy_denied` (`do_not_retry`). Do not invent placeholder ids \
+like `rev-initial`: an unknown `revision_id` is rejected.\n\n\
 ```json\n\
 federation_escalate({\n\
   \"artifact_ref\": \"<ar.* ref>\", \"agent_id\": \"<agent_id>\",\n\
-  \"revision_id\": \"<rev_sha256:... from agent_revision_create>\",\n\
   \"root_session_id\": \"<root_session_id>\",\n\
   \"role_verdicts\": [\n\
     {\"role\": \"auditor\", \"agent_id\": \"auditor.default\", \"passed\": true, \"findings_summary\": \"...\", \"recorded_at\": \"...\"}\n\

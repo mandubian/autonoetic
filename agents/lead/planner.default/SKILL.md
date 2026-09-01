@@ -413,20 +413,19 @@ libraries, coder declares them in `requirements.txt` / `package.json` and may re
 `status: "needs_packager"`. Spawn **`packager.default`** before federation gates so
 `unit_test_runner` can import deps via mounted layers.
 
-**Order:** coder → packager (if needed) → federation gates → `agent_revision_create` (seed) → `federation_escalate` (pass the seeded `revision_id`) → agent-factory.
+**Order:** coder → packager (if needed) → federation gates → `federation_escalate` (omit `revision_id`; the review binds to the `artifact_ref`) → agent-factory.
 
 Gating an unpackaged artifact then packaging invalidates every `promotion_record` (new digest).
 Always pass the **post-packager** `artifact_ref` to federation roles and to agent-factory.
 
-**Seed the revision before escalating.** Once all federation roles pass, call
-`agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` and pass
-the returned `revision_id` (`rev_sha256:...`) to `federation_escalate`. This routes the
-escalation through the robust **seeded** path (capabilities read from the revision
-record) instead of the fragile **unseeded** path that parses the artifact's `SKILL.md`
-frontmatter at escalate time — a missing/invalid frontmatter then fails fast at seed
-time, before the operator is ever bothered. If `agent_revision_create` returns
-`promotion_gate_content_digest_would_change`, the artifact changed since the gates ran —
-re-run federation on the current `artifact_ref` rather than reseeding.
+**Escalate unseeded — you do not hold `AgentRevision`.** Only `specialized_builder.default` can call
+`agent_revision_create`; for you it is `policy_denied` (`do_not_retry`). Omit `revision_id` entirely and
+pass the `artifact_ref` (ar.*) to `federation_escalate`: the review binds to the artifact under
+`unseeded:<artifact>`, capabilities are read from the artifact's `SKILL.md` (validated by
+`artifact_build` at build time), and the approved escalation is honored at promote time after the
+revision is seeded downstream. Never invent a placeholder `revision_id` — an unknown id is rejected.
+The unseeded path only applies to **new** agents; re-promoting an already-installed agent requires a
+seeded revision, which is the specialized_builder's job.
 
 ---
 
@@ -451,12 +450,11 @@ Route any mismatch back to `coder.default` with the specific field and the fix, 
 
 **3. Collect verdicts:** Call `promotion_query({artifact_ref})` — not child reply JSON. Execution roles (`unit_test_runner`, `sealed_evaluator`) need `execution_trace_id`; gateway derives `pass`. Auditor needs `pass: true`, no `critical` findings.
 
-**4. Seed revision, then escalate:** Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` → pass the returned `revision_id` (`rev_sha256:...`; `already_exists`/`reactivated` is fine) to `federation_escalate`. Never omit `revision_id` — the unseeded path parses SKILL.md at escalate time and fails opaquely. Use `federation_escalate` (not `session_escalate`).
+**4. Escalate (unseeded):** Call `federation_escalate` with `artifact_ref` and **no** `revision_id` — you lack `AgentRevision`, so `agent_revision_create` would be denied. The review binds to the artifact; agent-factory seeds the revision after approval. Use `federation_escalate` (not `session_escalate`). (Re-promoting an already-installed agent needs a seeded revision — route that to `specialized_builder.default`.)
 
 ```json
 federation_escalate({
   "artifact_ref": "<ar.* ref>", "agent_id": "<agent_id>",
-  "revision_id": "<rev_sha256:... from agent_revision_create>",
   "root_session_id": "<root_session_id>",
   "role_verdicts": [
     {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},
@@ -490,7 +488,7 @@ After `coder.default` rebuilds (new `artifact_ref`), before re-spawning gates:
 
 ```json
 federation_escalate({
-  "artifact_ref": "<current ar.*>", "agent_id": "<agent_id>", "revision_id": "<rev_sha256:...>",
+  "artifact_ref": "<current ar.*>", "agent_id": "<agent_id>",
   "root_session_id": "<root_session_id>",
   "role_verdicts": [
     {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...",
