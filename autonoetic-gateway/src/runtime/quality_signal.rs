@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 
 use crate::runtime::memory::MemoryStore;
 use crate::scheduler::gateway_store::GatewayStore;
@@ -27,6 +28,7 @@ pub async fn maybe_emit_quality_signal(
     agent_id: &str,
     turn_count: u64,
     session_suspended: bool,
+    close_outcome: SessionCloseOutcome,
 ) {
     if !config.auto_learning.enabled || !config.auto_learning.quality_signals {
         return;
@@ -41,7 +43,13 @@ pub async fn maybe_emit_quality_signal(
         return;
     }
 
-    let signal = match compute_signal(store, session_id, agent_id, turn_count) {
+    let signal = match compute_signal(
+        store,
+        session_id,
+        agent_id,
+        turn_count,
+        close_outcome.is_clean_completion(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(
@@ -124,28 +132,40 @@ fn compute_signal(
     session_id: &str,
     agent_id: &str,
     turn_count: u64,
+    completed_normally: bool,
 ) -> anyhow::Result<QualitySignal> {
     let events = store.search_causal_events(Some(session_id), None, 500)?;
 
     let tool_call_count = events
         .iter()
-        .filter(|e| e.action == "tool_requested" || e.action == "tool_completed")
-        .count() as u64
-        / 2;
+        .filter(|e| {
+            (e.category == "tool_invoke" && e.action == "completed")
+                || (e.category == "tool" && e.action == "failure")
+        })
+        .count() as u64;
 
     let error_count = events
         .iter()
-        .filter(|e| e.status == "error" || e.status == "failed")
+        .filter(|e| {
+            e.status.eq_ignore_ascii_case("error") || e.status.eq_ignore_ascii_case("failed")
+        })
         .count() as u64;
 
     let approval_count = events
         .iter()
-        .filter(|e| e.action == "approval_created" || e.action == "gate_suspended")
+        .filter(|e| {
+            e.action == "approval_created"
+                || e.action == "gate_suspended"
+                || (e.category == "tool_invoke"
+                    && e.action == "completed"
+                    && e
+                        .payload
+                        .as_deref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| v.get("approval_request_id").cloned())
+                        .is_some())
+        })
         .count() as u64;
-
-    let completed_normally = events
-        .iter()
-        .any(|e| e.action == "session_closed" && e.status == "ok");
 
     Ok(QualitySignal {
         session_id: session_id.to_string(),
@@ -245,4 +265,97 @@ pub fn build_quality_trend_report(
         "agent_filter": agent_filter,
         "agents": rows,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autonoetic_types::causal_chain::CausalEventRecord;
+
+    fn event(session_id: &str, category: &str, action: &str, status: &str, payload: Option<String>) -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: "planner.default".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: Some("turn-000001".to_string()),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: category.to_string(),
+            action: action.to_string(),
+            status: status.to_string(),
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            target: None,
+            payload,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn completed_normally_true_adds_completion_bonus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+        let sid = "session-test-clean";
+        store.create_causal_event(&event(sid, "session", "start", "SUCCESS", None)).unwrap();
+        store.create_causal_event(&event(sid, "lifecycle", "hibernate", "SUCCESS", None)).unwrap();
+        store.create_causal_event(&event(sid, "session", "history.persisted", "SUCCESS", None)).unwrap();
+
+        let signal = compute_signal(&store, sid, "planner.default", 1, true).unwrap();
+        assert!(signal.completed_normally);
+        assert_eq!(signal.tool_call_count, 0);
+        assert_eq!(signal.error_count, 0);
+        assert_eq!(signal.approval_count, 0);
+        assert!((signal.overall_score() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn errored_close_is_not_completed_normally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+        let sid = "session-test-error";
+        store.create_causal_event(&event(sid, "session", "start", "SUCCESS", None)).unwrap();
+        store.create_causal_event(&event(sid, "context_governor", "error", "ERROR", None)).unwrap();
+
+        let signal = compute_signal(&store, sid, "planner.default", 2, false).unwrap();
+        assert!(!signal.completed_normally);
+        assert_eq!(signal.error_count, 1);
+        assert_eq!(signal.overall_score(), 0.7);
+    }
+
+    #[test]
+    fn tool_calls_counted_from_tracer_vocabulary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+        let sid = "session-test-tools";
+        store.create_causal_event(&event(sid, "tool_invoke", "requested", "SUCCESS", None)).unwrap();
+        store.create_causal_event(&event(sid, "tool_invoke", "completed", "SUCCESS", None)).unwrap();
+        store.create_causal_event(&event(sid, "tool", "failure", "ERROR", None)).unwrap();
+        store.create_causal_event(&event(sid, "tool_call", "cache_hit", "SUCCESS", None)).unwrap();
+
+        let signal = compute_signal(&store, sid, "planner.default", 1, true).unwrap();
+        assert_eq!(signal.tool_call_count, 2);
+        assert_eq!(signal.error_count, 1);
+    }
+
+    #[test]
+    fn approvals_counted_from_tool_completion_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+        let sid = "session-test-approval";
+        store
+            .create_causal_event(&event(
+                sid,
+                "tool_invoke",
+                "completed",
+                "SUCCESS",
+                Some(serde_json::json!({"approval_request_id": "apr-1"}).to_string()),
+            ))
+            .unwrap();
+        store.create_causal_event(&event(sid, "tool_invoke", "completed", "SUCCESS", None)).unwrap();
+
+        let signal = compute_signal(&store, sid, "planner.default", 1, false).unwrap();
+        assert_eq!(signal.approval_count, 1);
+        assert_eq!(signal.tool_call_count, 2);
+    }
 }
