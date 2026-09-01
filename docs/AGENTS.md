@@ -412,7 +412,7 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `agent_spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
+| `agent_spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent. Pass `resident_idle_ttl_secs` to keep the child addressable by `agent_message` after it completes (parks instead of terminating; bundle-declared residency wins). |
 | `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
 | `agent_inspect` | `(agent_id: string, ...) → metadata` | Inspect *any* installed agent's metadata/capabilities/revision |
 | `self_describe` | `() → self` | Describe *yourself* — see below |
