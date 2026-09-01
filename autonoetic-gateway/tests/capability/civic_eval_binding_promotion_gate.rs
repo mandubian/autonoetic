@@ -143,6 +143,7 @@ fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
 struct Fixture {
     _temp: tempfile::TempDir,
     gateway_dir: PathBuf,
+    agents_dir: PathBuf,
     proposer_dir: PathBuf,
     config: GatewayConfig,
     registry: autonoetic_gateway::runtime::tools::NativeToolRegistry,
@@ -213,7 +214,8 @@ fn setup() -> Fixture {
 
     Fixture {
         _temp: temp,
-        gateway_dir,
+        gateway_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
         proposer_dir,
         config,
         registry,
@@ -315,8 +317,18 @@ fn promote(f: &Fixture, config: &GatewayConfig) -> serde_json::Value {
     serde_json::from_str(&result).expect("response is JSON")
 }
 
-fn cfg_with_binding(enabled: bool, min_pass_ratio: f64) -> GatewayConfig {
+fn cfg_with_binding(f: &Fixture, enabled: bool, min_pass_ratio: f64) -> GatewayConfig {
     let mut cfg = GatewayConfig::default();
+    // Scope the promote call to the fixture's own runtime/agents dirs. The
+    // `GatewayConfig::default()` runtime dir is the process CWD's `./runtime`
+    // — a fixed location shared by every test process on the machine. These
+    // tests all promote `civic.binding.test` from the same fixed root session,
+    // so with the default dir the promote's single-flight reservation
+    // (`{workflow}:promote:civic.binding.test:…`) collided across concurrent
+    // nextest processes and one of them came back `coalesced` instead of
+    // `promoted` — a cross-process flake `serial_test` cannot prevent.
+    cfg.runtime_dir = f.gateway_dir.clone();
+    cfg.agents_dir = f.agents_dir.clone();
     cfg.require_operator_approval_for_new_agents = false;
     cfg.civic_eval_binding = CivicEvalBindingConfig {
         enabled,
@@ -334,7 +346,7 @@ fn binding_disabled_promotes_with_low_score_advisory_only() {
     record_full_gate_pass(&f);
     seed_civic_run(&f, "eval-low-1", 1, 5, EvalRunStatus::Failed); // 0.2
 
-    let cfg = cfg_with_binding(false, 0.8);
+    let cfg = cfg_with_binding(&f, false, 0.8);
     let json = promote(&f, &cfg);
 
     assert_eq!(json["ok"], true, "binding disabled → promote succeeds: {json}");
@@ -349,7 +361,7 @@ fn binding_enabled_below_threshold_rejected() {
     record_full_gate_pass(&f);
     seed_civic_run(&f, "eval-below-1", 3, 5, EvalRunStatus::Failed); // 0.6 < 0.8
 
-    let cfg = cfg_with_binding(true, 0.8);
+    let cfg = cfg_with_binding(&f, true, 0.8);
     let json = promote(&f, &cfg);
 
     assert_eq!(json["ok"], false, "binding enabled + below → must reject: {json}");
@@ -381,7 +393,7 @@ fn binding_enabled_at_threshold_promotes_and_reports_passed() {
     record_full_gate_pass(&f);
     seed_civic_run(&f, "eval-pass-1", 4, 5, EvalRunStatus::Passed); // 0.8 == threshold
 
-    let cfg = cfg_with_binding(true, 0.8);
+    let cfg = cfg_with_binding(&f, true, 0.8);
     let json = promote(&f, &cfg);
 
     assert_eq!(json["ok"], true, "at-threshold → promote succeeds: {json}");
@@ -399,7 +411,7 @@ fn binding_enabled_missing_run_passes_through() {
     record_full_gate_pass(&f);
     // No seed_civic_run call.
 
-    let cfg = cfg_with_binding(true, 0.8);
+    let cfg = cfg_with_binding(&f, true, 0.8);
     let json = promote(&f, &cfg);
 
     assert_eq!(
