@@ -334,17 +334,6 @@ pub fn build_memory_context_snippet(
     Some((parts.join("\n"), primed))
 }
 
-/// Backward-compatible wrapper: composes system instructions with an optional
-/// user context snippet but no persona.
-pub(crate) fn compose_system_instructions_with_user_context(
-    agent_instructions: &str,
-    manifest: &AgentManifest,
-    output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
-    user_context_snippet: Option<&str>,
-) -> String {
-    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None, None, None)
-}
-
 /// Concatenate core + extended SKILL.md sections for the system prompt.
 ///
 /// The `<!-- extended -->` marker in `SKILL.md` was originally a "deferred

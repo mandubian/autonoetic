@@ -2070,25 +2070,6 @@ fn emit_decider_obligation_event(
     let _ = store.create_causal_event(&event);
 }
 
-fn decide_request(
-    config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    request_id: &str,
-    decided_by: &str,
-    reason: Option<String>,
-    status: ApprovalStatus,
-) -> anyhow::Result<ApprovalDecision> {
-    decide_request_with_options(
-        config,
-        gateway_store,
-        request_id,
-        decided_by,
-        reason,
-        status,
-        ApproveOptions::default(),
-    )
-}
-
 fn decide_request_with_options(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,

@@ -62,12 +62,6 @@ fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {
     )
 }
 
-fn is_sqlite_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<rusqlite::Error>()
-        .map(|e| matches!(e, rusqlite::Error::SqliteFailure(_, _)))
-        .unwrap_or(false)
-}
-
 /// Per-agent tally for the **civic-health** view (#772 E.2 / #771 D.2). See
 /// [`GatewayStore::civic_health`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
