@@ -301,7 +301,8 @@ operator_activity:
 # the timeline view — pending gates remain actionable via the pending
 # strip and approvals popup regardless). Unconfigured types keep the
 # built-in classification; unknown keys are reserved for future event
-# types. Invalid values fail config load.
+# types. Values are validated when the room starts — an invalid value
+# aborts the launch with a naming error.
 #   event_tiers:
 #     scheduled_job.completed: hidden
 #     workflow.started: significant

@@ -9,7 +9,7 @@
 use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChannel};
 use super::client::RoomClient;
 use super::markdown;
-use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
+use super::render::{self, ActorKind, FloorMode, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{
     Altitude, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
@@ -8918,14 +8918,15 @@ fn build_rich_row_lines(
             let mut prefix = format!("{rule}{rule} turn {l}{tag} ");
             // Chapter header: what the turn did/cost/thought (see
             // `render::turn_divider_labels`), only when it fits with a
-            // minimum tail of rule characters.
+            // minimum tail of rule characters. Widths are *display cells*,
+            // not char counts — the stats may carry wide glyphs (💭).
             if let Some(s) = &divider.stats {
                 let candidate = format!("{prefix}· {s} ");
-                if candidate.chars().count() + 4 <= total_w {
+                if UnicodeWidthStr::width(candidate.as_str()) + 4 <= total_w {
                     prefix = candidate;
                 }
             }
-            let fill = total_w.saturating_sub(prefix.chars().count());
+            let fill = total_w.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
             format!("{prefix}{}", rule.to_string().repeat(fill))
         } else {
             rule.to_string().repeat(total_w)
@@ -9408,39 +9409,8 @@ fn actor_color(actor: ActorKind) -> Color {
     }
 }
 
-/// View floor — which timeline rows are shown. `Altitude(f)` hides everything
-/// below `f`; `Story` is the process-arc preset: decisions and failures
-/// (Attention+) plus everything the session *said* and *concluded* — agent,
-/// operator, and peer messages, gate cards, and promotion verdicts — while
-/// plumbing and routine tool output stay hidden. One keystroke answers "what
-/// actually happened?".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FloorMode {
-    Altitude(Altitude),
-    Story,
-}
-
+/// Compact header indicator (glyph + name), same shape as an altitude.
 impl FloorMode {
-    /// Whether a timeline entry passes this floor. Story mode is a *union*,
-    /// not an altitude cut: narrative rows are Normal but still belong to the
-    /// arc, so they are admitted by tone, not altitude.
-    fn admits(self, entry: &SessionTimelineEntry) -> bool {
-        match self {
-            FloorMode::Altitude(f) => entry.altitude >= f,
-            FloorMode::Story => {
-                entry.altitude >= Altitude::Attention
-                    || matches!(
-                        render::tone_for_entry(entry),
-                        render::RowTone::AgentNarrative
-                            | render::RowTone::OperatorGate
-                            | render::RowTone::VerdictPass
-                            | render::RowTone::VerdictFail
-                    )
-            }
-        }
-    }
-
-    /// Compact header indicator (glyph + name), same shape as an altitude.
     fn indicator(self) -> String {
         match self {
             FloorMode::Altitude(a) => {
@@ -14525,6 +14495,28 @@ mod tests {
         assert!(bar.contains("1.2k/340 tok"), "got: {bar}");
         // The bar is width-bounded: prefix + fill == total_w (60+3+1+12+2+2).
         assert_eq!(bar.chars().count(), 80, "got: {bar}");
+
+        // Wide glyphs in the stats (💭 = 2 cells) must not overflow the bar:
+        // fit + fill are computed in display cells, so the rendered width is
+        // exactly total_w even though the char count is smaller.
+        let mut wide_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        wide_boundaries.insert(
+            0,
+            TurnDivider {
+                forkable: false,
+                stats: Some("2 calls: read, grep · 💭×9 · 12.3k/4.5k tok".into()),
+            },
+        );
+        let lines = build_rich_row_lines(
+            &spec, 0, &wide_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(
+            UnicodeWidthStr::width(bar.as_str()),
+            80,
+            "display width must equal total_w; got: {bar}"
+        );
+        assert!(bar.chars().count() < 80, "wide glyph counted as 1 char: {bar}");
 
         // A boundary without stats keeps the plain divider shape.
         let plain_boundaries: HashMap<usize, TurnDivider> =

@@ -30,6 +30,42 @@ pub fn altitude_glyph(altitude: Altitude) -> &'static str {
     }
 }
 
+/// View floor — which timeline rows are shown. `Altitude(f)` hides everything
+/// below `f`; `Story` is the process-arc preset: decisions and failures
+/// (Attention+) plus everything the session *said* and *concluded* — agent,
+/// operator, and peer messages, gate cards, and promotion verdicts — while
+/// plumbing and routine tool output stay hidden. One keystroke answers "what
+/// actually happened?".
+///
+/// Channel-neutral: both the interactive TUI (`a` key) and the read-only
+/// viewer/follow modes (`--min-altitude story`) filter through [`FloorMode::admits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorMode {
+    Altitude(Altitude),
+    Story,
+}
+
+impl FloorMode {
+    /// Whether a timeline entry passes this floor. Story mode is a *union*,
+    /// not an altitude cut: narrative rows are Normal but still belong to the
+    /// arc, so they are admitted by tone, not altitude.
+    pub fn admits(self, entry: &SessionTimelineEntry) -> bool {
+        match self {
+            FloorMode::Altitude(f) => entry.altitude >= f,
+            FloorMode::Story => {
+                entry.altitude >= Altitude::Attention
+                    || matches!(
+                        tone_for_entry(entry),
+                        RowTone::AgentNarrative
+                            | RowTone::OperatorGate
+                            | RowTone::VerdictPass
+                            | RowTone::VerdictFail
+                    )
+            }
+        }
+    }
+}
+
 /// A compact actor label: the seat, prefixed when the occupant is not a normal
 /// autonoetic agent (so a human operator or a foreign agent is obvious).
 pub fn actor_label(entry: &SessionTimelineEntry) -> String {
@@ -3035,12 +3071,18 @@ pub fn is_redundant_promotion_escalation_approval(
         .is_some_and(|id| linked_escalation_approvals.contains(id))
 }
 
-/// Call ids of every `tool.completed` on the page. Used to drop the matching
-/// `tool.requested` rows — one call, one row (see [`is_paired_tool_request`]).
-fn completed_call_ids(entries: &[SessionTimelineEntry]) -> HashSet<String> {
+/// Call ids of every `tool.completed` on the page that will actually render.
+/// Used to drop the matching `tool.requested` rows — one call, one row (see
+/// [`is_paired_tool_request`]). Completions hidden by operator config are
+/// excluded: dropping the request too would make the whole call invisible.
+fn completed_call_ids(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> HashSet<String> {
     entries
         .iter()
         .filter(|e| e.event_type == "tool.completed")
+        .filter(|e| !is_hidden_by_config(e, overrides))
         .filter_map(|e| {
             let p = parse_entry_payload(e)?;
             payload_field_str(&p, "call_id")
@@ -3081,7 +3123,7 @@ pub fn coalesce_indexed_with(
     overrides: &HashMap<String, String>,
 ) -> Vec<(RenderedRow, RowSource)> {
     let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
-    let completed_calls = completed_call_ids(entries);
+    let completed_calls = completed_call_ids(entries, overrides);
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
@@ -3589,7 +3631,7 @@ pub fn turn_divider_labels(
     struct TurnAgg {
         calls: usize,
         tools: std::collections::HashMap<String, usize>,
-        seen_calls: HashSet<(String, String)>,
+        seen_calls: HashSet<String>,
         tokens_in: u64,
         tokens_out: u64,
         reasoning: usize,
@@ -3615,9 +3657,13 @@ pub fn turn_divider_labels(
                     .and_then(|p| payload_field_str(p, "tool_name"))
                     .unwrap_or_else(|| "tool".into());
                 let call_id = p.as_ref().and_then(|p| payload_field_str(p, "call_id"));
-                // Dedupe the request/completion pair of one call (first wins).
+                // Dedupe the request/completion pair of one call by call_id
+                // *alone* — a pair half may miss `tool_name` (older rows) or
+                // spell it differently, and a `(tool, call_id)` key would then
+                // count the same call twice. The tool name only steers the
+                // per-tool breakdown, never uniqueness.
                 let count_it = match &call_id {
-                    Some(id) => agg.seen_calls.insert((tool.clone(), id.clone())),
+                    Some(id) => agg.seen_calls.insert(id.clone()),
                     None => e.event_type == "tool.requested",
                 };
                 if count_it {
@@ -4435,6 +4481,44 @@ mod tests {
     }
 
     #[test]
+    fn paired_request_survives_when_completion_is_config_hidden() {
+        // If the operator hides completions but not requests, the pairing set
+        // must ignore the hidden completion — otherwise the request would be
+        // dropped too and the whole call would vanish from the view.
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({
+                    "tool_name": "content_write",
+                    "call_id": call_id,
+                    "args_preview": "/tmp/out.rs"
+                }),
+            )
+        };
+        let overrides: HashMap<String, String> = [("tool.completed".to_string(), "hidden".to_string())]
+            .into_iter()
+            .collect();
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.completed", "c1")];
+        let rows = coalesce_with(&entries, &overrides);
+        assert_eq!(rows.len(), 1, "the request must still render; got {rows:?}");
+        match &rows[0] {
+            RenderedRow::Line(spec) => {
+                // The *request* action form (`✎ write`), not the completion's
+                // `✎ wrote` — proof the surviving row is the request half.
+                assert!(
+                    spec.headline.contains("✎ write /tmp/out.rs"),
+                    "expected the request headline, got: {}",
+                    spec.headline
+                );
+            }
+            other => panic!("expected the request line, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn in_flight_tool_request_still_renders() {
         // A request without its completion yet (call still open, or completion
         // on a later page) must stay visible — it is the in-flight signal.
@@ -4608,6 +4692,21 @@ mod tests {
         assert!(t3.contains("3 calls: read×2, grep"), "got: {t3}");
         assert!(t3.contains("1.2k/340 tok"), "got: {t3}");
         assert!(t3.contains("💭×2"), "got: {t3}");
+
+        // A pair whose halves disagree on tool_name (or miss it) still counts
+        // once: dedupe is by call_id alone, tool names only steer the
+        // per-tool breakdown.
+        let ragged = vec![
+            mk_turn("turn-000006", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c9"})),
+            mk_turn("turn-000006", "tool.completed", serde_json::json!({"call_id": "c9"})),
+        ];
+        let wanted6: HashSet<String> = ["turn-000006"].into_iter().map(String::from).collect();
+        let labels6 = turn_divider_labels(&ragged, &wanted6);
+        assert!(
+            labels6["turn-000006"].contains("1 calls"),
+            "same call_id must count once regardless of tool_name: {:?}",
+            labels6
+        );
         // A narrative-only turn has no plumbing/cost/thought → no entry,
         // so its divider stays plain.
         assert!(!labels.contains_key("turn-000004"), "narrative-only turn: no stats");

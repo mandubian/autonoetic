@@ -43,7 +43,7 @@ autonoetic room <ROOT_SESSION_ID> [OPTIONS]
 | Option | Default | Meaning |
 |---|---|---|
 | `<ROOT_SESSION_ID>` | — | The session whose timeline to show (required). |
-| `--min-altitude <LEVEL>` | `normal` | Lowest importance to show: `detail` \| `normal` \| `attention` \| `error` \| `story`. |
+| `--min-altitude <LEVEL>` | `detail` | Lowest importance to show: `detail` \| `normal` \| `attention` \| `error` \| `story`. |
 | `--follow` | off | Non-interactive: tail the timeline live (like `tail -f`) until `Ctrl+C`. |
 | `--tui` | off | Launch the **interactive** full-screen shell (scroll, drill-down, resolve gates, send messages). |
 | `--limit <N>` | `200` | Max rows fetched per read. |
