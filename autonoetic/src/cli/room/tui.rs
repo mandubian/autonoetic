@@ -2877,6 +2877,191 @@ fn newest_blocking_gate_event(
     None
 }
 
+/// Max lines rendered per content block in the approval inspection pane. The
+/// modal scrolls (j/k), so the block names what remains rather than growing
+/// unbounded (truncation vocabulary: `…(+N more lines)`).
+const APPROVAL_CONTENT_MAX_LINES: usize = 60;
+
+/// Push a bounded content body: up to [`APPROVAL_CONTENT_MAX_LINES`] lines,
+/// indented, with a `…(+N more lines)` marker when cut.
+fn push_bounded_body(lines: &mut Vec<String>, body: &str) {
+    let all: Vec<&str> = body.lines().collect();
+    let show = all.len().min(APPROVAL_CONTENT_MAX_LINES);
+    for line in &all[..show] {
+        for chunk in render::wrap_display_lines(line, 74) {
+            lines.push(format!("    {chunk}"));
+        }
+    }
+    if all.len() > show {
+        lines.push(format!(
+            "    …(+{} more lines)",
+            render::compact_count(all.len() - show)
+        ));
+    }
+}
+
+/// The concrete contents an approval would put into effect, derived from the
+/// operator-redacted record's typed action (`approvals.inspect` → `full`).
+/// This is the "what am I actually approving?" view: the file body a write
+/// would create, the full command, the wiki page text, the skill preview
+/// behind a promotion, the capability scope deltas — not just the one-line
+/// digest the timeline card shows. Redaction stays gateway-side.
+fn approval_action_content_lines(
+    record: &autonoetic_types::background::ApprovalRequest,
+) -> Vec<String> {
+    use autonoetic_types::background::ScheduledAction;
+    let mut lines = vec!["── what this approval does ──".to_string()];
+    match &record.action {
+        ScheduledAction::WriteFile { path, content, .. } => {
+            lines.push(format!("writes file: {path}"));
+            let line_count = content.lines().count().max(1);
+            lines.push(format!(
+                "content ({} lines):",
+                render::compact_count(line_count)
+            ));
+            push_bounded_body(&mut lines, content);
+        }
+        ScheduledAction::SandboxExec { command, intent, .. } => {
+            lines.push("executes command:".to_string());
+            push_bounded_body(&mut lines, command);
+            if let Some(i) = intent.as_ref().filter(|s| !s.trim().is_empty()) {
+                lines.push("stated purpose:".to_string());
+                for line in render::wrap_display_lines(i, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+        }
+        ScheduledAction::WebFetch { url, .. } => {
+            lines.push(format!("fetches: {url}"));
+        }
+        ScheduledAction::WebCall { url, method, body, .. } => {
+            let method = method.clone().unwrap_or_else(|| "GET".into());
+            lines.push(format!("{method} {url}"));
+            if let Some(b) = body {
+                let pretty = serde_json::to_string_pretty(b).unwrap_or_else(|_| b.to_string());
+                lines.push("request body:".to_string());
+                push_bounded_body(&mut lines, &pretty);
+            }
+        }
+        ScheduledAction::WebSearch { query, provider, .. } => {
+            lines.push(format!("searches: {query}"));
+            if let Some(p) = provider {
+                lines.push(format!("  provider: {p}"));
+            }
+        }
+        ScheduledAction::CredentialRequest { url, method, .. } => {
+            let method = method.clone().unwrap_or_else(|| "GET".into());
+            lines.push(format!("sends credential to: {method} {url}"));
+        }
+        ScheduledAction::AgentInstall {
+            agent_id,
+            summary,
+            requested_by_agent_id,
+            ..
+        } => {
+            lines.push(format!("installs agent: {agent_id}"));
+            lines.push(format!("  requested by: {requested_by_agent_id}"));
+            for line in render::wrap_display_lines(summary, 76) {
+                lines.push(format!("    {line}"));
+            }
+        }
+        ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            outgoing_revision_id,
+            payload,
+            ..
+        } => {
+            lines.push(format!("promotes {agent_id}: {outgoing_revision_id} → {revision_id}"));
+            if let Some(p) = payload {
+                // The candidate's SKILL.md body is the other half of the delta:
+                // capabilities say what the agent *may* do, the body says what
+                // it is *told* to do (#818).
+                if let Some(preview) = p.get("skill_preview").and_then(|v| v.as_str()) {
+                    if !preview.trim().is_empty() {
+                        lines.push("candidate SKILL.md:".to_string());
+                        push_bounded_body(&mut lines, preview);
+                    }
+                }
+                if let Some(broadened) = p.get("broadened").and_then(|v| v.as_array()) {
+                    for b in broadened {
+                        let cap = b.get("capability_type").and_then(|v| v.as_str());
+                        let prev = b.get("previous_scope").map(|v| v.to_string());
+                        let next = b.get("new_scope").map(|v| v.to_string());
+                        if let Some(cap) = cap {
+                            match (prev, next) {
+                                (Some(pv), Some(nx)) => lines.push(format!(
+                                    "  {} {} → {}",
+                                    cap,
+                                    render::one_line(pv.trim_matches('"'), 60),
+                                    render::one_line(nx.trim_matches('"'), 60)
+                                )),
+                                _ => lines.push(format!("  {cap} (scope widened)")),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ScheduledAction::WikiProposal {
+            title, content, tags, ..
+        } => {
+            lines.push(format!("wiki page: {title}"));
+            if !tags.is_empty() {
+                lines.push(format!("  tags: {}", tags.join(", ")));
+            }
+            lines.push("page content:".to_string());
+            push_bounded_body(&mut lines, content);
+        }
+        ScheduledAction::LayerMount { layers, command } => {
+            lines.push("mounts layers:".to_string());
+            for l in layers {
+                let name = &l.layer_id;
+                lines.push(format!("    · {}", render::one_line(name, 100)));
+            }
+            lines.push("for command:".to_string());
+            push_bounded_body(&mut lines, command);
+        }
+        _ => {
+            // SessionContinue / SessionEscalate / ProfileShare /
+            // CredentialPrompt have no inspectable content beyond what the
+            // action-specific card arms above already render.
+            return Vec::new();
+        }
+    }
+    lines
+}
+
+/// Artifact source excerpts for sandbox/artifact exec approvals (`code_excerpts`
+/// on the approval record) — the code the command would run, bounded per file.
+fn approval_code_excerpt_lines(
+    excerpts: Option<&[autonoetic_types::background::CodeExcerpt]>,
+) -> Vec<String> {
+    let Some(excerpts) = excerpts else {
+        return Vec::new();
+    };
+    if excerpts.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["── code this runs ──".to_string()];
+    for ex in excerpts.iter().take(4) {
+        let size = render::compact_count(ex.size_bytes);
+        let cut = if ex.truncated {
+            ex.truncated_from_bytes
+                .map(|n| format!(", truncated from {}", render::compact_count(n)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "· {} ({} bytes{}):",
+            ex.file_name, size, cut
+        ));
+        push_bounded_body(&mut lines, &ex.content);
+    }
+    lines
+}
+
 fn gate_inspect_detail_lines(value: &serde_json::Value) -> Vec<String> {
     let field = |key: &str| {
         value
@@ -2971,6 +3156,18 @@ fn gate_inspect_detail_lines(value: &serde_json::Value) -> Vec<String> {
                 lines.push(format!("  risk: {}", render::one_line(&risk, 120)));
             }
         }
+    }
+    // "What am I actually approving?" — the record's typed action carries the
+    // concrete content (file body, command, URLs, wiki page, skill preview)
+    // and `code_excerpts` carries artifact source. Absent (older gateways)
+    // ⇒ the digest above is all there is.
+    if let Ok(record) =
+        serde_json::from_value::<autonoetic_types::background::ApprovalRequest>(
+            value.get("full").cloned().unwrap_or(serde_json::Value::Null),
+        )
+    {
+        lines.extend(approval_action_content_lines(&record));
+        lines.extend(approval_code_excerpt_lines(record.code_excerpts.as_deref()));
     }
     lines
 }
@@ -3865,7 +4062,7 @@ fn rpc(
 pub fn run(
     client: &RoomClient,
     root_session_id: &mut String,
-    initial_floor: FloorMode,
+    cli_floor: Option<FloorMode>,
     limit: u32,
     target_agent_id: &mut Option<String>,
     presets: &[String],
@@ -3894,8 +4091,13 @@ pub fn run(
 
     let mut entries: Vec<SessionTimelineEntry> = Vec::new();
     let mut cursor: Option<String> = None;
-    let mut floor = initial_floor;
-    let mut squash = true;
+    // View dials: explicit `--min-altitude` wins over the persisted prefs,
+    // which win over built-in defaults (floor=detail, squash=on, reasoning=on).
+    let saved_prefs = load_room_view_prefs_from(&room_view_prefs_path());
+    let mut floor = cli_floor
+        .or_else(|| saved_prefs.as_ref().and_then(|p| p.floor()))
+        .unwrap_or(FloorMode::Altitude(Altitude::Detail));
+    let mut squash = saved_prefs.as_ref().map(|p| p.squash).unwrap_or(true);
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
     // View-row indices (into the squashed `rows` vec) that are first-class
@@ -3944,7 +4146,10 @@ pub fn run(
     let mut resolved: HashSet<String> = HashSet::new();
     let mut acted: HashSet<String> = HashSet::new();
     // Display toggles + spinner state for the in-flight row indicator.
-    let mut show_reasoning = true;
+    let mut show_reasoning = saved_prefs.as_ref().map(|p| p.reasoning).unwrap_or(true);
+    // Rows accumulated above the follow point while the operator is scrolled
+    // away (`── N new ──` marker; `u` jumps there, re-following clears it).
+    let mut unread_count: usize = 0;
     let mut spinner_frame: usize = 0;
     let mut info_panel_open = false;
     let mut info_scroll: u16 = 0;
@@ -6140,6 +6345,7 @@ pub fn run(
                         }
                         KeyCode::Char('a') => {
                             floor = cycle_floor_mode(floor);
+                            persist_room_view_prefs(floor, squash, show_reasoning);
                             status = Some(match floor {
                                 FloorMode::Altitude(a) => format!(
                                     "floor: {} and above (a to cycle; story mode included)",
@@ -6150,6 +6356,25 @@ pub fn run(
                                 }
                             });
                             detail = None;
+                        }
+                        KeyCode::Char('u') => {
+                            // Jump to the first row the operator has not seen
+                            // since scrolling away (the `── N new ──` marker).
+                            let boundary = (!follow && unread_count > 0 && view_row_count > 0)
+                                .then(|| view_row_count.saturating_sub(unread_count));
+                            match boundary {
+                                Some(at) => {
+                                    selected = at.min(view_row_count.saturating_sub(1));
+                                    status = Some(format!(
+                                        "{} new rows since you scrolled — G to resume following",
+                                        render::compact_count(unread_count)
+                                    ));
+                                }
+                                None => {
+                                    status =
+                                        Some("no unread rows (f/G to follow newest)".to_string());
+                                }
+                            }
                         }
                         KeyCode::Char('A') => {
                             if content_view.is_some() || artifact_file_view.is_some()
@@ -6259,7 +6484,10 @@ pub fn run(
                                 }
                             }
                         }
-                        KeyCode::Char('s') => squash = !squash,
+                        KeyCode::Char('s') => {
+                            squash = !squash;
+                            persist_room_view_prefs(floor, squash, show_reasoning);
+                        }
                         // Y: copy the selected row to the clipboard — the
                         // actionable token for a tool row (command/path/ref/id),
                         // else the row's visible text. Handy for grabbing an
@@ -6371,7 +6599,10 @@ pub fn run(
                         // (it's a Detail-altitude event, so it's normally hidden
                         // by the floor or by squash — but the toggle matters for
                         // any channel that doesn't filter on altitude).
-                        KeyCode::Char('R') => show_reasoning = !show_reasoning,
+                        KeyCode::Char('R') => {
+                            show_reasoning = !show_reasoning;
+                            persist_room_view_prefs(floor, squash, show_reasoning);
+                        }
                         // F: fork the session from the selected row's turn and
                         // switch to the new branch — backtrack to a past state to
                         // try a different approach. Checkpoints exist only at
@@ -7322,6 +7553,7 @@ pub fn run(
                     early_gate.as_ref(),
                     early_spinner,
                     &view_turn_boundaries,
+                    None,
                     show_reasoning,
                     &early_stats,
                     early_pending_plans,
@@ -7373,6 +7605,7 @@ pub fn run(
                     view_gate.as_ref(),
                     SPINNER_FRAMES[spinner_frame],
                     &view_turn_boundaries,
+                    None,
                     show_reasoning,
                     &boot_stats,
                     0,
@@ -7832,6 +8065,24 @@ pub fn run(
         let pending_plan_count =
             unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
 
+        // Unread tracking: while the operator is scrolled away (`follow` off),
+        // appended rows accumulate; the `── N new ──` marker renders above the
+        // first unread row and re-following (`f`/`G`) clears it. `view_row_count`
+        // still holds the previous frame's count here.
+        if follow {
+            unread_count = 0;
+        } else {
+            let added = rows.len().saturating_sub(view_row_count);
+            if added > 0 && view_row_count > 0 {
+                unread_count = unread_count.saturating_add(added);
+            }
+        }
+        let unread_marker = if !follow && unread_count > 0 && unread_count < rows.len() {
+            Some((rows.len() - unread_count, unread_count))
+        } else {
+            None
+        };
+
         // First-class checkpoint view-row indices — plan/approval/escalation/
         // operator/session-start events that survived coalescing. Collapsed
         // runs are never checkpoints (checkpoints always render individually).
@@ -8016,8 +8267,8 @@ pub fn run(
                 .map(|i| match &rows[i] {
                     RenderedRow::Line(spec) => {
                         build_rich_row_lines(
-                            spec, i, &turn_boundaries, content_w, glyph_w, rail_w, label_w,
-                            spinner_glyph, show_reasoning,
+                            spec, i, &turn_boundaries, unread_marker, content_w, glyph_w,
+                            rail_w, label_w, spinner_glyph, show_reasoning,
                         )
                         .len()
                     }
@@ -8077,6 +8328,7 @@ pub fn run(
                 gate.as_ref(),
                 spinner_glyph,
                 &turn_boundaries,
+                unread_marker,
                 show_reasoning,
                 &session_stats,
                 pending_plan_count,
@@ -8892,6 +9144,7 @@ fn build_rich_row_lines(
     spec: &RowSpec,
     row_index: usize,
     turn_boundaries: &HashMap<usize, TurnDivider>,
+    unread_marker: Option<(usize, usize)>,
     content_w: usize,
     glyph_w: usize,
     rail_w: usize,
@@ -8900,6 +9153,19 @@ fn build_rich_row_lines(
     show_reasoning: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // Unread separator: a highlighted rule above the first row the operator
+    // has not seen since scrolling away (`u` jumps here, `G`/`f` clears).
+    if unread_marker.is_some_and(|(at, _)| at == row_index) {
+        let (_, count) = unread_marker.unwrap();
+        let label = format!(
+            "── {} new since you scrolled · u jump · G follow ──",
+            render::compact_count(count)
+        );
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+    }
     if let Some(divider) = turn_boundaries.get(&row_index) {
         let total_w = content_w + glyph_w + MARK_W + label_w + rail_w + 2;
         // Forkable turns (a runnable checkpoint exists) get a heavier rule, a
@@ -9419,6 +9685,70 @@ impl FloorMode {
             FloorMode::Story => "📖story".to_string(),
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Persisted view preferences (`~/.autonoetic/room-view.json`) — the operator's
+// floor/squash/reasoning dial settings survive relaunch. Explicit CLI flags
+// (`--min-altitude`) win over the file; the file wins over built-in defaults.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RoomViewPrefs {
+    /// Altitude name (`detail|normal|attention|error`) or `story`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floor: Option<String>,
+    squash: bool,
+    reasoning: bool,
+}
+
+impl RoomViewPrefs {
+    fn from_view(floor: FloorMode, squash: bool, reasoning: bool) -> Self {
+        RoomViewPrefs {
+            floor: Some(match floor {
+                FloorMode::Altitude(a) => a.as_str().to_string(),
+                FloorMode::Story => "story".to_string(),
+            }),
+            squash,
+            reasoning,
+        }
+    }
+
+    fn floor(&self) -> Option<FloorMode> {
+        let f = self.floor.as_deref()?;
+        if f.eq_ignore_ascii_case("story") {
+            return Some(FloorMode::Story);
+        }
+        Altitude::parse_str(f).map(FloorMode::Altitude)
+    }
+}
+
+fn room_view_prefs_path() -> std::path::PathBuf {
+    crate::cli::common::dirs_or_default().join("room-view.json")
+}
+
+fn load_room_view_prefs_from(path: &std::path::Path) -> Option<RoomViewPrefs> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_room_view_prefs_to(path: &std::path::Path, prefs: &RoomViewPrefs) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(json) = serde_json::to_string_pretty(prefs) else {
+        return;
+    };
+    let _ = std::fs::write(path, json);
+}
+
+/// Best-effort persistence of the current view dial state. A failed write is
+/// silently ignored — losing a view preference must never disturb a session.
+fn persist_room_view_prefs(floor: FloorMode, squash: bool, reasoning: bool) {
+    save_room_view_prefs_to(
+        &room_view_prefs_path(),
+        &RoomViewPrefs::from_view(floor, squash, reasoning),
+    );
 }
 
 fn cycle_floor_mode(mode: FloorMode) -> FloorMode {
@@ -10433,6 +10763,7 @@ fn draw(
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
     turn_boundaries: &HashMap<usize, TurnDivider>,
+    unread_marker: Option<(usize, usize)>,
     show_reasoning: bool,
     stats: &SessionStats,
     _pending_plan_count: usize,
@@ -10578,6 +10909,7 @@ fn draw(
                     spec,
                     i,
                     turn_boundaries,
+                    unread_marker,
                     content_w,
                     glyph_w,
                     rail_w,
@@ -10610,6 +10942,7 @@ fn draw(
                     spec,
                     i,
                     turn_boundaries,
+                    unread_marker,
                     content_w,
                     glyph_w,
                     rail_w,
@@ -11855,15 +12188,35 @@ fn draw_gate_modal(
     // Plan gates render the canonical plan detail in a dedicated section below.
     // Do not auto-inject inspect_lines for plan gates in either branch or the plan
     // would appear twice (the headline is already shown above the dedicated section).
-    if content_lines.len() <= 2 && !inspect_lines.is_empty() && modal.gate.kind != GateKind::Plan {
+    //
+    // The inspect lines split in two: a digest prefix (summary/risk — subject to
+    // the dedup rules below, the card may already say it) and the content block
+    // (`── what this approval does ──` / `── code this runs ──`, the concrete
+    // file body/command/source behind the gate). The content block is the
+    // decision surface — it is ALWAYS appended, never suppressed by the
+    // dedup rules: an operator must be able to see what they are approving.
+    let content_start = if modal.gate.kind != GateKind::Plan {
+        inspect_lines
+            .iter()
+            .position(|l| l.starts_with("── "))
+            .unwrap_or(inspect_lines.len())
+    } else {
+        inspect_lines.len()
+    };
+    let (digest_lines, content_block): (Vec<String>, Vec<String>) = {
+        let mut digest = inspect_lines.clone();
+        let content = digest.split_off(content_start);
+        (digest, content)
+    };
+    if content_lines.len() <= 2 && !digest_lines.is_empty() && modal.gate.kind != GateKind::Plan {
         content_lines.push(Line::from(Span::styled(
             "From approval record:",
             Style::default().fg(Color::DarkGray),
         )));
-        for line in inspect_lines {
-            content_lines.push(Line::from(line.clone()));
+        for line in digest_lines {
+            content_lines.push(Line::from(line));
         }
-    } else if !inspect_lines.is_empty()
+    } else if !digest_lines.is_empty()
         && modal.gate.kind != GateKind::Plan
         && entry.is_some_and(|e| {
             payload_field_str(e, "reason").is_none()
@@ -11871,8 +12224,16 @@ fn draw_gate_modal(
                 && payload_field_str(e, "summary").is_none()
         })
     {
-        for line in inspect_lines {
-            content_lines.push(Line::from(line.clone()));
+        for line in digest_lines {
+            content_lines.push(Line::from(line));
+        }
+    }
+    if !content_block.is_empty() {
+        for line in content_block {
+            content_lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Gray),
+            )));
         }
     }
 
@@ -12164,6 +12525,190 @@ mod tests {
         assert!(narrow.ends_with('…'), "{narrow}");
         assert!(narrow.width() <= 30, "{} > 30", narrow.width());
     }
+
+    // ── Approval contents: "what am I actually approving?" ──
+
+    use autonoetic_types::background::{ApprovalRequest, CodeExcerpt, ScheduledAction};
+
+    fn inspect_value(record: &ApprovalRequest) -> serde_json::Value {
+        serde_json::json!({ "action": "test", "full": serde_json::to_value(record).unwrap() })
+    }
+
+    fn bare_record(action: ScheduledAction) -> ApprovalRequest {
+        serde_json::from_value(serde_json::json!({
+            "request_id": "apr-1",
+            "agent_id": "coder.default",
+            "session_id": "root-x/child",
+            "action": serde_json::to_value(&action).unwrap(),
+            "created_at": "2026-06-01T00:00:00Z",
+        }))
+        .expect("minimal ApprovalRequest must deserialize")
+    }
+
+    #[test]
+    fn approval_inspect_shows_write_file_content() {
+        let record = bare_record(ScheduledAction::WriteFile {
+            path: "/tmp/patch.rs".into(),
+            content: "fn main() {\n    println!(\"hi\");\n}\n".into(),
+            requires_approval: true,
+            evidence_ref: None,
+        });
+        let lines = gate_inspect_detail_lines(&inspect_value(&record));
+        let joined = lines.join("\n");
+        assert!(joined.contains("── what this approval does ──"), "{joined}");
+        assert!(joined.contains("writes file: /tmp/patch.rs"), "{joined}");
+        assert!(joined.contains("println!"), "file body must be shown: {joined}");
+    }
+
+    #[test]
+    fn approval_inspect_bounds_long_content_and_counts_the_rest() {
+        let body = "x\n".repeat(APPROVAL_CONTENT_MAX_LINES + 30);
+        let record = bare_record(ScheduledAction::WriteFile {
+            path: "/tmp/big.txt".into(),
+            content: body,
+            requires_approval: true,
+            evidence_ref: None,
+        });
+        let lines = gate_inspect_detail_lines(&inspect_value(&record));
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains(&format!("…(+{} more lines)", render::compact_count(30))),
+            "cut must name the remainder: {joined}"
+        );
+    }
+
+    #[test]
+    fn approval_inspect_shows_skill_preview_and_broadened_scopes() {
+        let record = bare_record(ScheduledAction::RevisionPromote {
+            agent_id: "coder.default".into(),
+            revision_id: "rev-new".into(),
+            outgoing_revision_id: "rev-old".into(),
+            added_capabilities: vec!["NetworkAccess".into()],
+            broadened_capabilities: vec!["NetworkAccess".into()],
+            payload: Some(serde_json::json!({
+                "skill_preview": "# Instructions\nYou are a coder.",
+                "broadened": [
+                    {"capability_type": "NetworkAccess",
+                     "previous_scope": {"hosts": ["api.example.com"]},
+                     "new_scope": {"hosts": ["*"]}}
+                ]
+            })),
+            federation_context: None,
+        });
+        let lines = gate_inspect_detail_lines(&inspect_value(&record));
+        let joined = lines.join("\n");
+        assert!(joined.contains("promotes coder.default: rev-old → rev-new"), "{joined}");
+        assert!(joined.contains("candidate SKILL.md:"), "{joined}");
+        assert!(joined.contains("You are a coder."), "{joined}");
+        assert!(joined.contains("NetworkAccess"), "{joined}");
+    }
+
+    #[test]
+    fn approval_inspect_shows_wiki_content_and_code_excerpts() {
+        let mut record = bare_record(ScheduledAction::WikiProposal {
+            page_id: "p1".into(),
+            title: "Retry patterns".into(),
+            content: "# Retry\nBack off exponentially.".into(),
+            tags: vec!["patterns".into()],
+            content_sha256: None,
+            proposed_by_agent: "curator.default".into(),
+            proposed_by_session: None,
+        });
+        record.code_excerpts = Some(vec![CodeExcerpt {
+            file_name: "src/main.py".into(),
+            content: "print('hello')".into(),
+            language: "python".into(),
+            size_bytes: 14,
+            truncated: false,
+            truncated_from_bytes: None,
+        }]);
+        let lines = gate_inspect_detail_lines(&inspect_value(&record));
+        let joined = lines.join("\n");
+        assert!(joined.contains("wiki page: Retry patterns"), "{joined}");
+        assert!(joined.contains("Back off exponentially."), "{joined}");
+        assert!(joined.contains("── code this runs ──"), "{joined}");
+        assert!(joined.contains("src/main.py (14 bytes)"), "{joined}");
+        assert!(joined.contains("print('hello')"), "{joined}");
+    }
+
+    #[test]
+    fn approval_inspect_without_full_record_stays_empty() {
+        // Older gateways don't send `full` — the digest arms still work and
+        // no content section appears.
+        let lines = gate_inspect_detail_lines(&serde_json::json!({
+            "action": "web_fetch",
+            "summary": "fetch the api docs",
+        }));
+        let joined = lines.join("\n");
+        assert!(joined.contains("about:"), "{joined}");
+        assert!(!joined.contains("── what this approval does ──"), "{joined}");
+    }
+
+    // ── Persisted view prefs ──
+
+    #[test]
+    fn room_view_prefs_roundtrip_and_floor_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("room-view.json");
+        assert!(load_room_view_prefs_from(&path).is_none(), "absent file ⇒ None");
+
+        save_room_view_prefs_to(
+            &path,
+            &RoomViewPrefs::from_view(FloorMode::Story, false, false),
+        );
+        let loaded = load_room_view_prefs_from(&path).expect("saved prefs must load");
+        assert_eq!(loaded.squash, false);
+        assert_eq!(loaded.reasoning, false);
+        assert_eq!(loaded.floor(), Some(FloorMode::Story));
+
+        save_room_view_prefs_to(
+            &path,
+            &RoomViewPrefs::from_view(FloorMode::Altitude(Altitude::Attention), true, true),
+        );
+        let loaded = load_room_view_prefs_from(&path).expect("saved prefs must load");
+        assert_eq!(
+            loaded.floor(),
+            Some(FloorMode::Altitude(Altitude::Attention))
+        );
+
+        // A corrupted file is ignored (falls back to defaults), never fatal.
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_room_view_prefs_from(&path).is_none());
+    }
+
+    // ── Unread marker ──
+
+    #[test]
+    fn unread_marker_line_renders_above_boundary_row() {
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Planner,
+            tone: RowTone::AgentNarrative,
+            actor_label: "planner".into(),
+            headline: "row 2".into(),
+            detail: None,
+            turn_id: None,
+            source_session_id: None,
+            turn_index: None,
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        let lines = build_rich_row_lines(
+            &spec, 2, &boundaries, Some((2, 47)), 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(first.contains("47 new since you scrolled"), "got: {first}");
+        // Other rows don't get the marker.
+        let lines = build_rich_row_lines(
+            &spec, 1, &boundaries, Some((2, 47)), 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!first.contains("new since"), "got: {first}");
+    }
+
 
     #[test]
     fn activity_strip_truncation_survives_multibyte_at_every_width() {
@@ -14455,7 +15000,7 @@ mod tests {
             egress_label: Some("local_only".into()),
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
@@ -14487,7 +15032,7 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.contains("turn 3"), "got: {bar}");
@@ -14508,7 +15053,7 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &wide_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &wide_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(
@@ -14522,7 +15067,7 @@ mod tests {
         let plain_boundaries: HashMap<usize, TurnDivider> =
             [(0usize, TurnDivider::default())].into_iter().collect();
         let lines = build_rich_row_lines(
-            &spec, 0, &plain_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &plain_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.starts_with("── turn 3 ") && bar.ends_with('─'), "got: {bar}");
@@ -14548,7 +15093,7 @@ mod tests {
             egress_label: None,
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(!joined.contains('■'), "unlabeled row must not show a marker: {joined}");

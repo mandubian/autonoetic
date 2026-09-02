@@ -686,7 +686,8 @@ Like `chat`, it's a gateway API client and needs `AUTONOETIC_SHARED_SECRET`.
 autonoetic room <ROOT_SESSION_ID> [OPTIONS]
 
 Options:
-  --min-altitude <LEVEL>  Lowest importance to show: detail | normal | attention | error | story  (default: detail)
+  --min-altitude <LEVEL>  Lowest importance to show: detail | normal | attention | error | story
+                          (default: the persisted room view preference, else detail)
   --follow                Tail the timeline live until Ctrl+C (read-only)
   --tui                   Interactive shell: scroll, drill-down, resolve gates, send messages
   --limit <N>             Max rows fetched per read (default: 200)

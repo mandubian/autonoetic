@@ -3635,6 +3635,8 @@ pub fn turn_divider_labels(
         tokens_in: u64,
         tokens_out: u64,
         reasoning: usize,
+        first_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+        last_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     }
     let mut aggs: std::collections::HashMap<String, TurnAgg> = std::collections::HashMap::new();
     for e in entries {
@@ -3648,7 +3650,15 @@ pub fn turn_divider_labels(
             tokens_in: 0,
             tokens_out: 0,
             reasoning: 0,
+            first_at: None,
+            last_at: None,
         });
+        // Wall time: span of the turn's own events (open turns show the span
+        // so far — the label refreshes as the turn progresses).
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(&e.occurred_at) {
+            agg.first_at = Some(agg.first_at.map_or(at, |prev| prev.min(at)));
+            agg.last_at = Some(agg.last_at.map_or(at, |prev| prev.max(at)));
+        }
         match e.event_type.as_str() {
             "tool.requested" | "tool.completed" => {
                 let p = parse_entry_payload(e);
@@ -3707,11 +3717,32 @@ pub fn turn_divider_labels(
         if agg.reasoning > 0 {
             parts.push(format!("💭×{}", agg.reasoning));
         }
+        if let (Some(first), Some(last)) = (agg.first_at, agg.last_at) {
+            let secs = (last - first).num_seconds().max(0);
+            if secs > 0 {
+                parts.push(format_turn_duration(secs));
+            }
+        }
         if !parts.is_empty() {
             out.insert(turn_id, parts.join(" · "));
         }
     }
     out
+}
+
+/// Compact human duration for divider labels: `45s`, `2m13s`, `1h04m`.
+fn format_turn_duration(total_secs: i64) -> String {
+    if total_secs >= 3600 {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        format!("{h}h{:02}m", m)
+    } else if total_secs >= 60 {
+        let m = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{m}m{:02}s", s)
+    } else {
+        format!("{total_secs}s")
+    }
 }
 
 pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
@@ -4655,6 +4686,30 @@ mod tests {
 
     #[test]
     fn turn_divider_labels_aggregate_calls_tokens_reasoning() {
+        // occurred_at is fixed on the helper entries; override per-entry below
+        // so the divider can derive a wall-time span.
+        let mk_turn_at = |turn: &str, et: &str, at: &str, payload: serde_json::Value| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Detail,
+                payload,
+            );
+            e.turn_id = Some(turn.into());
+            e.occurred_at = at.to_string();
+            e
+        };
+        // Wall time: two events 83s apart → `1m23s` on the divider.
+        let spanned = vec![
+            mk_turn_at("turn-000002", "turn.start", "2026-06-01T00:00:00Z", serde_json::json!({})),
+            mk_turn_at("turn-000002", "agent.message", "2026-06-01T00:01:23Z",
+                serde_json::json!({"message": "done"})),
+        ];
+        let wanted2: HashSet<String> = ["turn-000002"].into_iter().map(String::from).collect();
+        let labels2 = turn_divider_labels(&spanned, &wanted2);
+        assert_eq!(labels2["turn-000002"], "1m23s", "span-only turn: got {:?}", labels2);
+
         let mk_turn = |turn: &str, et: &str, payload: serde_json::Value| {
             let mut e = entry(
                 SessionRole::Specialist { kind: "coder".into() },

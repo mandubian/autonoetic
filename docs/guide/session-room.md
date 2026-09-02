@@ -90,13 +90,38 @@ chosen level. Long runs of routine `·` events are **collapsed** into a single
 Two aids keep the process readable at the default floor:
 
 - **Turn dividers are chapter headers.** Each `── turn N ──` rule carries the
-  turn's aggregate — tool calls, LLM tokens, how many reasoning rounds — so you
-  can scan *what the session did, what it cost, and how much it thought* from
-  the dividers alone.
+  turn's aggregate — tool calls, LLM tokens, reasoning rounds, and wall time —
+  so you can scan *what the session did, what it cost, and how long it took*
+  from the dividers alone.
 - **Truncation always names the escape hatch.** A bare `…` means a headline or
   preview was compacted by design; `…(+3.2k chars · Enter)` or `…(+12 lines ·
   Enter)` means real content was cut — how much, and the key that shows the
   rest (Enter opens the drill-down pane with the full payload).
+
+**Your view dials persist.** The `a` (floor), `s` (squash), and `R` (reasoning)
+settings are saved to `~/.autonoetic/room-view.json` and restored on the next
+launch. An explicit `--min-altitude` on the command line overrides the saved
+floor for that session.
+
+## Seeing what you approve
+
+When a gate modal opens (approval, escalation, plan), it shows the digest card
+**plus the concrete contents the approval would put into effect**, fetched from
+the approval record:
+
+- `write_file` — the target path and the full file body that would be written.
+- `sandbox_exec` — the complete command and the agent's stated purpose.
+- web fetches/calls/searches — the exact URL, method, and (redacted) body.
+- `revision_promote` — the candidate's **SKILL.md body** and the per-capability
+  scope deltas (`NetworkAccess ["api.example.com"] → ["*"]`), next to the
+  added/broadened capability list.
+- `wiki_propose` — the full page content before it is materialized.
+- artifact/sandbox exec approvals also render **`── code this runs ──`**: the
+  artifact source excerpts the gateway captured, with truncation noted.
+
+Content blocks are bounded (long bodies end with `…(+N more lines)`); the modal
+scrolls with `j`/`k`. Secrets stay masked by the gateway's operator-redaction —
+the room only renders what the gateway already deemed operator-safe.
 
 **Actor labels** show who acted, by seat, with a marker when the occupant isn't a
 normal autonoetic agent:
@@ -116,6 +141,8 @@ normal autonoetic agent:
 | `G` / `End` | Jump to the bottom and resume following newest |
 | `a` | Cycle the view floor (detail → normal → attention → error → **story**). `story` is the process-arc preset: narrative, gates, verdicts, and failures — plumbing and routine tool output hidden. |
 | `s` | Toggle squashing of routine `·` runs |
+| `R` | Toggle the 💭 reasoning prefix on agent rows |
+| `u` | Jump to the `── N new ──` marker — rows that arrived while you were scrolled away (`G`/`f` resumes following and clears it) |
 | `Enter` | Drill into the selected row — show its full detail (metadata, refs, payload). `Enter`/`Esc` closes it. |
 | `q` / `Ctrl+C` | Quit (press twice within 3s) |
 | `Esc` | Close the detail pane / content view / search if open — **never** arms destructive actions |
