@@ -2883,19 +2883,24 @@ fn newest_blocking_gate_event(
 const APPROVAL_CONTENT_MAX_LINES: usize = 60;
 
 /// Push a bounded content body: up to [`APPROVAL_CONTENT_MAX_LINES`] lines,
-/// indented, with a `…(+N more lines)` marker when cut.
+/// indented, with a `…(+N more lines)` marker when cut. Streams over the
+/// body's lines — no allocation proportional to the full body.
 fn push_bounded_body(lines: &mut Vec<String>, body: &str) {
-    let all: Vec<&str> = body.lines().collect();
-    let show = all.len().min(APPROVAL_CONTENT_MAX_LINES);
-    for line in &all[..show] {
-        for chunk in render::wrap_display_lines(line, 74) {
-            lines.push(format!("    {chunk}"));
+    let mut shown = 0usize;
+    let mut total = 0usize;
+    for line in body.lines() {
+        total += 1;
+        if total <= APPROVAL_CONTENT_MAX_LINES {
+            for chunk in render::wrap_display_lines(line, 74) {
+                lines.push(format!("    {chunk}"));
+            }
+            shown += 1;
         }
     }
-    if all.len() > show {
+    if total > shown {
         lines.push(format!(
             "    …(+{} more lines)",
-            render::compact_count(all.len() - show)
+            render::compact_count(total - shown)
         ));
     }
 }
@@ -8068,10 +8073,12 @@ pub fn run(
         // Unread tracking: while the operator is scrolled away (`follow` off),
         // appended rows accumulate; the `── N new ──` marker renders above the
         // first unread row and re-following (`f`/`G`) clears it. `view_row_count`
-        // still holds the previous frame's count here.
+        // still holds the previous frame's count here. The delta only counts
+        // when the timeline itself changed — a local view toggle (squash,
+        // floor, reasoning) also changes row counts but manufactures nothing.
         if follow {
             unread_count = 0;
-        } else {
+        } else if entries_changed {
             let added = rows.len().saturating_sub(view_row_count);
             if added > 0 && view_row_count > 0 {
                 unread_count = unread_count.saturating_add(added);
@@ -9698,8 +9705,14 @@ struct RoomViewPrefs {
     /// Altitude name (`detail|normal|attention|error`) or `story`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     floor: Option<String>,
+    #[serde(default = "default_true")]
     squash: bool,
+    #[serde(default = "default_true")]
     reasoning: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl RoomViewPrefs {
@@ -12674,6 +12687,13 @@ mod tests {
         // A corrupted file is ignored (falls back to defaults), never fatal.
         std::fs::write(&path, "{not json").unwrap();
         assert!(load_room_view_prefs_from(&path).is_none());
+
+        // A partial (hand-edited) file is best-effort: missing dials fall
+        // back to the built-in defaults instead of being treated as corrupt.
+        std::fs::write(&path, r#"{ "floor": "story" }"#).unwrap();
+        let partial = load_room_view_prefs_from(&path).expect("partial file must load");
+        assert_eq!(partial.floor(), Some(FloorMode::Story));
+        assert!(partial.squash && partial.reasoning, "defaults apply: {partial:?}");
     }
 
     // ── Unread marker ──
