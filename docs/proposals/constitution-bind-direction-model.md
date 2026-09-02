@@ -175,16 +175,44 @@ inside a session*, so only a seat can be obliged to act:
 **`owed_to` ranges over principals** — *identities*, some of which are outside
 the session entirely:
 
-| `owed_to` | Is | Why not a seat |
+| `owed_to` | Is | Seat today |
 |---|---|---|
-| `agent` | `PrincipalKind::AutonoeticAgent` | also holds seats, so appears in both — legitimately |
-| `served_party` | `PrincipalKind::ServedUser` | **has no seat at all**; never participates in a session |
-| `none` | no invocable beneficiary | see §2.3 |
+| `agent` | `PrincipalKind::AutonoeticAgent` | holds seats (`Planner`, `Specialist`, …), so appears in both fields — legitimately |
+| `served_party` | `PrincipalKind::ServedUser` | **none defined** — see below |
+| `none` | no invocable beneficiary | n/a (§2.3) |
 
-That asymmetry is the point: the served party can be *owed* but never *bound*,
-because being bound requires occupying a seat and they never do. Conversely the
-gateway holds a seat (`Runtime`) but has no human/agent principal identity.
-Neither domain collapses into the other.
+**Why the served party appears only in `owed_to` — and why that is contingent.**
+A third review question ("can a served party have a seat?") exposed that an
+earlier phrasing here — *"has no seat at all; never participates in a session"* —
+conflated three claims:
+
+1. *Can the human who is the served party hold a seat?* **Yes, and today they
+   usually do.** §12: "Today the operator and the served user are usually the
+   same person." That human holds `Operator`.
+2. *Is there a seat for the served party qua served party?* **No.** `SessionRole`
+   has nine variants and none is theirs.
+3. *Is the served party ever bound?* **No.** All three `U-*` clauses are "may" —
+   pure grants. No clause in the constitution obliges them.
+
+The field placement rests on (3), and (2) **explains** it: the served party is
+never obliged *because there is no seat through which to oblige them*. Absence
+of a seat causes absence of obligation, rather than merely coinciding with it.
+
+So `owed_to`-only is a **contingent fact about the current constitution, not a
+structural axiom** — and it yields a prediction worth recording: **implementing
+`U-1` requires giving the served party a seat.** Refusing a delivered result is
+an *act*; acting needs a surface; a surface is a seat. At that point the served
+party becomes bindable and could, in principle, carry obligations of its own.
+See #1274.
+
+This is why the model should *record* bind-direction rather than derive it: a
+scheme that hard-codes "the served party is never bound" into which prefix it
+gets would have to be amended the moment `U-1` ships. A declared field just
+changes value.
+
+Conversely the gateway holds a seat (`Runtime`) but has no human/agent principal
+identity, so it appears only in `binds`. Neither domain collapses into the
+other, but the membership is data, not doctrine.
 
 `community` is **not** in either. It is "gateway + agents", and clauses that
 appear to bind it bind the *gateway*, because the gateway is what implements the
