@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 85;
+const SCHEMA_VERSION_LATEST: i64 = 86;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -570,6 +570,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_liveness_v83(conn)?;
     apply_decider_model_pin_v84(conn)?;
     apply_decider_gate_routings_v85(conn)?;
+    apply_session_served_party_v86(conn)?;
 
     Ok(())
 }
@@ -3790,6 +3791,60 @@ fn apply_decider_model_pin_v84(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// #822 — record *on whose behalf* a run executes, at ingress, while it is
+/// still cheap.
+///
+/// `PrincipalKind::ServedUser` has existed since #359 but nothing emitted it at
+/// session start, so every run so far is history that cannot be re-attributed
+/// to a served party. That is the append-only argument
+/// (`docs/concepts/philosophy.md` §4.7) applied to §12: today operator ≈ served
+/// user, which is exactly why the attribution is cheap now and impossible to
+/// backfill once the two diverge.
+///
+/// Keyed by **root** session: the served party is whom the whole run serves,
+/// not a per-child-session property. Binding is **write-once** (see
+/// `served_party.rs`) — a run that could silently change whom it serves
+/// mid-flight would make the record worthless as evidence.
+///
+/// Purely attributive. No clause is enforced by this table: §12 is `MISSING`,
+/// and claiming otherwise is the overclaim this codebase keeps auditing out.
+fn apply_session_served_party_v86(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 86 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_served_party (
+            root_session_id TEXT PRIMARY KEY,
+            -- The bare id, *without* the `user:` wire prefix — that prefix is
+            -- only how ingress spells the kind, and the kind has its own column.
+            -- So a served user `alice` stores ('alice', 'served_user'), not
+            -- ('user:alice', …). Reassemble the `user:<id>` form when comparing
+            -- against a causal-chain `actor_id` or an approval's `decided_by`.
+            principal_id    TEXT NOT NULL,
+            -- `Principal::kind_to_storage()` round-trips this column.
+            principal_kind  TEXT NOT NULL,
+            -- 'declared' (caller named a served party) or 'operator_default'
+            -- (nobody did, so the operator is recorded as the served party).
+            -- Distinguishing them matters: a defaulted row is an assumption,
+            -- and a future §12 mechanism must be able to tell the two apart.
+            source          TEXT NOT NULL,
+            recorded_at     TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![86_i64, "session_served_party", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_session_liveness_v83(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
@@ -4048,6 +4103,63 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "a second park row for one session must be rejected");
+    }
+
+    /// v86 creates `session_served_party` and bumps SCHEMA_VERSION_LATEST.
+    #[test]
+    fn v86_creates_session_served_party_and_bumps_supported_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap(); // idempotent
+
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 86",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "v86 must be recorded exactly once");
+
+        let recorded_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            SCHEMA_VERSION_LATEST >= recorded_max,
+            "SCHEMA_VERSION_LATEST ({SCHEMA_VERSION_LATEST}) must cover the highest applied \
+             migration ({recorded_max}), or the gateway rejects its own database"
+        );
+
+        conn.execute(
+            "INSERT INTO session_served_party
+                (root_session_id, principal_id, principal_kind, source, recorded_at)
+             VALUES ('root-1', 'alice', 'served_user', 'declared', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // root_session_id is the primary key: one served party per run. The
+        // write-once rule in `served_party.rs` rests on this — a second INSERT
+        // for the same run must not create a second answer to "who was this
+        // done for?".
+        let dup = conn.execute(
+            "INSERT INTO session_served_party
+                (root_session_id, principal_id, principal_kind, source, recorded_at)
+             VALUES ('root-1', 'mallory', 'served_user', 'declared', '2026-01-02T00:00:00Z')",
+            [],
+        );
+        assert!(dup.is_err(), "a second binding for one run must be rejected by the schema");
+
+        let id: String = conn
+            .query_row(
+                "SELECT principal_id FROM session_served_party WHERE root_session_id = 'root-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(id, "alice");
     }
 
     /// v73 creates `egress_session_policies` and bumps SCHEMA_VERSION_LATEST.

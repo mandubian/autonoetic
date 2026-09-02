@@ -1776,6 +1776,22 @@ impl JsonRpcRouter {
                         }
                     };
 
+                // Served-party attribution (#822). Recorded here because
+                // `session_id` is final (a chat reroute has already re-pointed
+                // it at the root) and routing is confirmed, so no binding is
+                // written for an ingest that never dispatched. Best-effort and
+                // purely attributive — it must never be the reason a turn fails
+                // to run. See `gateway_store::served_party`.
+                if let Some(store) = self.execution.gateway_store() {
+                    crate::scheduler::gateway_store::record_served_party_at_ingress(
+                        &store,
+                        &session_id,
+                        &target_agent_id,
+                        params.served_party.as_deref(),
+                        &chrono::Utc::now().to_rfc3339(),
+                    );
+                }
+
                 // Operator's own message onto the canonical timeline (#405) — so
                 // any channel (room, Discord) shows both sides of the conversation,
                 // not just the agent's replies. Written gateway-side and once,
@@ -6382,6 +6398,20 @@ struct EventIngestParams {
     /// can only restrict what the room already declared, never widen it.
     #[serde(default)]
     egress_label: Option<autonoetic_types::egress::NamedEgressLabel>,
+    /// On whose behalf this run executes (#822). Exactly two forms are
+    /// accepted: `user:<id>` for a served user distinct from the operator
+    /// (the convention `principal::decider_principal_kind` already
+    /// recognizes), and the bare word `operator`. Anything else is *not*
+    /// guessed at as a user id — it is logged and treated as unspecified, so a
+    /// typo can never become a served party of that name.
+    ///
+    /// Absent or unrecognized ⇒ the operator is recorded as the served party,
+    /// marked as a default rather than a declaration.
+    ///
+    /// Bound once per *root* session and purely attributive — see
+    /// `gateway_store::served_party`.
+    #[serde(default)]
+    served_party: Option<String>,
 }
 
 /// Task-board status for a delegation whose spawn just returned. A spawn that

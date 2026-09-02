@@ -38,6 +38,7 @@ pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
 mod residency;
+mod served_party;
 mod recordings;
 mod row_decode;
 mod runtime_control;
@@ -83,6 +84,11 @@ const LIVE_DIGEST_RETRY_CAPACITY: usize = LIVE_DIGEST_BUFFER_CAPACITY * 16;
 
 pub use messages::AgentMessageRecord;
 pub use residency::SessionResidency;
+pub use served_party::{
+    is_distinct_served_user, operator_default, parse_served_party_token,
+    record_at_ingress as record_served_party_at_ingress, BindOutcome, ServedParty,
+    ServedPartySource, ServedPartyToken,
+};
 pub(crate) use row_decode::memory_object_from_row;
 pub(crate) use util::escape_sqlite_like_fragment;
 
@@ -600,6 +606,28 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::egress::LabeledMessageRow>> {
         let conn = self.conn.lock().unwrap();
         label_listing::list_labeled_messages_for_root(&conn, root_session_id)
+    }
+
+    // ---- Served-party attribution (#822) ----
+
+    /// Record *on whose behalf* a run executes. Write-once per root session —
+    /// see `served_party.rs` for why a mutable answer would be worthless as
+    /// evidence.
+    pub fn bind_served_party(
+        &self,
+        root_session_id: &str,
+        principal: &autonoetic_types::principal::Principal,
+        source: ServedPartySource,
+        now: &str,
+    ) -> Result<BindOutcome> {
+        let conn = self.conn.lock().unwrap();
+        served_party::bind_served_party(&conn, root_session_id, principal, source, now)
+    }
+
+    /// Who this run was done for, if anything was ever bound.
+    pub fn get_served_party(&self, root_session_id: &str) -> Result<Option<ServedParty>> {
+        let conn = self.conn.lock().unwrap();
+        served_party::get_served_party(&conn, root_session_id)
     }
 
     // ---- Session residency (parked, addressable sessions) ----
