@@ -21,10 +21,9 @@ pub struct GatewayServer {
 
 impl GatewayServer {
     pub fn new(config: GatewayConfig) -> Self {
-        // #1002 slice 4: legacy host-fs ro-binds the whole host `/` into every
-        // bubblewrap sandbox. It stays the default until after launch (RFC
-        // sandbox-mount-allow-set.md DP-1) but the deprecation warning makes
-        // the migration visible from day one.
+        // #1002 slice 4 / DP-1: `allow_set` is the default; `legacy` (whole-host
+        // ro-bind) is a deprecated opt-out and the warning keeps those
+        // deployments visible.
         match config.sandbox.host_fs.as_str() {
             "allow_set" => {
                 tracing::info!(
@@ -40,10 +39,9 @@ impl GatewayServer {
                 tracing::warn!(
                     target: "sandbox",
                     host_fs = %other,
-                    "sandbox.host_fs is '{other}', not 'allow_set': bubblewrap sandboxes \
-                     keep the legacy whole-host ro-bind. Set sandbox.host_fs: allow_set to \
-                     mount only the gateway-asserted set (see \
-                     docs/internals/sandbox/drivers.md); the default flips after launch."
+                    "sandbox.host_fs is '{other}': bubblewrap sandboxes keep the deprecated \
+                     whole-host ro-bind. Set sandbox.host_fs: allow_set to mount only the \
+                     gateway-asserted set (see docs/internals/sandbox/drivers.md)."
                 );
             }
         }

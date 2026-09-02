@@ -167,7 +167,7 @@ pub(crate) async fn execute_script_in_sandbox(
     input_payload: &str,
     metadata: Option<&serde_json::Value>,
     sandbox_type: &str,
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     sandbox_kill: Option<(
         std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
         String,
@@ -191,6 +191,11 @@ pub(crate) async fn execute_script_in_sandbox(
 
     let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
     let mut overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
+    // DP-1: `sandbox.host_fs` decides host exposure for the whole bubblewrap
+    // tier, not just `sandbox_exec`. A script agent that kept the whole-host
+    // ro-bind while the operator was told the default is `allow_set` is the
+    // drift this seam exists to prevent.
+    overrides.host_fs_allow_set = crate::sandbox::host_fs_allow_set(Some(config));
     let has_evaluation_cap = capabilities.iter().any(|c| {
         matches!(
             c,

@@ -2095,6 +2095,50 @@ fn bounded_child_summary(reply: &str, max_chars: usize, full_ref: Option<&str>) 
     summarize_oversized_reply(reply, max_chars, full_ref)
 }
 
+/// Derive the task status for a completed child from its reply — mechanically,
+/// never by LLM judgment.
+///
+/// Only a structured reply (the `io.returns` JSON a script agent emits) can
+/// downgrade the status: a top-level `"status"` of `"failed"`/`"error"` or a
+/// top-level `"ok": false`. Anything else — prose replies, unparseable
+/// payloads, absent reply, any other `status` value (`"partial"`,
+/// `"completed"`, …) — stays `Succeeded`, exactly the pre-existing behavior.
+/// "The session ended normally" and "the work succeeded" are different facts;
+/// this keeps the task row honest about the second without second-guessing
+/// free-form replies.
+///
+/// The match is deliberately narrow: **top-level keys only** (a nested
+/// `{"result": {"status": "failed"}}` does not count) and **exact lowercase
+/// tokens** (`"Failed"`, `"ERROR"` do not). A payload carrying only
+/// `{"error": …}` with no `status`/`ok` key also stays `Succeeded`. Widening
+/// any of these means reading intent out of a shape agents were never told to
+/// honour, which is how a mechanical rule turns into judgment.
+///
+/// Recording `Failed` is not inert: `update_task_run_status` runs the task
+/// through `evaluate_stage_retry`, so a task carrying a `retry_policy` whose
+/// summary classifies as retryable (timeout / transient-infra phrasings) is
+/// now re-run up to its budget where it previously ended as a silent success.
+/// Generic failures classify as `FailureClass::Unknown` (`retryable: None`)
+/// and are not retried — see `derive_child_task_status_does_not_arm_blind_retry`.
+fn derive_child_task_status(assistant_reply: Option<&str>) -> autonoetic_types::workflow::TaskRunStatus {
+    use autonoetic_types::workflow::TaskRunStatus;
+    let Some(reply) = assistant_reply else {
+        return TaskRunStatus::Succeeded;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(reply) else {
+        return TaskRunStatus::Succeeded;
+    };
+    let failed = matches!(
+        v.get("status").and_then(|s| s.as_str()),
+        Some("failed") | Some("error")
+    ) || v.get("ok") == Some(&serde_json::Value::Bool(false));
+    if failed {
+        TaskRunStatus::Failed
+    } else {
+        TaskRunStatus::Succeeded
+    }
+}
+
 /// Write `reply` to the content store under the child session, visible to the
 /// parent, and return its short `cnt_` ref.
 fn spill_child_reply(
@@ -2654,19 +2698,36 @@ async fn spawn_task_execution(
                 }
             }
 
+            // Mechanical child-failure surfacing: a child whose structured
+            // reply reports failure (`status: "failed"|"error"` or
+            // `ok: false` — the io.returns shape) must not be recorded as a
+            // Succeeded task. The task row is what the parent's join, the
+            // Session Room and `workflow_state` read; recording Succeeded
+            // there masked real child failures (e.g. a sandbox that died at
+            // mount setup) and sent the parent down a re-delegation loop.
+            let task_status =
+                derive_child_task_status(spawn_result.assistant_reply.as_deref());
+            if task_status == autonoetic_types::workflow::TaskRunStatus::Failed {
+                tracing::warn!(
+                    target: "workflow",
+                    task_id = %t_id,
+                    "Child session ended normally but its structured reply reports failure; \
+                     recording task as failed"
+                );
+            }
             if let Err(e) = workflow_store::update_task_run_status(
                 &cfg,
                 store,
                 &wf_id,
                 &t_id,
-                autonoetic_types::workflow::TaskRunStatus::Succeeded,
+                task_status,
                 summary,
                 None,
                 None,
             ) {
                 tracing::warn!(target: "workflow", error = %e, "Failed to persist async task completion");
             }
-            tracing::info!(target: "workflow", task_id = %t_id, "Async task completed successfully");
+            tracing::info!(target: "workflow", task_id = %t_id, status = task_status.as_str(), "Async task completed");
             let _ = workflow_store::checkpoint_task(
                 &cfg,
                 store,
@@ -2674,7 +2735,7 @@ async fn spawn_task_execution(
                 &t_id,
                 "completed".to_string(),
                 serde_json::json!({
-                    "status": "succeeded",
+                    "status": task_status.as_str(),
                     "result_summary": spawn_result.assistant_reply.as_ref().map(|s| {
                         bounded_child_summary(
                             s,
@@ -3881,6 +3942,117 @@ mod child_reply_spill_tests {
         assert_eq!(
             workflow_store::full_result_ref(&task),
             Some("cnt_abcd1234")
+        );
+    }
+
+    #[test]
+    fn structured_failure_reply_derives_failed_task() {
+        use autonoetic_types::workflow::TaskRunStatus;
+        let failed = r#"{"status":"failed","error":"bwrap: Can't mkdir /opt/wrapper-out"}"#;
+        assert_eq!(
+            derive_child_task_status(Some(failed)),
+            TaskRunStatus::Failed
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"error"}"#)),
+            TaskRunStatus::Failed
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"ok":false,"reason":"no files"}"#)),
+            TaskRunStatus::Failed
+        );
+    }
+
+    #[test]
+    fn non_failure_replies_stay_succeeded() {
+        use autonoetic_types::workflow::TaskRunStatus;
+        // The adapter's honest "partial" must NOT be downgraded — only an
+        // explicit failure shape changes the task status.
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"partial","artifact_ref":"ar.9e12"}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"ok":true}"#)),
+            TaskRunStatus::Succeeded
+        );
+        // Prose, unparseable, absent reply — all stay Succeeded.
+        assert_eq!(
+            derive_child_task_status(Some("All three attempts failed identically.")),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some("{not json")),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(derive_child_task_status(None), TaskRunStatus::Succeeded);
+        // Top-level keys only, exact lowercase tokens only — anything wider
+        // reads intent out of a shape agents were never told to honour.
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"result":{"status":"failed"}}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"Failed"}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"error":"boom"}"#)),
+            TaskRunStatus::Succeeded
+        );
+    }
+
+    /// Recording `Failed` is not inert: it routes the task through
+    /// `evaluate_stage_retry`. A deterministic child failure must not arm a
+    /// blind re-run (the re-delegation loop this PR exists to break), while a
+    /// transport-classified one still gets its budgeted retry.
+    #[test]
+    fn derive_child_task_status_does_not_arm_blind_retry() {
+        use crate::scheduler::workflow_store::evaluate_stage_retry;
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+
+        let task = TaskRun {
+            task_id: "t-retry".to_string(),
+            workflow_id: "wf-retry".to_string(),
+            agent_id: "executor.default".to_string(),
+            session_id: "root/child".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: "2026-09-02T00:00:00Z".to_string(),
+            updated_at: "2026-09-02T00:00:00Z".to_string(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "unknown": {"max_retries": 2},
+                "transient_infra": {"max_retries": 2},
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        let deterministic = r#"{"status":"failed","error":"bwrap: Can't mkdir /opt/wrapper-out"}"#;
+        let status = derive_child_task_status(Some(deterministic));
+        assert_eq!(status, TaskRunStatus::Failed);
+        let decision = evaluate_stage_retry(&task, status, Some(deterministic));
+        assert!(
+            !decision.retry_scheduled,
+            "a deterministic child failure must not be re-run blindly: {:?}",
+            decision.failure
+        );
+
+        let transient = r#"{"status":"failed","error":"llm_transport:connect"}"#;
+        let status = derive_child_task_status(Some(transient));
+        assert_eq!(status, TaskRunStatus::Failed);
+        let decision = evaluate_stage_retry(&task, status, Some(transient));
+        assert!(
+            decision.retry_scheduled,
+            "a transport failure keeps its budgeted retry: {:?}",
+            decision.failure
         );
     }
 }

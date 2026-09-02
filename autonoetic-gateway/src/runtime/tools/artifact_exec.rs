@@ -964,6 +964,11 @@ impl NativeTool for ArtifactExecTool {
         } else {
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities)
         };
+        // DP-1: one key for the whole bubblewrap tier. The promotion gate runs
+        // unpromoted candidate code, so it is the last path that should keep
+        // the deprecated whole-host ro-bind when the operator asked for the
+        // asserted set.
+        overrides.host_fs_allow_set = crate::sandbox::host_fs_allow_set(config);
         if approval_validated_for_command && !manifest_may_record_promotion_verdicts(manifest) {
             overrides.share_net = true;
         }
@@ -1321,7 +1326,7 @@ fn execute_with_ticket(
     gw_dir: &Path,
     args: &ArtifactExecArgs,
     ticket: &crate::runtime::tools::artifact_prepare::DeploymentTicket,
-    _config: Option<&autonoetic_types::config::GatewayConfig>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
@@ -1415,6 +1420,8 @@ fn execute_with_ticket(
 
     let mut overrides =
         crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
+    // DP-1: same key as every other bubblewrap exec path (see execute()).
+    overrides.host_fs_allow_set = crate::sandbox::host_fs_allow_set(config);
     overrides.share_net = !ticket.approved_domains.is_empty();
 
     let mut extra_env: Vec<(String, String)> = args
