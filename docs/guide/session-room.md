@@ -43,7 +43,7 @@ autonoetic room <ROOT_SESSION_ID> [OPTIONS]
 | Option | Default | Meaning |
 |---|---|---|
 | `<ROOT_SESSION_ID>` | — | The session whose timeline to show (required). |
-| `--min-altitude <LEVEL>` | `normal` | Lowest importance to show: `detail` \| `normal` \| `attention` \| `error`. |
+| `--min-altitude <LEVEL>` | `detail` | Lowest importance to show: `detail` \| `normal` \| `attention` \| `error` \| `story`. |
 | `--follow` | off | Non-interactive: tail the timeline live (like `tail -f`) until `Ctrl+C`. |
 | `--tui` | off | Launch the **interactive** full-screen shell (scroll, drill-down, resolve gates, send messages). |
 | `--limit <N>` | `200` | Max rows fetched per read. |
@@ -87,6 +87,17 @@ The `--min-altitude` floor (and the `a` key in the TUI) hides anything below the
 chosen level. Long runs of routine `·` events are **collapsed** into a single
 `⟨N routine events …⟩` row (toggle with `s`).
 
+Two aids keep the process readable at the default floor:
+
+- **Turn dividers are chapter headers.** Each `── turn N ──` rule carries the
+  turn's aggregate — tool calls, LLM tokens, how many reasoning rounds — so you
+  can scan *what the session did, what it cost, and how much it thought* from
+  the dividers alone.
+- **Truncation always names the escape hatch.** A bare `…` means a headline or
+  preview was compacted by design; `…(+3.2k chars · Enter)` or `…(+12 lines ·
+  Enter)` means real content was cut — how much, and the key that shows the
+  rest (Enter opens the drill-down pane with the full payload).
+
 **Actor labels** show who acted, by seat, with a marker when the occupant isn't a
 normal autonoetic agent:
 
@@ -103,7 +114,7 @@ normal autonoetic agent:
 | `k` / `↑` | Move selection up |
 | `g` / `Home` | Jump to the top |
 | `G` / `End` | Jump to the bottom and resume following newest |
-| `a` | Cycle the altitude floor (detail → normal → attention → error → …) |
+| `a` | Cycle the view floor (detail → normal → attention → error → **story**). `story` is the process-arc preset: narrative, gates, verdicts, and failures — plumbing and routine tool output hidden. |
 | `s` | Toggle squashing of routine `·` runs |
 | `Enter` | Drill into the selected row — show its full detail (metadata, refs, payload). `Enter`/`Esc` closes it. |
 | `q` / `Ctrl+C` | Quit (press twice within 3s) |

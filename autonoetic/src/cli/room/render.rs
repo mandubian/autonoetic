@@ -5,7 +5,7 @@
 //! viewer, and (later) external channel bridges all share the *same* formatting.
 //! Presentation only — importance/altitude is decided gateway-side.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry};
@@ -27,6 +27,42 @@ pub fn altitude_glyph(altitude: Altitude) -> &'static str {
         Altitude::Attention => "⚠",
         Altitude::Normal => "▸",
         Altitude::Detail => "·",
+    }
+}
+
+/// View floor — which timeline rows are shown. `Altitude(f)` hides everything
+/// below `f`; `Story` is the process-arc preset: decisions and failures
+/// (Attention+) plus everything the session *said* and *concluded* — agent,
+/// operator, and peer messages, gate cards, and promotion verdicts — while
+/// plumbing and routine tool output stay hidden. One keystroke answers "what
+/// actually happened?".
+///
+/// Channel-neutral: both the interactive TUI (`a` key) and the read-only
+/// viewer/follow modes (`--min-altitude story`) filter through [`FloorMode::admits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorMode {
+    Altitude(Altitude),
+    Story,
+}
+
+impl FloorMode {
+    /// Whether a timeline entry passes this floor. Story mode is a *union*,
+    /// not an altitude cut: narrative rows are Normal but still belong to the
+    /// arc, so they are admitted by tone, not altitude.
+    pub fn admits(self, entry: &SessionTimelineEntry) -> bool {
+        match self {
+            FloorMode::Altitude(f) => entry.altitude >= f,
+            FloorMode::Story => {
+                entry.altitude >= Altitude::Attention
+                    || matches!(
+                        tone_for_entry(entry),
+                        RowTone::AgentNarrative
+                            | RowTone::OperatorGate
+                            | RowTone::VerdictPass
+                            | RowTone::VerdictFail
+                    )
+            }
+        }
     }
 }
 
@@ -57,9 +93,25 @@ fn role_label(role: &SessionRole) -> String {
     }
 }
 
+/// Truncation vocabulary — one rule for every cut in the room:
+/// - a bare `…` means a headline/preview was compacted for the list *by design*
+///   (`one_line`/`cap_preview`); nothing beyond it is meant to be read inline.
+/// - `…(+N <unit> · Enter)` means real content was cut: the marker says how
+///   much and names the key that shows the rest (Enter opens the drill-down
+///   pane, which always carries the full payload).
 /// Hard ceiling for narrative body text shown inline in the room list. The
-/// detail pane (⏎) still shows the full payload; beyond this we add `…`.
+/// detail pane (⏎) still shows the full payload; beyond this we add a
+/// `…(+N chars · Enter)` marker.
 const NARRATIVE_BODY_MAX: usize = 8_000;
+
+/// Human-readable count for truncation markers: 950 → `950`, 12_340 → `12.3k`.
+pub(crate) fn compact_count(n: usize) -> String {
+    if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 /// Try to parse a string that may be JSON — including gateway-truncated timeline
 /// copies ending with `…`.
@@ -2310,13 +2362,21 @@ pub(crate) fn cap_preview(s: &str, max: usize) -> String {
 }
 
 /// Like `cap_preview` but preserves newlines, yielding a multi-line string
-/// suitable for the `detail` field. Caps total character count at `max`.
+/// suitable for the `detail` field. Caps total character count at `max`; a cut
+/// carries the `…(+N chars · Enter)` marker (see the truncation vocabulary on
+/// [`NARRATIVE_BODY_MAX`]) so the operator always knows what was dropped and
+/// how to see it.
 fn preserve_lines(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    let total = s.chars().count();
+    if total <= max {
         return s.to_string();
     }
-    let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{truncated}…")
+    let kept = max.saturating_sub(1);
+    let truncated: String = s.chars().take(kept).collect();
+    format!(
+        "{truncated}…(+{} chars · Enter)",
+        compact_count(total - kept)
+    )
 }
 
 /// Build the second-line preview for a known event type. Returns `None` for
@@ -2948,8 +3008,24 @@ pub enum RowSource {
 /// A lone routine event renders normally — collapsing one is pointless.
 /// Checkpoint and Significant tiers always render individually. Coalescing is
 /// page-local; a run split across reads collapses per page.
+///
+/// Kept exported — the built-in classification without operator overrides is
+/// the channel-neutral default (tests, future channels). Callers with access
+/// to the operator config should use [`coalesce_with`].
+#[allow(dead_code)]
 pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
     coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
+}
+
+/// [`coalesce`] with operator tier overrides (config `session_room.event_tiers`).
+pub fn coalesce_with(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> Vec<RenderedRow> {
+    coalesce_indexed_with(entries, overrides)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
 }
 
 /// Approval ids already surfaced by a linked `escalation.pending` row.
@@ -2995,9 +3071,59 @@ pub fn is_redundant_promotion_escalation_approval(
         .is_some_and(|id| linked_escalation_approvals.contains(id))
 }
 
+/// Call ids of every `tool.completed` on the page that will actually render.
+/// Used to drop the matching `tool.requested` rows — one call, one row (see
+/// [`is_paired_tool_request`]). Completions hidden by operator config are
+/// excluded: dropping the request too would make the whole call invisible.
+fn completed_call_ids(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> HashSet<String> {
+    entries
+        .iter()
+        .filter(|e| e.event_type == "tool.completed")
+        .filter(|e| !is_hidden_by_config(e, overrides))
+        .filter_map(|e| {
+            let p = parse_entry_payload(e)?;
+            payload_field_str(&p, "call_id")
+        })
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// True for a `tool.requested` whose completion (same `call_id`) is also on
+/// the page. The completion row's headline already carries the same key param
+/// (`args_preview`), so the pair would render as two rows for one call — the
+/// request half is dropped. A request without its completion yet (in-flight
+/// call, or the completion is on a later page) still renders.
+fn is_paired_tool_request(e: &SessionTimelineEntry, completed: &HashSet<String>) -> bool {
+    if e.event_type != "tool.requested" || completed.is_empty() {
+        return false;
+    }
+    parse_entry_payload(e)
+        .and_then(|p| payload_field_str(&p, "call_id"))
+        .is_some_and(|id| completed.contains(&id))
+}
+
 /// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
+///
+/// Kept exported (forward-compat, tests) — config-aware callers use
+/// [`coalesce_indexed_with`].
+#[allow(dead_code)]
 pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
+    coalesce_indexed_with(entries, &HashMap::new())
+}
+
+/// [`coalesce_indexed`] with operator tier overrides: types configured as
+/// `hidden` are dropped from the view entirely (one entry, silently — the
+/// config is explicit operator intent), `routine`-overridden types fold,
+/// `checkpoint`/`significant`-overridden types always render individually.
+pub fn coalesce_indexed_with(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> Vec<(RenderedRow, RowSource)> {
     let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
+    let completed_calls = completed_call_ids(entries, overrides);
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
@@ -3005,11 +3131,17 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
         if is_redundant_promotion_escalation_approval(e, &linked_escalation_approvals) {
             continue;
         }
+        if is_paired_tool_request(e, &completed_calls) {
+            continue;
+        }
+        if is_hidden_by_config(e, overrides) {
+            continue;
+        }
         // Defense-in-depth: only fold Routine-tier events that are ALSO below
         // the Attention altitude. This preserves the original invariant that
         // Attention/Error rows (gates, failures, interventions) NEVER collapse,
         // even if a future event type is mis-classified as Routine by `event_tier`.
-        let foldable = event_tier(e) == EventTier::Routine
+        let foldable = event_tier_with(e, overrides) == EventTier::Routine
             && e.altitude < Altitude::Attention;
         if foldable {
             if run_start.is_none() {
@@ -3073,6 +3205,9 @@ const SIGNIFICANT_EVENT_TYPES: &[&str] = &[
     "llm.request_failed", "llm.empty_response", "llm.retry",
     "tool.failed", "guard.tripped",
     "session.emergency_stop", "security.sandbox_escape",
+    // A failed background job is a failure — it renders individually and
+    // never folds into a routine run (mirrors the gateway's Attention bump).
+    "scheduled_job.failed",
     // Operator egress-policy declarations (`/private`, `/taint`) — a change to
     // what may leave the machine is consciously kept individual (#977).
     "egress.session_policy",
@@ -3090,7 +3225,7 @@ const ROUTINE_EVENT_TYPES: &[&str] = &[
     "tool.requested",
     "workflow.child_state", "workflow.join_satisfied", "workflow.signal",
     "workflow.started", "workflow.completed",
-    "scheduled_job.triggered", "scheduled_job.completed", "scheduled_job.failed",
+    "scheduled_job.triggered", "scheduled_job.completed",
     // High-volume egress metadata — per-envelope labelings, chokepoint
     // summaries, routing audits, relabel bookkeeping (#972). Folded by
     // default; surfaced on dial-down / investigation.
@@ -3144,6 +3279,83 @@ pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
     EventTier::Significant
 }
 
+/// Operator-configured visibility setting for one event type (config
+/// `session_room.event_tiers`). `Hidden` drops the type from the timeline
+/// view entirely — pending gates stay actionable through the pending strip
+/// and approvals popup regardless, because those are computed from the full
+/// entry list, not the visible rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierSetting {
+    Checkpoint,
+    Significant,
+    Routine,
+    Hidden,
+}
+
+impl TierSetting {
+    pub fn parse(s: &str) -> Option<TierSetting> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "checkpoint" => Some(TierSetting::Checkpoint),
+            "significant" => Some(TierSetting::Significant),
+            "routine" => Some(TierSetting::Routine),
+            "hidden" => Some(TierSetting::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// The operator override for this entry's event type, if one is configured.
+fn tier_setting_for(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> Option<TierSetting> {
+    overrides
+        .get(&entry.event_type)
+        .and_then(|s| TierSetting::parse(s))
+}
+
+/// [`event_tier`] with operator overrides applied: an event type configured
+/// as checkpoint/significant/routine is classified accordingly; `hidden` has
+/// no tier (row removal is the caller's decision) and falls back to the
+/// built-in classification; unconfigured types use the built-in lists.
+pub fn event_tier_with(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> EventTier {
+    match tier_setting_for(entry, overrides) {
+        Some(TierSetting::Checkpoint) => EventTier::Checkpoint,
+        Some(TierSetting::Significant) => EventTier::Significant,
+        Some(TierSetting::Routine) => EventTier::Routine,
+        Some(TierSetting::Hidden) | None => event_tier(entry),
+    }
+}
+
+/// True when the operator has hidden this entry's event type via config.
+pub fn is_hidden_by_config(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> bool {
+    tier_setting_for(entry, overrides) == Some(TierSetting::Hidden)
+}
+
+/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
+/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
+/// Kept exported (forward-compat, tests) — config-aware callers use
+/// [`is_checkpoint_with`].
+#[allow(dead_code)]
+pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
+    event_tier(entry) == EventTier::Checkpoint
+}
+
+/// [`is_checkpoint`] with operator overrides applied (a type overridden to
+/// `checkpoint` earns the banner chrome and `[`/`]` jump keys).
+pub fn is_checkpoint_with(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> bool {
+    event_tier_with(entry, overrides) == EventTier::Checkpoint
+}
+
 /// `tool.completed` is Significant only for a state-changing tool; routine
 /// (folded) otherwise. Reads `tool_name` from the payload defensively.
 fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
@@ -3163,12 +3375,6 @@ fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
     } else {
         EventTier::Routine
     }
-}
-
-/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
-/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
-pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
-    event_tier(entry) == EventTier::Checkpoint
 }
 
 fn flush_run(
@@ -3398,6 +3604,114 @@ fn format_tokens_compact(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// One-line per-turn aggregate for the turn divider — the "chapter header".
+///
+/// Turns are the natural reading unit of a session: the divider now carries
+/// what the turn *did* (tool calls), what it *cost* (LLM tokens), and how much
+/// thinking it involved, so the operator can scan the process arc from the
+/// dividers alone without opening any row. Pure and channel-neutral.
+///
+/// `wanted` is the set of turn_ids that actually have a divider on the current
+/// page; the aggregation is a single pass over `entries`. Open turns aggregate
+/// what is visible so far — the label refreshes as the turn progresses.
+///
+/// Returns a map turn_id → label fragment (e.g.
+/// `4 calls: read×2, grep · 45.2k↓/3.1k↑ tok · 💭×3`). Turns with nothing to
+/// report are absent — their dividers stay plain.
+pub fn turn_divider_labels(
+    entries: &[SessionTimelineEntry],
+    wanted: &HashSet<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    struct TurnAgg {
+        calls: usize,
+        tools: std::collections::HashMap<String, usize>,
+        seen_calls: HashSet<String>,
+        tokens_in: u64,
+        tokens_out: u64,
+        reasoning: usize,
+    }
+    let mut aggs: std::collections::HashMap<String, TurnAgg> = std::collections::HashMap::new();
+    for e in entries {
+        let Some(turn_id) = e.turn_id.as_deref().filter(|t| wanted.contains(*t)) else {
+            continue;
+        };
+        let agg = aggs.entry(turn_id.to_string()).or_insert(TurnAgg {
+            calls: 0,
+            tools: std::collections::HashMap::new(),
+            seen_calls: HashSet::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            reasoning: 0,
+        });
+        match e.event_type.as_str() {
+            "tool.requested" | "tool.completed" => {
+                let p = parse_entry_payload(e);
+                let tool = p
+                    .as_ref()
+                    .and_then(|p| payload_field_str(p, "tool_name"))
+                    .unwrap_or_else(|| "tool".into());
+                let call_id = p.as_ref().and_then(|p| payload_field_str(p, "call_id"));
+                // Dedupe the request/completion pair of one call by call_id
+                // *alone* — a pair half may miss `tool_name` (older rows) or
+                // spell it differently, and a `(tool, call_id)` key would then
+                // count the same call twice. The tool name only steers the
+                // per-tool breakdown, never uniqueness.
+                let count_it = match &call_id {
+                    Some(id) => agg.seen_calls.insert(id.clone()),
+                    None => e.event_type == "tool.requested",
+                };
+                if count_it {
+                    agg.calls += 1;
+                    *agg.tools.entry(tool).or_insert(0) += 1;
+                }
+            }
+            "llm.round" => {
+                if let Some(p) = parse_entry_payload(e) {
+                    agg.tokens_in += p.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    agg.tokens_out += p.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                }
+            }
+            "agent.reasoning" => agg.reasoning += 1,
+            _ => {}
+        }
+    }
+    for (turn_id, agg) in aggs {
+        let mut parts: Vec<String> = Vec::new();
+        if agg.calls > 0 {
+            let mut ordered: Vec<(String, usize)> = agg.tools.into_iter().collect();
+            ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let shown = ordered.len().min(3);
+            let mut names: Vec<String> = ordered
+                .iter()
+                .take(shown)
+                .map(|(k, c)| if *c > 1 { format!("{k}×{c}") } else { k.clone() })
+                .collect();
+            if ordered.len() > shown {
+                names.push(format!("+{}", ordered.len() - shown));
+            }
+            parts.push(format!("{} calls: {}", agg.calls, names.join(", ")));
+        }
+        if agg.tokens_in > 0 || agg.tokens_out > 0 {
+            parts.push(format!(
+                "{}/{} tok",
+                format_tokens_compact(agg.tokens_in),
+                format_tokens_compact(agg.tokens_out)
+            ));
+        }
+        if agg.reasoning > 0 {
+            parts.push(format!("💭×{}", agg.reasoning));
+        }
+        if !parts.is_empty() {
+            out.insert(turn_id, parts.join(" · "));
+        }
+    }
+    out
 }
 
 pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
@@ -4137,6 +4451,270 @@ mod tests {
     }
 
     #[test]
+    fn paired_tool_request_is_dropped_completion_renders_once() {
+        // One call, one row: a tool.requested whose tool.completed (same
+        // call_id) is on the page is dropped — the completion headline already
+        // carries the same key param. This kills the double row a significant
+        // completion used to produce (lone requested flush + completion row).
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({
+                    "tool_name": "content_write",
+                    "call_id": call_id,
+                    "args_preview": "/tmp/out.rs"
+                }),
+            )
+        };
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.completed", "c1")];
+        let rows = coalesce(&entries);
+        assert_eq!(rows.len(), 1, "only the completion renders; got {rows:?}");
+        match &rows[0] {
+            RenderedRow::Line(spec) => {
+                assert!(spec.headline.contains("wrote"), "got: {}", spec.headline);
+            }
+            other => panic!("expected the completion line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paired_request_survives_when_completion_is_config_hidden() {
+        // If the operator hides completions but not requests, the pairing set
+        // must ignore the hidden completion — otherwise the request would be
+        // dropped too and the whole call would vanish from the view.
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({
+                    "tool_name": "content_write",
+                    "call_id": call_id,
+                    "args_preview": "/tmp/out.rs"
+                }),
+            )
+        };
+        let overrides: HashMap<String, String> = [("tool.completed".to_string(), "hidden".to_string())]
+            .into_iter()
+            .collect();
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.completed", "c1")];
+        let rows = coalesce_with(&entries, &overrides);
+        assert_eq!(rows.len(), 1, "the request must still render; got {rows:?}");
+        match &rows[0] {
+            RenderedRow::Line(spec) => {
+                // The *request* action form (`✎ write`), not the completion's
+                // `✎ wrote` — proof the surviving row is the request half.
+                assert!(
+                    spec.headline.contains("✎ write /tmp/out.rs"),
+                    "expected the request headline, got: {}",
+                    spec.headline
+                );
+            }
+            other => panic!("expected the request line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_flight_tool_request_still_renders() {
+        // A request without its completion yet (call still open, or completion
+        // on a later page) must stay visible — it is the in-flight signal.
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": "sandbox_exec", "call_id": call_id }),
+            )
+        };
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.requested", "c2")];
+        let rows = coalesce(&entries);
+        match &rows[..] {
+            [RenderedRow::Collapsed { count: 2, .. }] => {}
+            other => panic!("both requests survive (folded), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_without_call_id_is_never_paired_away() {
+        // Older rows may lack call_id; without one we cannot prove the pair,
+        // so the request always renders (previous behavior) — here as its own
+        // row next to the significant completion.
+        let requested = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.requested",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "content_write", "args_preview": "/tmp/a.rs" }),
+        );
+        let completed = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "content_write", "args_preview": "/tmp/a.rs" }),
+        );
+        let rows = coalesce(&[requested, completed]);
+        assert_eq!(rows.len(), 2, "got {rows:?}");
+        assert!(matches!(&rows[0], RenderedRow::Line { .. }));
+        assert!(matches!(&rows[1], RenderedRow::Line { .. }));
+    }
+
+    #[test]
+    fn preserve_lines_cut_names_amount_and_escape_hatch() {
+        // Truncation vocabulary: content cuts carry `…(+N chars · Enter)`.
+        let long = "x".repeat(NARRATIVE_BODY_MAX + 500);
+        let cut = preserve_lines(&long, NARRATIVE_BODY_MAX);
+        assert!(cut.ends_with("…(+501 chars · Enter)"), "got: {cut}");
+        let marker = "…(+501 chars · Enter)";
+        assert_eq!(
+            cut.chars().count(),
+            (NARRATIVE_BODY_MAX - 1) + marker.chars().count()
+        );
+        // Under the cap: untouched.
+        assert_eq!(preserve_lines("short", NARRATIVE_BODY_MAX), "short");
+    }
+
+    #[test]
+    fn compact_count_formats_thousands() {
+        assert_eq!(compact_count(950), "950");
+        assert_eq!(compact_count(9_999), "9999");
+        assert_eq!(compact_count(10_000), "10.0k");
+        assert_eq!(compact_count(12_340), "12.3k");
+    }
+
+    #[test]
+    fn tier_overrides_reclassify_and_hide() {
+        let mk = |et: &str, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                payload,
+            )
+        };
+        let overrides: HashMap<String, String> = [
+            // Promote a loud-but-Normal type to never fold.
+            ("workflow.started".to_string(), "significant".to_string()),
+            // Demote a chatty type to folding.
+            ("agent.peer_message".to_string(), "routine".to_string()),
+            // Drop a type the operator does not care about.
+            ("scheduled_job.completed".to_string(), "hidden".to_string()),
+            // Checkpoint chrome + jump keys.
+            ("digest_annotate".to_string(), "checkpoint".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // Promotion wins over the built-in classification.
+        assert_eq!(
+            event_tier_with(&mk("workflow.started", serde_json::json!({})), &overrides),
+            EventTier::Significant
+        );
+        // Demotion to routine folds (when altitude permits).
+        assert_eq!(
+            event_tier_with(&mk("agent.peer_message", serde_json::json!({})), &overrides),
+            EventTier::Routine
+        );
+        // Checkpoint override earns banner/jump handling.
+        assert!(is_checkpoint_with(
+            &mk("digest_annotate", serde_json::json!({})),
+            &overrides
+        ));
+        // Hidden drops the row from the view.
+        let entries = vec![
+            mk("scheduled_job.completed", serde_json::json!({"result_summary": "x"})),
+            mk("agent.message", serde_json::json!({"message": "hi"})),
+        ];
+        let rows = coalesce_with(&entries, &overrides);
+        assert_eq!(rows.len(), 1, "hidden type must not render; got {rows:?}");
+
+        // An invalid override value falls back to the built-in classification
+        // (config load validates; this is belt-and-braces).
+        let mut bad = HashMap::new();
+        bad.insert("workflow.started".to_string(), "loud".to_string());
+        assert_eq!(
+            event_tier_with(&mk("workflow.started", serde_json::json!({})), &bad),
+            event_tier(&mk("workflow.started", serde_json::json!({})))
+        );
+        // Empty overrides ⇒ identical to the plain classification.
+        assert_eq!(
+            event_tier_with(&mk("agent.message", serde_json::json!({})), &HashMap::new()),
+            event_tier(&mk("agent.message", serde_json::json!({})))
+        );
+        // TierSetting::parse is case-insensitive and rejects junk.
+        assert_eq!(TierSetting::parse("ROUTINE"), Some(TierSetting::Routine));
+        assert_eq!(TierSetting::parse("  hidden "), Some(TierSetting::Hidden));
+        assert_eq!(TierSetting::parse("invisible"), None);
+    }
+
+    #[test]
+    fn turn_divider_labels_aggregate_calls_tokens_reasoning() {
+        let mk_turn = |turn: &str, et: &str, payload: serde_json::Value| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Detail,
+                payload,
+            );
+            e.turn_id = Some(turn.into());
+            e
+        };
+        let entries = vec![
+            // Turn 3: two read calls (request/completion pairs dedupe), one
+            // LLM round with tokens, two reasoning events.
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c1"})),
+            mk_turn("turn-000003", "tool.completed", serde_json::json!({"tool_name": "read", "call_id": "c1"})),
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c2"})),
+            mk_turn("turn-000003", "tool.completed", serde_json::json!({"tool_name": "read", "call_id": "c2"})),
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "grep", "call_id": "c3"})),
+            mk_turn("turn-000003", "llm.round", serde_json::json!({"input_tokens": 1200, "output_tokens": 340})),
+            mk_turn("turn-000003", "agent.reasoning", serde_json::json!({"reasoning": "a"})),
+            mk_turn("turn-000003", "agent.reasoning", serde_json::json!({"reasoning": "b"})),
+            // Turn 4: narrative only — nothing to report, no label.
+            mk_turn("turn-000004", "agent.message", serde_json::json!({"message": "done"})),
+            // Turn 5 belongs to a different wanted-set run; excluded below.
+            mk_turn("turn-000005", "llm.round", serde_json::json!({"input_tokens": 5})),
+        ];
+        let wanted: HashSet<String> = ["turn-000003", "turn-000004"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let labels = turn_divider_labels(&entries, &wanted);
+        assert_eq!(labels.len(), 1, "only turn 3 has something to report");
+        let t3 = &labels["turn-000003"];
+        assert!(t3.contains("3 calls: read×2, grep"), "got: {t3}");
+        assert!(t3.contains("1.2k/340 tok"), "got: {t3}");
+        assert!(t3.contains("💭×2"), "got: {t3}");
+
+        // A pair whose halves disagree on tool_name (or miss it) still counts
+        // once: dedupe is by call_id alone, tool names only steer the
+        // per-tool breakdown.
+        let ragged = vec![
+            mk_turn("turn-000006", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c9"})),
+            mk_turn("turn-000006", "tool.completed", serde_json::json!({"call_id": "c9"})),
+        ];
+        let wanted6: HashSet<String> = ["turn-000006"].into_iter().map(String::from).collect();
+        let labels6 = turn_divider_labels(&ragged, &wanted6);
+        assert!(
+            labels6["turn-000006"].contains("1 calls"),
+            "same call_id must count once regardless of tool_name: {:?}",
+            labels6
+        );
+        // A narrative-only turn has no plumbing/cost/thought → no entry,
+        // so its divider stays plain.
+        assert!(!labels.contains_key("turn-000004"), "narrative-only turn: no stats");
+        // Empty wanted set → no work.
+        assert!(turn_divider_labels(&entries, &HashSet::new()).is_empty());
+    }
+
+    #[test]
     fn event_tier_classification() {
         let mk = |et: &str| {
             entry(
@@ -4165,6 +4743,7 @@ mod tests {
             "agent.message", "digest_annotate",
             "llm.request_failed", "llm.empty_response", "guard.tripped",
             "tool.failed", "session.emergency_stop", "security.sandbox_escape",
+            "scheduled_job.failed",
             "egress.envelope_withheld", "egress.assertion_violation",
             "egress.boundary_refused", "egress.declassified",
         ] {

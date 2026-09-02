@@ -15,7 +15,9 @@ mod test_scenarios;
 mod tui;
 
 use crate::cli::common::RoomArgs;
-use autonoetic_types::session_timeline::{Altitude, SessionTimelineListResult};
+use autonoetic_types::session_timeline::{
+    Altitude, SessionTimelineEntry, SessionTimelineListResult,
+};
 use channel::{Channel, CliChannel};
 use client::RoomClient;
 use std::path::Path;
@@ -32,13 +34,34 @@ pub async fn handle_room_with_target(
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
 
-    // `parse_str` returns `Some` for every valid floor — `None` means invalid.
-    let min_altitude = match Altitude::parse_str(&args.min_altitude) {
-        Some(a) => a,
-        None => anyhow::bail!(
-            "invalid --min-altitude '{}': expected detail | normal | attention | error",
-            args.min_altitude
-        ),
+    // Operator tier overrides must be valid — an unnoticed typo would silently
+    // fall back to the built-in classification and look like a no-op.
+    for (event_type, tier) in &config.session_room.event_tiers {
+        if render::TierSetting::parse(tier).is_none() {
+            anyhow::bail!(
+                "invalid session_room.event_tiers value for '{event_type}': '{tier}' \
+                 (expected checkpoint | significant | routine | hidden)"
+            );
+        }
+    }
+
+    // `story` is a pure view preset (narrative + gates + failures) — the
+    // gateway only understands real altitudes, so the RPC floor fetches
+    // everything (`detail`) and the story admission filter is applied
+    // client-side in both the TUI and the read-only viewer/follow paths.
+    let story = args.min_altitude.eq_ignore_ascii_case("story");
+    let rpc_floor = if story { "detail" } else { args.min_altitude.as_str() };
+    let initial_floor = if story {
+        render::FloorMode::Story
+    } else {
+        // `parse_str` returns `Some` for every valid altitude — `None` means invalid.
+        match Altitude::parse_str(&args.min_altitude) {
+            Some(a) => render::FloorMode::Altitude(a),
+            None => anyhow::bail!(
+                "invalid --min-altitude '{}': expected detail | normal | attention | error | story",
+                args.min_altitude
+            ),
+        }
     };
 
     // The whole room is a gateway API client (#392) — no store access.
@@ -56,10 +79,11 @@ pub async fn handle_room_with_target(
         return tui::run(
             &client,
             &mut root_session_id,
-            min_altitude,
+            initial_floor,
             args.limit,
             &mut target_agent_id,
             &presets,
+            &config.session_room.event_tiers,
         );
     }
 
@@ -70,7 +94,9 @@ pub async fn handle_room_with_target(
         &root_session_id,
         &mut cursor,
         args.limit,
-        &args.min_altitude,
+        rpc_floor,
+        initial_floor,
+        &config.session_room.event_tiers,
     )
     .await?;
 
@@ -98,7 +124,9 @@ pub async fn handle_room_with_target(
             &root_session_id,
             &mut cursor,
             args.limit,
-            &args.min_altitude,
+            rpc_floor,
+            initial_floor,
+            &config.session_room.event_tiers,
         )
         .await?;
     }
@@ -154,12 +182,19 @@ async fn resolve_root_session_id(
 /// Render every timeline entry newer than `cursor` via `session.timeline.list`,
 /// paging until caught up and advancing `cursor`. Returns whether anything was
 /// rendered.
+///
+/// `rpc_floor` is the gateway-side altitude floor — always a real altitude
+/// (`story` resolves to `detail` upstream; the story admission filter runs
+/// here via `view_floor`). Pure-view filtering (story preset + operator tier
+/// overrides) is applied client-side before coalescing.
 async fn drain_new_rpc(
     client: &RoomClient,
     root_session_id: &str,
     cursor: &mut Option<String>,
     limit: u32,
-    min_altitude: &str,
+    rpc_floor: &str,
+    view_floor: render::FloorMode,
+    tier_overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<bool> {
     let mut rendered_any = false;
     loop {
@@ -170,7 +205,7 @@ async fn drain_new_rpc(
                     "root_session_id": root_session_id,
                     "after_event_id": cursor.clone(),
                     "limit": limit,
-                    "min_altitude": min_altitude,
+                    "min_altitude": rpc_floor,
                 }),
             )
             .await?;
@@ -178,7 +213,13 @@ async fn drain_new_rpc(
         if page.entries.is_empty() {
             break;
         }
-        for row in render::coalesce(&page.entries) {
+        let admitted: Vec<SessionTimelineEntry> = page
+            .entries
+            .iter()
+            .filter(|e| view_floor.admits(e) && !render::is_hidden_by_config(e, tier_overrides))
+            .cloned()
+            .collect();
+        for row in render::coalesce_with(&admitted, tier_overrides) {
             println!("{}", CliChannel.format_row(&row));
         }
         *cursor = page.entries.last().map(|e| e.event_id.clone());

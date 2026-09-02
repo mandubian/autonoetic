@@ -295,6 +295,18 @@ operator_activity:
 #     planner: detail
 #     specialist: detail
 #     operator: detail
+# event_tiers: operator visibility overrides for the room TUI timeline,
+# keyed by timeline event type. Values: checkpoint (always render
+# individually, earns [ / ] jump keys), significant (always render
+# individually), routine (fold into collapsed runs), hidden (drop from
+# the timeline view — pending gates remain actionable via the pending
+# strip and approvals popup regardless). Unconfigured types keep the
+# built-in classification; unknown keys are reserved for future event
+# types. Values are validated when the room starts — an invalid value
+# aborts the launch with a naming error.
+#   event_tiers:
+#     scheduled_job.completed: hidden
+#     workflow.started: significant
 
 # ── Decider Obligations (symmetric obligations, #359 §O) ──────────────
 # When enabled, the gateway refuses a BLOCKING-tier gate decision with no

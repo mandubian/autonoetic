@@ -855,7 +855,8 @@ pub fn operator_comment_event(
 /// | `workbench.created` | Normal | milestone — content becomes reviewable (NOT plumbing) |
 /// | `workbench.reconciled` / `workbench.discarded` | Detail | edit/discard mechanics around the real work |
 /// | `workflow.child_state` / `workflow.join_satisfied` / `workflow.signal` | Detail | workflow bookkeeping |
-/// | `scheduled_job.*` | Detail | cron plumbing |
+/// | `scheduled_job.triggered` / `.completed` | Detail | cron plumbing |
+/// | `scheduled_job.failed` | Attention | a failed background job is a failure, never folded |
 /// | `agent.message` | Normal | primary agent narrative — the thing to read |
 /// | `operator.message` | Normal | operator input — primary |
 /// | `session.start` / `session.end` | Normal | session boundaries a new agent joins/leaves |
@@ -931,6 +932,10 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // see a researcher stuck re-probing one host, not have it buried in
         // per-call tool errors.
         | "sandbox.host_budget_exhausted"
+        // A failed scheduled/background job is a failure, not plumbing — it
+        // must never fold into a routine run in the room (same rule as
+        // `tool.completed` with `ok:false`).
+        | "scheduled_job.failed"
         | "security.escape_threshold" => Altitude::Attention,
 
         // ─── Normal: visible progress (the default floor). ───
@@ -968,7 +973,6 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "workflow.signal"
         | "scheduled_job.triggered"
         | "scheduled_job.completed"
-        | "scheduled_job.failed"
         // High-volume egress metadata — per-envelope labelings, per-request
         // chokepoint summaries, routing audits, relabel bookkeeping. Hidden at
         // the default floor; surfaced when investigating (dial-down, #972).
@@ -1458,6 +1462,16 @@ mod tests {
             altitude_for("agent.reasoning", &SessionRole::Sentinel),
             Altitude::Attention
         );
+    }
+
+    #[test]
+    fn scheduled_job_failure_is_attention_never_routine() {
+        // A failed background job is a failure, not plumbing: it must clear the
+        // Detail floor so the room cannot fold it into a routine run (same rule
+        // as a `tool.completed` with `ok:false`). Triggered/completed stay Detail.
+        assert_eq!(base_altitude("scheduled_job.failed"), Altitude::Attention);
+        assert_eq!(base_altitude("scheduled_job.triggered"), Altitude::Detail);
+        assert_eq!(base_altitude("scheduled_job.completed"), Altitude::Detail);
     }
 
     #[test]

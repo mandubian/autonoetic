@@ -9,7 +9,7 @@
 use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChannel};
 use super::client::RoomClient;
 use super::markdown;
-use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
+use super::render::{self, ActorKind, FloorMode, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{
     Altitude, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
@@ -596,7 +596,7 @@ fn build_info_panel(
     root: &str,
     channel_kind: &str,
     stats: &SessionStats,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     follow: bool,
     show_reasoning: bool,
@@ -656,7 +656,10 @@ fn build_info_panel(
     }
     lines.push(String::new());
     lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
-        floor.as_str(),
+        match floor {
+            FloorMode::Altitude(a) => a.as_str().to_string(),
+            FloorMode::Story => "story".to_string(),
+        },
         if squash { "on" } else { "off" },
         if show_reasoning { "on" } else { "off" },
         if follow { "●" } else { "○" },
@@ -709,7 +712,7 @@ fn build_header(
     stats: &SessionStats,
     gate_count: usize,
     follow: bool,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     taint: Option<&str>,
     pinned: bool,
@@ -739,7 +742,7 @@ fn build_header(
     if let Some(chip) = pending_chip(&stats.pending_calls, stats.pending_age_turns) {
         right_parts.push(chip);
     }
-    let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
+    let floor_ind = floor.indicator();
     right_parts.push(floor_ind);
     if !squash {
         right_parts.push("unsquashed".to_string());
@@ -3862,10 +3865,11 @@ fn rpc(
 pub fn run(
     client: &RoomClient,
     root_session_id: &mut String,
-    initial_floor: Altitude,
+    initial_floor: FloorMode,
     limit: u32,
     target_agent_id: &mut Option<String>,
     presets: &[String],
+    tier_overrides: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     crate::cli::terminal::require_interactive_terminal("Session Room")?;
     // Wire SIGTERM/SIGHUP/external-SIGINT to a terminal restore + clean exit
@@ -4003,7 +4007,7 @@ pub fn run(
     let mut view_row_heights: Vec<usize> = Vec::new();
     let mut view_viewport_offset = 0usize;
     let mut view_list_height = 0usize;
-    let mut view_turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    let mut view_turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
     // Idle-frame optimization: only rebuild and redraw when something changed.
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
@@ -6135,7 +6139,16 @@ pub fn run(
                             }
                         }
                         KeyCode::Char('a') => {
-                            floor = cycle_floor(floor);
+                            floor = cycle_floor_mode(floor);
+                            status = Some(match floor {
+                                FloorMode::Altitude(a) => format!(
+                                    "floor: {} and above (a to cycle; story mode included)",
+                                    a.as_str()
+                                ),
+                                FloorMode::Story => {
+                                    "story mode: narrative, gates, verdicts, failures (a to cycle)".to_string()
+                                }
+                            });
                             detail = None;
                         }
                         KeyCode::Char('A') => {
@@ -7714,8 +7727,11 @@ pub fn run(
             // `entries` holds everything (fetched at `detail`); the display floor is
             // applied here as a pure view filter. RowSource indices below therefore
             // index into `visible`, so gate selection and drill-down use it too.
-            let visible: Vec<SessionTimelineEntry> =
-                entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
+            let visible: Vec<SessionTimelineEntry> = entries
+                .iter()
+                .filter(|e| floor.admits(e) && !render::is_hidden_by_config(e, tier_overrides))
+                .cloned()
+                .collect();
             // Detect in-flight turns: any turn_id we've seen `turn.start` for but
             // not yet `turn.end` is still open. The TUI marks the most recent row
             // in such a turn with a spinner.
@@ -7724,7 +7740,7 @@ pub fn run(
             let linked_escalation_approvals =
                 render::linked_promotion_escalation_approval_ids(&visible);
             let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
-                render::coalesce_indexed(&visible)
+                render::coalesce_indexed_with(&visible, tier_overrides)
             } else {
                 visible
                     .iter()
@@ -7787,12 +7803,30 @@ pub fn run(
         // Repurpose the boundary flag to mean "this turn is forkable" so the
         // divider can render distinctly. (Presence in the map still means "draw
         // a divider here"; the bool now carries forkability.)
-        for (row_idx, forkable) in turn_boundaries.iter_mut() {
-            let turn = match indexed.get(*row_idx).map(|(r, _)| r) {
-                Some(RenderedRow::Line(spec)) => spec.turn_index.map(|n| n as u64),
-                _ => None,
-            };
-            *forkable = turn.is_some_and(|t| forkable_turns.contains(&t));
+        // Dividers also carry the turn's chapter header — calls, tokens,
+        // reasoning — aggregated over the *full* timeline: plumbing is
+        // floor-filtered out of `visible`, but it still belongs in the totals.
+        {
+            let divider_turns: HashSet<String> = turn_boundaries
+                .keys()
+                .filter_map(|ri| match indexed.get(*ri) {
+                    Some((RenderedRow::Line(spec), _)) => spec.turn_id.clone(),
+                    _ => None,
+                })
+                .collect();
+            let divider_labels = render::turn_divider_labels(&entries, &divider_turns);
+            for (row_idx, divider) in turn_boundaries.iter_mut() {
+                let turn = match indexed.get(*row_idx).map(|(r, _)| r) {
+                    Some(RenderedRow::Line(spec)) => {
+                        if let Some(t) = &spec.turn_id {
+                            divider.stats = divider_labels.get(t).cloned();
+                        }
+                        spec.turn_index.map(|n| n as u64)
+                    }
+                    _ => None,
+                };
+                divider.forkable = turn.is_some_and(|t| forkable_turns.contains(&t));
+            }
         }
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
         let pending_plan_count =
@@ -7806,7 +7840,10 @@ pub fn run(
             .enumerate()
             .filter_map(|(vi, (_, src))| match src {
                 RowSource::Single(i) => {
-                    visible.get(*i).filter(|e| render::is_checkpoint(e)).map(|_| vi)
+                    visible
+                        .get(*i)
+                        .filter(|e| render::is_checkpoint_with(e, tier_overrides))
+                        .map(|_| vi)
                 }
                 _ => None,
             })
@@ -8139,6 +8176,15 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
     }
 }
 
+/// Decoration for a turn-boundary row: whether the turn is forkable (`⑂`)
+/// and the per-turn aggregate shown on the divider line (calls, tokens,
+/// reasoning — the "chapter header", see `render::turn_divider_labels`).
+#[derive(Debug, Clone, Default)]
+struct TurnDivider {
+    forkable: bool,
+    stats: Option<String>,
+}
+
 /// Annotate a row list with turn-boundary flags and in-flight markers. The
 /// in-flight spinner is reserved for the **most recent** row of each open
 /// turn — earlier rows keep their normal altitude glyph so the operator can
@@ -8148,8 +8194,8 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
 /// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
 /// the 💭 marker (`agent.reasoning` rows).
 ///
-/// Returns the per-row `turn_boundaries` map (true → draw divider above the
-/// row) so the renderer can decorate the boundary.
+/// Returns the per-row `turn_boundaries` map (a divider is drawn above the
+/// row when present) so the renderer can decorate the boundary.
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     visible: &[SessionTimelineEntry],
@@ -8164,11 +8210,11 @@ fn annotate_turns_and_in_flight(
     extra_inflight_rows: &HashSet<usize>,
     root_session_id: &str,
     spawn_lineage: &HashMap<String, SessionSpawnLineageEntry>,
-) -> HashMap<usize, bool> {
+) -> HashMap<usize, TurnDivider> {
     let mut last_turn: Option<String> = None;
     let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
     let mut collapsed_open_turn_rows: HashSet<usize> = HashSet::new();
-    let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    let mut turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
     for (i, (row, _)) in rows.iter().enumerate() {
         if let RenderedRow::Line(spec) = row {
             if let Some(t) = &spec.turn_id {
@@ -8176,7 +8222,7 @@ fn annotate_turns_and_in_flight(
                     last_row_for_turn.insert(t.clone(), i);
                 }
                 if last_turn.as_ref() != Some(t) {
-                    turn_boundaries.insert(i, true);
+                    turn_boundaries.insert(i, TurnDivider::default());
                 }
                 last_turn = Some(t.clone());
             }
@@ -8845,7 +8891,7 @@ fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
 fn build_rich_row_lines(
     spec: &RowSpec,
     row_index: usize,
-    turn_boundaries: &HashMap<usize, bool>,
+    turn_boundaries: &HashMap<usize, TurnDivider>,
     content_w: usize,
     glyph_w: usize,
     rail_w: usize,
@@ -8854,12 +8900,12 @@ fn build_rich_row_lines(
     show_reasoning: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if let Some(&forkable) = turn_boundaries.get(&row_index) {
+    if let Some(divider) = turn_boundaries.get(&row_index) {
         let total_w = content_w + glyph_w + MARK_W + label_w + rail_w + 2;
         // Forkable turns (a runnable checkpoint exists) get a heavier rule, a
         // `⑂` marker, and a brighter colour so the operator can see at a glance
         // where `F` / `/fork --at-turn N` will actually work.
-        let (rule, tag, style) = if forkable {
+        let (rule, tag, style) = if divider.forkable {
             ('═', " ⑂ fork", Style::default().fg(Color::Cyan))
         } else {
             ('─', "", Style::default().fg(Color::DarkGray))
@@ -8869,8 +8915,18 @@ fn build_rich_row_lines(
             .clone()
             .or_else(|| spec.turn_index.map(|n| n.to_string()));
         let bar = if let Some(l) = label {
-            let prefix = format!("{rule}{rule} turn {l}{tag} ");
-            let fill = total_w.saturating_sub(prefix.chars().count());
+            let mut prefix = format!("{rule}{rule} turn {l}{tag} ");
+            // Chapter header: what the turn did/cost/thought (see
+            // `render::turn_divider_labels`), only when it fits with a
+            // minimum tail of rule characters. Widths are *display cells*,
+            // not char counts — the stats may carry wide glyphs (💭).
+            if let Some(s) = &divider.stats {
+                let candidate = format!("{prefix}· {s} ");
+                if UnicodeWidthStr::width(candidate.as_str()) + 4 <= total_w {
+                    prefix = candidate;
+                }
+            }
+            let fill = total_w.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
             format!("{prefix}{}", rule.to_string().repeat(fill))
         } else {
             rule.to_string().repeat(total_w)
@@ -8983,8 +9039,10 @@ fn build_rich_row_lines(
         let mut kept: Vec<Line<'static>> =
             physical.into_iter().take(max_lines).collect();
         if let Some(last) = kept.last_mut() {
+            // Truncation vocabulary: a cut that drops real content names how
+            // much and the key that shows the rest (Enter = drill-down pane).
             last.spans.push(Span::styled(
-                format!(" …(+{dropped})"),
+                format!(" …(+{} lines · Enter)", render::compact_count(dropped)),
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -9351,12 +9409,27 @@ fn actor_color(actor: ActorKind) -> Color {
     }
 }
 
-fn cycle_floor(floor: Altitude) -> Altitude {
-    match floor {
-        Altitude::Detail => Altitude::Normal,
-        Altitude::Normal => Altitude::Attention,
-        Altitude::Attention => Altitude::Error,
-        Altitude::Error => Altitude::Detail,
+/// Compact header indicator (glyph + name), same shape as an altitude.
+impl FloorMode {
+    fn indicator(self) -> String {
+        match self {
+            FloorMode::Altitude(a) => {
+                format!("{}{}", render::altitude_glyph(a), a.as_str())
+            }
+            FloorMode::Story => "📖story".to_string(),
+        }
+    }
+}
+
+fn cycle_floor_mode(mode: FloorMode) -> FloorMode {
+    match mode {
+        FloorMode::Altitude(a) => match a {
+            Altitude::Detail => FloorMode::Altitude(Altitude::Normal),
+            Altitude::Normal => FloorMode::Altitude(Altitude::Attention),
+            Altitude::Attention => FloorMode::Altitude(Altitude::Error),
+            Altitude::Error => FloorMode::Story,
+        },
+        FloorMode::Story => FloorMode::Altitude(Altitude::Detail),
     }
 }
 
@@ -9390,7 +9463,7 @@ fn switch_session(
     follow: &mut bool,
     resolved: &mut HashSet<String>,
     acted: &mut HashSet<String>,
-    floor: &mut Altitude,
+    floor: &mut FloorMode,
     root_session_id: &mut String,
     _target_agent_id: &mut Option<String>,
     _limit: u32,
@@ -10344,7 +10417,7 @@ fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> (Vec<String
 fn draw(
     f: &mut Frame,
     root: &str,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     follow: bool,
     prev_viewport_offset: Option<usize>,
@@ -10359,7 +10432,7 @@ fn draw(
     status: Option<&str>,
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
-    turn_boundaries: &HashMap<usize, bool>,
+    turn_boundaries: &HashMap<usize, TurnDivider>,
     show_reasoning: bool,
     stats: &SessionStats,
     _pending_plan_count: usize,
@@ -13351,18 +13424,95 @@ mod tests {
     }
 
     #[test]
-    fn floor_cycles_through_all_levels() {
-        let mut a = Altitude::Detail;
-        let seq: Vec<Altitude> = (0..4)
-            .map(|_| {
-                a = cycle_floor(a);
-                a
+    fn floor_cycles_through_all_levels_and_story() {
+        // The `a` key cycles the FloorMode: Detail → Normal → Attention →
+        // Error → Story → Detail. The altitude ring passes through Normal,
+        // Attention, and Error before story mode.
+        let mut m = FloorMode::Altitude(Altitude::Detail);
+        let mut seq: Vec<Altitude> = Vec::new();
+        for _ in 0..3 {
+            m = cycle_floor_mode(m);
+            match m {
+                FloorMode::Altitude(a) => seq.push(a),
+                FloorMode::Story => panic!("story must come after Error"),
+            }
+        }
+        assert_eq!(seq, vec![Altitude::Normal, Altitude::Attention, Altitude::Error]);
+        m = cycle_floor_mode(m);
+        assert_eq!(m, FloorMode::Story);
+        m = cycle_floor_mode(m);
+        assert_eq!(m, FloorMode::Altitude(Altitude::Detail));
+    }
+
+    #[test]
+    fn story_mode_admits_narrative_gates_verdicts_and_failures_only() {
+        let mk = |et: &str, alt: Altitude, payload: serde_json::Value| SessionTimelineEntry {
+            event_id: "ev-1".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: autonoetic_types::principal::Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: et.into(),
+            altitude: alt,
+            occurred_at: "2026-06-01T00:00:00Z".into(),
+            payload: Some(payload.to_string()),
+            refs: autonoetic_types::session_timeline::TimelineRefs::default(),
+        };
+        let admitted = |e: &SessionTimelineEntry| FloorMode::Story.admits(e);
+        // Narrative (Normal altitude) — the arc, must pass.
+        assert!(admitted(&mk(
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({"message": "I finished the refactor"})
+        )));
+        assert!(admitted(&mk(
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({"message": "carry on"})
+        )));
+        // Gates pass by tone even at Normal altitude.
+        assert!(admitted(&mk(
+            "plan.pending",
+            Altitude::Normal,
+            serde_json::json!({})
+        )));
+        // An embedded plan proposal inside a Normal agent.message passes too.
+        assert!(admitted(&mk(
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message": {"status": "awaiting_approval", "plan_id": "plan-1", "summary": "s"}
             })
-            .collect();
-        assert_eq!(
-            seq,
-            vec![Altitude::Normal, Altitude::Attention, Altitude::Error, Altitude::Detail]
-        );
+        )));
+        // Verdicts: promotion_record completions pass by tone.
+        assert!(admitted(&mk(
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({"tool_name": "promotion_record", "result": "{\"pass\":true}"})
+        )));
+        // Plumbing and routine tool output — must NOT pass.
+        assert!(!admitted(&mk(
+            "llm.round",
+            Altitude::Detail,
+            serde_json::json!({"input_tokens": 10, "output_tokens": 2})
+        )));
+        assert!(!admitted(&mk(
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({"tool_name": "workflow_wait"})
+        )));
+        assert!(!admitted(&mk(
+            "agent.reasoning",
+            Altitude::Detail,
+            serde_json::json!({"reasoning": "hmm"})
+        )));
+        // Failures pass on altitude.
+        assert!(admitted(&mk(
+            "tool.failed",
+            Altitude::Error,
+            serde_json::json!({})
+        )));
     }
 
     fn spec_with_turn(turn: Option<&str>, headline: &str) -> (RenderedRow, RowSource) {
@@ -14256,14 +14406,14 @@ mod tests {
     fn header_badge_shows_taint_but_not_unrestricted() {
         let stats = test_stats();
         let with_taint = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             Some("local_only"), false, 120,
         );
         assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
 
         // Unrestricted (None) ⇒ no chip — absence reads as "open".
         let open = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             None, false, 120,
         );
         assert!(!open.contains("🔒"), "{open}");
@@ -14273,14 +14423,14 @@ mod tests {
     fn header_badge_shows_pinned_state() {
         let stats = test_stats();
         let pinned = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             None, true, 120,
         );
         assert!(pinned.contains("📌 pinned"), "{pinned}");
 
         // Not pinned ⇒ no chip (even with a taint label from room data).
         let unpinned = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             Some("no_remote_model"), false, 120,
         );
         assert!(!unpinned.contains("📌"), "{unpinned}");
@@ -14309,6 +14459,74 @@ mod tests {
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
+    }
+
+    #[test]
+    fn turn_divider_renders_chapter_stats() {
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Specialist,
+            tone: RowTone::Default,
+            actor_label: "coder".into(),
+            headline: "did the thing".into(),
+            detail: None,
+            turn_id: Some("turn-000003".into()),
+            source_session_id: None,
+            turn_index: Some(3),
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let mut turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        turn_boundaries.insert(
+            0,
+            TurnDivider {
+                forkable: false,
+                stats: Some("3 calls: read×2, grep · 1.2k/340 tok".into()),
+            },
+        );
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(bar.contains("turn 3"), "got: {bar}");
+        assert!(bar.contains("3 calls: read×2, grep"), "got: {bar}");
+        assert!(bar.contains("1.2k/340 tok"), "got: {bar}");
+        // The bar is width-bounded: prefix + fill == total_w (60+3+1+12+2+2).
+        assert_eq!(bar.chars().count(), 80, "got: {bar}");
+
+        // Wide glyphs in the stats (💭 = 2 cells) must not overflow the bar:
+        // fit + fill are computed in display cells, so the rendered width is
+        // exactly total_w even though the char count is smaller.
+        let mut wide_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        wide_boundaries.insert(
+            0,
+            TurnDivider {
+                forkable: false,
+                stats: Some("2 calls: read, grep · 💭×9 · 12.3k/4.5k tok".into()),
+            },
+        );
+        let lines = build_rich_row_lines(
+            &spec, 0, &wide_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(
+            UnicodeWidthStr::width(bar.as_str()),
+            80,
+            "display width must equal total_w; got: {bar}"
+        );
+        assert!(bar.chars().count() < 80, "wide glyph counted as 1 char: {bar}");
+
+        // A boundary without stats keeps the plain divider shape.
+        let plain_boundaries: HashMap<usize, TurnDivider> =
+            [(0usize, TurnDivider::default())].into_iter().collect();
+        let lines = build_rich_row_lines(
+            &spec, 0, &plain_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(bar.starts_with("── turn 3 ") && bar.ends_with('─'), "got: {bar}");
+        assert!(!bar.contains("calls"), "got: {bar}");
     }
 
     #[test]

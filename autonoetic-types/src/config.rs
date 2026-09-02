@@ -2907,12 +2907,22 @@ impl Default for WikiProposalConfig {
 pub struct SessionRoomConfig {
     #[serde(default)]
     pub role_floors: HashMap<String, String>,
+    /// Operator visibility overrides for the room timeline view, keyed by
+    /// timeline event type: `checkpoint | significant | routine | hidden`.
+    /// `checkpoint`/`significant` promote a type to always render individually;
+    /// `routine` folds it into collapsed runs; `hidden` drops it from the
+    /// timeline view entirely (pending gates stay actionable through the
+    /// pending strip and approvals popup regardless). Unknown keys are
+    /// reserved for future event types; invalid values fail config load.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub event_tiers: HashMap<String, String>,
 }
 
 impl Default for SessionRoomConfig {
     fn default() -> Self {
         Self {
             role_floors: HashMap::new(),
+            event_tiers: HashMap::new(),
         }
     }
 }
