@@ -62,15 +62,45 @@ So the falsehood is not drift — it is asserted and guarded. A re-implementatio
 consuming the register would be told the agent is responsible for chain
 integrity and egress confinement.
 
-### 1.2 `Binds` cannot express one of the four advertised bind-directions
+### 1.2 `owed_to` does not exist — and `Binds` was *not* the problem
+
+**Corrected after review.** An earlier revision of this RFC claimed
+`Binds { Agent, Gateway, Decider }` "cannot express the served party" and
+proposed adding values for `ServedParty` and `Operator`. That was wrong on both
+counts, and the code says why.
+
+`autonoetic-types/src/session_timeline.rs` already separates the two axes, in a
+doc comment that settles the question:
 
 ```rust
-pub enum Binds { Agent, Gateway, Decider }
+/// The seat a participant occupies — occupant-agnostic (a human or an AI may
+/// hold `Operator`). Distinct from [`crate::principal::PrincipalKind`] (who).
+pub enum SessionRole {
+    /// The deciding seat (gates, redirects). Symmetric obligations attach here.
+    Operator,
+    Planner, Specialist { kind: String }, Sentinel, Curator, Auditor,
+    Tool { surface: String }, ExternalSurface { surface: String },
+    /// The executor's own voice (lifecycle, mechanical rulings).
+    Runtime,
+}
 ```
 
-§12's `U-*` bind the community toward the **served party**. There is no value
-for it. One of the four bind-directions the document advertises does not exist
-in the model a re-implementer would read.
+Two consequences:
+
+- **`Operator` is a seat, not a human.** "The operator is a human" describes the
+  current occupant, not the thing. And there is **no separate `Decider` role** —
+  `Operator` *is* the deciding seat. §O's "decider" is the function; `Operator`
+  is the seat. Listing both in a party set double-counts.
+- **`Binds` is already correct.** Its three values map exactly onto the three
+  powers of §2 — *"Reasoner, enforcer, and decider are seats, not identities."*
+  The served party needs no `Binds` value because **the served party never
+  complies with anything**; they have no seat and never participate in a
+  session. They can only be *owed*.
+
+So the missing thing is not a `Binds` value. It is that **`owed_to` does not
+exist at all**, which is why §12's clauses have nowhere to record that the
+gateway owes them to the served party — and why they resorted to inventing a
+`community` aggregate that breaks §0 (defect 1.3).
 
 ### 1.3 §0 and §12 contradict each other
 
@@ -112,29 +142,59 @@ as the migration work rather than pretending it is done.
 
 ## 2. The model
 
-**One party set. Two relations over it. One orthogonal verification field.**
+**Two fields over two different domains, plus one orthogonal verification field.**
 
-An earlier sketch of this RFC drew `binds` and `owed_to` from *different* lists
-(`community` in one, `system integrity` in the other). That asymmetry was a
-symptom, not a design: `community` is an aggregate (defect 1.3) and `system
-integrity` is not a party at all. Both vanish under a single set.
+This section has been through two wrong versions, and both errors are worth
+recording because each was a category mistake of a different kind.
 
-### 2.1 The parties
+- **First attempt:** `binds` and `owed_to` drawn from two hand-written lists that
+  differed arbitrarily — `community` in one, `system integrity` in the other.
+  Challenged on the asymmetry. Both values were bogus: `community` is an
+  aggregate that breaks §0 (defect 1.3), and `system integrity` is not a party
+  at all (it is `none`, §2.3).
+- **Second attempt:** one flat party set for both fields — `agent`, `gateway`,
+  `decider`, `operator`, `served_party`. Also wrong, and more subtly: that list
+  mixes a principal kind, a runtime, a function, a *seat name for that same
+  function*, and another principal kind. `operator` and `decider` are the same
+  thing counted twice (defect 1.2).
 
-| Party | Is | Notes |
+The resolution is that the two fields genuinely range over different domains,
+for a structural reason — and the code already models both.
+
+### 2.1 The two domains
+
+**`binds` ranges over seats** — the three powers of §2. A seat is a *function
+inside a session*, so only a seat can be obliged to act:
+
+| `binds` | Seat | `SessionRole` |
 |---|---|---|
-| `agent` | a reasoner running under the gateway | low privilege |
-| `gateway` | the enforcer | the only party that can *implement* a mechanism |
-| `decider` | whoever resolves a gate | a **seat**, occupied by human or agent (`P-2.20`) |
-| `operator` | whoever administers the deployment | today usually also the served party |
-| `served_party` | the end-user a run executes on behalf of | `PrincipalKind::ServedUser` |
+| `agent` | reasoner | `Planner`, `Specialist`, `Sentinel`, `Curator`, `Auditor` |
+| `gateway` | enforcer | `Runtime` |
+| `decider` | deciding seat | `Operator` |
 
-`community` is **not** a party — it is "gateway + agents", and clauses that
+**`owed_to` ranges over principals** — *identities*, some of which are outside
+the session entirely:
+
+| `owed_to` | Is | Why not a seat |
+|---|---|---|
+| `agent` | `PrincipalKind::AutonoeticAgent` | also holds seats, so appears in both — legitimately |
+| `served_party` | `PrincipalKind::ServedUser` | **has no seat at all**; never participates in a session |
+| `none` | no invocable beneficiary | see §2.3 |
+
+That asymmetry is the point: the served party can be *owed* but never *bound*,
+because being bound requires occupying a seat and they never do. Conversely the
+gateway holds a seat (`Runtime`) but has no human/agent principal identity.
+Neither domain collapses into the other.
+
+`community` is **not** in either. It is "gateway + agents", and clauses that
 appear to bind it bind the *gateway*, because the gateway is what implements the
 mechanism. That is the same conclusion `docs/concepts/philosophy.md` §3.3 already
 reaches for data locality: *"the mechanism landed on the other side of the
 bind-direction… an entitlement in §12 would be a claim, whereas an invariant on
 the enforcer is a guarantee."*
+
+`operator` is **not** in either, because it is the occupant name for the
+`decider` seat (§1.2), not a separate party.
 
 ### 2.2 The three fields
 
@@ -230,8 +290,10 @@ work and it cannot be automated: "who must comply" is a semantic judgement.
 
 ## 4. Code changes
 
-- `Binds` gains `Operator` and `ServedParty`; a new `OwedTo` (same set plus
-  `None`); a `VerifiedBy` enum per §2.4.
+- **`Binds` is unchanged** — its three values are already the three powers
+  (§1.2). Add a new `OwedTo { Agent, ServedParty, None }` and a `VerifiedBy`
+  enum per §2.4. The earlier revision of this RFC proposed extending `Binds`
+  with `Operator`/`ServedParty`; that was a category error.
 - **`binds()` stops deriving from the prefix** and reads the clause's declared
   field. The test `principles_bind_agent_rights_bind_gateway` **inverts**: it
   currently asserts the falsehood, and should assert that every clause declares
@@ -257,11 +319,11 @@ work and it cannot be automated: "who must comply" is a semantic judgement.
 
 ## 6. Open questions
 
-- **`operator` vs `decider`.** Today the operator is usually both, plus the
-  served party. Are they one party in three seats, or three parties? The model
-  above assumes seats, consistent with §3.2's "office before occupant" — but if
-  `operator` is only ever a `decider` occupant, it should not be in the party
-  set at all.
+- ~~**`operator` vs `decider`**~~ — **resolved.** `SessionRole::Operator` *is*
+  the deciding seat (its doc: "The deciding seat (gates, redirects). Symmetric
+  obligations attach here"), and it is occupant-agnostic. `operator` is
+  therefore not a separate party; it is the seat `decider` names. Removed from
+  the model.
 - **Does `agent` need splitting** by role (reasoner / decider / auditor)? `P-2.20`
   lets an agent occupy the decider seat, which the model handles via `decider`
   being a seat — but `binds: agent` then means "any agent", including one wearing
