@@ -16,7 +16,7 @@ use crate::runtime::tools::{
     CredentialEnvMapping, NativeTool, NativeToolRegistry,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{AgentManifest, ScriptInputMode};
 use autonoetic_types::background::{
     ApprovalDecision, ApprovalStatus, ScheduledAction,
 };
@@ -344,6 +344,7 @@ impl NativeTool for ArtifactExecTool {
         );
 
         let resolved_files = artifact_store.resolve_files(&artifact_id)?;
+        let artifact_input_mode = artifact_script_input_mode(&resolved_files);
 
         let mut artifact_code = String::new();
         let mut workspace_files: Vec<(String, String)> = Vec::new();
@@ -977,10 +978,14 @@ impl NativeTool for ArtifactExecTool {
         // recurring executor gap where argv (`args`) was wrongly used for
         // scripts that call load_input(). The conflict with env.AUTONOETIC_INPUT
         // is rejected earlier (mechanical, no silent override).
-        if let Some(input) = &args.input {
+        let serialized_input = args
+            .input
+            .as_ref()
+            .map(|input| crate::runtime::tools::serialize_tool_input(input));
+        if let Some(payload) = &serialized_input {
             extra_env.push((
                 crate::runtime::tools::AUTONOETIC_INPUT_ENV.to_string(),
-                crate::runtime::tools::serialize_tool_input(input),
+                payload.clone(),
             ));
         }
 
@@ -1086,7 +1091,7 @@ impl NativeTool for ArtifactExecTool {
             &mounts,
             !overrides.host_fs_allow_set,
         );
-        let runner = SandboxRunner::spawn_with_session_content_and_env(
+        let mut runner = SandboxRunner::spawn_with_session_content_and_env(
             driver,
             agent_dir_str,
             gw_dir,
@@ -1097,6 +1102,29 @@ impl NativeTool for ArtifactExecTool {
             &extra_env,
             root_session_id,
         )?;
+
+        // Dual delivery, mirroring `execute_script_in_sandbox` (the agent-spawn
+        // fast path sets AUTONOETIC_INPUT *and* writes stdin for stdin-mode
+        // scripts): when the artifact's SKILL.md declares the default stdin
+        // input mode, the payload also goes to the entrypoint's stdin. Without
+        // this, a stdin-reading entrypoint run ad-hoc under artifact_exec saw
+        // an empty stdin with exit 0 — the silent wrong-output class diagnosed
+        // in session-ed19b4ca (same family as the #1 re-federation cause in
+        // session-964ea6d7). The env var stays set either way so
+        // load_input()-style scripts keep working; `script_input_mode: args`
+        // artifacts keep reading $1 and simply never read stdin.
+        if let Some(payload) = &serialized_input {
+            if artifact_input_mode == ScriptInputMode::Stdin {
+                use std::io::Write;
+                if let Some(mut stdin) = runner.process.stdin.take() {
+                    stdin.write_all(payload.as_bytes()).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to write artifact input to entrypoint stdin: {e}"
+                        )
+                    })?;
+                }
+            }
+        }
 
         let output = runner.process.wait_with_output()?;
         crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
@@ -1208,6 +1236,22 @@ pub fn promotion_run_is_network_isolated(manifest: &AgentManifest) -> bool {
             .unwrap_or(false)
 }
 
+/// The artifact's declared script input mode, read from its SKILL.md
+/// frontmatter (`metadata.autonoetic.script_input_mode`). Defaults to
+/// [`ScriptInputMode::Stdin`] — the manifest-wide default — when the artifact
+/// carries no SKILL.md or the frontmatter does not parse: artifact_exec also
+/// runs plain script artifacts that have no manifest at all, and those follow
+/// the stdin default like every script agent.
+fn artifact_script_input_mode(resolved_files: &[(String, Vec<u8>)]) -> ScriptInputMode {
+    resolved_files
+        .iter()
+        .find(|(name, _)| name == "SKILL.md")
+        .and_then(|(_, bytes)| std::str::from_utf8(bytes).ok())
+        .and_then(|text| crate::runtime::parser::SkillParser::parse(text).ok())
+        .map(|(manifest, _)| manifest.script_input_mode)
+        .unwrap_or_default()
+}
+
 fn build_command(entrypoint: &str, args: &[String]) -> String {
     let ext = std::path::Path::new(entrypoint)
         .extension()
@@ -1284,6 +1328,7 @@ fn execute_with_ticket(
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
     let bundle = artifact_store.inspect(&ticket.artifact_id)?;
     let resolved_files = artifact_store.resolve_files(&ticket.artifact_id)?;
+    let artifact_input_mode = artifact_script_input_mode(&resolved_files);
 
     let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
     let agent_dir_str = agent_dir
@@ -1381,10 +1426,14 @@ fn execute_with_ticket(
     // First-class `input` parameter → AUTONOETIC_INPUT env var. Mirrors the
     // main execute() path — same conflict rejection happens before this fn
     // is entered (execute_with_ticket is only called from execute()).
-    if let Some(input) = &args.input {
+    let serialized_input = args
+        .input
+        .as_ref()
+        .map(|input| crate::runtime::tools::serialize_tool_input(input));
+    if let Some(payload) = &serialized_input {
         extra_env.push((
             crate::runtime::tools::AUTONOETIC_INPUT_ENV.to_string(),
-            crate::runtime::tools::serialize_tool_input(input),
+            payload.clone(),
         ));
     }
 
@@ -1470,7 +1519,7 @@ fn execute_with_ticket(
             &mounts,
             !overrides.host_fs_allow_set,
         );
-    let runner = SandboxRunner::spawn_with_session_content_and_env(
+    let mut runner = SandboxRunner::spawn_with_session_content_and_env(
         driver,
         agent_dir_str,
         gw_dir,
@@ -1481,6 +1530,19 @@ fn execute_with_ticket(
         &extra_env,
         None,
     )?;
+
+    // Dual delivery on the ticket path too — same contract and same
+    // session-ed19b4ca rationale as the matching block in execute().
+    if let Some(payload) = &serialized_input {
+        if artifact_input_mode == ScriptInputMode::Stdin {
+            use std::io::Write;
+            if let Some(mut stdin) = runner.process.stdin.take() {
+                stdin.write_all(payload.as_bytes()).map_err(|e| {
+                    anyhow::anyhow!("Failed to write artifact input to entrypoint stdin: {e}")
+                })?;
+            }
+        }
+    }
 
     let output = runner.process.wait_with_output()?;
     crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
@@ -1552,10 +1614,12 @@ fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
 mod tests {
     use super::{
         artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
-        promotion_gate_artifact_command_decision, ArtifactExecArgs, ArtifactExecTool,
+        artifact_script_input_mode, promotion_gate_artifact_command_decision, ArtifactExecArgs,
+        ArtifactExecTool,
     };
     use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
     use crate::runtime::tools::NativeTool;
+    use autonoetic_types::agent::ScriptInputMode;
     use autonoetic_types::capability::Capability;
 
     #[test]
@@ -1994,5 +2058,71 @@ mod tests {
             egress: None,
         };
         assert!(!tool.is_available(&manifest));
+    }
+
+    /// The artifact's SKILL.md input mode drives stdin dual delivery. Declared
+    /// `args` must opt out; a missing or unparseable SKILL.md must follow the
+    /// manifest-wide stdin default, not silently skip delivery.
+    #[test]
+    fn artifact_script_input_mode_follows_skill_md_declaration() {
+        let files = |entries: &[(&str, &str)]| -> Vec<(String, Vec<u8>)> {
+            entries
+                .iter()
+                .map(|(n, c)| (n.to_string(), c.as_bytes().to_vec()))
+                .collect()
+        };
+
+        // Declared args → opt-out honored.
+        let skill_args = files(&[(
+            "SKILL.md",
+            "---\nname: a\ndescription: d\nmetadata:\n  autonoetic:\n    script_input_mode: args\n---\nbody",
+        )]);
+        assert_eq!(
+            artifact_script_input_mode(&skill_args),
+            ScriptInputMode::Args,
+            "an explicit script_input_mode: args must disable stdin delivery"
+        );
+
+        // Declared stdin → Stdin.
+        let skill_stdin = files(&[(
+            "SKILL.md",
+            "---\nname: a\ndescription: d\nmetadata:\n  autonoetic:\n    script_input_mode: stdin\n---\nbody",
+        )]);
+        assert_eq!(artifact_script_input_mode(&skill_stdin), ScriptInputMode::Stdin);
+
+        // SKILL.md present but declaring nothing → default (Stdin).
+        let skill_plain = files(&[(
+            "SKILL.md",
+            "---\nname: a\ndescription: d\n---\nbody",
+        )]);
+        assert_eq!(
+            artifact_script_input_mode(&skill_plain),
+            ScriptInputMode::Stdin,
+            "the manifest-wide default is stdin"
+        );
+
+        // No SKILL.md at all (plain script artifact) → default (Stdin).
+        let no_skill = files(&[("main.py", "print(1)")]);
+        assert_eq!(
+            artifact_script_input_mode(&no_skill),
+            ScriptInputMode::Stdin,
+            "manifest-less artifacts follow the stdin default"
+        );
+
+        // Unparseable SKILL.md → default (Stdin), never a hard failure —
+        // artifact_exec also runs non-bundle artifacts.
+        let bad_skill = files(&[("SKILL.md", "not frontmatter at all")]);
+        assert_eq!(
+            artifact_script_input_mode(&bad_skill),
+            ScriptInputMode::Stdin,
+            "an unreadable SKILL.md must degrade to the default, not fail exec"
+        );
+
+        // Non-UTF-8 SKILL.md → default (Stdin).
+        let binary_skill = vec![("SKILL.md".to_string(), vec![0xff, 0xfe, 0x00])];
+        assert_eq!(
+            artifact_script_input_mode(&binary_skill),
+            ScriptInputMode::Stdin
+        );
     }
 }

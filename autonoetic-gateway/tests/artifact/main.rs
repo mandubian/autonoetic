@@ -5,5 +5,6 @@ mod support;
 
 mod build_ref;
 mod exec_lifecycle;
+mod exec_stdin;
 mod fork_lineage;
 mod ref_global_on_promote;
