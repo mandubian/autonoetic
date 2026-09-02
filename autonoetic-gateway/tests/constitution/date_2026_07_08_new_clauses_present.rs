@@ -94,21 +94,22 @@ fn active_constitution_is_the_signed_amendment() {
     // The signed, running version must point at the activated amendment.
     // Repointed from 2026.07.08 → 2026.07.19 (anomaly/adjudication + genesis
     // batch) → 2026.07.30 (data-egress label plane, #910) → 2026.08.30
-    // (text-then-law realignment, #1078); each successor is a strict
+    // (text-then-law realignment, #1078) → 2026.09.02 (invariant enforcement
+    // citations, #1281); each successor is a strict
     // superset of its predecessor's pinned clauses (§12, Ri-0.17, O-6,
     // I-12, the entrenched paragraph), so this remains a meaningful
     // active-version pin.
     let current = include_str!("../../../docs/constitution/CURRENT").trim();
     assert_eq!(
-        current, "2026.08.30",
-        "docs/constitution/CURRENT must point at the signed 2026.08.30 amendment"
+        current, "2026.09.02",
+        "docs/constitution/CURRENT must point at the signed 2026.09.02 amendment"
     );
     assert_eq!(
         autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
-        "2026.08.30",
+        "2026.09.02",
         "ACTIVE_CONSTITUTION_VERSION must match the activated amendment"
     );
-    let active: &str = include_str!("../../../docs/constitution/versions/2026.08.30/constitution.md");
+    let active: &str = include_str!("../../../docs/constitution/versions/2026.09.02/constitution.md");
     assert!(
         active.contains("Rights of the Served"),
         "the active, signed constitution must carry the §12 text from 2026.07.08"

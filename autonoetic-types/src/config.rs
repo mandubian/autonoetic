@@ -845,7 +845,7 @@ pub struct LlmRoutingConfig {
 /// Active constitution artifacts enforced by the gateway runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstitutionConfig {
-    /// Ratified constitution version to enforce (e.g. "2026.08.30").
+    /// Ratified constitution version to enforce (e.g. "2026.09.02").
     ///
     /// Convenience selector (#1123): when set, `source_path`/`lock_path` are
     /// derived from the standard layout
@@ -892,7 +892,7 @@ impl Default for ConstitutionConfig {
 /// default paths, the `CURRENT` pointer, and the lock-inventory tests all stay
 /// in sync from this one edit. The guard test
 /// `current_file_matches_active_constitution_version` fails CI if the two drift.
-pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.08.30";
+pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.09.02";
 
 pub fn default_constitution_source_path() -> PathBuf {
     PathBuf::from(format!(
