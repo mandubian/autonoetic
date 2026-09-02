@@ -46,6 +46,7 @@ mod gate_decider;
 mod gate_enforced_rules;
 mod gateway_determinism;
 mod install_signature;
+mod invariant_enforcement;
 mod lifecycle_orphan_reaper_handle_abort;
 mod lifecycle_orphan_reaper;
 mod o_1_decider_motivation;
