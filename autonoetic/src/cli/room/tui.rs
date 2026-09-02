@@ -8983,8 +8983,10 @@ fn build_rich_row_lines(
         let mut kept: Vec<Line<'static>> =
             physical.into_iter().take(max_lines).collect();
         if let Some(last) = kept.last_mut() {
+            // Truncation vocabulary: a cut that drops real content names how
+            // much and the key that shows the rest (Enter = drill-down pane).
             last.spans.push(Span::styled(
-                format!(" …(+{dropped})"),
+                format!(" …(+{} lines · Enter)", render::compact_count(dropped)),
                 Style::default().fg(Color::DarkGray),
             ));
         }

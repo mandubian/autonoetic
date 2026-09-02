@@ -57,9 +57,25 @@ fn role_label(role: &SessionRole) -> String {
     }
 }
 
+/// Truncation vocabulary — one rule for every cut in the room:
+/// - a bare `…` means a headline/preview was compacted for the list *by design*
+///   (`one_line`/`cap_preview`); nothing beyond it is meant to be read inline.
+/// - `…(+N <unit> · Enter)` means real content was cut: the marker says how
+///   much and names the key that shows the rest (Enter opens the drill-down
+///   pane, which always carries the full payload).
 /// Hard ceiling for narrative body text shown inline in the room list. The
-/// detail pane (⏎) still shows the full payload; beyond this we add `…`.
+/// detail pane (⏎) still shows the full payload; beyond this we add a
+/// `…(+N chars · Enter)` marker.
 const NARRATIVE_BODY_MAX: usize = 8_000;
+
+/// Human-readable count for truncation markers: 950 → `950`, 12_340 → `12.3k`.
+pub(crate) fn compact_count(n: usize) -> String {
+    if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 /// Try to parse a string that may be JSON — including gateway-truncated timeline
 /// copies ending with `…`.
@@ -2310,13 +2326,21 @@ pub(crate) fn cap_preview(s: &str, max: usize) -> String {
 }
 
 /// Like `cap_preview` but preserves newlines, yielding a multi-line string
-/// suitable for the `detail` field. Caps total character count at `max`.
+/// suitable for the `detail` field. Caps total character count at `max`; a cut
+/// carries the `…(+N chars · Enter)` marker (see the truncation vocabulary on
+/// [`NARRATIVE_BODY_MAX`]) so the operator always knows what was dropped and
+/// how to see it.
 fn preserve_lines(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    let total = s.chars().count();
+    if total <= max {
         return s.to_string();
     }
-    let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{truncated}…")
+    let kept = max.saturating_sub(1);
+    let truncated: String = s.chars().take(kept).collect();
+    format!(
+        "{truncated}…(+{} chars · Enter)",
+        compact_count(total - kept)
+    )
 }
 
 /// Build the second-line preview for a known event type. Returns `None` for
@@ -2995,14 +3019,46 @@ pub fn is_redundant_promotion_escalation_approval(
         .is_some_and(|id| linked_escalation_approvals.contains(id))
 }
 
+/// Call ids of every `tool.completed` on the page. Used to drop the matching
+/// `tool.requested` rows — one call, one row (see [`is_paired_tool_request`]).
+fn completed_call_ids(entries: &[SessionTimelineEntry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter(|e| e.event_type == "tool.completed")
+        .filter_map(|e| {
+            let p = parse_entry_payload(e)?;
+            payload_field_str(&p, "call_id")
+        })
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// True for a `tool.requested` whose completion (same `call_id`) is also on
+/// the page. The completion row's headline already carries the same key param
+/// (`args_preview`), so the pair would render as two rows for one call — the
+/// request half is dropped. A request without its completion yet (in-flight
+/// call, or the completion is on a later page) still renders.
+fn is_paired_tool_request(e: &SessionTimelineEntry, completed: &HashSet<String>) -> bool {
+    if e.event_type != "tool.requested" || completed.is_empty() {
+        return false;
+    }
+    parse_entry_payload(e)
+        .and_then(|p| payload_field_str(&p, "call_id"))
+        .is_some_and(|id| completed.contains(&id))
+}
+
 /// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
 pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
     let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
+    let completed_calls = completed_call_ids(entries);
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
     for (i, e) in entries.iter().enumerate() {
         if is_redundant_promotion_escalation_approval(e, &linked_escalation_approvals) {
+            continue;
+        }
+        if is_paired_tool_request(e, &completed_calls) {
             continue;
         }
         // Defense-in-depth: only fold Routine-tier events that are ALSO below
@@ -4134,6 +4190,105 @@ mod tests {
         );
         assert!(matches!(&rows[1], RenderedRow::Line { .. }));
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
+    }
+
+    #[test]
+    fn paired_tool_request_is_dropped_completion_renders_once() {
+        // One call, one row: a tool.requested whose tool.completed (same
+        // call_id) is on the page is dropped — the completion headline already
+        // carries the same key param. This kills the double row a significant
+        // completion used to produce (lone requested flush + completion row).
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({
+                    "tool_name": "content_write",
+                    "call_id": call_id,
+                    "args_preview": "/tmp/out.rs"
+                }),
+            )
+        };
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.completed", "c1")];
+        let rows = coalesce(&entries);
+        assert_eq!(rows.len(), 1, "only the completion renders; got {rows:?}");
+        match &rows[0] {
+            RenderedRow::Line(spec) => {
+                assert!(spec.headline.contains("wrote"), "got: {}", spec.headline);
+            }
+            other => panic!("expected the completion line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_flight_tool_request_still_renders() {
+        // A request without its completion yet (call still open, or completion
+        // on a later page) must stay visible — it is the in-flight signal.
+        let mk = |et: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": "sandbox_exec", "call_id": call_id }),
+            )
+        };
+        let entries = vec![mk("tool.requested", "c1"), mk("tool.requested", "c2")];
+        let rows = coalesce(&entries);
+        match &rows[..] {
+            [RenderedRow::Collapsed { count: 2, .. }] => {}
+            other => panic!("both requests survive (folded), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_without_call_id_is_never_paired_away() {
+        // Older rows may lack call_id; without one we cannot prove the pair,
+        // so the request always renders (previous behavior) — here as its own
+        // row next to the significant completion.
+        let requested = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.requested",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "content_write", "args_preview": "/tmp/a.rs" }),
+        );
+        let completed = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "content_write", "args_preview": "/tmp/a.rs" }),
+        );
+        let rows = coalesce(&[requested, completed]);
+        assert_eq!(rows.len(), 2, "got {rows:?}");
+        assert!(matches!(&rows[0], RenderedRow::Line { .. }));
+        assert!(matches!(&rows[1], RenderedRow::Line { .. }));
+    }
+
+    #[test]
+    fn preserve_lines_cut_names_amount_and_escape_hatch() {
+        // Truncation vocabulary: content cuts carry `…(+N chars · Enter)`.
+        let long = "x".repeat(NARRATIVE_BODY_MAX + 500);
+        let cut = preserve_lines(&long, NARRATIVE_BODY_MAX);
+        assert!(cut.ends_with("…(+501 chars · Enter)"), "got: {cut}");
+        let marker = "…(+501 chars · Enter)";
+        assert_eq!(
+            cut.chars().count(),
+            (NARRATIVE_BODY_MAX - 1) + marker.chars().count()
+        );
+        // Under the cap: untouched.
+        assert_eq!(preserve_lines("short", NARRATIVE_BODY_MAX), "short");
+    }
+
+    #[test]
+    fn compact_count_formats_thousands() {
+        assert_eq!(compact_count(950), "950");
+        assert_eq!(compact_count(9_999), "9999");
+        assert_eq!(compact_count(10_000), "10.0k");
+        assert_eq!(compact_count(12_340), "12.3k");
     }
 
     #[test]
