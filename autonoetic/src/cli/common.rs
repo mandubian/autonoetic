@@ -1488,7 +1488,9 @@ pub struct RoomArgs {
     /// agent (e.g. `planner.default`).
     #[arg(long)]
     pub agent: Option<String>,
-    /// Altitude floor: detail | normal | attention | error. Default: detail.
+    /// Altitude floor: detail | normal | attention | error | story. Default:
+    /// detail. `story` shows only the process arc — narrative, gates,
+    /// verdicts, and failures — hiding plumbing and routine tool output.
     #[arg(long, default_value = "detail")]
     pub min_altitude: String,
     /// Follow the timeline live (tail -f style) until Ctrl+C.

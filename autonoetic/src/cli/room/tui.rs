@@ -596,7 +596,7 @@ fn build_info_panel(
     root: &str,
     channel_kind: &str,
     stats: &SessionStats,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     follow: bool,
     show_reasoning: bool,
@@ -656,7 +656,10 @@ fn build_info_panel(
     }
     lines.push(String::new());
     lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
-        floor.as_str(),
+        match floor {
+            FloorMode::Altitude(a) => a.as_str().to_string(),
+            FloorMode::Story => "story".to_string(),
+        },
         if squash { "on" } else { "off" },
         if show_reasoning { "on" } else { "off" },
         if follow { "●" } else { "○" },
@@ -709,7 +712,7 @@ fn build_header(
     stats: &SessionStats,
     gate_count: usize,
     follow: bool,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     taint: Option<&str>,
     pinned: bool,
@@ -739,7 +742,7 @@ fn build_header(
     if let Some(chip) = pending_chip(&stats.pending_calls, stats.pending_age_turns) {
         right_parts.push(chip);
     }
-    let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
+    let floor_ind = floor.indicator();
     right_parts.push(floor_ind);
     if !squash {
         right_parts.push("unsquashed".to_string());
@@ -3862,10 +3865,11 @@ fn rpc(
 pub fn run(
     client: &RoomClient,
     root_session_id: &mut String,
-    initial_floor: Altitude,
+    initial_floor: FloorMode,
     limit: u32,
     target_agent_id: &mut Option<String>,
     presets: &[String],
+    tier_overrides: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     crate::cli::terminal::require_interactive_terminal("Session Room")?;
     // Wire SIGTERM/SIGHUP/external-SIGINT to a terminal restore + clean exit
@@ -6135,7 +6139,16 @@ pub fn run(
                             }
                         }
                         KeyCode::Char('a') => {
-                            floor = cycle_floor(floor);
+                            floor = cycle_floor_mode(floor);
+                            status = Some(match floor {
+                                FloorMode::Altitude(a) => format!(
+                                    "floor: {} and above (a to cycle; story mode included)",
+                                    a.as_str()
+                                ),
+                                FloorMode::Story => {
+                                    "story mode: narrative, gates, verdicts, failures (a to cycle)".to_string()
+                                }
+                            });
                             detail = None;
                         }
                         KeyCode::Char('A') => {
@@ -7714,8 +7727,11 @@ pub fn run(
             // `entries` holds everything (fetched at `detail`); the display floor is
             // applied here as a pure view filter. RowSource indices below therefore
             // index into `visible`, so gate selection and drill-down use it too.
-            let visible: Vec<SessionTimelineEntry> =
-                entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
+            let visible: Vec<SessionTimelineEntry> = entries
+                .iter()
+                .filter(|e| floor.admits(e) && !render::is_hidden_by_config(e, tier_overrides))
+                .cloned()
+                .collect();
             // Detect in-flight turns: any turn_id we've seen `turn.start` for but
             // not yet `turn.end` is still open. The TUI marks the most recent row
             // in such a turn with a spinner.
@@ -7724,7 +7740,7 @@ pub fn run(
             let linked_escalation_approvals =
                 render::linked_promotion_escalation_approval_ids(&visible);
             let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
-                render::coalesce_indexed(&visible)
+                render::coalesce_indexed_with(&visible, tier_overrides)
             } else {
                 visible
                     .iter()
@@ -7824,7 +7840,10 @@ pub fn run(
             .enumerate()
             .filter_map(|(vi, (_, src))| match src {
                 RowSource::Single(i) => {
-                    visible.get(*i).filter(|e| render::is_checkpoint(e)).map(|_| vi)
+                    visible
+                        .get(*i)
+                        .filter(|e| render::is_checkpoint_with(e, tier_overrides))
+                        .map(|_| vi)
                 }
                 _ => None,
             })
@@ -9389,12 +9408,58 @@ fn actor_color(actor: ActorKind) -> Color {
     }
 }
 
-fn cycle_floor(floor: Altitude) -> Altitude {
-    match floor {
-        Altitude::Detail => Altitude::Normal,
-        Altitude::Normal => Altitude::Attention,
-        Altitude::Attention => Altitude::Error,
-        Altitude::Error => Altitude::Detail,
+/// View floor — which timeline rows are shown. `Altitude(f)` hides everything
+/// below `f`; `Story` is the process-arc preset: decisions and failures
+/// (Attention+) plus everything the session *said* and *concluded* — agent,
+/// operator, and peer messages, gate cards, and promotion verdicts — while
+/// plumbing and routine tool output stay hidden. One keystroke answers "what
+/// actually happened?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloorMode {
+    Altitude(Altitude),
+    Story,
+}
+
+impl FloorMode {
+    /// Whether a timeline entry passes this floor. Story mode is a *union*,
+    /// not an altitude cut: narrative rows are Normal but still belong to the
+    /// arc, so they are admitted by tone, not altitude.
+    fn admits(self, entry: &SessionTimelineEntry) -> bool {
+        match self {
+            FloorMode::Altitude(f) => entry.altitude >= f,
+            FloorMode::Story => {
+                entry.altitude >= Altitude::Attention
+                    || matches!(
+                        render::tone_for_entry(entry),
+                        render::RowTone::AgentNarrative
+                            | render::RowTone::OperatorGate
+                            | render::RowTone::VerdictPass
+                            | render::RowTone::VerdictFail
+                    )
+            }
+        }
+    }
+
+    /// Compact header indicator (glyph + name), same shape as an altitude.
+    fn indicator(self) -> String {
+        match self {
+            FloorMode::Altitude(a) => {
+                format!("{}{}", render::altitude_glyph(a), a.as_str())
+            }
+            FloorMode::Story => "📖story".to_string(),
+        }
+    }
+}
+
+fn cycle_floor_mode(mode: FloorMode) -> FloorMode {
+    match mode {
+        FloorMode::Altitude(a) => match a {
+            Altitude::Detail => FloorMode::Altitude(Altitude::Normal),
+            Altitude::Normal => FloorMode::Altitude(Altitude::Attention),
+            Altitude::Attention => FloorMode::Altitude(Altitude::Error),
+            Altitude::Error => FloorMode::Story,
+        },
+        FloorMode::Story => FloorMode::Altitude(Altitude::Detail),
     }
 }
 
@@ -9428,7 +9493,7 @@ fn switch_session(
     follow: &mut bool,
     resolved: &mut HashSet<String>,
     acted: &mut HashSet<String>,
-    floor: &mut Altitude,
+    floor: &mut FloorMode,
     root_session_id: &mut String,
     _target_agent_id: &mut Option<String>,
     _limit: u32,
@@ -10382,7 +10447,7 @@ fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> (Vec<String
 fn draw(
     f: &mut Frame,
     root: &str,
-    floor: Altitude,
+    floor: FloorMode,
     squash: bool,
     follow: bool,
     prev_viewport_offset: Option<usize>,
@@ -13389,18 +13454,95 @@ mod tests {
     }
 
     #[test]
-    fn floor_cycles_through_all_levels() {
-        let mut a = Altitude::Detail;
-        let seq: Vec<Altitude> = (0..4)
-            .map(|_| {
-                a = cycle_floor(a);
-                a
+    fn floor_cycles_through_all_levels_and_story() {
+        // The `a` key cycles the FloorMode: Detail → Normal → Attention →
+        // Error → Story → Detail. The altitude ring passes through Normal,
+        // Attention, and Error before story mode.
+        let mut m = FloorMode::Altitude(Altitude::Detail);
+        let mut seq: Vec<Altitude> = Vec::new();
+        for _ in 0..3 {
+            m = cycle_floor_mode(m);
+            match m {
+                FloorMode::Altitude(a) => seq.push(a),
+                FloorMode::Story => panic!("story must come after Error"),
+            }
+        }
+        assert_eq!(seq, vec![Altitude::Normal, Altitude::Attention, Altitude::Error]);
+        m = cycle_floor_mode(m);
+        assert_eq!(m, FloorMode::Story);
+        m = cycle_floor_mode(m);
+        assert_eq!(m, FloorMode::Altitude(Altitude::Detail));
+    }
+
+    #[test]
+    fn story_mode_admits_narrative_gates_verdicts_and_failures_only() {
+        let mk = |et: &str, alt: Altitude, payload: serde_json::Value| SessionTimelineEntry {
+            event_id: "ev-1".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: autonoetic_types::principal::Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: et.into(),
+            altitude: alt,
+            occurred_at: "2026-06-01T00:00:00Z".into(),
+            payload: Some(payload.to_string()),
+            refs: autonoetic_types::session_timeline::TimelineRefs::default(),
+        };
+        let admitted = |e: &SessionTimelineEntry| FloorMode::Story.admits(e);
+        // Narrative (Normal altitude) — the arc, must pass.
+        assert!(admitted(&mk(
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({"message": "I finished the refactor"})
+        )));
+        assert!(admitted(&mk(
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({"message": "carry on"})
+        )));
+        // Gates pass by tone even at Normal altitude.
+        assert!(admitted(&mk(
+            "plan.pending",
+            Altitude::Normal,
+            serde_json::json!({})
+        )));
+        // An embedded plan proposal inside a Normal agent.message passes too.
+        assert!(admitted(&mk(
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message": {"status": "awaiting_approval", "plan_id": "plan-1", "summary": "s"}
             })
-            .collect();
-        assert_eq!(
-            seq,
-            vec![Altitude::Normal, Altitude::Attention, Altitude::Error, Altitude::Detail]
-        );
+        )));
+        // Verdicts: promotion_record completions pass by tone.
+        assert!(admitted(&mk(
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({"tool_name": "promotion_record", "result": "{\"pass\":true}"})
+        )));
+        // Plumbing and routine tool output — must NOT pass.
+        assert!(!admitted(&mk(
+            "llm.round",
+            Altitude::Detail,
+            serde_json::json!({"input_tokens": 10, "output_tokens": 2})
+        )));
+        assert!(!admitted(&mk(
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({"tool_name": "workflow_wait"})
+        )));
+        assert!(!admitted(&mk(
+            "agent.reasoning",
+            Altitude::Detail,
+            serde_json::json!({"reasoning": "hmm"})
+        )));
+        // Failures pass on altitude.
+        assert!(admitted(&mk(
+            "tool.failed",
+            Altitude::Error,
+            serde_json::json!({})
+        )));
     }
 
     fn spec_with_turn(turn: Option<&str>, headline: &str) -> (RenderedRow, RowSource) {
@@ -14294,14 +14436,14 @@ mod tests {
     fn header_badge_shows_taint_but_not_unrestricted() {
         let stats = test_stats();
         let with_taint = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             Some("local_only"), false, 120,
         );
         assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
 
         // Unrestricted (None) ⇒ no chip — absence reads as "open".
         let open = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             None, false, 120,
         );
         assert!(!open.contains("🔒"), "{open}");
@@ -14311,14 +14453,14 @@ mod tests {
     fn header_badge_shows_pinned_state() {
         let stats = test_stats();
         let pinned = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             None, true, 120,
         );
         assert!(pinned.contains("📌 pinned"), "{pinned}");
 
         // Not pinned ⇒ no chip (even with a taint label from room data).
         let unpinned = build_header(
-            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
             Some("no_remote_model"), false, 120,
         );
         assert!(!unpinned.contains("📌"), "{unpinned}");

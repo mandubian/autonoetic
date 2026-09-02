@@ -32,13 +32,19 @@ pub async fn handle_room_with_target(
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
 
-    // `parse_str` returns `Some` for every valid floor — `None` means invalid.
-    let min_altitude = match Altitude::parse_str(&args.min_altitude) {
-        Some(a) => a,
-        None => anyhow::bail!(
-            "invalid --min-altitude '{}': expected detail | normal | attention | error",
-            args.min_altitude
-        ),
+    // `story` is a pure view preset (narrative + gates + failures); the rest
+    // are the gateway altitude levels. `parse_str` returns `Some` for every
+    // valid altitude — `None` means invalid.
+    let initial_floor = if args.min_altitude.eq_ignore_ascii_case("story") {
+        tui::FloorMode::Story
+    } else {
+        match Altitude::parse_str(&args.min_altitude) {
+            Some(a) => tui::FloorMode::Altitude(a),
+            None => anyhow::bail!(
+                "invalid --min-altitude '{}': expected detail | normal | attention | error | story",
+                args.min_altitude
+            ),
+        }
     };
 
     // The whole room is a gateway API client (#392) — no store access.
@@ -56,10 +62,11 @@ pub async fn handle_room_with_target(
         return tui::run(
             &client,
             &mut root_session_id,
-            min_altitude,
+            initial_floor,
             args.limit,
             &mut target_agent_id,
             &presets,
+            &config.session_room.event_tiers,
         );
     }
 
@@ -71,6 +78,7 @@ pub async fn handle_room_with_target(
         &mut cursor,
         args.limit,
         &args.min_altitude,
+        &config.session_room.event_tiers,
     )
     .await?;
 
@@ -99,6 +107,7 @@ pub async fn handle_room_with_target(
             &mut cursor,
             args.limit,
             &args.min_altitude,
+            &config.session_room.event_tiers,
         )
         .await?;
     }
@@ -160,6 +169,7 @@ async fn drain_new_rpc(
     cursor: &mut Option<String>,
     limit: u32,
     min_altitude: &str,
+    tier_overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<bool> {
     let mut rendered_any = false;
     loop {
@@ -178,7 +188,7 @@ async fn drain_new_rpc(
         if page.entries.is_empty() {
             break;
         }
-        for row in render::coalesce(&page.entries) {
+        for row in render::coalesce_with(&page.entries, tier_overrides) {
             println!("{}", CliChannel.format_row(&row));
         }
         *cursor = page.entries.last().map(|e| e.event_id.clone());

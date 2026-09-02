@@ -5,7 +5,7 @@
 //! viewer, and (later) external channel bridges all share the *same* formatting.
 //! Presentation only — importance/altitude is decided gateway-side.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry};
@@ -2972,8 +2972,24 @@ pub enum RowSource {
 /// A lone routine event renders normally — collapsing one is pointless.
 /// Checkpoint and Significant tiers always render individually. Coalescing is
 /// page-local; a run split across reads collapses per page.
+///
+/// Kept exported — the built-in classification without operator overrides is
+/// the channel-neutral default (tests, future channels). Callers with access
+/// to the operator config should use [`coalesce_with`].
+#[allow(dead_code)]
 pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
     coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
+}
+
+/// [`coalesce`] with operator tier overrides (config `session_room.event_tiers`).
+pub fn coalesce_with(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> Vec<RenderedRow> {
+    coalesce_indexed_with(entries, overrides)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
 }
 
 /// Approval ids already surfaced by a linked `escalation.pending` row.
@@ -3048,7 +3064,22 @@ fn is_paired_tool_request(e: &SessionTimelineEntry, completed: &HashSet<String>)
 }
 
 /// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
+///
+/// Kept exported (forward-compat, tests) — config-aware callers use
+/// [`coalesce_indexed_with`].
+#[allow(dead_code)]
 pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
+    coalesce_indexed_with(entries, &HashMap::new())
+}
+
+/// [`coalesce_indexed`] with operator tier overrides: types configured as
+/// `hidden` are dropped from the view entirely (one entry, silently — the
+/// config is explicit operator intent), `routine`-overridden types fold,
+/// `checkpoint`/`significant`-overridden types always render individually.
+pub fn coalesce_indexed_with(
+    entries: &[SessionTimelineEntry],
+    overrides: &HashMap<String, String>,
+) -> Vec<(RenderedRow, RowSource)> {
     let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
     let completed_calls = completed_call_ids(entries);
     let mut out = Vec::new();
@@ -3061,11 +3092,14 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
         if is_paired_tool_request(e, &completed_calls) {
             continue;
         }
+        if is_hidden_by_config(e, overrides) {
+            continue;
+        }
         // Defense-in-depth: only fold Routine-tier events that are ALSO below
         // the Attention altitude. This preserves the original invariant that
         // Attention/Error rows (gates, failures, interventions) NEVER collapse,
         // even if a future event type is mis-classified as Routine by `event_tier`.
-        let foldable = event_tier(e) == EventTier::Routine
+        let foldable = event_tier_with(e, overrides) == EventTier::Routine
             && e.altitude < Altitude::Attention;
         if foldable {
             if run_start.is_none() {
@@ -3129,6 +3163,9 @@ const SIGNIFICANT_EVENT_TYPES: &[&str] = &[
     "llm.request_failed", "llm.empty_response", "llm.retry",
     "tool.failed", "guard.tripped",
     "session.emergency_stop", "security.sandbox_escape",
+    // A failed background job is a failure — it renders individually and
+    // never folds into a routine run (mirrors the gateway's Attention bump).
+    "scheduled_job.failed",
     // Operator egress-policy declarations (`/private`, `/taint`) — a change to
     // what may leave the machine is consciously kept individual (#977).
     "egress.session_policy",
@@ -3146,7 +3183,7 @@ const ROUTINE_EVENT_TYPES: &[&str] = &[
     "tool.requested",
     "workflow.child_state", "workflow.join_satisfied", "workflow.signal",
     "workflow.started", "workflow.completed",
-    "scheduled_job.triggered", "scheduled_job.completed", "scheduled_job.failed",
+    "scheduled_job.triggered", "scheduled_job.completed",
     // High-volume egress metadata — per-envelope labelings, chokepoint
     // summaries, routing audits, relabel bookkeeping (#972). Folded by
     // default; surfaced on dial-down / investigation.
@@ -3200,6 +3237,83 @@ pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
     EventTier::Significant
 }
 
+/// Operator-configured visibility setting for one event type (config
+/// `session_room.event_tiers`). `Hidden` drops the type from the timeline
+/// view entirely — pending gates stay actionable through the pending strip
+/// and approvals popup regardless, because those are computed from the full
+/// entry list, not the visible rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierSetting {
+    Checkpoint,
+    Significant,
+    Routine,
+    Hidden,
+}
+
+impl TierSetting {
+    pub fn parse(s: &str) -> Option<TierSetting> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "checkpoint" => Some(TierSetting::Checkpoint),
+            "significant" => Some(TierSetting::Significant),
+            "routine" => Some(TierSetting::Routine),
+            "hidden" => Some(TierSetting::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// The operator override for this entry's event type, if one is configured.
+fn tier_setting_for(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> Option<TierSetting> {
+    overrides
+        .get(&entry.event_type)
+        .and_then(|s| TierSetting::parse(s))
+}
+
+/// [`event_tier`] with operator overrides applied: an event type configured
+/// as checkpoint/significant/routine is classified accordingly; `hidden` has
+/// no tier (row removal is the caller's decision) and falls back to the
+/// built-in classification; unconfigured types use the built-in lists.
+pub fn event_tier_with(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> EventTier {
+    match tier_setting_for(entry, overrides) {
+        Some(TierSetting::Checkpoint) => EventTier::Checkpoint,
+        Some(TierSetting::Significant) => EventTier::Significant,
+        Some(TierSetting::Routine) => EventTier::Routine,
+        Some(TierSetting::Hidden) | None => event_tier(entry),
+    }
+}
+
+/// True when the operator has hidden this entry's event type via config.
+pub fn is_hidden_by_config(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> bool {
+    tier_setting_for(entry, overrides) == Some(TierSetting::Hidden)
+}
+
+/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
+/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
+/// Kept exported (forward-compat, tests) — config-aware callers use
+/// [`is_checkpoint_with`].
+#[allow(dead_code)]
+pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
+    event_tier(entry) == EventTier::Checkpoint
+}
+
+/// [`is_checkpoint`] with operator overrides applied (a type overridden to
+/// `checkpoint` earns the banner chrome and `[`/`]` jump keys).
+pub fn is_checkpoint_with(
+    entry: &SessionTimelineEntry,
+    overrides: &HashMap<String, String>,
+) -> bool {
+    event_tier_with(entry, overrides) == EventTier::Checkpoint
+}
+
 /// `tool.completed` is Significant only for a state-changing tool; routine
 /// (folded) otherwise. Reads `tool_name` from the payload defensively.
 fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
@@ -3219,12 +3333,6 @@ fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
     } else {
         EventTier::Routine
     }
-}
-
-/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
-/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
-pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
-    event_tier(entry) == EventTier::Checkpoint
 }
 
 fn flush_run(
@@ -4396,6 +4504,72 @@ mod tests {
     }
 
     #[test]
+    fn tier_overrides_reclassify_and_hide() {
+        let mk = |et: &str, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                payload,
+            )
+        };
+        let overrides: HashMap<String, String> = [
+            // Promote a loud-but-Normal type to never fold.
+            ("workflow.started".to_string(), "significant".to_string()),
+            // Demote a chatty type to folding.
+            ("agent.peer_message".to_string(), "routine".to_string()),
+            // Drop a type the operator does not care about.
+            ("scheduled_job.completed".to_string(), "hidden".to_string()),
+            // Checkpoint chrome + jump keys.
+            ("digest_annotate".to_string(), "checkpoint".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // Promotion wins over the built-in classification.
+        assert_eq!(
+            event_tier_with(&mk("workflow.started", serde_json::json!({})), &overrides),
+            EventTier::Significant
+        );
+        // Demotion to routine folds (when altitude permits).
+        assert_eq!(
+            event_tier_with(&mk("agent.peer_message", serde_json::json!({})), &overrides),
+            EventTier::Routine
+        );
+        // Checkpoint override earns banner/jump handling.
+        assert!(is_checkpoint_with(
+            &mk("digest_annotate", serde_json::json!({})),
+            &overrides
+        ));
+        // Hidden drops the row from the view.
+        let entries = vec![
+            mk("scheduled_job.completed", serde_json::json!({"result_summary": "x"})),
+            mk("agent.message", serde_json::json!({"message": "hi"})),
+        ];
+        let rows = coalesce_with(&entries, &overrides);
+        assert_eq!(rows.len(), 1, "hidden type must not render; got {rows:?}");
+
+        // An invalid override value falls back to the built-in classification
+        // (config load validates; this is belt-and-braces).
+        let mut bad = HashMap::new();
+        bad.insert("workflow.started".to_string(), "loud".to_string());
+        assert_eq!(
+            event_tier_with(&mk("workflow.started", serde_json::json!({})), &bad),
+            event_tier(&mk("workflow.started", serde_json::json!({})))
+        );
+        // Empty overrides ⇒ identical to the plain classification.
+        assert_eq!(
+            event_tier_with(&mk("agent.message", serde_json::json!({})), &HashMap::new()),
+            event_tier(&mk("agent.message", serde_json::json!({})))
+        );
+        // TierSetting::parse is case-insensitive and rejects junk.
+        assert_eq!(TierSetting::parse("ROUTINE"), Some(TierSetting::Routine));
+        assert_eq!(TierSetting::parse("  hidden "), Some(TierSetting::Hidden));
+        assert_eq!(TierSetting::parse("invisible"), None);
+    }
+
+    #[test]
     fn turn_divider_labels_aggregate_calls_tokens_reasoning() {
         let mk_turn = |turn: &str, et: &str, payload: serde_json::Value| {
             let mut e = entry(
@@ -4470,6 +4644,7 @@ mod tests {
             "agent.message", "digest_annotate",
             "llm.request_failed", "llm.empty_response", "guard.tripped",
             "tool.failed", "session.emergency_stop", "security.sandbox_escape",
+            "scheduled_job.failed",
             "egress.envelope_withheld", "egress.assertion_violation",
             "egress.boundary_refused", "egress.declassified",
         ] {

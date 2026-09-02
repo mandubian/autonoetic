@@ -1157,6 +1157,7 @@ Controls the canonical session timeline (see [`docs/internals/session/room.md`](
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_room.role_floors` | map\<string, string\> | `{}` (empty — use hardcoded defaults) | Per-seat minimum altitude override. Keys are role names (`sentinel`, `runtime`, `planner`, `specialist`, `operator`, `curator`, `auditor`, `tool`, `external_surface`). Values are altitude strings (`detail`, `normal`, `attention`, `error`). Unconfigured roles keep their hardcoded defaults. |
+| `session_room.event_tiers` | map\<string, string\> | `{}` (empty — use built-in classification) | Operator visibility override for the room TUI timeline, keyed by timeline event type. Values: `checkpoint` (always renders individually, earns the `[` / `]` jump keys and banner chrome), `significant` (always renders individually), `routine` (folds into collapsed runs), `hidden` (dropped from the timeline view — pending gates stay actionable through the pending strip and approvals popup regardless, because those are computed from the full timeline, not the visible rows). Unconfigured types keep the built-in classification (`checkpoint`/`significant`/`routine` lists in `autonoetic/src/cli/room/render.rs`); unknown keys are reserved for future event types; invalid values fail config load. |
 
 Hardcoded defaults when no config is provided:
 
@@ -1173,6 +1174,18 @@ session_room:
   role_floors:
     sentinel: attention
     planner: normal
+```
+
+Example — quiet the room timeline for a long-running session (hide scheduled-job
+completions, keep workflow starts visible, treat digest annotations as
+checkpoints):
+
+```yaml
+session_room:
+  event_tiers:
+    scheduled_job.completed: hidden
+    workflow.started: significant
+    digest_annotate: checkpoint
 ```
 
 ---

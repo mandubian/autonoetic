@@ -144,7 +144,7 @@ pub fn help_lines() -> Vec<String> {
         "  ?            session info panel (stats, toggles, active gates)".to_string(),
         String::new(),
         "View".to_string(),
-        "  a            cycle altitude floor (detail → normal → attention → error)".to_string(),
+        "  a            cycle view floor (detail → normal → attention → error → story)".to_string(),
         "  s            toggle squash (fold routine detail events)".to_string(),
         "  R            toggle 💭 reasoning prefix on agent rows".to_string(),
         "  F            fork from selected row's turn & switch to the branch".to_string(),
