@@ -134,6 +134,7 @@ pub fn help_lines() -> Vec<String> {
         "  G / End      jump to newest row (enable follow)".to_string(),
         "  [ / ]        jump to previous / next checkpoint row".to_string(),
         "  e / E        jump to next / previous attention row (errors, gates)".to_string(),
+        "  u            jump to the `── N new ──` marker (rows added while you were scrolled away)".to_string(),
         "  Ctrl+F       search timeline · n / N cycle matches · Esc clear".to_string(),
         "  Y            copy selected row (tool token, else its text) to clipboard".to_string(),
         "  f / Space    toggle follow (pin to newest)".to_string(),

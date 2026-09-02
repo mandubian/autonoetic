@@ -1489,10 +1489,12 @@ pub struct RoomArgs {
     #[arg(long)]
     pub agent: Option<String>,
     /// Altitude floor: detail | normal | attention | error | story. Default:
-    /// detail. `story` shows only the process arc — narrative, gates,
-    /// verdicts, and failures — hiding plumbing and routine tool output.
-    #[arg(long, default_value = "detail")]
-    pub min_altitude: String,
+    /// the persisted room view preference (`~/.autonoetic/room-view.json`,
+    /// written by the `a`/`s`/`R` dials), else `detail`. `story` shows only
+    /// the process arc — narrative, gates, verdicts, and failures — hiding
+    /// plumbing and routine tool output.
+    #[arg(long)]
+    pub min_altitude: Option<String>,
     /// Follow the timeline live (tail -f style) until Ctrl+C.
     #[arg(long)]
     pub follow: bool,

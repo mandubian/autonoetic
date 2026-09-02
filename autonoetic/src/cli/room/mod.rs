@@ -49,19 +49,22 @@ pub async fn handle_room_with_target(
     // gateway only understands real altitudes, so the RPC floor fetches
     // everything (`detail`) and the story admission filter is applied
     // client-side in both the TUI and the read-only viewer/follow paths.
-    let story = args.min_altitude.eq_ignore_ascii_case("story");
-    let rpc_floor = if story { "detail" } else { args.min_altitude.as_str() };
-    let initial_floor = if story {
-        render::FloorMode::Story
-    } else {
-        // `parse_str` returns `Some` for every valid altitude — `None` means invalid.
-        match Altitude::parse_str(&args.min_altitude) {
-            Some(a) => render::FloorMode::Altitude(a),
+    // `None` (flag absent) lets the TUI fall back to the persisted view
+    // prefs; the non-interactive viewer then defaults to `detail`.
+    let cli_floor = match args.min_altitude.as_deref() {
+        Some("story") | Some("Story") | Some("STORY") => Some(render::FloorMode::Story),
+        Some(s) => match Altitude::parse_str(s) {
+            Some(a) => Some(render::FloorMode::Altitude(a)),
             None => anyhow::bail!(
                 "invalid --min-altitude '{}': expected detail | normal | attention | error | story",
-                args.min_altitude
+                s
             ),
-        }
+        },
+        None => None,
+    };
+    let story = matches!(cli_floor, Some(render::FloorMode::Story));
+    let rpc_floor = if story { "detail" } else {
+        args.min_altitude.as_deref().unwrap_or("detail")
     };
 
     // The whole room is a gateway API client (#392) — no store access.
@@ -79,7 +82,7 @@ pub async fn handle_room_with_target(
         return tui::run(
             &client,
             &mut root_session_id,
-            initial_floor,
+            cli_floor,
             args.limit,
             &mut target_agent_id,
             &presets,
@@ -89,13 +92,19 @@ pub async fn handle_room_with_target(
 
     // Read-only viewer.
     let mut cursor: Option<String> = None;
+    // The viewer is non-interactive: explicit floor or `detail`, no prefs.
+    let viewer_floor = if story {
+        render::FloorMode::Story
+    } else {
+        render::FloorMode::Altitude(Altitude::parse_str(rpc_floor).unwrap_or(Altitude::Detail))
+    };
     let rendered_any = drain_new_rpc(
         &client,
         &root_session_id,
         &mut cursor,
         args.limit,
         rpc_floor,
-        initial_floor,
+        viewer_floor,
         &config.session_room.event_tiers,
     )
     .await?;
@@ -104,7 +113,7 @@ pub async fn handle_room_with_target(
         if !rendered_any {
             eprintln!(
                 "(no activity at or above '{}' for session '{}')",
-                args.min_altitude, root_session_id
+                rpc_floor, root_session_id
             );
         }
         return Ok(());
@@ -113,7 +122,7 @@ pub async fn handle_room_with_target(
     eprintln!(
         "Following room '{}' (floor: {}) via the {} channel. Press Ctrl+C to stop.",
         root_session_id,
-        args.min_altitude,
+        rpc_floor,
         CliChannel.kind(),
     );
     let mut interval = tokio::time::interval(Duration::from_millis(800));
@@ -125,7 +134,7 @@ pub async fn handle_room_with_target(
             &mut cursor,
             args.limit,
             rpc_floor,
-            initial_floor,
+            viewer_floor,
             &config.session_room.event_tiers,
         )
         .await?;
