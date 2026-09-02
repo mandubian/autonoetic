@@ -86,6 +86,34 @@ them binds the host root, so the key changes the bubblewrap tier only.
 | `allow_set` (default, DP-1) | Nothing of the host exists except what the gateway asserts |
 | `legacy` (deprecated opt-out) | `--ro-bind / /` — the whole host filesystem is readable inside the sandbox. A warning is logged at startup, and the secret mask is the stopgap that keeps credentials out |
 
+The mode is a property of the **tier**, not of one tool: `sandbox_exec`,
+script-mode agents, `artifact_exec` and the promotion gate all resolve it
+through `host_fs_allow_set` in `sandbox.rs`. A path that constructed
+`BwrapIsolationOverrides` without asking would keep the host root bound while
+the startup log and this table said otherwise — which is why the resolution
+lives in one function rather than at each call site.
+
+### Mount destinations
+
+A mount is only as good as its destination: bwrap `mkdir`s the target inside
+the namespace, and a target it cannot create kills the sandbox at setup —
+before *any* command, including `echo ok`. `mount_destination_flags` decides
+this mechanically, and the answer turns on whether the destination already
+exists:
+
+| Destination | Outcome |
+|---|---|
+| Under the workspace (`/tmp`) | Nothing needed — the workspace bind is writable |
+| Already exists | Nothing needed — bwrap binds *over* an existing entry without `mkdir`, including inside a read-only bind |
+| Missing, inside a toolchain/name-resolution bind | Refused: `mkdir` in a read-only bind cannot work |
+| Missing, `allow_set` | Nothing needed — the root is an empty writable tmpfs |
+| Missing, `legacy` | The deepest **existing** ancestor is replaced by a `--tmpfs` and its entries re-bound read-only, but only for `/opt`, `/mnt`, `/srv`, `/media`. Anything else — `/etc`, `/var`, `/` — is refused and names the flip |
+
+Two refusals are about honesty rather than capability: a destination that
+overlaps another mount of the same exec, and a `legacy` tmpfs that would sit
+on top of an earlier mount. Neither fails in bwrap — the later mount silently
+hides the earlier layer, which is worse than a refusal that says so.
+
 ### What the allow-set contains
 
 `allow_set` cannot be expressed as "bind less", because bwrap's default root

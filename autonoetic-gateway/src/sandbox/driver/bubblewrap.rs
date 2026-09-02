@@ -194,7 +194,7 @@ fn bubblewrap_shell_command(
     }
 
     // Add extra bind mounts for session content
-    let mut provisioned_parents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut provisioned_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut bound_dests: Vec<String> = Vec::new();
     for mount in extra_mounts {
         // Create the source directory if needed
@@ -214,12 +214,8 @@ fn bubblewrap_shell_command(
         // dies at setup before any command runs (observed as
         // `bwrap: Can't mkdir /opt/wrapper-out: Read-only file system` under
         // legacy's `--ro-bind / /`, killing even `echo ok`).
-        let provisioning = mount_destination_flags(
-            mode,
-            &mount.dest,
-            &bound_dests,
-            &mut provisioned_parents,
-        )?;
+        let provisioning =
+            mount_destination_flags(mode, &mount.dest, &bound_dests, &mut provisioned_roots)?;
         argv.extend(provisioning);
         let bind_flag = if mount.readonly {
             "--ro-bind".to_string()
@@ -241,80 +237,187 @@ fn bubblewrap_shell_command(
     Ok(("bwrap".to_string(), argv))
 }
 
+/// Host directories the legacy mode may replace with a tmpfs in order to
+/// create a *missing* mount destination. Conventional add-on roots only:
+/// provisioning replaces the directory inside the namespace, and while
+/// [`legacy_provisioning_flags`] re-binds the entries that were there, that
+/// re-bind resolves symlinks into real entries — acceptable for `/opt`-shaped
+/// directories, not for `/etc` or `/var`, whose symlink webs commands depend
+/// on. Anything else refuses and names `allow_set`.
+const LEGACY_PROVISIONABLE_ROOTS: &[&str] = &["/opt", "/mnt", "/srv", "/media"];
+
+/// Upper bound on the entries re-bound onto a provisioning tmpfs. A directory
+/// with more than this is not a mount root, it is a system directory: refuse
+/// instead of emitting hundreds of binds.
+const LEGACY_PROVISION_MAX_ENTRIES: usize = 64;
+
 /// Provision a mount destination so bwrap can create it inside the namespace.
 ///
 /// Fail-loud with a teaching message rather than letting bwrap die at setup:
 /// a sandbox that cannot assemble its mounts fails *every* command (including
 /// `echo ok`), and the raw bwrap stderr gives the agent no lawful next move.
 ///
-/// - Workspace-subtree destinations need nothing: the workspace bind is a
-///   writable host directory, so bwrap can mkdir freely.
-/// - Legacy mode: `/` is ro-bound, so any destination outside the workspace
-///   gets a one-shot `--tmpfs <parent>` (deduped; emitted before the first
-///   bind under that parent so later binds compose onto it). The tmpfs
-///   shadows the host parent inside the namespace — that subtree is exactly
-///   what the layer provides, so nothing else is missed. A destination
-///   directly under `/` (parent `/`) or under a read-only toolchain bind
-///   cannot be provisioned safely → structured refusal.
-/// - AllowSet mode: the root is an empty writable tmpfs, so bwrap creates
-///   ancestor dirs freely; only toolchain-shadowing destinations refuse.
+/// The rule is "can bwrap mkdir this destination?", and the answer turns on
+/// whether the destination *already exists*:
+///
+/// - Workspace subtree: nothing. The workspace bind is a writable host
+///   directory, so bwrap can mkdir freely.
+/// - Destination already present in the namespace: nothing. bwrap binds *over*
+///   an existing entry without any mkdir — including inside a read-only bind
+///   (verified: `--ro-bind /usr /usr --ro-bind layer /usr/share` mounts fine).
+///   This is why an existing destination is never refused: it worked before
+///   this function existed, and still does.
+/// - Missing destination inside a gateway-asserted read-only bind: refusal.
+///   bwrap must mkdir there and cannot (`Can't mkdir /usr/nope: Read-only file
+///   system`).
+/// - Missing destination, `AllowSet`: nothing. The root is an empty writable
+///   tmpfs, so bwrap creates every ancestor itself.
+/// - Missing destination, `Legacy`: `/` is ro-bound, so the deepest *existing*
+///   ancestor is replaced by a tmpfs — the immediate parent is not enough
+///   (`--tmpfs /opt/foo` dies with the same `Can't mkdir` when `/opt/foo` is
+///   itself missing). Only [`LEGACY_PROVISIONABLE_ROOTS`] may be replaced, and
+///   the entries that were there are re-bound read-only so the tmpfs does not
+///   silently empty the directory. Everything else refuses and names the flip.
 fn mount_destination_flags(
     mode: HostFsMode,
     dest: &str,
     bound_dests: &[String],
-    provisioned_parents: &mut std::collections::HashSet<String>,
+    provisioned_roots: &mut std::collections::HashSet<String>,
 ) -> anyhow::Result<Vec<String>> {
     let workspace = BWRAP_WORKSPACE_DIR;
     if dest == workspace || dest.starts_with(&format!("{workspace}/")) {
         return Ok(Vec::new());
     }
-    let dest_path = std::path::Path::new(dest);
-    let Some(parent) = dest_path.parent() else {
-        return Ok(Vec::new());
-    };
-    let parent = parent.to_string_lossy().to_string();
 
-    // A destination shadowing (or shadowed by) a toolchain bind breaks the
-    // sandbox in every mode: refuse with the fix named.
-    if ALLOW_SET_TOOLCHAIN_ROOTS
-        .iter()
-        .any(|root| dest == *root || dest.starts_with(&format!("{root}/")))
-    {
+    // Overlap with an earlier mount of this exec, in *either* direction: a
+    // later bind onto the same or a containing destination does not fail — it
+    // silently shadows the earlier layer, which is worse than refusing
+    // (verified: `--ro-bind A /opt/x --ro-bind B /opt/x` leaves only B).
+    if let Some(earlier) = bound_dests.iter().find(|d| paths_overlap(dest, d)) {
         anyhow::bail!(
-            "sandbox mount destination '{dest}' overlaps a read-only toolchain bind; \
-             choose a mount_as outside {ALLOW_SET_TOOLCHAIN_ROOTS:?}"
+            "sandbox mount destination '{dest}' overlaps the earlier mount '{earlier}' \
+             in this exec — the later bind would silently hide the earlier one. \
+             Give each mount_as an independent path"
         );
     }
-    // A destination nested under an earlier bind's destination: the parent
-    // would live inside that (read-only layer) bind — mkdir fails there.
-    if bound_dests
-        .iter()
-        .any(|d| parent == *d || parent.starts_with(&format!("{d}/")))
-    {
+
+    let dest_exists = std::path::Path::new(dest).exists();
+
+    // Gateway-asserted read-only binds. Binding over an entry that is already
+    // there needs no mkdir and is fine; creating a new one inside them cannot
+    // work in either mode.
+    if let Some(root) = asserted_ro_bind_containing(dest) {
+        if dest_exists {
+            return Ok(Vec::new());
+        }
         anyhow::bail!(
-            "sandbox mount destination '{dest}' nests under the earlier mount \
-             '{parent}'; give each mount_as an independent parent path"
+            "sandbox mount destination '{dest}' does not exist and would have to be \
+             created inside the read-only bind '{root}' (bwrap: Can't mkdir). \
+             Choose a mount_as outside {ALLOW_SET_TOOLCHAIN_ROOTS:?}"
         );
     }
 
     match mode {
         HostFsMode::AllowSet => Ok(Vec::new()),
-        HostFsMode::Legacy => {
-            if parent == "/" {
-                anyhow::bail!(
-                    "sandbox mount destination '{dest}' cannot be created inside the \
-                     legacy whole-host ro-bind (bwrap: Can't mkdir). Use a mount_as whose \
-                     parent directory exists (e.g. /opt/..., /mnt/...) or set \
-                     sandbox.host_fs: allow_set"
-                );
-            }
-            if provisioned_parents.insert(parent.clone()) {
-                Ok(vec!["--tmpfs".to_string(), parent])
-            } else {
-                Ok(Vec::new())
-            }
-        }
+        HostFsMode::Legacy if dest_exists => Ok(Vec::new()),
+        HostFsMode::Legacy => legacy_provisioning_flags(dest, bound_dests, provisioned_roots),
     }
+}
+
+/// True when `a` and `b` name the same path or one contains the other.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+/// The gateway-asserted read-only bind containing `dest`, if any.
+fn asserted_ro_bind_containing(dest: &str) -> Option<&'static str> {
+    ALLOW_SET_TOOLCHAIN_ROOTS
+        .iter()
+        .chain(ALLOW_SET_NAME_RESOLUTION.iter())
+        .find(|root| dest == **root || dest.starts_with(&format!("{root}/")))
+        .copied()
+}
+
+/// `--tmpfs` the deepest existing ancestor of a missing legacy destination,
+/// re-binding what was there so nothing silently disappears.
+fn legacy_provisioning_flags(
+    dest: &str,
+    bound_dests: &[String],
+    provisioned_roots: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<String>> {
+    let mut ancestor = std::path::Path::new(dest).parent();
+    while let Some(candidate) = ancestor {
+        if candidate.exists() {
+            break;
+        }
+        ancestor = candidate.parent();
+    }
+    let Some(root) = ancestor.map(|a| a.to_string_lossy().to_string()) else {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' has no existing ancestor directory on the \
+             host; use an absolute mount_as under {LEGACY_PROVISIONABLE_ROOTS:?} or set \
+             sandbox.host_fs: allow_set"
+        );
+    };
+
+    if !LEGACY_PROVISIONABLE_ROOTS.contains(&root.as_str()) {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' cannot be created under the deprecated \
+             whole-host ro-bind: the gateway would have to replace '{root}' with a tmpfs, \
+             which it only does for {LEGACY_PROVISIONABLE_ROOTS:?}. Use a mount_as under \
+             one of those, or one that already exists on the host, or set \
+             sandbox.host_fs: allow_set (the default), where any destination is creatable"
+        );
+    }
+
+    // Already provisioned for an earlier mount: bwrap can mkdir on that tmpfs.
+    if provisioned_roots.contains(&root) {
+        return Ok(Vec::new());
+    }
+    // A tmpfs over `root` is mounted *after* any earlier bind beneath it, so it
+    // would bury that mount. Refuse instead of silently hiding it.
+    if let Some(earlier) = bound_dests
+        .iter()
+        .find(|d| **d == root || d.starts_with(&format!("{root}/")))
+    {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' needs '{root}' replaced with a tmpfs, \
+             which would hide the earlier mount '{earlier}'. Order the mounts so the \
+             deepest destination comes first, or set sandbox.host_fs: allow_set"
+        );
+    }
+
+    // Preserve what the host had there: the tmpfs shadows `root` inside the
+    // namespace, so every entry that was visible is re-bound read-only (which
+    // is what the whole-host ro-bind gave it anyway).
+    let mut entries: Vec<String> = match std::fs::read_dir(&root) {
+        Ok(rd) => rd
+            .flatten()
+            .map(|e| e.path().to_string_lossy().to_string())
+            .collect(),
+        Err(e) => anyhow::bail!(
+            "sandbox mount destination '{dest}' needs '{root}' provisioned, but it \
+             cannot be read ({e}); set sandbox.host_fs: allow_set"
+        ),
+    };
+    if entries.len() > LEGACY_PROVISION_MAX_ENTRIES {
+        anyhow::bail!(
+            "sandbox mount destination '{dest}' needs '{root}' replaced with a tmpfs, but \
+             '{root}' holds {} entries (limit {LEGACY_PROVISION_MAX_ENTRIES}) that would \
+             have to be re-bound; set sandbox.host_fs: allow_set",
+            entries.len()
+        );
+    }
+    entries.sort();
+
+    provisioned_roots.insert(root.clone());
+    let mut flags = vec!["--tmpfs".to_string(), root];
+    for entry in entries {
+        flags.push("--ro-bind".to_string());
+        flags.push(entry.clone());
+        flags.push(entry);
+    }
+    Ok(flags)
 }
 
 /// Mount prologue shared by both command forms: ro-bind the host `/`, bind the
@@ -637,20 +740,49 @@ mod tests {
         assert_eq!(argv[12], "echo hi");
     }
 
+    /// The provisionable root that exists on this host, or `None` (a build
+    /// container may have neither `/opt` nor `/mnt`), in which case the
+    /// provisioning tests have nothing lawful to provision and skip.
+    fn host_provisionable_root() -> Option<&'static str> {
+        LEGACY_PROVISIONABLE_ROOTS
+            .iter()
+            .copied()
+            .find(|root| std::path::Path::new(root).exists())
+    }
+
+    fn host_entries(root: &str) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(root)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        entries
+    }
+
     #[test]
     fn legacy_mode_provisions_tmpfs_parent_for_layer_mount() {
         // The adapter-session failure: a layer with mount_as /opt/wrapper-out
         // under legacy's `--ro-bind / /` used to die at setup with
         // `bwrap: Can't mkdir /opt/wrapper-out: Read-only file system`,
         // failing every command including `echo ok`.
+        let Some(root) = host_provisionable_root() else {
+            return;
+        };
+        if host_entries(root).len() > LEGACY_PROVISION_MAX_ENTRIES {
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tempdir");
         let agent_dir = tmp.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
         let gateway_dir = tmp.path().join("runtime");
+        let dest = format!("{root}/autonoetic-wrapper-out-test");
         let mounts = vec![SandboxMount {
             source: tmp.path().join("layer"),
-            dest: "/opt/wrapper-out".to_string(),
+            dest: dest.clone(),
             readonly: true,
         }];
         let (_bin, argv) = bubblewrap_shell_command(
@@ -661,16 +793,139 @@ mod tests {
             None, // legacy
         )
         .expect("shell command should build");
-        let tmpfs_pos = argv.iter().position(|a| a == "--tmpfs").expect("tmpfs provisioning expected");
-        assert_eq!(argv[tmpfs_pos + 1], "/opt");
+        let tmpfs_pos = argv
+            .iter()
+            .position(|a| a == "--tmpfs")
+            .expect("tmpfs provisioning expected");
+        assert_eq!(argv[tmpfs_pos + 1], root);
         let bind_pos = argv
             .windows(3)
-            .position(|w| w[0] == "--ro-bind" && w[2] == "/opt/wrapper-out")
+            .position(|w| w[0] == "--ro-bind" && w[2] == dest)
             .expect("layer bind expected");
         assert!(
             tmpfs_pos < bind_pos,
             "tmpfs parent must precede the bind onto it"
         );
+        // Nothing the host had there may silently disappear behind the tmpfs.
+        for entry in host_entries(root) {
+            let restored = argv
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind" && w[1] == entry && w[2] == entry);
+            assert!(restored, "entry {entry} must be re-bound over the tmpfs: {argv:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_mode_provisions_the_deepest_existing_ancestor() {
+        // `--tmpfs <immediate parent>` is not enough: bwrap has to mkdir that
+        // parent too, and cannot inside the ro-bound root — verified as
+        // `bwrap: Can't mkdir /opt/foo: Read-only file system`. The tmpfs has
+        // to land on the deepest ancestor that actually exists.
+        let Some(root) = host_provisionable_root() else {
+            return;
+        };
+        if host_entries(root).len() > LEGACY_PROVISION_MAX_ENTRIES {
+            return;
+        }
+        let mut provisioned = std::collections::HashSet::new();
+        let flags = mount_destination_flags(
+            HostFsMode::Legacy,
+            &format!("{root}/autonoetic-missing-a/autonoetic-missing-b"),
+            &[],
+            &mut provisioned,
+        )
+        .expect("deep destination must be provisionable");
+        assert_eq!(flags[0], "--tmpfs");
+        assert_eq!(flags[1], root, "tmpfs must land on the existing ancestor");
+    }
+
+    #[test]
+    fn legacy_mode_refuses_to_replace_a_system_directory() {
+        // `--tmpfs /etc` empties /etc inside the sandbox (verified: no passwd
+        // db, no resolv.conf, no CA certs) — a silently broken environment in
+        // exchange for one mount. Refuse and name the flip instead.
+        let mut provisioned = std::collections::HashSet::new();
+        let err = mount_destination_flags(
+            HostFsMode::Legacy,
+            "/etc/autonoetic-layer-test",
+            &[],
+            &mut provisioned,
+        )
+        .expect_err("/etc must not be replaced with a tmpfs");
+        assert!(err.to_string().contains("allow_set"), "{err}");
+    }
+
+    #[test]
+    fn existing_destination_needs_no_provisioning_and_is_never_refused() {
+        // bwrap binds *over* an existing entry with no mkdir, including inside
+        // a read-only bind (verified: `--ro-bind /usr /usr --ro-bind layer
+        // /usr/share` mounts fine). This worked before the provisioning logic
+        // existed and must keep working — including under /usr.
+        for dest in ["/usr/bin", "/etc"] {
+            for mode in [HostFsMode::Legacy, HostFsMode::AllowSet] {
+                let mut provisioned = std::collections::HashSet::new();
+                let flags = mount_destination_flags(mode, dest, &[], &mut provisioned)
+                    .unwrap_or_else(|e| panic!("existing dest {dest} must be accepted: {e}"));
+                assert!(flags.is_empty(), "no provisioning for existing {dest}");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_destination_inside_a_readonly_bind_is_refused() {
+        for mode in [HostFsMode::Legacy, HostFsMode::AllowSet] {
+            let mut provisioned = std::collections::HashSet::new();
+            let err = mount_destination_flags(
+                mode,
+                "/usr/autonoetic-missing-xyz",
+                &[],
+                &mut provisioned,
+            )
+            .expect_err("missing dest inside a ro bind must refuse");
+            assert!(err.to_string().contains("Can't mkdir"), "{err}");
+        }
+    }
+
+    #[test]
+    fn overlapping_mount_destinations_are_refused_in_both_directions() {
+        // Verified: a second bind onto the same dest leaves only the second
+        // layer visible, and binding a *parent* after a child buries the child.
+        // Neither errors in bwrap, so the refusal has to happen here.
+        for (dest, earlier) in [
+            ("/opt/x", "/opt/x"),          // exact duplicate
+            ("/opt/a", "/opt/a/b"),        // earlier mount nested under this one
+            ("/opt/a/b/c", "/opt/a"),      // this one nested under an earlier mount
+        ] {
+            let mut provisioned = std::collections::HashSet::new();
+            let err = mount_destination_flags(
+                HostFsMode::AllowSet,
+                dest,
+                &[earlier.to_string()],
+                &mut provisioned,
+            )
+            .expect_err("overlapping destinations must refuse");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(earlier),
+                "the refusal must name the conflicting earlier mount '{earlier}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_provisioning_refuses_to_bury_an_earlier_mount() {
+        let Some(root) = host_provisionable_root() else {
+            return;
+        };
+        let mut provisioned = std::collections::HashSet::new();
+        let err = mount_destination_flags(
+            HostFsMode::Legacy,
+            &format!("{root}/autonoetic-second"),
+            &[format!("{root}/autonoetic-first")],
+            &mut provisioned,
+        )
+        .expect_err("a tmpfs that would hide an earlier mount must refuse");
+        assert!(err.to_string().contains("autonoetic-first"), "{err}");
     }
 
     #[test]
@@ -680,26 +935,27 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
         let gateway_dir = tmp.path().join("runtime");
+        let Some(root) = host_provisionable_root() else {
+            return;
+        };
+        if host_entries(root).len() > LEGACY_PROVISION_MAX_ENTRIES {
+            return;
+        }
         let mounts = vec![
             SandboxMount {
                 source: tmp.path().join("l1"),
-                dest: "/opt/a".to_string(),
+                dest: format!("{root}/autonoetic-a"),
                 readonly: true,
             },
             SandboxMount {
                 source: tmp.path().join("l2"),
-                dest: "/opt/b".to_string(),
+                dest: format!("{root}/autonoetic-b"),
                 readonly: true,
             },
         ];
-        let (_bin, argv) = bubblewrap_shell_command(
-            &agent_dir_str,
-            &gateway_dir,
-            "echo ok",
-            &mounts,
-            None,
-        )
-        .expect("shell command should build");
+        let (_bin, argv) =
+            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo ok", &mounts, None)
+                .expect("shell command should build");
         let count = argv.iter().filter(|a| *a == "--tmpfs").count();
         assert_eq!(count, 1, "shared parent provisioned exactly once: {argv:?}");
     }
@@ -766,17 +1022,19 @@ mod tests {
     }
 
     #[test]
-    fn mount_destination_refuses_toolchain_overlap_in_both_modes() {
+    fn mount_destination_refuses_new_dirs_under_a_toolchain_root() {
         let mut provisioned = std::collections::HashSet::new();
         for mode in [HostFsMode::Legacy, HostFsMode::AllowSet] {
             let err = mount_destination_flags(
                 mode,
-                "/usr/share/layer",
+                "/usr/share/autonoetic-layer-xyz",
                 &[],
                 &mut provisioned,
             )
-            .expect_err("toolchain overlap must refuse");
-            assert!(err.to_string().contains("toolchain"), "{err}");
+            .expect_err("a new directory under a toolchain root must refuse");
+            let msg = err.to_string();
+            assert!(msg.contains("/usr"), "{msg}");
+            assert!(msg.contains("read-only bind"), "{msg}");
         }
     }
 
