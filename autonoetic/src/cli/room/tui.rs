@@ -4003,7 +4003,7 @@ pub fn run(
     let mut view_row_heights: Vec<usize> = Vec::new();
     let mut view_viewport_offset = 0usize;
     let mut view_list_height = 0usize;
-    let mut view_turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    let mut view_turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
     // Idle-frame optimization: only rebuild and redraw when something changed.
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
@@ -7787,12 +7787,30 @@ pub fn run(
         // Repurpose the boundary flag to mean "this turn is forkable" so the
         // divider can render distinctly. (Presence in the map still means "draw
         // a divider here"; the bool now carries forkability.)
-        for (row_idx, forkable) in turn_boundaries.iter_mut() {
-            let turn = match indexed.get(*row_idx).map(|(r, _)| r) {
-                Some(RenderedRow::Line(spec)) => spec.turn_index.map(|n| n as u64),
-                _ => None,
-            };
-            *forkable = turn.is_some_and(|t| forkable_turns.contains(&t));
+        // Dividers also carry the turn's chapter header — calls, tokens,
+        // reasoning — aggregated over the *full* timeline: plumbing is
+        // floor-filtered out of `visible`, but it still belongs in the totals.
+        {
+            let divider_turns: HashSet<String> = turn_boundaries
+                .keys()
+                .filter_map(|ri| match indexed.get(*ri) {
+                    Some((RenderedRow::Line(spec), _)) => spec.turn_id.clone(),
+                    _ => None,
+                })
+                .collect();
+            let divider_labels = render::turn_divider_labels(&entries, &divider_turns);
+            for (row_idx, divider) in turn_boundaries.iter_mut() {
+                let turn = match indexed.get(*row_idx).map(|(r, _)| r) {
+                    Some(RenderedRow::Line(spec)) => {
+                        if let Some(t) = &spec.turn_id {
+                            divider.stats = divider_labels.get(t).cloned();
+                        }
+                        spec.turn_index.map(|n| n as u64)
+                    }
+                    _ => None,
+                };
+                divider.forkable = turn.is_some_and(|t| forkable_turns.contains(&t));
+            }
         }
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
         let pending_plan_count =
@@ -8139,6 +8157,15 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
     }
 }
 
+/// Decoration for a turn-boundary row: whether the turn is forkable (`⑂`)
+/// and the per-turn aggregate shown on the divider line (calls, tokens,
+/// reasoning — the "chapter header", see `render::turn_divider_labels`).
+#[derive(Debug, Clone, Default)]
+struct TurnDivider {
+    forkable: bool,
+    stats: Option<String>,
+}
+
 /// Annotate a row list with turn-boundary flags and in-flight markers. The
 /// in-flight spinner is reserved for the **most recent** row of each open
 /// turn — earlier rows keep their normal altitude glyph so the operator can
@@ -8148,8 +8175,8 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
 /// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
 /// the 💭 marker (`agent.reasoning` rows).
 ///
-/// Returns the per-row `turn_boundaries` map (true → draw divider above the
-/// row) so the renderer can decorate the boundary.
+/// Returns the per-row `turn_boundaries` map (a divider is drawn above the
+/// row when present) so the renderer can decorate the boundary.
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     visible: &[SessionTimelineEntry],
@@ -8164,11 +8191,11 @@ fn annotate_turns_and_in_flight(
     extra_inflight_rows: &HashSet<usize>,
     root_session_id: &str,
     spawn_lineage: &HashMap<String, SessionSpawnLineageEntry>,
-) -> HashMap<usize, bool> {
+) -> HashMap<usize, TurnDivider> {
     let mut last_turn: Option<String> = None;
     let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
     let mut collapsed_open_turn_rows: HashSet<usize> = HashSet::new();
-    let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    let mut turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
     for (i, (row, _)) in rows.iter().enumerate() {
         if let RenderedRow::Line(spec) = row {
             if let Some(t) = &spec.turn_id {
@@ -8176,7 +8203,7 @@ fn annotate_turns_and_in_flight(
                     last_row_for_turn.insert(t.clone(), i);
                 }
                 if last_turn.as_ref() != Some(t) {
-                    turn_boundaries.insert(i, true);
+                    turn_boundaries.insert(i, TurnDivider::default());
                 }
                 last_turn = Some(t.clone());
             }
@@ -8845,7 +8872,7 @@ fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
 fn build_rich_row_lines(
     spec: &RowSpec,
     row_index: usize,
-    turn_boundaries: &HashMap<usize, bool>,
+    turn_boundaries: &HashMap<usize, TurnDivider>,
     content_w: usize,
     glyph_w: usize,
     rail_w: usize,
@@ -8854,12 +8881,12 @@ fn build_rich_row_lines(
     show_reasoning: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if let Some(&forkable) = turn_boundaries.get(&row_index) {
+    if let Some(divider) = turn_boundaries.get(&row_index) {
         let total_w = content_w + glyph_w + MARK_W + label_w + rail_w + 2;
         // Forkable turns (a runnable checkpoint exists) get a heavier rule, a
         // `⑂` marker, and a brighter colour so the operator can see at a glance
         // where `F` / `/fork --at-turn N` will actually work.
-        let (rule, tag, style) = if forkable {
+        let (rule, tag, style) = if divider.forkable {
             ('═', " ⑂ fork", Style::default().fg(Color::Cyan))
         } else {
             ('─', "", Style::default().fg(Color::DarkGray))
@@ -8869,7 +8896,16 @@ fn build_rich_row_lines(
             .clone()
             .or_else(|| spec.turn_index.map(|n| n.to_string()));
         let bar = if let Some(l) = label {
-            let prefix = format!("{rule}{rule} turn {l}{tag} ");
+            let mut prefix = format!("{rule}{rule} turn {l}{tag} ");
+            // Chapter header: what the turn did/cost/thought (see
+            // `render::turn_divider_labels`), only when it fits with a
+            // minimum tail of rule characters.
+            if let Some(s) = &divider.stats {
+                let candidate = format!("{prefix}· {s} ");
+                if candidate.chars().count() + 4 <= total_w {
+                    prefix = candidate;
+                }
+            }
             let fill = total_w.saturating_sub(prefix.chars().count());
             format!("{prefix}{}", rule.to_string().repeat(fill))
         } else {
@@ -10361,7 +10397,7 @@ fn draw(
     status: Option<&str>,
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
-    turn_boundaries: &HashMap<usize, bool>,
+    turn_boundaries: &HashMap<usize, TurnDivider>,
     show_reasoning: bool,
     stats: &SessionStats,
     _pending_plan_count: usize,
@@ -14311,6 +14347,52 @@ mod tests {
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
+    }
+
+    #[test]
+    fn turn_divider_renders_chapter_stats() {
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Specialist,
+            tone: RowTone::Default,
+            actor_label: "coder".into(),
+            headline: "did the thing".into(),
+            detail: None,
+            turn_id: Some("turn-000003".into()),
+            source_session_id: None,
+            turn_index: Some(3),
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let mut turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        turn_boundaries.insert(
+            0,
+            TurnDivider {
+                forkable: false,
+                stats: Some("3 calls: read×2, grep · 1.2k/340 tok".into()),
+            },
+        );
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(bar.contains("turn 3"), "got: {bar}");
+        assert!(bar.contains("3 calls: read×2, grep"), "got: {bar}");
+        assert!(bar.contains("1.2k/340 tok"), "got: {bar}");
+        // The bar is width-bounded: prefix + fill == total_w (60+3+1+12+2+2).
+        assert_eq!(bar.chars().count(), 80, "got: {bar}");
+
+        // A boundary without stats keeps the plain divider shape.
+        let plain_boundaries: HashMap<usize, TurnDivider> =
+            [(0usize, TurnDivider::default())].into_iter().collect();
+        let lines = build_rich_row_lines(
+            &spec, 0, &plain_boundaries, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(bar.starts_with("── turn 3 ") && bar.ends_with('─'), "got: {bar}");
+        assert!(!bar.contains("calls"), "got: {bar}");
     }
 
     #[test]

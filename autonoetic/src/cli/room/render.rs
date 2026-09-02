@@ -3456,6 +3456,110 @@ fn format_tokens_compact(n: u64) -> String {
     }
 }
 
+/// One-line per-turn aggregate for the turn divider — the "chapter header".
+///
+/// Turns are the natural reading unit of a session: the divider now carries
+/// what the turn *did* (tool calls), what it *cost* (LLM tokens), and how much
+/// thinking it involved, so the operator can scan the process arc from the
+/// dividers alone without opening any row. Pure and channel-neutral.
+///
+/// `wanted` is the set of turn_ids that actually have a divider on the current
+/// page; the aggregation is a single pass over `entries`. Open turns aggregate
+/// what is visible so far — the label refreshes as the turn progresses.
+///
+/// Returns a map turn_id → label fragment (e.g.
+/// `4 calls: read×2, grep · 45.2k↓/3.1k↑ tok · 💭×3`). Turns with nothing to
+/// report are absent — their dividers stay plain.
+pub fn turn_divider_labels(
+    entries: &[SessionTimelineEntry],
+    wanted: &HashSet<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    struct TurnAgg {
+        calls: usize,
+        tools: std::collections::HashMap<String, usize>,
+        seen_calls: HashSet<(String, String)>,
+        tokens_in: u64,
+        tokens_out: u64,
+        reasoning: usize,
+    }
+    let mut aggs: std::collections::HashMap<String, TurnAgg> = std::collections::HashMap::new();
+    for e in entries {
+        let Some(turn_id) = e.turn_id.as_deref().filter(|t| wanted.contains(*t)) else {
+            continue;
+        };
+        let agg = aggs.entry(turn_id.to_string()).or_insert(TurnAgg {
+            calls: 0,
+            tools: std::collections::HashMap::new(),
+            seen_calls: HashSet::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            reasoning: 0,
+        });
+        match e.event_type.as_str() {
+            "tool.requested" | "tool.completed" => {
+                let p = parse_entry_payload(e);
+                let tool = p
+                    .as_ref()
+                    .and_then(|p| payload_field_str(p, "tool_name"))
+                    .unwrap_or_else(|| "tool".into());
+                let call_id = p.as_ref().and_then(|p| payload_field_str(p, "call_id"));
+                // Dedupe the request/completion pair of one call (first wins).
+                let count_it = match &call_id {
+                    Some(id) => agg.seen_calls.insert((tool.clone(), id.clone())),
+                    None => e.event_type == "tool.requested",
+                };
+                if count_it {
+                    agg.calls += 1;
+                    *agg.tools.entry(tool).or_insert(0) += 1;
+                }
+            }
+            "llm.round" => {
+                if let Some(p) = parse_entry_payload(e) {
+                    agg.tokens_in += p.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    agg.tokens_out += p.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                }
+            }
+            "agent.reasoning" => agg.reasoning += 1,
+            _ => {}
+        }
+    }
+    for (turn_id, agg) in aggs {
+        let mut parts: Vec<String> = Vec::new();
+        if agg.calls > 0 {
+            let mut ordered: Vec<(String, usize)> = agg.tools.into_iter().collect();
+            ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let shown = ordered.len().min(3);
+            let mut names: Vec<String> = ordered
+                .iter()
+                .take(shown)
+                .map(|(k, c)| if *c > 1 { format!("{k}×{c}") } else { k.clone() })
+                .collect();
+            if ordered.len() > shown {
+                names.push(format!("+{}", ordered.len() - shown));
+            }
+            parts.push(format!("{} calls: {}", agg.calls, names.join(", ")));
+        }
+        if agg.tokens_in > 0 || agg.tokens_out > 0 {
+            parts.push(format!(
+                "{}/{} tok",
+                format_tokens_compact(agg.tokens_in),
+                format_tokens_compact(agg.tokens_out)
+            ));
+        }
+        if agg.reasoning > 0 {
+            parts.push(format!("💭×{}", agg.reasoning));
+        }
+        if !parts.is_empty() {
+            out.insert(turn_id, parts.join(" · "));
+        }
+    }
+    out
+}
+
 pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     let mut lines = vec![
         format!("event:     {}", entry.event_type),
@@ -4289,6 +4393,52 @@ mod tests {
         assert_eq!(compact_count(9_999), "9999");
         assert_eq!(compact_count(10_000), "10.0k");
         assert_eq!(compact_count(12_340), "12.3k");
+    }
+
+    #[test]
+    fn turn_divider_labels_aggregate_calls_tokens_reasoning() {
+        let mk_turn = |turn: &str, et: &str, payload: serde_json::Value| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Detail,
+                payload,
+            );
+            e.turn_id = Some(turn.into());
+            e
+        };
+        let entries = vec![
+            // Turn 3: two read calls (request/completion pairs dedupe), one
+            // LLM round with tokens, two reasoning events.
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c1"})),
+            mk_turn("turn-000003", "tool.completed", serde_json::json!({"tool_name": "read", "call_id": "c1"})),
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "read", "call_id": "c2"})),
+            mk_turn("turn-000003", "tool.completed", serde_json::json!({"tool_name": "read", "call_id": "c2"})),
+            mk_turn("turn-000003", "tool.requested", serde_json::json!({"tool_name": "grep", "call_id": "c3"})),
+            mk_turn("turn-000003", "llm.round", serde_json::json!({"input_tokens": 1200, "output_tokens": 340})),
+            mk_turn("turn-000003", "agent.reasoning", serde_json::json!({"reasoning": "a"})),
+            mk_turn("turn-000003", "agent.reasoning", serde_json::json!({"reasoning": "b"})),
+            // Turn 4: narrative only — nothing to report, no label.
+            mk_turn("turn-000004", "agent.message", serde_json::json!({"message": "done"})),
+            // Turn 5 belongs to a different wanted-set run; excluded below.
+            mk_turn("turn-000005", "llm.round", serde_json::json!({"input_tokens": 5})),
+        ];
+        let wanted: HashSet<String> = ["turn-000003", "turn-000004"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let labels = turn_divider_labels(&entries, &wanted);
+        assert_eq!(labels.len(), 1, "only turn 3 has something to report");
+        let t3 = &labels["turn-000003"];
+        assert!(t3.contains("3 calls: read×2, grep"), "got: {t3}");
+        assert!(t3.contains("1.2k/340 tok"), "got: {t3}");
+        assert!(t3.contains("💭×2"), "got: {t3}");
+        // A narrative-only turn has no plumbing/cost/thought → no entry,
+        // so its divider stays plain.
+        assert!(!labels.contains_key("turn-000004"), "narrative-only turn: no stats");
+        // Empty wanted set → no work.
+        assert!(turn_divider_labels(&entries, &HashSet::new()).is_empty());
     }
 
     #[test]
