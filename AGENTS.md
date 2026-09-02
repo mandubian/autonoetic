@@ -82,12 +82,18 @@ in:
 - `config/config-template.yaml`
 - `docs/reference/config.md`
 
-Then validate:
+Then validate (note the test targets: the lock test is a `--lib` unit test,
+and the constitution suites live in the `constitution` domain binary since the
+#922 grouping — there is no `constitution_r_8_6_*` binary anymore):
 
 ```bash
-cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
-cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
+cargo test -p autonoetic-gateway --lib constitution_lock_matches_canonical_digest_and_counts
+cargo test -p autonoetic-gateway --test constitution r_8_6_retention_policy_startup
 ```
+
+For activation re-blessing, the register bless test is `bless_register_doc`
+(`BLESS_REGISTER=1 cargo test -p autonoetic-gateway --lib bless_register_doc`),
+not `bless_enforcement_register`.
 
 Canonicalization details are documented in `docs/constitution/signing.md`.
 Operational key handling for multi-machine deterministic signing is in
