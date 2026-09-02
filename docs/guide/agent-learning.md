@@ -296,7 +296,7 @@ These are tagged and stored in the `memories` table for cross-session retrieval.
 
 ## Automatic Wake-Time Priming
 
-The tools above are **pull-based** — the agent has to think to call them. The gateway also **pushes** a bounded "Prior Knowledge (from past sessions)" block into the system prompt at every turn, no tool call required, built from the agent's own tagged digest/quality-signal memories.
+The tools above are **pull-based** — the agent has to think to call them. The gateway also **pushes** a bounded "Prior Knowledge (from past sessions)" block into the system prompt at every turn, no tool call required, built from the agent's own tagged digest memories. Cold start is the one exception: an agent with no digests of its own yet is primed from the shared pool of `source:post_session_digest` memories from any agent; the moment it has its own, foreign digests are excluded. Per-session quality signals (`source:quality_signal`) are deliberately **excluded** from priming: they are curator telemetry (turn/tool/error counts) persisted for trend analysis, not knowledge a model can act on — injecting them would only crowd digest/error-lesson memories out of the priming slots.
 
 This priming is **task-matched**, not merely the most recent memories: a candidate pool (deduped, up to 50) is scored against the incoming task text by token-overlap relevance, with error lessons (`digest.error_pattern` / `digest.lesson` scopes) winning ties; unmatched slots are filled by recency so the block is never empty just because nothing scored. Each line carries provenance so the agent can weigh it:
 
