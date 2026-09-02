@@ -2106,6 +2106,20 @@ fn bounded_child_summary(reply: &str, max_chars: usize, full_ref: Option<&str>) 
 /// "The session ended normally" and "the work succeeded" are different facts;
 /// this keeps the task row honest about the second without second-guessing
 /// free-form replies.
+///
+/// The match is deliberately narrow: **top-level keys only** (a nested
+/// `{"result": {"status": "failed"}}` does not count) and **exact lowercase
+/// tokens** (`"Failed"`, `"ERROR"` do not). A payload carrying only
+/// `{"error": …}` with no `status`/`ok` key also stays `Succeeded`. Widening
+/// any of these means reading intent out of a shape agents were never told to
+/// honour, which is how a mechanical rule turns into judgment.
+///
+/// Recording `Failed` is not inert: `update_task_run_status` runs the task
+/// through `evaluate_stage_retry`, so a task carrying a `retry_policy` whose
+/// summary classifies as retryable (timeout / transient-infra phrasings) is
+/// now re-run up to its budget where it previously ended as a silent success.
+/// Generic failures classify as `FailureClass::Unknown` (`retryable: None`)
+/// and are not retried — see `derive_child_task_status_does_not_arm_blind_retry`.
 fn derive_child_task_status(assistant_reply: Option<&str>) -> autonoetic_types::workflow::TaskRunStatus {
     use autonoetic_types::workflow::TaskRunStatus;
     let Some(reply) = assistant_reply else {
@@ -3972,6 +3986,74 @@ mod child_reply_spill_tests {
             TaskRunStatus::Succeeded
         );
         assert_eq!(derive_child_task_status(None), TaskRunStatus::Succeeded);
+        // Top-level keys only, exact lowercase tokens only — anything wider
+        // reads intent out of a shape agents were never told to honour.
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"result":{"status":"failed"}}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"status":"Failed"}"#)),
+            TaskRunStatus::Succeeded
+        );
+        assert_eq!(
+            derive_child_task_status(Some(r#"{"error":"boom"}"#)),
+            TaskRunStatus::Succeeded
+        );
+    }
+
+    /// Recording `Failed` is not inert: it routes the task through
+    /// `evaluate_stage_retry`. A deterministic child failure must not arm a
+    /// blind re-run (the re-delegation loop this PR exists to break), while a
+    /// transport-classified one still gets its budgeted retry.
+    #[test]
+    fn derive_child_task_status_does_not_arm_blind_retry() {
+        use crate::scheduler::workflow_store::evaluate_stage_retry;
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+
+        let task = TaskRun {
+            task_id: "t-retry".to_string(),
+            workflow_id: "wf-retry".to_string(),
+            agent_id: "executor.default".to_string(),
+            session_id: "root/child".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: "2026-09-02T00:00:00Z".to_string(),
+            updated_at: "2026-09-02T00:00:00Z".to_string(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "unknown": {"max_retries": 2},
+                "transient_infra": {"max_retries": 2},
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        let deterministic = r#"{"status":"failed","error":"bwrap: Can't mkdir /opt/wrapper-out"}"#;
+        let status = derive_child_task_status(Some(deterministic));
+        assert_eq!(status, TaskRunStatus::Failed);
+        let decision = evaluate_stage_retry(&task, status, Some(deterministic));
+        assert!(
+            !decision.retry_scheduled,
+            "a deterministic child failure must not be re-run blindly: {:?}",
+            decision.failure
+        );
+
+        let transient = r#"{"status":"failed","error":"llm_transport:connect"}"#;
+        let status = derive_child_task_status(Some(transient));
+        assert_eq!(status, TaskRunStatus::Failed);
+        let decision = evaluate_stage_retry(&task, status, Some(transient));
+        assert!(
+            decision.retry_scheduled,
+            "a transport failure keeps its budgeted retry: {:?}",
+            decision.failure
+        );
     }
 }
 
