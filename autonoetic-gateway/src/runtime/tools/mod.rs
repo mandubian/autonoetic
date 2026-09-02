@@ -566,6 +566,21 @@ pub(crate) fn load_session_content_mounts(
                 continue;
             }
 
+            // A content name is agent-supplied and is about to be joined onto a
+            // host directory (`temp_base.join(&name)`, written by the *gateway*
+            // process) and onto the sandbox mount destination `/tmp/<name>`. A
+            // name carrying `..` would escape both. Same guard, same reason as
+            // `project_live`.
+            if !crate::runtime::content_store::safe_relative_path(&name) {
+                tracing::warn!(
+                    target: "sandbox",
+                    %name,
+                    session = %sid,
+                    "skipping unsafe content name for sandbox mount"
+                );
+                continue;
+            }
+
             let content = match store.read(&handle) {
                 Ok(c) => c,
                 Err(_) => continue,

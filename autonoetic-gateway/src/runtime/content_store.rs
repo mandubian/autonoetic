@@ -86,8 +86,11 @@ pub struct ContentStore {
 /// escaping/absolute components, and at least one real path segment. Rejects
 /// `""`, `.`, `..`, `/abs`, `C:\…`, and anything containing a `..` — so it can't
 /// resolve to the base dir itself or escape it. Used by `project_live` for both
-/// the `session_id` (which feeds `remove_dir_all`) and each content name.
-fn safe_relative_path(s: &str) -> bool {
+/// the `session_id` (which feeds `remove_dir_all`) and each content name, and by
+/// every other site that joins a content name onto a host directory: the sandbox
+/// content mounts (`load_session_content_mounts`) and the capture→content
+/// registration (`register_captured_files_as_content`).
+pub(crate) fn safe_relative_path(s: &str) -> bool {
     let path = Path::new(s);
     if path.is_absolute() {
         return false;
