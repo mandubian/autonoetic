@@ -2562,8 +2562,11 @@ pub struct SandboxConfig {
     /// whole host `/` — deprecated opt-out for pre-launch deployments, with a
     /// deprecation warning logged at startup. Docker/microvm/wasm always
     /// behave like `allow_set` (no host `/` bind), so this key only changes
-    /// the bubblewrap tier (RFC sandbox-mount-allow-set.md DP-1: default
-    /// flipped post-launch).
+    /// the bubblewrap tier — but it changes *every* bubblewrap exec path:
+    /// `sandbox_exec`, script-mode agents, `artifact_exec` and the promotion
+    /// gate all resolve it through `sandbox::host_fs_allow_set`. (RFC
+    /// docs/archived/sandbox-mount-allow-set.md DP-1: default flipped
+    /// post-launch.)
     #[serde(default = "default_host_fs_mode")]
     pub host_fs: String,
 }

@@ -55,9 +55,25 @@ pub struct BwrapIsolationOverrides {
     pub force_network_off: bool,
     /// #1002 slice 4: when true, the bubblewrap driver mounts only the
     /// gateway-asserted allow-set (no `--ro-bind / /`). Defaults false in
-    /// every constructor — the tool layer sets it from
-    /// `config.sandbox.host_fs == "allow_set"`.
+    /// every constructor; every exec path that has a `GatewayConfig` sets it
+    /// via [`host_fs_allow_set`] so one key decides host exposure for the
+    /// whole tier — `sandbox_exec`, script-mode agents, `artifact_exec` and
+    /// the promotion gate alike.
     pub host_fs_allow_set: bool,
+}
+
+/// Resolve `sandbox.host_fs` into the bubblewrap driver's flag (DP-1: the
+/// default is `allow_set`).
+///
+/// Every bubblewrap exec path must ask this, not hardcode a mode: the config
+/// key, the startup log line and `docs/reference/config.md` all describe the
+/// *tier*, so a path that ignored it would leave the host root bound while the
+/// operator was told otherwise. `None` (no config threaded) keeps the
+/// deprecated behaviour rather than inventing a mode.
+pub fn host_fs_allow_set(config: Option<&autonoetic_types::config::GatewayConfig>) -> bool {
+    config
+        .map(|c| c.sandbox.host_fs == "allow_set")
+        .unwrap_or(false)
 }
 
 impl BwrapIsolationOverrides {

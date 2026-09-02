@@ -64,11 +64,11 @@ Ordered by urgency.
    Fixing both together removes an entire class of "new secret file forgotten in the list".
    *(resolved 2026-08-27: all four implementation slices merged — mount-set observability
    (#1160), declared mounts + operator allowlist + tier guard (#1163), artifact_exec
-   mount reporting (#1165), `sandbox.host_fs: allow_set` (#1174). `allow_set` ships
-   opt-in; `legacy` still default with a startup deprecation warning. The only remaining
-   scope is DP-1 — flipping the default after a fleet-validation window — which this
-   RFC deliberately places post-launch. Close the issue at the flip or now with the
-   flip tracked separately.)*
+   mount reporting (#1165), `sandbox.host_fs: allow_set` (#1174). DP-1 — the default
+   flip — landed in #1273: `allow_set` is the default and is resolved by every
+   bubblewrap exec path (sandbox_exec, script mode, artifact_exec, promotion gate);
+   `legacy` is a deprecated opt-out that logs a startup warning. Nothing of #1002
+   remains open.)*
 3. **#988** — no write-side path taint: copying labeled content to a new path launders
    its egress label. Defeats the egress model at its core invariant. *(resolved
    2026-08-24: closed via the durable-object answer in #1001 — the label attaches to
