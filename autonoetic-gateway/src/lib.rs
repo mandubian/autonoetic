@@ -21,6 +21,7 @@ pub mod denial_affordances;
 mod docs_link_guard;
 pub mod egress_audit;
 pub mod egress_lineage;
+pub mod constitution_relations;
 pub mod enforcement_register;
 pub mod evolution_view;
 pub mod exec_request;

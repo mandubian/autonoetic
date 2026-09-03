@@ -1047,8 +1047,9 @@ pub fn clause_title(clause_id: &str) -> Option<&'static str> {
 /// Reading the field is the whole point of #1284: bind direction is a property
 /// of the obligation, so it has to be recorded on the obligation.
 pub fn binds(clause_id: &str) -> Option<Binds> {
-    principle(clause_id)
-        .map(|p| p.binds)
+    crate::constitution_relations::relation(clause_id)
+        .map(|r| r.binds)
+        .or_else(|| principle(clause_id).map(|p| p.binds))
         .or_else(|| right(clause_id).map(|r| r.binds))
         .or_else(|| obligation(clause_id).map(|o| o.binds))
 }
@@ -1057,16 +1058,18 @@ pub fn binds(clause_id: &str) -> Option<Binds> {
 /// clause is unknown — distinct from `Some(OwedTo::NoOne)`, which is a
 /// positive claim that the clause is an integrity property.
 pub fn owed_to(clause_id: &str) -> Option<OwedTo> {
-    principle(clause_id)
-        .map(|p| p.owed_to)
+    crate::constitution_relations::relation(clause_id)
+        .map(|r| r.owed_to)
+        .or_else(|| principle(clause_id).map(|p| p.owed_to))
         .or_else(|| right(clause_id).map(|r| r.owed_to))
         .or_else(|| obligation(clause_id).map(|o| o.owed_to))
 }
 
 /// Verification-modality floor for a clause, read from its declared field.
 pub fn verified_by(clause_id: &str) -> Option<VerifiedBy> {
-    principle(clause_id)
-        .map(|p| p.verified_by)
+    crate::constitution_relations::relation(clause_id)
+        .map(|r| r.verified_by)
+        .or_else(|| principle(clause_id).map(|p| p.verified_by))
         .or_else(|| right(clause_id).map(|r| r.verified_by))
         .or_else(|| obligation(clause_id).map(|o| o.verified_by))
 }
@@ -1636,6 +1639,52 @@ mod tests {
         // than being re-derived from its own prefix.
         assert_eq!(binds("P-15.1"), Some(Binds::Enforcer));
         assert_eq!(binds("P-9.15"), Some(Binds::Enforcer));
+    }
+
+    /// **§6.4 agreement** — where the register and the law table both speak
+    /// about a clause, they must say the same thing.
+    ///
+    /// The RFC specifies this as register-vs-*document* agreement, which has
+    /// to wait for the amendment that puts the columns in the signed text
+    /// (#1284 part 3). This is the reachable half: `constitution_relations`
+    /// is the law side today and the accessors defer to it, so a
+    /// disagreement means a reader gets one answer and `binds()` returns
+    /// another.
+    ///
+    /// The two do not overlap completely, by design. The register's
+    /// `principles()` uses **section-level** groupings as clause ids —
+    /// `P-7` collects `P-7.5`, `P-7.19`, … — and a section is not a clause:
+    /// the constitution declares `P-7.5`, never a bare `P-7`. The law table
+    /// holds only real clauses, so those groupings have no counterpart and
+    /// keep their own declared fields. `P-8.1` is the one register principle
+    /// that *is* a numbered clause, and this test is what moved it law-side.
+    #[test]
+    fn the_register_and_the_law_table_never_disagree() {
+        let mut compared = 0usize;
+        for c in clause_relations() {
+            let Some(law) = crate::constitution_relations::relation(c.id) else {
+                // Section-level grouping — no law-side counterpart.
+                assert!(
+                    !c.id.contains('.'),
+                    "{} is a numbered clause but the law table does not classify \
+                     it; a numbered clause must be law-side, not register-only",
+                    c.id
+                );
+                continue;
+            };
+            compared += 1;
+            assert_eq!(
+                (c.binds, c.owed_to, c.verified_by),
+                (law.binds, law.owed_to, law.verified_by),
+                "{} declares different relations in the register and the law table",
+                c.id
+            );
+        }
+        assert!(
+            compared >= 14,
+            "expected the register's real clauses to be law-side too; compared \
+             only {compared} — this test has gone vacuous"
+        );
     }
 
     /// **§6.5 non-duplication** — no two clauses share
