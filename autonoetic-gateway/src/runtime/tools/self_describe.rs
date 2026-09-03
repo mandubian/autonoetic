@@ -616,8 +616,37 @@ mod tests {
         // an *enforcer* duty owed to the agent (#1284). "gateway" named this
         // implementation rather than the power any implementation must
         // provide, which is the distinction the power vocabulary draws.
-        assert!(rights.iter().all(|r| r["binds"] == "enforcer"));
-        assert!(rights.iter().all(|r| r["owed_to"] == "autonoetic_agent"));
+        // Compare per clause ID against the register rather than asserting
+        // the values are uniformly enforcer/autonoetic_agent (#1284). The
+        // tool now *reads* these fields, so this test's job is the plumbing,
+        // not the data: pinning uniform values would restate the register's
+        // current contents, and would fail for an unrelated reason the moment
+        // a seat-standing right like Ri-0.15 (owed to the `decider`) is
+        // registered — the exact case the declared-field model exists to
+        // allow. That would read as a regression in `self_describe`.
+        for surfaced in rights {
+            let id = surfaced["id"].as_str().expect("right id");
+            let clause = enforcement_register::right(id)
+                .unwrap_or_else(|| panic!("{id} surfaced but not in the register"));
+            assert_eq!(
+                surfaced["binds"],
+                clause.binds.label(),
+                "{id}: surfaced binds must match the register"
+            );
+            assert_eq!(
+                surfaced["owed_to"],
+                clause.owed_to.label(),
+                "{id}: surfaced owed_to must match the register"
+            );
+        }
+
+        // The retired party names must not survive on this surface.
+        assert!(
+            !rights
+                .iter()
+                .any(|r| r["binds"] == "gateway" || r["binds"] == "agent"),
+            "the pre-#1284 literal must be gone, not merely shadowed"
+        );
         assert!(
             rights.iter().any(|r| r["id"] == "Ri-0.14"),
             "expected the wake-up right to be surfaced"

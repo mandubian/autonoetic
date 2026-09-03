@@ -1071,6 +1071,55 @@ pub fn verified_by(clause_id: &str) -> Option<VerifiedBy> {
         .or_else(|| obligation(clause_id).map(|o| o.verified_by))
 }
 
+/// One registered clause, flattened across the three ID families.
+///
+/// Exists because `Principle`, `Right` and `Obligation` are separate lists,
+/// so every traversal has to remember all three — and a traversal that
+/// forgets one fails silently. `the_power_set_is_closed_at_three` originally
+/// chained principles and rights and skipped obligations, leaving `O-*` free
+/// to declare an out-of-set power with nothing to catch it. Anything asking a
+/// relational question should go through [`clause_relations`] rather than
+/// re-chaining by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClauseRelation {
+    pub id: &'static str,
+    pub binds: Binds,
+    pub owed_to: OwedTo,
+    pub verified_by: VerifiedBy,
+    pub statement: &'static str,
+    pub entrenched: bool,
+}
+
+/// Every registered clause with its declared relational fields, principles
+/// then rights then obligations.
+pub fn clause_relations() -> Vec<ClauseRelation> {
+    let principles = principles().iter().map(|p| ClauseRelation {
+        id: p.id,
+        binds: p.binds,
+        owed_to: p.owed_to,
+        verified_by: p.verified_by,
+        statement: p.statement,
+        entrenched: p.entrenched,
+    });
+    let rights = rights().iter().map(|r| ClauseRelation {
+        id: r.id,
+        binds: r.binds,
+        owed_to: r.owed_to,
+        verified_by: r.verified_by,
+        statement: r.statement,
+        entrenched: r.entrenched,
+    });
+    let obligations = obligations().iter().map(|o| ClauseRelation {
+        id: o.id,
+        binds: o.binds,
+        owed_to: o.owed_to,
+        verified_by: o.verified_by,
+        statement: o.statement,
+        entrenched: o.entrenched,
+    });
+    principles.chain(rights).chain(obligations).collect()
+}
+
 /// Clauses that are agent **rights** in the substantive sense — enforcer
 /// duties owed to the agent — regardless of ID prefix (RFC §2.5).
 ///
@@ -1079,22 +1128,10 @@ pub fn verified_by(clause_id: &str) -> Option<VerifiedBy> {
 /// even though its ID says principle. §0's rights/rules ratio is computed from
 /// prefixes today; this is what it would be computed from instead.
 pub fn agent_rights() -> Vec<&'static str> {
-    principles()
-        .iter()
-        .filter(|p| p.owed_to.is_agent_right(p.binds))
-        .map(|p| p.id)
-        .chain(
-            rights()
-                .iter()
-                .filter(|r| r.owed_to.is_agent_right(r.binds))
-                .map(|r| r.id),
-        )
-        .chain(
-            obligations()
-                .iter()
-                .filter(|o| o.owed_to.is_agent_right(o.binds))
-                .map(|o| o.id),
-        )
+    clause_relations()
+        .into_iter()
+        .filter(|c| c.owed_to.is_agent_right(c.binds))
+        .map(|c| c.id)
         .collect()
 }
 
@@ -1214,17 +1251,10 @@ pub fn render_register_markdown() -> String {
     );
     out.push_str("| binds | clauses |\n|---|---|\n");
     for power in Binds::ALL {
-        let mut ids: Vec<&str> = principles()
-            .iter()
-            .filter(|p| p.binds == power)
-            .map(|p| p.id)
-            .chain(rights().iter().filter(|r| r.binds == power).map(|r| r.id))
-            .chain(
-                obligations()
-                    .iter()
-                    .filter(|o| o.binds == power)
-                    .map(|o| o.id),
-            )
+        let mut ids: Vec<&str> = clause_relations()
+            .into_iter()
+            .filter(|c| c.binds == power)
+            .map(|c| c.id)
             .collect();
         ids.sort_unstable();
         let cell = if ids.is_empty() {
@@ -1502,12 +1532,7 @@ mod tests {
     /// through the public accessors.
     #[test]
     fn every_clause_declares_all_three_relational_fields() {
-        let ids: Vec<&str> = principles()
-            .iter()
-            .map(|p| p.id)
-            .chain(rights().iter().map(|r| r.id))
-            .chain(obligations().iter().map(|o| o.id))
-            .collect();
+        let ids: Vec<&str> = clause_relations().into_iter().map(|c| c.id).collect();
         assert!(
             ids.len() >= 19,
             "register shrank to {} clauses — this test would pass vacuously",
@@ -1543,10 +1568,26 @@ mod tests {
         assert_eq!(labels, vec!["reasoner", "enforcer", "decider"]);
 
         // Every declared value is a member of ALL — no clause reaches a power
-        // outside the closed set.
-        for id in principles().iter().map(|p| p.id).chain(rights().iter().map(|r| r.id)) {
-            let b = binds(id).expect("declared");
-            assert!(Binds::ALL.contains(&b), "{id} binds a power outside the closed set");
+        // outside the closed set. Over *all three* families: this loop chained
+        // principles and rights only, so an `O-*` obligation could declare an
+        // out-of-set power with nothing to catch it.
+        let all = clause_relations();
+        assert!(
+            all.iter().any(|c| c.id.starts_with("O-")),
+            "obligations must be in scope — that omission was the original defect"
+        );
+        for c in &all {
+            assert!(
+                Binds::ALL.contains(&c.binds),
+                "{} binds a power outside the closed set",
+                c.id
+            );
+            assert_eq!(
+                binds(c.id),
+                Some(c.binds),
+                "{} resolves a different power through binds() than it declares",
+                c.id
+            );
         }
     }
 
@@ -1609,21 +1650,8 @@ mod tests {
     #[test]
     fn no_two_clauses_share_a_relation_and_statement() {
         let mut seen: HashMap<(Binds, OwedTo, &str), &str> = HashMap::new();
-        let all: Vec<(&str, Binds, OwedTo, &str)> = principles()
-            .iter()
-            .map(|p| (p.id, p.binds, p.owed_to, p.statement))
-            .chain(
-                rights()
-                    .iter()
-                    .map(|r| (r.id, r.binds, r.owed_to, r.statement)),
-            )
-            .chain(
-                obligations()
-                    .iter()
-                    .map(|o| (o.id, o.binds, o.owed_to, o.statement)),
-            )
-            .collect();
-        for (id, b, o, statement) in all {
+        for c in clause_relations() {
+            let (id, b, o, statement) = (c.id, c.binds, c.owed_to, c.statement);
             if let Some(prior) = seen.insert((b, o, statement), id) {
                 panic!(
                     "{id} duplicates {prior}: same binds/owed_to and an identical \
