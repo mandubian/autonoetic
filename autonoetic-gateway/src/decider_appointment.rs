@@ -171,9 +171,9 @@ pub fn appoint(
 
     let appointment_id = format!("apt_{}", uuid::Uuid::new_v4());
     // The peer-root session: a **top-level** id, so it shares no root with the
-    // run and is therefore outside it for R-10.7, budget, emergency stop,
+    // run and is therefore outside it for P-10.7, budget, emergency stop,
     // session grants and content-visibility push — none of which needs a
-    // hand-written exclusion (#1196). Owned by the decider agent so R-10.7's
+    // hand-written exclusion (#1196). Owned by the decider agent so P-10.7's
     // ownership check authenticates, with the appointing operator as the
     // recorded principal so the chain reads as delegation, not spawn.
     let decider_session = format!("decider-{}", uuid::Uuid::new_v4());
@@ -200,7 +200,7 @@ pub fn appoint(
     };
 
     // Record the peer-root session before the appointment, so an appointment
-    // that exists always has a session R-10.7 can authenticate against.
+    // that exists always has a session P-10.7 can authenticate against.
     store.upsert_session_transcript(&autonoetic_types::causal_chain::SessionTranscriptRecord {
         transcript_id: format!("tr-{}", decider_session),
         session_id: decider_session.clone(),

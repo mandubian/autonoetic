@@ -1,9 +1,9 @@
-//! P-2.20 / P-2.21 / R-10.7: agent-as-decider runtime.
+//! P-2.20 / P-2.21 / P-10.7: agent-as-decider runtime.
 //!
 //! Verifies that agents with `GateDecider` capability can resolve approval and
 //! escalation gates, that uncertain agent-deciders escalate rather than reject
 //! (P-2.21), and that an agent may not decide a gate created by itself or a
-//! descendant session (R-10.7).
+//! descendant session (P-10.7).
 
 
 use std::path::PathBuf;
@@ -112,7 +112,7 @@ pub(crate) fn seed_decider_revision(
     Ok(())
 }
 
-/// Record a session as owned by `agent_id` so the R-10.7 binding check can
+/// Record a session as owned by `agent_id` so the P-10.7 binding check can
 /// authenticate the caller-supplied `decider_session_id`.
 fn seed_decider_session(
     store: &GatewayStore,
@@ -153,7 +153,7 @@ fn sandbox_action() -> ScheduledAction {
 /// Seat `agent_id` over `scope_root` so the decide path's provenance condition
 /// (#1195) is satisfied. Inserted directly rather than through
 /// `decider_appointment::appoint` on purpose: these tests exercise the *decide*
-/// path (P-2.20 capability, R-10.7 boundary), and going through the appointing
+/// path (P-2.20 capability, P-10.7 boundary), and going through the appointing
 /// validator would couple them to its rules as well. Appointment validation has
 /// its own suite in `decider_appointment.rs`.
 fn seed_appointment(
@@ -363,7 +363,7 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "selfdecider.default")?;
-    // The decider session must be bound to the decider agent for the R-10.7
+    // The decider session must be bound to the decider agent for the P-10.7
     // ownership check; it is a parent of the gate's session, so the spawn-tree
     // violation still triggers.
     seed_decider_session(&store, "root-session", "selfdecider.default")?;
@@ -393,8 +393,8 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
     .expect_err("agent-decider should not decide a descendant's gate");
 
     assert!(
-        err.to_string().contains("R-10.7"),
-        "error should cite R-10.7: {}",
+        err.to_string().contains("P-10.7"),
+        "error should cite P-10.7: {}",
         err
     );
 
@@ -428,7 +428,7 @@ fn agent_decider_cannot_spoof_session_id_to_bypass_p_10_7() -> anyhow::Result<()
     seed_decider_session(&store, "legit-session", "other-agent.default")?;
 
     // Gate sits in the spoofer's own spawn tree, which would be blocked by the
-    // real decider session — but the spoofer tries to bypass R-10.7 by claiming
+    // real decider session — but the spoofer tries to bypass P-10.7 by claiming
     // "legit-session" (owned by another agent) as its decider session.
     create_pending_approval(
         &store,
@@ -451,10 +451,10 @@ fn agent_decider_cannot_spoof_session_id_to_bypass_p_10_7() -> anyhow::Result<()
             ..Default::default()
         },
     )
-    .expect_err("spoofed session ID must not bypass R-10.7 binding");
+    .expect_err("spoofed session ID must not bypass P-10.7 binding");
 
     assert!(
-        err.to_string().contains("R-10.7"),
+        err.to_string().contains("P-10.7"),
         "spoofed decider session should be rejected by binding check: {}",
         err
     );
@@ -505,10 +505,10 @@ fn agent_decider_without_session_id_is_rejected_p_10_7() -> anyhow::Result<()> {
             ..Default::default()
         },
     )
-    .expect_err("missing decider_session_id must fail closed (R-10.7)");
+    .expect_err("missing decider_session_id must fail closed (P-10.7)");
 
     assert!(
-        err.to_string().contains("R-10.7"),
+        err.to_string().contains("P-10.7"),
         "missing decider_session_id should be rejected: {}",
         err
     );
@@ -710,7 +710,7 @@ fn escalation_without_gate_decider_capability_fails() -> anyhow::Result<()> {
 
 /// An `agent:<id>` decider that was never installed is refused, and the gate
 /// stays pending. Before #1192 the manifest-load error was logged at debug and
-/// the decision committed with P-2.20, R-10.7 and the `agent_decider.*_gate`
+/// the decision committed with P-2.20, P-10.7 and the `agent_decider.*_gate`
 /// causal event all skipped.
 #[test]
 fn unresolvable_agent_decider_is_refused_not_demoted_to_human() -> anyhow::Result<()> {
@@ -881,7 +881,7 @@ fn operator_decider_is_unaffected_by_the_agent_identity_check() -> anyhow::Resul
 }
 
 // ---------------------------------------------------------------------------
-// #1193: R-10.7 is a trust boundary, not a direction. A decider spawned *by*
+// #1193: P-10.7 is a trust boundary, not a direction. A decider spawned *by*
 // the agent whose gate it decides is the same conflict of interest read the
 // other way round.
 // ---------------------------------------------------------------------------
@@ -934,8 +934,8 @@ fn decider_spawned_by_the_gate_raiser_is_refused() -> anyhow::Result<()> {
     .expect_err("a decider spawned by the gate raiser must not rule on its gate");
 
     assert!(
-        err.to_string().contains("R-10.7"),
-        "refusal should cite R-10.7: {}",
+        err.to_string().contains("P-10.7"),
+        "refusal should cite P-10.7: {}",
         err
     );
 
@@ -1007,8 +1007,8 @@ fn decider_spawned_by_the_gate_raiser_is_refused_via_recorded_lineage() -> anyho
     .expect_err("recorded spawn lineage must close the same hole as the ID prefix");
 
     assert!(
-        err.to_string().contains("R-10.7"),
-        "refusal should cite R-10.7: {}",
+        err.to_string().contains("P-10.7"),
+        "refusal should cite P-10.7: {}",
         err
     );
 

@@ -127,7 +127,7 @@ fn render_trigger_incoherence(inc: &TriggerIncoherence) -> String {
             format!("checkpoint yield reason {got} does not match the trigger")
         }
         TriggerIncoherence::EmergencyStop => {
-            "emergency-stopped sessions are never auto-resumed (R-6.14)".to_string()
+            "emergency-stopped sessions are never auto-resumed (P-6.14)".to_string()
         }
     }
 }

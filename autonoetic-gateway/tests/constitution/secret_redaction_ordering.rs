@@ -74,7 +74,7 @@ fn p_4_14_bearer_token_never_appears_raw_in_jsonl() {
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(
         !cas_payload.contains(secret_token),
-        "R+9 violation: raw bearer token found in the content-addressed payload"
+        "P-4.14 violation: raw bearer token found in the content-addressed payload"
     );
     assert!(
         cas_payload.contains("***REDACTED***"),
@@ -119,7 +119,7 @@ fn p_4_14_api_key_env_assignment_never_appears_raw() {
     );
     assert!(
         !cas_payload_for_last_entry(&path).contains(secret_value),
-        "R+9 violation: raw API key found in the content-addressed payload"
+        "P-4.14 violation: raw API key found in the content-addressed payload"
     );
 }
 
@@ -160,7 +160,7 @@ fn p_4_14_query_param_secret_never_appears_raw() {
     );
     assert!(
         !cas_payload_for_last_entry(&path).contains(secret_param),
-        "R+9 violation: query-param key found in the content-addressed payload"
+        "P-4.14 violation: query-param key found in the content-addressed payload"
     );
 }
 
@@ -207,11 +207,11 @@ fn p_4_14_json_sensitive_key_value_redacted() {
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(
         !cas_payload.contains("my-secret-token-value"),
-        "R+9 violation: raw token value found in the content-addressed payload"
+        "P-4.14 violation: raw token value found in the content-addressed payload"
     );
     assert!(
         !cas_payload.contains("hunter2"),
-        "R+9 violation: raw password value found in the content-addressed payload"
+        "P-4.14 violation: raw password value found in the content-addressed payload"
     );
     assert!(
         cas_payload.contains("this is fine"),
@@ -266,7 +266,7 @@ fn p_4_14_durable_path_also_redacts() {
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(
         !cas_payload.contains("sk-secret-key-for-testing-only"),
-        "R+9 violation: log_durable path leaked secret into the content-addressed payload"
+        "P-4.14 violation: log_durable path leaked secret into the content-addressed payload"
     );
     assert!(
         cas_payload.contains("art_test123"),

@@ -207,7 +207,7 @@ fn appointment_round_trips_and_lands_on_the_causal_chain() -> anyhow::Result<()>
     assert!(stored.advice_only, "phase 1 is advisory-only");
     assert_eq!(stored.appointed_by, "operator");
     // #1196: the peer-root session exists as soon as the seat does, and is
-    // **top-level** — that is what puts it outside the run for R-10.7, budget,
+    // **top-level** — that is what puts it outside the run for P-10.7, budget,
     // emergency stop, session grants and content-visibility push, with no
     // hand-written exclusion for any of them.
     let session = stored
@@ -541,7 +541,7 @@ fn the_decider_session_shares_no_root_with_the_run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// R-10.7 authenticates the decider against recorded session ownership, so the
+/// P-10.7 authenticates the decider against recorded session ownership, so the
 /// seat is useless unless the gateway registered that ownership. The principal
 /// is the appointing operator, so the chain reads as delegation, not spawn.
 #[test]
@@ -556,7 +556,7 @@ fn the_decider_session_is_owned_by_the_agent_and_principaled_to_the_operator() -
     assert_eq!(
         f.store.session_owner_agent(session)?.as_deref(),
         Some("nightwatch.default"),
-        "R-10.7 authenticates against this; without it the seat cannot be used"
+        "P-10.7 authenticates against this; without it the seat cannot be used"
     );
 
     assert_eq!(

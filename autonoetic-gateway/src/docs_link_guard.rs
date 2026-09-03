@@ -213,6 +213,64 @@ fn regex_lite(pat: &'static str) -> &'static str {
     pat
 }
 
+/// Every reference to a **retired** clause family on a line: `R+N`, `R++N`,
+/// `R+++N`, or a dotted `R-N.M`.
+///
+/// Scans raw text rather than string literals, because the regression this
+/// backs ([`tests::no_retired_clause_family_survives_in_rust`]) appeared in an
+/// assertion message and a doc comment as readily as in an emitted value.
+///
+/// `R-` requires a **dot** (`R-4.14`, never bare `R-4`) for two reasons: the
+/// retired flat table was always dotted, and an undotted `R-` followed by
+/// digits is far more likely to be an identifier, a hash, or a hyphenated
+/// word than a clause. The `R+` families need no such qualifier — `R+`
+/// followed by a digit has no other meaning in this codebase.
+fn retired_clause_refs(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        // Must start at a word boundary, so `FOR-4.1` or `xR+3` do not match.
+        let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        if !(boundary && b[i] == b'R') {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut pluses = 0;
+        while j < b.len() && b[j] == b'+' {
+            pluses += 1;
+            j += 1;
+        }
+        let dashed = pluses == 0 && j < b.len() && b[j] == b'-';
+        if dashed {
+            j += 1;
+        }
+        if pluses == 0 && !dashed {
+            i += 1;
+            continue;
+        }
+        let digits_start = j;
+        let mut dotted = false;
+        while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
+            dotted |= b[j] == b'.';
+            j += 1;
+        }
+        // Trailing `.` belongs to the sentence, not the ID.
+        while j > digits_start && b[j - 1] == b'.' {
+            j -= 1;
+            dotted = line[digits_start..j].contains('.');
+        }
+        if j == digits_start || (dashed && !dotted) {
+            i += 1;
+            continue;
+        }
+        out.push(line[i..j].to_string());
+        i = j;
+    }
+    out
+}
+
 /// Every `"..."` literal on a line, contents only. Good enough for clause-id
 /// extraction: ids contain no escapes.
 fn string_literals(line: &str) -> Vec<&str> {
@@ -804,6 +862,136 @@ mod tests {
              fired. Map it to its successor — the pre-restructure versions under \
              `docs/constitution/versions/` record the target in the old status \
              cell — or delete the emission.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// The **retired** clause families (`R+`, `R++`, `R+++`, `R-x.y`) must not
+    /// appear in Rust at all — not in production, not in tests, not in prose.
+    ///
+    /// This is the gap that let #1277 regress within the hour. The emitter
+    /// guard above is `src/`-only and scans only machine-claim positions,
+    /// both deliberately: the `tests/` trees legitimately assert a clause is
+    /// *absent*, and prose legitimately cites principle families. But
+    /// "narrowly scoped" turned out to mean "silent about a whole tree", and
+    /// #1287 landed `assert_eq!(line["enforced_rules"], json!(["R+++3"]))` in
+    /// a new test the same day the constant became `I-6`. Main went red.
+    ///
+    /// A retired *family* is a different question from an unresolvable clause,
+    /// and a much easier one: these prefixes were renamed wholesale and are
+    /// dead everywhere, so there is no legitimate emission of one and no
+    /// false-positive risk from sentinels like `P-9.99` (which the broader
+    /// scan cannot distinguish from a typo). That asymmetry is what makes it
+    /// safe to scan every `.rs` line here while the guard above stays narrow.
+    /// The extractor's boundaries, pinned before the sweep relies on it. A
+    /// scan that silently matches nothing passes vacuously, and a scan that
+    /// matches ordinary hyphenated words is abandoned as noise — both were
+    /// live risks in earlier drafts of the clause guards (#1277).
+    #[test]
+    fn retired_clause_extraction_catches_families_and_not_lookalikes() {
+        let catches = |line: &str, want: &[&str]| {
+            let got = retired_clause_refs(line);
+            assert_eq!(got, want, "scanning {line:?}");
+        };
+
+        // Every retired family, in the positions they actually occurred in.
+        catches(r#"json!(["R+++3"])"#, &["R+++3"]);
+        catches(r#""R+9 violation: raw token""#, &["R+9"]);
+        catches("// used to push `R++7` and `P-10.6`", &["R++7"]);
+        catches("| R-4.14 | redaction before append |", &["R-4.14"]);
+        catches("R+1 and R++10 and R+++2", &["R+1", "R++10", "R+++2"]);
+
+        // Current families are not retired.
+        catches("P-4.14, Ri-0.13, O-6, I-11, U-1", &[]);
+
+        // Lookalikes: an undotted `R-` is an identifier or a word, not a
+        // clause — the retired flat table was always dotted.
+        catches("let R-4 = x;", &[]);
+        catches("FOR-4.14 and xR+3 and R_4.14", &[]);
+        catches("no clause here at all", &[]);
+
+        // A trailing sentence dot is not part of the ID.
+        catches("superseded by R-4.14.", &["R-4.14"]);
+    }
+
+    #[test]
+    fn no_retired_clause_family_survives_in_rust() {
+        let root = workspace_root();
+
+        // Deliberate mentions. Each names a *reason*, so removing the reason
+        // removes the exemption — the discipline `docs/.link-guard-allow`
+        // uses. Keep this list short: an entry is a claim that the mention is
+        // load-bearing, not that fixing it is inconvenient.
+        let allowed: &[(&str, &str, &str)] = &[
+            (
+                "autonoetic-gateway/src/constitution_digest.rs",
+                "R+9",
+                "asserts the glossary extractor *ignores* a retired marker row; \
+                 the test needs the retired ID to exercise the behaviour",
+            ),
+            (
+                "autonoetic-gateway/src/server/ofp.rs",
+                "R++7",
+                "records why this site pushes one rule and not two — the alias \
+                 hid a double-attribution of P-10.6 (#1288)",
+            ),
+            // This file is exempt wholesale: it is the guard, and every
+            // retired ID in it is either a doc comment describing what to
+            // catch, an allowlist entry, or a fixture in
+            // `retired_clause_extraction_catches_families_and_not_lookalikes`.
+            // Scanning it would make the guard unable to document itself.
+            (
+                "autonoetic-gateway/src/docs_link_guard.rs",
+                "R",
+                "the guard's own doc comments, allowlist, and extractor fixtures",
+            ),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut files_scanned = 0usize;
+        for rel in collect_sources(&root) {
+            if !rel.extension().is_some_and(|e| e == "rs") {
+                continue;
+            }
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let Ok(raw) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            files_scanned += 1;
+            for (lineno, line) in raw.lines().enumerate() {
+                for found in retired_clause_refs(line) {
+                    let exempt = allowed.iter().any(|(path, token, _)| {
+                        rel_str == *path && found.starts_with(token)
+                    });
+                    if exempt {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} mentions retired clause `{}`\n      {}",
+                        rel_str,
+                        lineno + 1,
+                        found,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            files_scanned > 200,
+            "expected to walk the whole Rust tree; saw {files_scanned} files — \
+             this guard has gone blind"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} site(s) still name a retired clause family. `R+*`/`R++*`/`R+++*` \
+             were renamed wholesale in #1277 and `R-x.y` became `P-x.y` before \
+             that; none of them resolves against any constitution version in \
+             force. A test asserting one is how main went red after #1287. Map \
+             it to its successor (the pre-restructure versions under \
+             `docs/constitution/versions/` record the target in the old status \
+             cell), or add it to this test's allowlist with a reason.\n\n  {}\n",
             failures.len(),
             failures.join("\n  ")
         );

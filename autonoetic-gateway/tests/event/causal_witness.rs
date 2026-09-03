@@ -45,7 +45,7 @@ fn witness_entries_carry_fingerprints_not_payload() {
     assert_eq!(line["v"], 2, "lean witness format version");
     assert_eq!(line["payload_ref"], line["payload_hash"], "CAS key is the payload hash");
     assert_eq!(line["target"], "cmd:ls");
-    assert_eq!(line["enforced_rules"], serde_json::json!(["R+++3"]));
+    assert_eq!(line["enforced_rules"], serde_json::json!(["I-6"]));
 
     // The entry parses, verifies, and its payload resolves from the CAS with
     // hash checking.
@@ -68,7 +68,7 @@ fn enforced_rules_are_bound_into_the_entry_hash() {
     let path = temp.path().join("causal_chain.jsonl");
 
     let logger = CausalLogger::new(&path).unwrap();
-    let rules = vec!["R+++3".to_string(), "P-7.17".to_string()];
+    let rules = vec!["I-6".to_string(), "P-7.17".to_string()];
     logger
         .log(
             "gateway",

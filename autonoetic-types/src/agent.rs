@@ -242,8 +242,8 @@ pub struct ResourceLimits {
 /// and an inbound message lands in its context as user text, under guidance
 /// that tells it not to discard peer traffic.
 ///
-/// This is the messaging analogue of R-10.7, which refuses a gate decider
-/// entangled with the party whose gate it decides. R-10.7 can reason from the
+/// This is the messaging analogue of P-10.7, which refuses a gate decider
+/// entangled with the party whose gate it decides. P-10.7 can reason from the
 /// spawn tree because a gate names its session; messaging has no such subject,
 /// and — decisively — the adjudicating bundles (`sealed_evaluator`,
 /// `static_evaluator`, `outcome-grader`, `security_sentinel`) declare *no*
