@@ -131,6 +131,11 @@ fn high_risk_exec(command: &str, hosts: &[&str]) -> ScheduledAction {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: Some(hosts.iter().map(|h| h.to_string()).collect()),
+        // #1299 added mount detection alongside host detection. This fixture
+        // exercises the *host* path (the Night Shift shape), so no mounts —
+        // `None` rather than `Some(vec![])`, which would assert that mount
+        // detection ran and found nothing.
+        detected_mounts: None,
         intent: None,
     }
 }
