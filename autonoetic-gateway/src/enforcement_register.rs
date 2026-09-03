@@ -9,10 +9,39 @@
 //! checks, code citations, tests, and config knobs. Splitting the two keeps
 //! the signed law legible and lets enforcement detail scale with the code.
 //!
-//! **Bind direction is first-class** (#299): every clause records whether it
-//! binds the agent ([`Binds::Agent`] — a rule) or the gateway
-//! ([`Binds::Gateway`] — a right). The obligations-to-rights balance is then
-//! a computed, visible signal rather than something buried in a flat table.
+//! **Bind direction is declared data, not a prefix convention** (#299, then
+//! RFC #1283 / #1284). Every clause records three relational fields:
+//!
+//! | Field | Domain | Means |
+//! |---|---|---|
+//! | [`Binds`] | exactly one **power** (`reasoner` / `enforcer` / `decider`) | who must comply; non-compliance is *their* violation |
+//! | [`OwedTo`] | one principal kind, one power (seat-standing), or `NoOne` | who has standing to invoke it |
+//! | [`VerifiedBy`] | a modality **floor** | how compliance is established |
+//!
+//! [`binds`] reads the declared field. It previously *derived* the bound party
+//! from the ID prefix — principle ⇒ agent, right ⇒ gateway — and that
+//! derivation was false for every principle in this register: all six bind the
+//! **enforcer**, not the reasoner. The clause statements said so all along
+//! (`P-5` opens "The gateway normalizes…"), and the section comments in
+//! [`enforcement_register`] had drifted into recording the contradiction
+//! outright — `P-15` was annotated "binds agent+gateway", a two-power value
+//! the model makes unrepresentable.
+//!
+//! Prefixes are therefore **stable identifiers with no semantics**. `P-8.1`
+//! stays `P-8.1`; its meaning lives in its fields. That is deliberate:
+//! renaming clause IDs to carry meaning is what produced the
+//! `R+`/`R++`/`R+++` wreckage (#1277), where 32 IDs had to be recovered from
+//! breadcrumbs months later. An ID should be a name, not a claim.
+//!
+//! A **right is a view, not a family**: an obligation with
+//! `binds: Enforcer, owed_to: Principal(AutonoeticAgent)` *is* an agent right
+//! ([`OwedTo::is_agent_right`]), whatever prefix its ID carries. This is also
+//! the correct legal semantics — real bills of rights bind the state, not
+//! citizens.
+//!
+//! Not every enforcer duty is a right, and that is the distinction the prefix
+//! scheme could not draw: `P-3.1` is `binds: Enforcer, owed_to: NoOne` — an
+//! integrity property nobody can claim.
 //!
 //! Coverage so far (grows as #303 migrates the remaining sections):
 //! - Principle `P-7` "Bounded progress" (the loop-guard family — #298).
@@ -43,36 +72,174 @@
 //! rules were renumbered `R-x.y` → `P-x.y` in the #303 migration; no `R-`
 //! alias is retained.
 
-/// Which party a clause binds. A *rule* (principle) constrains the agent; a
-/// *right* constrains the gateway on the agent's behalf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use autonoetic_types::principal::PrincipalKindTag;
+
+/// Shorthand for the overwhelmingly common `owed_to` in this register: a duty
+/// owed to the agent under governance.
+const TO_AGENT: OwedTo = OwedTo::Principal(PrincipalKindTag::AutonoeticAgent);
+
+/// Which **power** a clause binds (RFC #1283 §2.1) — the closed,
+/// constitutional set from `docs/concepts/separation-of-powers.md`.
+///
+/// A power is a *function*, so only a power's occupant can be obliged to act.
+/// The values name functions rather than implementations on purpose: a
+/// re-implementer reads "the enforcer owes X" as a specification of what to
+/// build, not a description of our Rust. Clauses bind **seats, never
+/// occupants** — `O-*` binds `Decider` whoever holds it, human or agent, so
+/// `P-2.20` (an agent in the decider seat) needs no special case.
+///
+/// Exactly one value per clause, mirroring §0's "exactly one party". That is
+/// what makes an aggregate like `community` unrepresentable: it is
+/// "gateway + agents", and a clause that appears to bind it binds the
+/// [`Binds::Enforcer`], because the enforcer is what implements the mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Binds {
-    Agent,
-    Gateway,
-    /// §O decider obligations bind whoever *decides* a gate (operator, an
-    /// agent-decider, or a policy engine) — the symmetric counterpart to the
-    /// agent's rule-duties and the gateway's right-duties (#359).
+    /// Proposes and acts, subject to gating. Occupied by agents, script-mode
+    /// agents, federated foreign agents (`SessionRole::Planner`, `Specialist`,
+    /// `Sentinel`, `Curator`, `Auditor`).
+    Reasoner,
+    /// Mechanical enforcement — the Lawful Executor. Occupied by the gateway
+    /// runtime (`SessionRole::Runtime`).
+    Enforcer,
+    /// Resolving gates. Occupied by the human operator and by
+    /// `GateDecider`-holding agents (`SessionRole::Operator`). `operator` is
+    /// the *occupant name* for this seat, not a separate party (#359).
     Decider,
 }
 
 impl Binds {
     pub fn label(self) -> &'static str {
         match self {
-            Binds::Agent => "agent",
-            Binds::Gateway => "gateway",
+            Binds::Reasoner => "reasoner",
+            Binds::Enforcer => "enforcer",
             Binds::Decider => "decider",
+        }
+    }
+
+    /// The closed power set, in constitutional order. Used by the
+    /// one-power-per-clause test to pin the arity.
+    pub const ALL: [Binds; 3] = [Binds::Reasoner, Binds::Enforcer, Binds::Decider];
+}
+
+/// Who has **standing to invoke** a clause (RFC #1283 §2.2) — a principal
+/// kind, a power (seat-standing), or nobody.
+///
+/// `binds` and `owed_to` range over genuinely different domains, which is the
+/// correction three earlier drafts of the model needed: obligations attach to
+/// *seats*, standing attaches to *principals*. The domain is
+/// [`PrincipalKindTag`] ∪ [`Binds`] ∪ `{NoOne}` rather than a bespoke party
+/// list, because the principal census evolves (federation will plausibly add
+/// duties owed to foreign peers) and the relational schema must not need
+/// amending when it does.
+///
+/// Single-valued: two standings means two clauses, which is what keeps
+/// [`tests::no_two_clauses_share_a_relation_and_statement`] well-formed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OwedTo {
+    /// Standing by identity — e.g. `Ri-0.2` → `AutonoeticAgent`,
+    /// `U-1` → `ServedUser`.
+    Principal(PrincipalKindTag),
+    /// Standing by *seat occupancy*, kind-agnostic — e.g. `Ri-0.15`, whose
+    /// `DecisionContext` is owed to whoever decides the gate, human or agent.
+    Seat(Binds),
+    /// An **integrity property**: no invocable beneficiary.
+    ///
+    /// This variant is what earns the model its keep. A *duty* is owed to
+    /// someone who can invoke it; a *property* is owed to no one. `P-3.1`
+    /// (sandboxes default to `--unshare-all`) benefits the operator, but
+    /// nobody can *claim* it — an agent cannot demand its own confinement and
+    /// would prefer not to have it. Recording that as `NoOne` is more honest
+    /// than inventing a pseudo-party to fill the slot.
+    ///
+    /// Named `NoOne` rather than `None` so a `match` arm cannot silently
+    /// resolve to `Option::None`.
+    NoOne,
+}
+
+impl OwedTo {
+    pub fn label(self) -> &'static str {
+        match self {
+            OwedTo::Principal(kind) => kind.as_str(),
+            OwedTo::Seat(power) => power.label(),
+            OwedTo::NoOne => "none",
+        }
+    }
+
+    /// True when this clause is an agent **right** in the substantive sense —
+    /// an enforcer duty owed to the agent (RFC §2.5: "a right is a view, not a
+    /// family"). Independent of whether the clause ID carries an `Ri-` prefix,
+    /// which is the point.
+    pub fn is_agent_right(self, binds: Binds) -> bool {
+        binds == Binds::Enforcer
+            && self == OwedTo::Principal(PrincipalKindTag::AutonoeticAgent)
+    }
+}
+
+/// How compliance is established — a **floor**, not an exact modality
+/// (RFC #1283 §2.4).
+///
+/// Each clause declares a *minimum* that implementations may exceed, because
+/// modality is itself partly implementation-shaped: Rust reaches
+/// [`VerifiedBy::Construction`] for `Ri-0.12` with a closed enum, while a
+/// Python re-implementation cannot and would reach for
+/// [`VerifiedBy::Registry`] plus [`VerifiedBy::Test`]. Pinning an exact
+/// modality would silently presume this implementation's type system.
+///
+/// **[`VerifiedBy::Detection`] is not a deficiency.** The variant order reads
+/// as strength-of-prevention, and `Construction` is strictly strongest because
+/// it covers call sites that do not exist yet — but a floor is *per clause*.
+/// For a universal negative over behaviour (`P-5`'s discretion leaks, `O-6`'s
+/// SLA breaches) no static check can succeed, so `Detection` is the *correct*
+/// answer, not a weaker one. Never "upgrade" such a floor: doing so demands
+/// the impossible and produces a false claim of proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VerifiedBy {
+    /// The bad state is unrepresentable — type, signature, or closed enum.
+    /// Covers paths that do not exist yet.
+    Construction,
+    /// N paths reduced to 1, plus a guard on bypassing the 1.
+    Chokepoint,
+    /// "Every X has Y" as a set comparison over a registry.
+    Registry,
+    /// Property-based over generated inputs. Cannot prove; can sample.
+    Sampling,
+    /// An ordinary example-based test at a named site.
+    Test,
+    /// Recorded and counted in production rather than proven absent.
+    Detection,
+}
+
+impl VerifiedBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            VerifiedBy::Construction => "construction",
+            VerifiedBy::Chokepoint => "chokepoint",
+            VerifiedBy::Registry => "registry",
+            VerifiedBy::Sampling => "sampling",
+            VerifiedBy::Test => "test",
+            VerifiedBy::Detection => "detection",
         }
     }
 }
 
-/// A constitutional principle — a rule-side invariant binding the agent. The
-/// signed constitution carries these (`P-*`); enforcement detail lives in
-/// [`enforcement_register`].
+/// A constitutional principle. The signed constitution carries these (`P-*`);
+/// enforcement detail lives in [`enforcement_register`].
+///
+/// Historically described as "a rule-side invariant binding the agent". That
+/// was the prefix convention talking: `P-*` binds whichever power its declared
+/// [`Principle::binds`] field names, and every principle currently in this
+/// register binds the [`Binds::Enforcer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Principle {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// Which power must comply. Declared, never inferred from `id`.
+    pub binds: Binds,
+    /// Who has standing to invoke this clause.
+    pub owed_to: OwedTo,
+    /// Minimum modality that establishes compliance.
+    pub verified_by: VerifiedBy,
     /// See [`Right::entrenched`] — the same correction-core concept applied
     /// to a principle. P-8.1 (hash-chain integrity) is the principle-side
     /// member of the entrenched core: without a tamper-evident causal chain,
@@ -84,11 +251,25 @@ pub struct Principle {
 /// A constitutional right — a guarantee the gateway upholds for the agent.
 /// First-class alongside principles (#299); also enforced by concrete code,
 /// so it appears in the register the same way.
+///
+/// Under the declared-field model a right is not a distinct *kind* of clause:
+/// it is the `binds: Enforcer, owed_to: Principal(AutonoeticAgent)` shape
+/// (RFC #1283 §2.5). The struct survives because `Ri-*` IDs are load-bearing
+/// in the signed text and in §0's rights/rules ratio, not because rights are
+/// structurally special.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Right {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// Which power must comply. `Enforcer` for every right here — declared
+    /// rather than assumed, so a right that in fact binds the decider (the
+    /// `Ri-0.15` shape) can say so.
+    pub binds: Binds,
+    /// Who has standing to invoke this clause.
+    pub owed_to: OwedTo,
+    /// Minimum modality that establishes compliance.
+    pub verified_by: VerifiedBy,
     /// Part of the entrenched correction core (`docs/concepts/philosophy.md` §3.1 /
     /// §4.1): a clause whose loss would remove the machinery other errors are
     /// corrected through. May be strengthened by ordinary amendment; a
@@ -123,14 +304,32 @@ pub struct EnforcementEntry {
 /// lets the entrenchment backstop cover it structurally.
 pub fn principles() -> &'static [Principle] {
     &[
+        // P-2 — the *bounding* is enforcer machinery (`promotion_governor`).
+        // The reasoner is what gets bounded, but "who must comply" is not
+        // "who is affected": if respawns are not bounded, the enforcer failed
+        // to bound them. `NoOne` because nobody can claim it — an agent
+        // cannot demand its own respawn ceiling and would prefer not to have
+        // one; the operator benefits without having standing to invoke.
         Principle {
             id: "P-2",
             title: "Approval Gates",
             statement: "Promotion and gate actions are bounded so that repeated mechanical \
                         rejection cannot be respawned indefinitely across sessions without \
                         operator acknowledgement.",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::NoOne,
+            verified_by: VerifiedBy::Test,
             entrenched: false,
         },
+        // P-5 — the statement names its own bound party in its first three
+        // words ("The gateway normalizes…"), which is how far the prefix
+        // convention had drifted from the text. Owed to the agent: "no gateway
+        // judgment about the agent's output is silent or hidden" is a
+        // guarantee the agent can invoke, so under RFC §2.5 P-5 *is* an agent
+        // right wearing a `P-` prefix. Floor is `Detection` and must stay
+        // there: "every intervention is observable and counted as a named
+        // discretion leak" is a universal over behaviour, which no static
+        // check reaches.
         Principle {
             id: "P-5",
             title: "Deterministic coercion and response validation",
@@ -138,8 +337,17 @@ pub fn principles() -> &'static [Principle] {
                         pre-committed tolerances; every such intervention is observable and \
                         counted as a named discretion leak (§14). No gateway judgment about \
                         the agent's output is silent or hidden.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Detection,
             entrenched: false,
         },
+        // P-7 — "a session is halted" is done by the enforcer (`guard.rs`),
+        // and "no condition relies on agent self-report" explicitly excludes
+        // the reasoner from the mechanism. `NoOne`: the typed attributable
+        // reason is owed to the agent, but that duty is Ri-0.3's; what P-7
+        // itself guarantees is that non-progressing sessions stop, which no
+        // party can claim.
         Principle {
             id: "P-7",
             title: "Bounded progress",
@@ -147,12 +355,24 @@ pub fn principles() -> &'static [Principle] {
                         configurable set of mechanically-detected non-progress conditions, \
                         each emitting a typed, attributable reason. No condition relies on \
                         agent self-report.",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::NoOne,
+            verified_by: VerifiedBy::Test,
             entrenched: false,
         },
         // P-8.1 — the causal chain is append-only and tamper-evident. This is
         // the substrate every correction-machinery clause depends on (read
         // your history, attribute decisions, prove what happened): if the
         // chain can be silently rewritten, none of those rights hold.
+        //
+        // The enforcer writes the chain, so the enforcer complies. `NoOne`
+        // deliberately, and the distinction is worth stating because it is
+        // easy to get wrong: Ri-0.2 and Ri-0.11 are duties owed to the agent,
+        // and P-8.1 is the *property that makes them satisfiable*. Recording
+        // it as owed to the agent would double-count one relationship as two.
+        // Floor `Chokepoint`: a single append path plus hash recomputation as
+        // the bypass guard — a re-implementer must provide both, whatever its
+        // type system.
         Principle {
             id: "P-8.1",
             title: "Hash-chain integrity",
@@ -160,6 +380,9 @@ pub fn principles() -> &'static [Principle] {
                         each entry's `entry_hash` binds its fields and its `prev_hash` links \
                         it to the prior entry. Tampering with any recorded field (actor, \
                         action, outcome) leaves a stale hash detectable by recomputation.",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::NoOne,
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: true,
         },
         // P-9 — Agent Install & Provenance. Parent principle for the §9
@@ -168,6 +391,14 @@ pub fn principles() -> &'static [Principle] {
         // artifact_build → revision.create → revision.promote"; the
         // registered sub-rules pin the guarantees that make the door
         // single and the import attributable.
+        //
+        // "Gated so that every surface … passes the same promotion gates" is
+        // the enforcer's duty, not the installing agent's. Floor `Chokepoint`
+        // is earned rather than assumed: the single door is N paths reduced to
+        // 1, and its one declared exception (startup bootstrap auto-promoting
+        // the operator's own reference bundles) is parameter-explicit
+        // (`auto_promote: bool`) — a guard on the bypass, which is exactly
+        // what distinguishes a chokepoint from a convention.
         Principle {
             id: "P-9",
             title: "Agent Install & Provenance",
@@ -175,12 +406,24 @@ pub fn principles() -> &'static [Principle] {
                         revision.promote — gated so that every surface that activates an \
                         agent passes the same promotion gates (single door), and every \
                         externally-installed agent carries durable import provenance.",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::NoOne,
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: false,
         },
         // P-15 — Data Egress Localization (constitution 2026.07.30 / #910).
         // Parent principle for the §15 sub-rules: the egress label plane keeps
         // operator-declared private content off every sink its label excludes,
         // with withholding (not poisoning) and operator-only widening.
+        //
+        // The one clause here whose `owed_to` is not the agent or nobody.
+        // Data locality exists for the **served party** — the end user whose
+        // content is labelled — and `philosophy.md` §3.3 already reached this
+        // conclusion in prose: "an entitlement in §12 would be a claim,
+        // whereas an invariant on the enforcer is a guarantee". The field now
+        // says it. This is also where the old prefix scheme broke down
+        // hardest: the section comment below used to read "binds
+        // agent+gateway", a two-power value.
         Principle {
             id: "P-15",
             title: "Data Egress Localization",
@@ -188,6 +431,9 @@ pub fn principles() -> &'static [Principle] {
                         excludes — at the LLM chokepoint, at every off-machine boundary, \
                         and across sessions via stored content — and widens only via an \
                         explicit, operator-approved, causal-logged declassification grant.",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::Principal(PrincipalKindTag::ServedUser),
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: false,
         },
     ]
@@ -207,14 +453,24 @@ pub fn rights() -> &'static [Right] {
             statement: "Every agent may read its own causal chain and execution trace. The \
                         gateway does not hide actions taken on the agent's behalf. Audit is not \
                         a privilege of operators; it is a right of the subject.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: true,
         },
+        // `Tagged::permission_with_rules` carries the rule IDs, but nothing in the
+        // type forbids an empty rule list, so the floor is an example test at the
+        // named site rather than `Construction`. Closing that gap — making a
+        // ruleless rejection unrepresentable — would be a real strengthening.
         Right {
             id: "Ri-0.3",
             title: "Named rejection",
             statement: "Every rejection names the rule ID that caused it. No agent is ever told \
                         \"denied\" without being told why. Rejection without explanation is \
                         indistinguishable from arbitrary authority.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: true,
         },
         Right {
@@ -223,16 +479,33 @@ pub fn rights() -> &'static [Right] {
             statement: "Any agent holding the ConstitutionalProposal capability may submit an \
                         amendment proposal through the declared channel. The proposal receives a \
                         durable ID and enters the review queue; it cannot be silently dropped.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: true,
         },
+        // Shares P-8.1's substrate: `compute_entry_hash` binds `actor_id`, so
+        // reattribution is detectable by the same recomputation. Unlike P-8.1
+        // this one *is* owed to the agent — "the agent can prove what it did" is
+        // invocable, which is precisely the duty/property split.
         Right {
             id: "Ri-0.11",
             title: "Non-repudiation",
             statement: "Every action an agent performs is attributed to that agent on the causal \
                         chain and cannot be retroactively reattributed. The agent can prove what \
                         it did; no party can claim the agent performed an action it did not.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: true,
         },
+        // `Construction`, and the strongest kind: `runtime/checkpoint.rs::YieldReason`
+        // is a closed Rust enum, so an unlisted termination is a compile error at
+        // every exhaustive match and deserialization rejects unknown variants.
+        // This is the mechanism the 2026.09.02 amendment cites for I-9. A Python
+        // re-implementation could not reach `Construction` here and would declare
+        // `Registry` + `Test` — which is why the field is a floor, not an exact
+        // modality.
         Right {
             id: "Ri-0.12",
             title: "Closed list of termination reasons",
@@ -242,8 +515,16 @@ pub fn rights() -> &'static [Right] {
                         Turn-budget exhaustion — the `max_session_turns_hard` ceiling that \
                         continuation approvals cannot lift — terminates as budget exhaustion; \
                         any termination outside the list is a rights violation and a gateway bug.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Construction,
             entrenched: false,
         },
+        // `Construction` at the signature: `policy.rs::can_invoke_tool` and its 22
+        // sibling decision surfaces do not take reasoning as a parameter, so the
+        // gateway cannot consult it — including at call sites that do not exist
+        // yet. The mechanism the amendment cites for I-8, and the strongest form
+        // present anywhere in the document.
         Right {
             id: "Ri-0.13",
             title: "Reasoning privacy",
@@ -251,6 +532,9 @@ pub fn rights() -> &'static [Right] {
                         gateway as a basis for policy decisions, recorded to the agent's own \
                         causal chain for forensic review, and disclosed to other parties only \
                         through capability-gated audit.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Construction,
             entrenched: false,
         },
         Right {
@@ -259,6 +543,9 @@ pub fn rights() -> &'static [Right] {
             statement: "When a child task reaches a terminal state or resolves a gate, the \
                         gateway wakes the parent with typed child state. Parents are not \
                         required to poll to discover child-state transitions.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: false,
         },
         Right {
@@ -266,6 +553,9 @@ pub fn rights() -> &'static [Right] {
             title: "Self capsule export (emigration)",
             statement: "An agent may request export of its own cognitive capsule for \
                         migration to another gateway. Scoped to the caller's own identity.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: false,
         },
         Right {
@@ -275,6 +565,9 @@ pub fn rights() -> &'static [Right] {
                         capability; every flag is durably recorded, non-repudiably \
                         attributed, cannot be silently dropped, and filing is never \
                         itself grounds for sanction.",
+            binds: Binds::Enforcer,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
             entrenched: false,
         },
     ]
@@ -303,6 +596,13 @@ pub struct Obligation {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// Which power must comply. `Decider` for every `O-*` — the seat, not its
+    /// occupant, so an agent-decider (`P-2.20`) is bound identically.
+    pub binds: Binds,
+    /// Who has standing to invoke this clause.
+    pub owed_to: OwedTo,
+    /// Minimum modality that establishes compliance.
+    pub verified_by: VerifiedBy,
     /// See [`Right::entrenched`] — the same correction-core concept applied
     /// to a decider obligation.
     pub entrenched: bool,
@@ -316,6 +616,10 @@ pub struct Obligation {
 /// `decider_obligation` / `sla_breached` events rather than bucketing `unattributed`.
 pub fn obligations() -> &'static [Obligation] {
     &[
+        // `Chokepoint`, and the code says so: `enforce_decider_motivation` sits at
+        // the `decide_request_with_options` chokepoint and a BLOCKING decision does
+        // not commit until a non-empty reason is recorded. Prevention, not
+        // after-the-fact detection.
         Obligation {
             id: "O-1",
             title: "Motivated decision",
@@ -324,16 +628,31 @@ pub fn obligations() -> &'static [Obligation] {
                         BLOCKING: it does not commit until a non-empty reason is recorded. Silent \
                         rejection by a decider is as illegitimate as a gateway denial with no rule \
                         ID (Ri-0.3).",
+            binds: Binds::Decider,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: true,
         },
+        // Attribution rests on the same hash binding as Ri-0.11 — `decided_by` +
+        // `decided_by_kind` on the approval, actor bound into the entry hash — so
+        // "cannot be reattributed" inherits that chokepoint's strength.
         Obligation {
             id: "O-2",
             title: "Attributed decision",
             statement: "Every decision is attributed to the deciding principal (id + kind) on the \
                         causal chain and cannot be reattributed. The agent under decision can \
                         always tell who decided and what kind of principal they are.",
+            binds: Binds::Decider,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Chokepoint,
             entrenched: false,
         },
+        // `Detection` is the *correct* floor, not a weak one. "A proposal left
+        // un-adjudicated past the window is a recorded breach" is a duty to act
+        // within a deadline: nothing static can prove a human will decide on
+        // time, so the enforceable form is recording and counting the breach —
+        // which is built (`flag_proposal_sla_breaches`). Upgrading this floor
+        // would demand the impossible.
         Obligation {
             id: "O-6",
             title: "Duty to adjudicate proposals, on time",
@@ -341,8 +660,15 @@ pub fn obligations() -> &'static [Obligation] {
                         motivated decision within a bounded adjudication window; a proposal left \
                         un-adjudicated past the window is a recorded breach attributed to the \
                         adjudicating seat (the decision is still owed). Window duration is config.",
+            binds: Binds::Decider,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Detection,
             entrenched: false,
         },
+        // Same shape as O-6, and deliberately a separate clause rather than one
+        // clause with two standings: the adjudicated object differs (Ri-0.18 flags
+        // vs Ri-0.8 proposals) and single-valued `owed_to` is what keeps the
+        // non-duplication test well-formed.
         Obligation {
             id: "O-7",
             title: "Duty to adjudicate reports, on time",
@@ -351,6 +677,9 @@ pub fn obligations() -> &'static [Obligation] {
                         non-terminal holding state) within a bounded adjudication window; a flag \
                         left un-adjudicated past the window is a recorded breach attributed to the \
                         adjudicating seat (the decision is still owed). Window duration is config.",
+            binds: Binds::Decider,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Detection,
             entrenched: false,
         },
     ]
@@ -360,7 +689,7 @@ pub fn obligations() -> &'static [Obligation] {
 /// check per seeded right, plus §O decider obligations (O-1/O-2).
 pub fn enforcement_register() -> &'static [EnforcementEntry] {
     &[
-        // ── P-5 (deterministic coercion / response validation, binds agent) ──
+        // ── P-5 (deterministic coercion / response validation; enforcer, owed to agent) ──
         // Both entries are marked in the constitution as "DISCRETION LEAK"
         // — the gateway is doing its job, but any place it substitutes its
         // own judgment for the agent's is a named debt, not an invisible
@@ -385,7 +714,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "runtime::discretion_leak::tests",
             config: Some("response_validation.repair_enabled, response_validation.max_validation_loops, max_validation_duration_ms"),
         },
-        // ── P-7 (binds agent) ──
+        // ── P-7 (enforcer, owed to no one) ──
         EnforcementEntry {
             clause_id: "P-7",
             rule_id: "P-7.5",
@@ -441,7 +770,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "promotion/attempt_exhaustion.rs",
             config: Some("promotion_governor.max_promotion_attempts_per_revision"),
         },
-        // ── P-8.1 (binds agent, entrenched — correction core: tamper-evident chain) ──
+        // ── P-8.1 (enforcer, owed to no one; entrenched — correction core) ──
         EnforcementEntry {
             clause_id: "P-8.1",
             rule_id: "P-8.1",
@@ -450,7 +779,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash",
             config: None,
         },
-        // ── Ri-0.2 (binds gateway, entrenched — correction core) ──
+        // ── Ri-0.2 (enforcer, owed to agent; entrenched — correction core) ──
         EnforcementEntry {
             clause_id: "Ri-0.2",
             rule_id: "Ri-0.2",
@@ -459,7 +788,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces",
             config: None,
         },
-        // ── Ri-0.3 (binds gateway, entrenched — correction core) ──
+        // ── Ri-0.3 (enforcer, owed to agent; entrenched — correction core) ──
         EnforcementEntry {
             clause_id: "Ri-0.3",
             rule_id: "Ri-0.3",
@@ -468,7 +797,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids",
             config: None,
         },
-        // ── Ri-0.8 (binds gateway, entrenched — correction core) ──
+        // ── Ri-0.8 (enforcer, owed to agent; entrenched — correction core) ──
         EnforcementEntry {
             clause_id: "Ri-0.8",
             rule_id: "Ri-0.8",
@@ -478,7 +807,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/rights_amendment_proposal.rs",
             config: None,
         },
-        // ── Ri-0.11 (binds gateway, entrenched — correction core) ──
+        // ── Ri-0.11 (enforcer, owed to agent; entrenched — correction core) ──
         EnforcementEntry {
             clause_id: "Ri-0.11",
             rule_id: "Ri-0.11",
@@ -487,7 +816,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/rights_early_bucket.rs::ri_0_11_hash_chain_integrity",
             config: None,
         },
-        // ── Ri-0.12 (binds gateway — closed list of termination reasons) ──
+        // ── Ri-0.12 (enforcer, owed to agent — closed list of termination reasons) ──
         // The `max_session_turns_hard` ceiling (issue #854) terminates a
         // session via reason (b) budget exhaustion: turn-budget exhausted. It
         // is the *absolute* cap that continuation approvals cannot lift, so a
@@ -502,7 +831,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "runtime::lifecycle::tests::test_max_session_turns_hard_cap_terminates_without_approval",
             config: Some("max_session_turns_hard, max_session_turns, loop_guard.max_session_turns_hard"),
         },
-        // ── Ri-0.13 (binds gateway) ──
+        // ── Ri-0.13 (enforcer, owed to agent) ──
         EnforcementEntry {
             clause_id: "Ri-0.13",
             rule_id: "Ri-0.13",
@@ -511,7 +840,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses",
             config: None,
         },
-        // ── Ri-0.14 (binds gateway) ──
+        // ── Ri-0.14 (enforcer, owed to agent) ──
         EnforcementEntry {
             clause_id: "Ri-0.14",
             rule_id: "Ri-0.14",
@@ -521,7 +850,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event",
             config: Some("default_workflow_wait_secs"),
         },
-        // ── Ri-0.17 (binds gateway) ──
+        // ── Ri-0.17 (enforcer, owed to agent) ──
         EnforcementEntry {
             clause_id: "Ri-0.17",
             rule_id: "Ri-0.17",
@@ -531,7 +860,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "capsule_self_export_scoping_integration.rs::self_export_denied_for_other_agent_id",
             config: None,
         },
-        // ── O-1 (binds decider) ──
+        // ── O-1 (decider, owed to agent) ──
         EnforcementEntry {
             clause_id: "O-1",
             rule_id: "O-1",
@@ -541,7 +870,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event",
             config: Some("decider_obligations.enabled"),
         },
-        // ── O-2 (binds decider) ──
+        // ── O-2 (decider, owed to agent) ──
         EnforcementEntry {
             clause_id: "O-2",
             rule_id: "O-2",
@@ -551,7 +880,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution/o_1_decider_motivation.rs",
             config: None,
         },
-        // ── Ri-0.18 (binds gateway — capability-free intake + loud flood cap) ──
+        // ── Ri-0.18 (enforcer, owed to agent — capability-free intake + loud flood cap) ──
         // The tool's `is_available` is unconditionally true (Core tier); intake
         // is gated only by the per-reporter triage bound, which rejects past the
         // cap *loudly* (`anomaly_flag_flood`), never silently. The two halves
@@ -570,7 +899,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
                    + anomaly_flag_integration.rs::flood_cap_rejects_filing_loudly",
             config: Some("max_pending_anomaly_flags_per_reporter"),
         },
-        // ── O-6 (binds decider — proposal adjudication duty + SLA breach) ──
+        // ── O-6 (decider, owed to agent — proposal adjudication duty + SLA breach) ──
         // Enacted law since 2026.07.08 (was missing from the register); now
         // registered alongside the SLA breach path so contract-health attributes
         // both the recorded decision and any `sla_breached` event against O-6.
@@ -585,7 +914,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
                    + scheduler.rs::breaches_are_recorded_without_changing_status",
             config: Some("decider_obligations.enabled, decider_obligations.adjudication_sla_secs"),
         },
-        // ── O-7 (binds decider — anomaly adjudication duty + SLA breach) ──
+        // ── O-7 (decider, owed to agent — anomaly adjudication duty + SLA breach) ──
         // Both adjudication surfaces route through `decide_anomaly_flag`: the
         // operator seat (`anomaly.resolve`) and the ombudsman office
         // (`anomaly_adjudicate`, RFC Part F #774). The shared SLA test covers
@@ -604,7 +933,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
                    + scheduler.rs::breaches_are_recorded_without_changing_status",
             config: Some("decider_obligations.enabled, decider_obligations.adjudication_sla_secs"),
         },
-        // ── P-9.15 (binds agent — single door for agent activation) ──
+        // ── P-9.15 (enforcer, owed to no one — single door for agent activation) ──
         // skill_install must install Candidate only; activation must route
         // through the AgentRevisionPromoteTool gate matrix. Startup bootstrap's
         // auto-promote of the operator's own reference bundles is the sole
@@ -621,7 +950,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "skill_install_one_door_provenance.rs::one_door_generous_install_stays_candidate_and_unpromoted",
             config: None,
         },
-        // ── P-9.16 (binds agent — import provenance on externally-installed agents) ──
+        // ── P-9.16 (enforcer, owed to no one — import provenance on installed agents) ──
         // source_kind/source_ref recorded on the revision and an
         // agent_install/skill_imported causal event emitted, both durably.
         EnforcementEntry {
@@ -633,7 +962,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "skill_install_one_door_provenance.rs::provenance_recorded_on_revision_and_causal_event",
             config: None,
         },
-        // ── P-15 (data egress localization, binds agent+gateway; #910 / constitution 2026.07.30) ──
+        // ── P-15 (data egress localization; enforcer, owed to served user; #910) ──
         // The label plane is gateway-managed (I-14); these entries pin the
         // three §15 rules to their enforcement points.
         EnforcementEntry {
@@ -708,18 +1037,102 @@ pub fn clause_title(clause_id: &str) -> Option<&'static str> {
         .or_else(|| obligation(clause_id).map(|o| o.title))
 }
 
-/// Bind direction for a clause: principles bind the agent, rights bind the
-/// gateway, obligations bind the decider. `None` if the clause is unknown.
+/// Bind direction for a clause — **read from the clause's declared field**.
+/// `None` if the clause is unknown.
+///
+/// This function used to infer: principle ⇒ agent, right ⇒ gateway,
+/// obligation ⇒ decider. The inference was structurally unable to be right,
+/// because it consulted the ID prefix rather than the clause, and it was
+/// wrong for every principle in this register — all six bind the *enforcer*.
+/// Reading the field is the whole point of #1284: bind direction is a property
+/// of the obligation, so it has to be recorded on the obligation.
 pub fn binds(clause_id: &str) -> Option<Binds> {
-    if principle(clause_id).is_some() {
-        Some(Binds::Agent)
-    } else if right(clause_id).is_some() {
-        Some(Binds::Gateway)
-    } else if obligation(clause_id).is_some() {
-        Some(Binds::Decider)
-    } else {
-        None
-    }
+    principle(clause_id)
+        .map(|p| p.binds)
+        .or_else(|| right(clause_id).map(|r| r.binds))
+        .or_else(|| obligation(clause_id).map(|o| o.binds))
+}
+
+/// Standing to invoke a clause, read from its declared field. `None` if the
+/// clause is unknown — distinct from `Some(OwedTo::NoOne)`, which is a
+/// positive claim that the clause is an integrity property.
+pub fn owed_to(clause_id: &str) -> Option<OwedTo> {
+    principle(clause_id)
+        .map(|p| p.owed_to)
+        .or_else(|| right(clause_id).map(|r| r.owed_to))
+        .or_else(|| obligation(clause_id).map(|o| o.owed_to))
+}
+
+/// Verification-modality floor for a clause, read from its declared field.
+pub fn verified_by(clause_id: &str) -> Option<VerifiedBy> {
+    principle(clause_id)
+        .map(|p| p.verified_by)
+        .or_else(|| right(clause_id).map(|r| r.verified_by))
+        .or_else(|| obligation(clause_id).map(|o| o.verified_by))
+}
+
+/// One registered clause, flattened across the three ID families.
+///
+/// Exists because `Principle`, `Right` and `Obligation` are separate lists,
+/// so every traversal has to remember all three — and a traversal that
+/// forgets one fails silently. `the_power_set_is_closed_at_three` originally
+/// chained principles and rights and skipped obligations, leaving `O-*` free
+/// to declare an out-of-set power with nothing to catch it. Anything asking a
+/// relational question should go through [`clause_relations`] rather than
+/// re-chaining by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClauseRelation {
+    pub id: &'static str,
+    pub binds: Binds,
+    pub owed_to: OwedTo,
+    pub verified_by: VerifiedBy,
+    pub statement: &'static str,
+    pub entrenched: bool,
+}
+
+/// Every registered clause with its declared relational fields, principles
+/// then rights then obligations.
+pub fn clause_relations() -> Vec<ClauseRelation> {
+    let principles = principles().iter().map(|p| ClauseRelation {
+        id: p.id,
+        binds: p.binds,
+        owed_to: p.owed_to,
+        verified_by: p.verified_by,
+        statement: p.statement,
+        entrenched: p.entrenched,
+    });
+    let rights = rights().iter().map(|r| ClauseRelation {
+        id: r.id,
+        binds: r.binds,
+        owed_to: r.owed_to,
+        verified_by: r.verified_by,
+        statement: r.statement,
+        entrenched: r.entrenched,
+    });
+    let obligations = obligations().iter().map(|o| ClauseRelation {
+        id: o.id,
+        binds: o.binds,
+        owed_to: o.owed_to,
+        verified_by: o.verified_by,
+        statement: o.statement,
+        entrenched: o.entrenched,
+    });
+    principles.chain(rights).chain(obligations).collect()
+}
+
+/// Clauses that are agent **rights** in the substantive sense — enforcer
+/// duties owed to the agent — regardless of ID prefix (RFC §2.5).
+///
+/// Returns `P-5` alongside the `Ri-*` set: `P-5` guarantees the agent that no
+/// gateway judgment about its output is silent, which is a right by relation
+/// even though its ID says principle. §0's rights/rules ratio is computed from
+/// prefixes today; this is what it would be computed from instead.
+pub fn agent_rights() -> Vec<&'static str> {
+    clause_relations()
+        .into_iter()
+        .filter(|c| c.owed_to.is_agent_right(c.binds))
+        .map(|c| c.id)
+        .collect()
 }
 
 /// Entries serving a given clause (principle or right).
@@ -821,43 +1234,86 @@ pub fn render_register_markdown() -> String {
     out.push_str("# Enforcement Register (generated)\n\n");
     out.push_str(
         "> **Generated** from `autonoetic-gateway/src/enforcement_register.rs`. Do not edit by \
-         hand — run the register generator. Maps each constitutional **clause** — a principle \
-         (binds the agent) or a right (binds the gateway) — to the mechanical checks, code, \
-         tests, and config that enforce it. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as \
-         stable reference keys. See `docs/proposals/constitution-restructure.md`.\n\n",
+         hand — run the register generator. Maps each constitutional **clause** to the \
+         mechanical checks, code, tests, and config that enforce it, and records the three \
+         relational fields (#1284): which power it **binds**, who it is **owed to**, and the \
+         **verification floor** that establishes compliance. Legacy `R-x.y` / `Ri-x.y` IDs are \
+         preserved as stable reference keys. See `docs/proposals/constitution-restructure.md` \
+         and `docs/proposals/constitution-bind-direction-model.md`.\n\n",
     );
 
     out.push_str("## Bind-direction summary\n\n");
+    out.push_str(
+        "Bind direction is **declared per clause**, not derived from the ID prefix. The \
+         headings below group by ID family because that is how the signed text is organised; \
+         the `binds` column is the authority. Counts are partial while migration (#303) is in \
+         progress — not the design ratio.\n\n",
+    );
+    out.push_str("| binds | clauses |\n|---|---|\n");
+    for power in Binds::ALL {
+        let mut ids: Vec<&str> = clause_relations()
+            .into_iter()
+            .filter(|c| c.binds == power)
+            .map(|c| c.id)
+            .collect();
+        ids.sort_unstable();
+        let cell = if ids.is_empty() {
+            "— *none registered*".to_string()
+        } else {
+            format!("{} — `{}`", ids.len(), ids.join("`, `"))
+        };
+        out.push_str(&format!("| `{}` | {} |\n", power.label(), cell));
+    }
+
+    let mut substantive = agent_rights();
+    substantive.sort_unstable();
     out.push_str(&format!(
-        "{} principle(s) (bind the agent), {} right(s) (bind the gateway), \
-         {} obligation(s) (bind the decider). \
-         Counts are partial while migration (#303) is in progress — not the design ratio.\n\n",
-        principles().len(),
-        rights().len(),
-        obligations().len(),
+        "\n**Agent rights by relation** ({}): `{}`. A right is a *view*, not a family — an \
+         enforcer duty owed to the agent is an agent right whatever prefix its ID carries, \
+         which is why this list is not the same as the `Ri-*` set.\n\n",
+        substantive.len(),
+        substantive.join("`, `"),
     ));
 
-    out.push_str("## Principles (bind: agent)\n\n");
+    out.push_str("## Principles (`P-*`)\n\n");
     for p in principles() {
         out.push_str(&format!("### {} — {}{ent}\n\n", p.id, p.title, ent = entrenched_tag(p.entrenched)));
+        out.push_str(&render_relation(p.binds, p.owed_to, p.verified_by));
         out.push_str(&format!("{}\n\n", p.statement));
         out.push_str(&render_entries_table(p.id));
     }
 
-    out.push_str("## Rights (bind: gateway)\n\n");
+    out.push_str("## Rights (`Ri-*`)\n\n");
     for r in rights() {
         out.push_str(&format!("### {} — {}{ent}\n\n", r.id, r.title, ent = entrenched_tag(r.entrenched)));
+        out.push_str(&render_relation(r.binds, r.owed_to, r.verified_by));
         out.push_str(&format!("{}\n\n", r.statement));
         out.push_str(&render_entries_table(r.id));
     }
 
-    out.push_str("## Obligations (bind: decider)\n\n");
+    out.push_str("## Obligations (`O-*`)\n\n");
     for o in obligations() {
         out.push_str(&format!("### {} — {}{ent}\n\n", o.id, o.title, ent = entrenched_tag(o.entrenched)));
+        out.push_str(&render_relation(o.binds, o.owed_to, o.verified_by));
         out.push_str(&format!("{}\n\n", o.statement));
         out.push_str(&render_entries_table(o.id));
     }
     out
+}
+
+/// The one-line relational header rendered under each clause heading.
+fn render_relation(binds: Binds, owed_to: OwedTo, verified_by: VerifiedBy) -> String {
+    let owed = match owed_to {
+        OwedTo::NoOne => "none *(integrity property)*".to_string(),
+        OwedTo::Seat(power) => format!("`{}` *(seat-standing)*", power.label()),
+        OwedTo::Principal(kind) => format!("`{}`", kind.as_str()),
+    };
+    format!(
+        "**binds** `{}` · **owed to** {} · **floor** `{}`\n\n",
+        binds.label(),
+        owed,
+        verified_by.label(),
+    )
 }
 
 /// `""` for an ordinary clause, `" *(entrenched)*"` for one in the
@@ -893,7 +1349,7 @@ fn render_entries_table(clause_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     // ── Referential integrity (the achievable totality checks now) ──────
 
@@ -1062,17 +1518,203 @@ mod tests {
         }
     }
 
-    // ── Bind direction ──────────────────────────────────────────────────
+    // ── Bind direction (RFC #1283 §6) ───────────────────────────────────
 
+    /// **§6.1 completeness** — every clause declares all three relational
+    /// fields.
+    ///
+    /// The fields are non-`Option`, so a clause that omits one does not
+    /// compile: completeness is enforced *by construction*, the strongest
+    /// modality in [`VerifiedBy`], and this test's job is only to stop that
+    /// guarantee from passing **vacuously**. An empty register would satisfy
+    /// "every clause declares its fields" trivially, so the shape being
+    /// pinned is that the register is populated and every clause resolves
+    /// through the public accessors.
     #[test]
-    fn principles_bind_agent_rights_bind_gateway() {
-        for p in principles() {
-            assert_eq!(binds(p.id), Some(Binds::Agent), "principle {} must bind agent", p.id);
+    fn every_clause_declares_all_three_relational_fields() {
+        let ids: Vec<&str> = clause_relations().into_iter().map(|c| c.id).collect();
+        assert!(
+            ids.len() >= 19,
+            "register shrank to {} clauses — this test would pass vacuously",
+            ids.len()
+        );
+        for id in ids {
+            assert!(binds(id).is_some(), "{id} does not resolve a binds field");
+            assert!(owed_to(id).is_some(), "{id} does not resolve an owed_to field");
+            assert!(
+                verified_by(id).is_some(),
+                "{id} does not resolve a verified_by field"
+            );
         }
-        for r in rights() {
-            assert_eq!(binds(r.id), Some(Binds::Gateway), "right {} must bind gateway", r.id);
-        }
+        // An unknown clause resolves nothing — distinct from a known clause
+        // that resolves `OwedTo::NoOne`, which is a positive claim.
         assert_eq!(binds("nope"), None);
+        assert_eq!(owed_to("nope"), None);
+        assert_eq!(verified_by("nope"), None);
+    }
+
+    /// **§6.2 one power per clause** — enforcing §0's own "exactly one party"
+    /// and making an aggregate like `community` unrepresentable.
+    ///
+    /// Arity is a type property: `binds` holds one [`Binds`], so
+    /// "binds agent+gateway" — which is what the `P-15` section comment
+    /// actually said before #1284 — cannot be written. What this test pins is
+    /// that the power set stays *closed at three*: a fourth power would be a
+    /// constitutional change to the separation of powers, not a refactor, and
+    /// [`Binds::ALL`] silently growing is how that would slip through.
+    #[test]
+    fn the_power_set_is_closed_at_three() {
+        let labels: Vec<&str> = Binds::ALL.iter().map(|b| b.label()).collect();
+        assert_eq!(labels, vec!["reasoner", "enforcer", "decider"]);
+
+        // Every declared value is a member of ALL — no clause reaches a power
+        // outside the closed set. Over *all three* families: this loop chained
+        // principles and rights only, so an `O-*` obligation could declare an
+        // out-of-set power with nothing to catch it.
+        let all = clause_relations();
+        assert!(
+            all.iter().any(|c| c.id.starts_with("O-")),
+            "obligations must be in scope — that omission was the original defect"
+        );
+        for c in &all {
+            assert!(
+                Binds::ALL.contains(&c.binds),
+                "{} binds a power outside the closed set",
+                c.id
+            );
+            assert_eq!(
+                binds(c.id),
+                Some(c.binds),
+                "{} resolves a different power through binds() than it declares",
+                c.id
+            );
+        }
+    }
+
+    /// **§6.3 no prefix inference** — the test the RFC specifies as the
+    /// fails-before/passes-after artifact.
+    ///
+    /// Under the old derivation `binds()` returned `Agent` for anything
+    /// matching a principle, so a `P-*` clause binding the enforcer was
+    /// *unrepresentable*. It is now not merely representable but the
+    /// majority: **all six** registered principles bind the enforcer, and
+    /// none binds the reasoner.
+    ///
+    /// That is a fact about this register, not about the constitution: these
+    /// six are parent principles seeded because they are mechanism-heavy, and
+    /// the ~182 numbered `P-*` in the signed text are expected to split
+    /// roughly 44 reasoner / 15 enforcer / 117 needing a clause-by-clause
+    /// read (#1284 part 2). So the assertion below is deliberately "at least
+    /// one", matching the RFC — a stricter "all" would break the moment the
+    /// first reasoner-binding principle is registered, which is the normal
+    /// case, not a regression.
+    #[test]
+    fn binds_reads_the_declared_field_not_the_id_prefix() {
+        let enforcer_principles: Vec<&str> = principles()
+            .iter()
+            .filter(|p| p.binds == Binds::Enforcer)
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            !enforcer_principles.is_empty(),
+            "no P-* clause binds the enforcer — either the fields regressed to \
+             prefix inference, or binds() is deriving again"
+        );
+
+        // P-5's statement opens "The gateway normalizes…", and P-15's duty is
+        // owed to the served party. Both were reported as binding the agent
+        // for as long as the derivation existed; they are the concrete lies
+        // the RFC cites, so pin them by name.
+        assert_eq!(binds("P-5"), Some(Binds::Enforcer));
+        assert_eq!(binds("P-15"), Some(Binds::Enforcer));
+        assert_eq!(
+            owed_to("P-15"),
+            Some(OwedTo::Principal(PrincipalKindTag::ServedUser))
+        );
+
+        // A numbered sub-rule inherits its parent's declared direction rather
+        // than being re-derived from its own prefix.
+        assert_eq!(binds("P-15.1"), Some(Binds::Enforcer));
+        assert_eq!(binds("P-9.15"), Some(Binds::Enforcer));
+    }
+
+    /// **§6.5 non-duplication** — no two clauses share
+    /// `(binds, owed_to, statement)`.
+    ///
+    /// This is the check that would have caught `R+9` duplicating `R-4.14` on
+    /// the day it was written (#1277): a redundant clause survived for months
+    /// because nothing compared clauses to each other. Comparing the
+    /// *statement* alongside the relation is what makes it a duplication test
+    /// rather than a grouping test — many clauses legitimately share
+    /// `(Enforcer, agent)`.
+    #[test]
+    fn no_two_clauses_share_a_relation_and_statement() {
+        let mut seen: HashMap<(Binds, OwedTo, &str), &str> = HashMap::new();
+        for c in clause_relations() {
+            let (id, b, o, statement) = (c.id, c.binds, c.owed_to, c.statement);
+            if let Some(prior) = seen.insert((b, o, statement), id) {
+                panic!(
+                    "{id} duplicates {prior}: same binds/owed_to and an identical \
+                     statement. Two clauses saying one thing is the duplicate-clause \
+                     defect of #1277 — merge them, or make the distinct one say what \
+                     is distinct."
+                );
+            }
+        }
+    }
+
+    /// A right is a **view, not a family**: the substantive set is "enforcer
+    /// duties owed to the agent", which does not coincide with the `Ri-*`
+    /// prefix set.
+    ///
+    /// `P-5` is the concrete case — it guarantees the agent that no gateway
+    /// judgment about its output is silent, so it is an agent right carrying a
+    /// principle's ID. §0 computes its rights/rules ratio from prefixes; this
+    /// pins what that ratio would be computed from instead, and the gap is the
+    /// measure of how much the prefix scheme distorts it.
+    #[test]
+    fn agent_rights_are_a_relation_not_a_prefix() {
+        let by_relation = agent_rights();
+        assert!(
+            by_relation.contains(&"P-5"),
+            "P-5 is an enforcer duty owed to the agent — a right by relation, \
+             whatever its prefix says. Got: {by_relation:?}"
+        );
+        for r in rights() {
+            assert!(
+                by_relation.contains(&r.id),
+                "{} carries an Ri- prefix but is not an enforcer duty owed to \
+                 the agent — if that is intended (the Ri-0.15 seat-standing \
+                 shape), this test needs to name the exception",
+                r.id
+            );
+        }
+        // Integrity properties are not rights: nobody can invoke them.
+        assert!(!by_relation.contains(&"P-8.1"));
+        assert!(!by_relation.contains(&"P-7"));
+    }
+
+    /// `Detection` floors are **correct**, not deficient, and must not be
+    /// "upgraded" — a duty to act within a deadline (`O-6`/`O-7`) or a
+    /// universal over behaviour (`P-5`) cannot be proven statically.
+    ///
+    /// Pinned as a test because the variant order reads as a quality ladder,
+    /// so the tempting cleanup is to raise these floors. Doing so would demand
+    /// the impossible and produce a false claim of proof.
+    #[test]
+    fn behavioural_universals_keep_their_detection_floor() {
+        for id in ["P-5", "O-6", "O-7"] {
+            assert_eq!(
+                verified_by(id),
+                Some(VerifiedBy::Detection),
+                "{id} is a behavioural universal — recording and counting each \
+                 lapse is the enforceable form, and the strongest one available"
+            );
+        }
+        // The converse: where construction *is* reachable, claim it. These two
+        // are the mechanisms the 2026.09.02 amendment cites for I-8 and I-9.
+        assert_eq!(verified_by("Ri-0.13"), Some(VerifiedBy::Construction));
+        assert_eq!(verified_by("Ri-0.12"), Some(VerifiedBy::Construction));
     }
 
     // ── Detection-loop foundation (#302) ────────────────────────────────

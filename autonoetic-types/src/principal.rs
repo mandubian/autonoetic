@@ -34,15 +34,58 @@ pub enum PrincipalKind {
     ServedUser,
 }
 
-impl PrincipalKind {
-    /// Stable discriminant tag (provider-independent).
-    pub fn tag(&self) -> &'static str {
+/// A [`PrincipalKind`] discriminant with its payload dropped — the *kind* of
+/// principal, addressable in `const` context and `Copy`.
+///
+/// `PrincipalKind::ForeignAgent` carries a `String`, which makes the full enum
+/// neither `Copy` nor constructible in a `const`. Some callers need to name a
+/// principal *kind* in static data rather than describe a particular
+/// principal: the constitutional `owed_to` field
+/// (`enforcement_register::OwedTo`) records which kind of principal has
+/// standing to invoke a clause, and lives in a `&'static [Principle]`.
+///
+/// Drift is prevented **by construction**, not by a test: [`PrincipalKind::kind_tag`]
+/// matches exhaustively, so adding a variant to `PrincipalKind` fails to
+/// compile until it is added here too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKindTag {
+    Human,
+    AutonoeticAgent,
+    Script,
+    ForeignAgent,
+    ServedUser,
+}
+
+impl PrincipalKindTag {
+    /// The same stable tag string [`PrincipalKind::tag`] returns.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Human => "human",
             Self::AutonoeticAgent => "autonoetic_agent",
             Self::Script => "script",
-            Self::ForeignAgent { .. } => "foreign_agent",
+            Self::ForeignAgent => "foreign_agent",
             Self::ServedUser => "served_user",
+        }
+    }
+}
+
+impl PrincipalKind {
+    /// Stable discriminant tag (provider-independent).
+    pub fn tag(&self) -> &'static str {
+        self.kind_tag().as_str()
+    }
+
+    /// This principal's kind, payload dropped. Exhaustive on purpose: a new
+    /// `PrincipalKind` variant must extend [`PrincipalKindTag`] to compile,
+    /// which is what keeps the two in step without a drift test.
+    pub fn kind_tag(&self) -> PrincipalKindTag {
+        match self {
+            Self::Human => PrincipalKindTag::Human,
+            Self::AutonoeticAgent => PrincipalKindTag::AutonoeticAgent,
+            Self::Script => PrincipalKindTag::Script,
+            Self::ForeignAgent { .. } => PrincipalKindTag::ForeignAgent,
+            Self::ServedUser => PrincipalKindTag::ServedUser,
         }
     }
 
@@ -164,6 +207,45 @@ impl Principal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tag()` and `kind_tag()` must not diverge — `tag()` is now defined in
+    /// terms of `kind_tag()`, so this pins the *values* rather than the
+    /// wiring, catching a tag string edited on one side only.
+    #[test]
+    fn kind_tag_round_trips_every_principal_kind() {
+        let all = [
+            PrincipalKind::Human,
+            PrincipalKind::AutonoeticAgent,
+            PrincipalKind::Script,
+            PrincipalKind::ForeignAgent {
+                provider: "claude-code".to_string(),
+            },
+            PrincipalKind::ServedUser,
+        ];
+        for kind in &all {
+            assert_eq!(
+                kind.tag(),
+                kind.kind_tag().as_str(),
+                "tag/kind_tag disagree for {kind:?}"
+            );
+        }
+        // The payload is dropped, not encoded: two foreign agents of
+        // different providers share one kind.
+        assert_eq!(
+            PrincipalKind::ForeignAgent {
+                provider: "codex".to_string()
+            }
+            .kind_tag(),
+            PrincipalKindTag::ForeignAgent
+        );
+        // Distinct kinds keep distinct tags — a copy-paste in `as_str` that
+        // collapsed two variants would otherwise pass the round-trip above.
+        let mut tags: Vec<&str> = all.iter().map(|k| k.tag()).collect();
+        tags.sort_unstable();
+        let before = tags.len();
+        tags.dedup();
+        assert_eq!(before, tags.len(), "two principal kinds share a tag: {tags:?}");
+    }
 
     #[test]
     fn reserved_non_agent_ids_are_recognized() {

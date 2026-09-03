@@ -8,6 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// [`ConstitutionClause::binds`] for a clause whose bind direction the
+/// enforcement register has not yet declared.
+///
+/// Deliberately not one of the three power names: a consumer that treats an
+/// unclassified clause as bound to a specific power is making the same mistake
+/// the prefix derivation made. Matching on this value is the correct way to
+/// ask "is this clause classified yet?".
+pub const BINDS_UNDECLARED: &str = "undeclared";
+
 /// Parameters for `constitution.get`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConstitutionGetParams {
@@ -25,7 +34,20 @@ pub struct ConstitutionGetParams {
 pub struct ConstitutionClause {
     /// Clause ID, e.g. `P-7.19` (a rule) or `Ri-0.10` (a right).
     pub id: String,
-    /// `agent` for a `P-*` principle/rule, `gateway` for an `Ri-*` right.
+    /// Which **power** the clause binds — `reasoner`, `enforcer`, `decider`,
+    /// or [`BINDS_UNDECLARED`].
+    ///
+    /// Read from the clause's declared bind-direction field in the
+    /// enforcement register, never derived from the ID prefix. Prior to
+    /// #1284 this was `"agent"` for any `P-*` and `"gateway"` for any `Ri-*`,
+    /// which reported the agent as responsible for causal-chain integrity
+    /// (`P-8.1`) and egress confinement (`P-15.*`) — the latter a duty
+    /// `I-14` forbids an agent from discharging even in principle.
+    ///
+    /// Clauses the register has not yet classified report
+    /// [`BINDS_UNDECLARED`] rather than a guess: the classification of the
+    /// remaining numbered clauses is tracked work (#1284 part 2), and a
+    /// visible gap is worth more than a plausible falsehood.
     pub binds: String,
     /// One-line statement — the first sentence of the clause in the source.
     pub gloss: String,

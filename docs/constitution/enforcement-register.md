@@ -1,14 +1,24 @@
 # Enforcement Register (generated)
 
-> **Generated** from `autonoetic-gateway/src/enforcement_register.rs`. Do not edit by hand — run the register generator. Maps each constitutional **clause** — a principle (binds the agent) or a right (binds the gateway) — to the mechanical checks, code, tests, and config that enforce it. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as stable reference keys. See `docs/proposals/constitution-restructure.md`.
+> **Generated** from `autonoetic-gateway/src/enforcement_register.rs`. Do not edit by hand — run the register generator. Maps each constitutional **clause** to the mechanical checks, code, tests, and config that enforce it, and records the three relational fields (#1284): which power it **binds**, who it is **owed to**, and the **verification floor** that establishes compliance. Legacy `R-x.y` / `Ri-x.y` IDs are preserved as stable reference keys. See `docs/proposals/constitution-restructure.md` and `docs/proposals/constitution-bind-direction-model.md`.
 
 ## Bind-direction summary
 
-6 principle(s) (bind the agent), 9 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+Bind direction is **declared per clause**, not derived from the ID prefix. The headings below group by ID family because that is how the signed text is organised; the `binds` column is the authority. Counts are partial while migration (#303) is in progress — not the design ratio.
 
-## Principles (bind: agent)
+| binds | clauses |
+|---|---|
+| `reasoner` | — *none registered* |
+| `enforcer` | 15 — `P-15`, `P-2`, `P-5`, `P-7`, `P-8.1`, `P-9`, `Ri-0.11`, `Ri-0.12`, `Ri-0.13`, `Ri-0.14`, `Ri-0.17`, `Ri-0.18`, `Ri-0.2`, `Ri-0.3`, `Ri-0.8` |
+| `decider` | 4 — `O-1`, `O-2`, `O-6`, `O-7` |
+
+**Agent rights by relation** (10): `P-5`, `Ri-0.11`, `Ri-0.12`, `Ri-0.13`, `Ri-0.14`, `Ri-0.17`, `Ri-0.18`, `Ri-0.2`, `Ri-0.3`, `Ri-0.8`. A right is a *view*, not a family — an enforcer duty owed to the agent is an agent right whatever prefix its ID carries, which is why this list is not the same as the `Ri-*` set.
+
+## Principles (`P-*`)
 
 ### P-2 — Approval Gates
+
+**binds** `enforcer` · **owed to** none *(integrity property)* · **floor** `test`
 
 Promotion and gate actions are bounded so that repeated mechanical rejection cannot be respawned indefinitely across sessions without operator acknowledgement.
 
@@ -19,6 +29,8 @@ Promotion and gate actions are bounded so that repeated mechanical rejection can
 
 ### P-5 — Deterministic coercion and response validation
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `detection`
+
 The gateway normalizes model I/O only through deterministic, pre-committed tolerances; every such intervention is observable and counted as a named discretion leak (§14). No gateway judgment about the agent's output is silent or hidden.
 
 | rule id | check | code | test | config |
@@ -27,6 +39,8 @@ The gateway normalizes model I/O only through deterministic, pre-committed toler
 | `P-5.8` | `gateway_authored_repair_leak` | `runtime/response_validation.rs::validate_and_maybe_repair (gateway-authored repair prompt) + runtime/discretion_leak.rs::record_discretion_leak` | `runtime::discretion_leak::tests` | `response_validation.repair_enabled, response_validation.max_validation_loops, max_validation_duration_ms` |
 
 ### P-7 — Bounded progress
+
+**binds** `enforcer` · **owed to** none *(integrity property)* · **floor** `test`
 
 A session is halted when it stops making progress, on a closed, configurable set of mechanically-detected non-progress conditions, each emitting a typed, attributable reason. No condition relies on agent self-report.
 
@@ -39,6 +53,8 @@ A session is halted when it stops making progress, on a closed, configurable set
 
 ### P-8.1 — Hash-chain integrity *(entrenched)*
 
+**binds** `enforcer` · **owed to** none *(integrity property)* · **floor** `chokepoint`
+
 The causal chain is append-only JSONL with hash-chain integrity — each entry's `entry_hash` binds its fields and its `prev_hash` links it to the prior entry. Tampering with any recorded field (actor, action, outcome) leaves a stale hash detectable by recomputation.
 
 | rule id | check | code | test | config |
@@ -46,6 +62,8 @@ The causal chain is append-only JSONL with hash-chain integrity — each entry's
 | `P-8.1` | `hash_chain_integrity` | `causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage` | `constitution/rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash` | — |
 
 ### P-9 — Agent Install & Provenance
+
+**binds** `enforcer` · **owed to** none *(integrity property)* · **floor** `chokepoint`
 
 Three-stage activation — artifact_build, revision.create, revision.promote — gated so that every surface that activates an agent passes the same promotion gates (single door), and every externally-installed agent carries durable import provenance.
 
@@ -56,6 +74,8 @@ Three-stage activation — artifact_build, revision.create, revision.promote —
 
 ### P-15 — Data Egress Localization
 
+**binds** `enforcer` · **owed to** `served_user` · **floor** `chokepoint`
+
 Content carrying an egress label never reaches a sink the label excludes — at the LLM chokepoint, at every off-machine boundary, and across sessions via stored content — and widens only via an explicit, operator-approved, causal-logged declassification grant.
 
 | rule id | check | code | test | config |
@@ -64,9 +84,11 @@ Content carrying an egress label never reaches a sink the label excludes — at 
 | `P-15.2` | `egress_boundary_gate` | `runtime/egress_labeler.rs::network_egress_boundary_refusal_json + runtime/egress_labeler.rs::mcp_remote_egress_refusal_json + runtime/egress_labeler.rs::ofp_federated_egress_refusal + runtime/egress_labeler.rs::emit_surface_boundary_refused` | `egress/phase4_boundaries.rs + egress/phase4_web_hooks.rs + egress/phase4_sandbox.rs` | — |
 | `P-15.3` | `egress_declassification_only` | `scheduler/approval.rs::apply_decision + scheduler/gateway_store/egress_declassification.rs::declassification_allows + runtime/egress_labeler.rs::emit_declassified` | `egress/phase4_declassification.rs + egress/compartment.rs` | `default_grant_ttl_secs` |
 
-## Rights (bind: gateway)
+## Rights (`Ri-*`)
 
 ### Ri-0.2 — Own history is readable *(entrenched)*
+
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
 
 Every agent may read its own causal chain and execution trace. The gateway does not hide actions taken on the agent's behalf. Audit is not a privilege of operators; it is a right of the subject.
 
@@ -76,6 +98,8 @@ Every agent may read its own causal chain and execution trace. The gateway does 
 
 ### Ri-0.3 — Named rejection *(entrenched)*
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
+
 Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. Rejection without explanation is indistinguishable from arbitrary authority.
 
 | rule id | check | code | test | config |
@@ -83,6 +107,8 @@ Every rejection names the rule ID that caused it. No agent is ever told "denied"
 | `Ri-0.3` | `named_rejection` | `Tagged::permission_with_rules + PolicyDecision.enforced_rules` | `constitution/rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids` | — |
 
 ### Ri-0.8 — Right to propose amendment *(entrenched)*
+
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
 
 Any agent holding the ConstitutionalProposal capability may submit an amendment proposal through the declared channel. The proposal receives a durable ID and enters the review queue; it cannot be silently dropped.
 
@@ -92,6 +118,8 @@ Any agent holding the ConstitutionalProposal capability may submit an amendment 
 
 ### Ri-0.11 — Non-repudiation *(entrenched)*
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `chokepoint`
+
 Every action an agent performs is attributed to that agent on the causal chain and cannot be retroactively reattributed. The agent can prove what it did; no party can claim the agent performed an action it did not.
 
 | rule id | check | code | test | config |
@@ -99,6 +127,8 @@ Every action an agent performs is attributed to that agent on the causal chain a
 | `Ri-0.11` | `non_repudiation` | `causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id` | `constitution/rights_early_bucket.rs::ri_0_11_hash_chain_integrity` | — |
 
 ### Ri-0.12 — Closed list of termination reasons
+
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `construction`
 
 A session terminates only for a reason in the declared, closed list (agent exit, budget exhaustion, operator emergency stop, parent-orphan reap, unrecoverable fatal error naming a rule ID, scheduled timeout). Turn-budget exhaustion — the `max_session_turns_hard` ceiling that continuation approvals cannot lift — terminates as budget exhaustion; any termination outside the list is a rights violation and a gateway bug.
 
@@ -108,6 +138,8 @@ A session terminates only for a reason in the declared, closed list (agent exit,
 
 ### Ri-0.13 — Reasoning privacy
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `construction`
+
 An agent's internal reasoning is private-under-law: not used by the gateway as a basis for policy decisions, recorded to the agent's own causal chain for forensic review, and disclosed to other parties only through capability-gated audit.
 
 | rule id | check | code | test | config |
@@ -115,6 +147,8 @@ An agent's internal reasoning is private-under-law: not used by the gateway as a
 | `Ri-0.13` | `reasoning_disclosure_capability_gated` | `runtime/tools/observability.rs (reasoning audit) + disclosure gating` | `constitution/private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses` | — |
 
 ### Ri-0.14 — Wake-up over polling
+
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
 
 When a child task reaches a terminal state or resolves a gate, the gateway wakes the parent with typed child state. Parents are not required to poll to discover child-state transitions.
 
@@ -124,6 +158,8 @@ When a child task reaches a terminal state or resolves a gate, the gateway wakes
 
 ### Ri-0.17 — Self capsule export (emigration)
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
+
 An agent may request export of its own cognitive capsule for migration to another gateway. Scoped to the caller's own identity.
 
 | rule id | check | code | test | config |
@@ -132,15 +168,19 @@ An agent may request export of its own cognitive capsule for migration to anothe
 
 ### Ri-0.18 — Right to report
 
+**binds** `enforcer` · **owed to** `autonoetic_agent` · **floor** `test`
+
 Any agent may file an anomaly report without holding any capability; every flag is durably recorded, non-repudiably attributed, cannot be silently dropped, and filing is never itself grounds for sanction.
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `Ri-0.18` | `anomaly_flag_capability_free_intake` | `runtime/tools/anomaly_flag.rs::AnomalyFlagTool + scheduler/gateway_store/anomaly_flags.rs::insert_anomaly_flag + scheduler/gateway_store/anomaly_flags.rs::emit_anomaly_flag_flood_alert` | `anomaly_flag_integration.rs::tool_available_with_zero_capabilities + anomaly_flag_integration.rs::filing_emits_causal_event_tagged_ri_0_18 + anomaly_flags.rs::flood_cap_rejects_at_limit_and_keeps_existing + anomaly_flag_integration.rs::flood_cap_rejects_filing_loudly` | `max_pending_anomaly_flags_per_reporter` |
 
-## Obligations (bind: decider)
+## Obligations (`O-*`)
 
 ### O-1 — Motivated decision *(entrenched)*
+
+**binds** `decider` · **owed to** `autonoetic_agent` · **floor** `chokepoint`
 
 A decision owes a motivation, graduated by stakes. A rejection/abort, or an approval of an elevated-authority or external/irreversible action, is BLOCKING: it does not commit until a non-empty reason is recorded. Silent rejection by a decider is as illegitimate as a gateway denial with no rule ID (Ri-0.3).
 
@@ -150,6 +190,8 @@ A decision owes a motivation, graduated by stakes. A rejection/abort, or an appr
 
 ### O-2 — Attributed decision
 
+**binds** `decider` · **owed to** `autonoetic_agent` · **floor** `chokepoint`
+
 Every decision is attributed to the deciding principal (id + kind) on the causal chain and cannot be reattributed. The agent under decision can always tell who decided and what kind of principal they are.
 
 | rule id | check | code | test | config |
@@ -158,6 +200,8 @@ Every decision is attributed to the deciding principal (id + kind) on the causal
 
 ### O-6 — Duty to adjudicate proposals, on time
 
+**binds** `decider` · **owed to** `autonoetic_agent` · **floor** `detection`
+
 A proposal review authority owes every Ri-0.8 proposal a recorded, motivated decision within a bounded adjudication window; a proposal left un-adjudicated past the window is a recorded breach attributed to the adjudicating seat (the decision is still owed). Window duration is config.
 
 | rule id | check | code | test | config |
@@ -165,6 +209,8 @@ A proposal review authority owes every Ri-0.8 proposal a recorded, motivated dec
 | `O-6` | `proposal_adjudication_recorded_within_sla` | `scheduler/gateway_store/constitutional_proposals.rs::decide_constitutional_proposal + scheduler/gateway_store/constitutional_proposals.rs::flag_proposal_sla_breaches + scheduler.rs::check_adjudication_sla_breaches` | `router.rs::test_dispatch_constitution_resolve_proposal + scheduler.rs::breaches_are_recorded_without_changing_status` | `decider_obligations.enabled, decider_obligations.adjudication_sla_secs` |
 
 ### O-7 — Duty to adjudicate reports, on time
+
+**binds** `decider` · **owed to** `autonoetic_agent` · **floor** `detection`
 
 An anomaly review authority owes every Ri-0.18 flag a recorded, motivated decision (confirmed/dismissed/deferred, with under_review as the non-terminal holding state) within a bounded adjudication window; a flag left un-adjudicated past the window is a recorded breach attributed to the adjudicating seat (the decision is still owed). Window duration is config.
 
