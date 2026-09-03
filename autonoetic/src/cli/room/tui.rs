@@ -7502,13 +7502,23 @@ pub fn run(
         // next full refresh (empty boundaries change row layout; spinner advances
         // skip frames in double-draw).
         if repaint_after_input {
+            // Mirror the full refresh's follow snap (`selected = last row`
+            // below) so the early frame highlights the same row the full
+            // frame will. Without this, arriving at the bottom via End/G
+            // paints the highlight at the stale position for a frame and
+            // then jumps — the "displayed twice, cursor moved" flicker.
+            let early_selected = if follow {
+                view_rows.len().saturating_sub(1)
+            } else {
+                selected
+            };
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             let early_stats = compute_session_stats(&entries);
             let early_gate_count = count_active_gates(&entries, &resolved, &acted);
             let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
             let early_pending_plans =
                 unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
-            let early_safe_selected = selected.min(view_rows.len().saturating_sub(1));
+            let early_safe_selected = early_selected.min(view_rows.len().saturating_sub(1));
             let early_spawn = view_indexed
                 .get(early_safe_selected)
                 .and_then(|(_, src)| spawn_agent_for_row_source(&view_visible, *src));
@@ -7547,7 +7557,7 @@ pub fn run(
                     follow,
                     if follow { None } else { Some(view_viewport_offset) },
                     &view_rows,
-                    selected,
+                    early_selected,
                     detail.as_ref(),
                     detail_scroll,
                     detail_h_scroll,
@@ -8256,11 +8266,23 @@ pub fn run(
 
         let term_size = terminal.size()?;
         let compose_open = compose.is_some() && detail.is_none();
-        let list_area_height = if compose_open {
-            term_size.height.saturating_sub(1 + FOOTER_HEIGHT + COMPOSE_PANEL_HEIGHT)
-        } else {
-            term_size.height.saturating_sub(1 + FOOTER_HEIGHT)
-        };
+        // Mirror draw()'s layout exactly: the live LLM activity strip reserves
+        // one line under the header only while a stream is in flight. If the
+        // loop's list height ignores it, the viewport offset computed here
+        // disagrees with the painted frame by one line and the next keypress
+        // re-anchors from the wrong offset (visible double-jump arriving at
+        // the bottom of a live timeline; also skews mouse-click row mapping).
+        let has_activity_strip =
+            !build_llm_activity_strip(&llm_activity, term_size.width).is_empty();
+        let list_area_height = term_size.height.saturating_sub(
+            1 + u16::from(has_activity_strip)
+                + FOOTER_HEIGHT
+                + if compose_open {
+                    COMPOSE_PANEL_HEIGHT
+                } else {
+                    0
+                },
+        );
         let list_height = list_area_height as usize;
         let width = term_size.width as usize;
         let rail_w = 2usize;

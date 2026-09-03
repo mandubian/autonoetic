@@ -1040,8 +1040,15 @@ fn interaction_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String
         .or_else(|| entry.refs.interaction_id.clone())
         .unwrap_or_default();
     let question = field("question").unwrap_or_else(|| "operator input needed".into());
-    let headline = format!("❓ CLARIFICATION — {}", one_line(&question, 88));
+    // Headline cap is list compaction (truncation vocabulary: bare `…` = by
+    // design), not the whole ask — the full question is repeated in `detail`
+    // below so the gate modal and row preview always carry the complete text.
+    let headline = format!("❓ CLARIFICATION — {}", one_line(&question, 240));
     let mut lines = vec![format!("  ask: {interaction_id}")];
+    lines.push("  question:".to_string());
+    for line in wrap_display_lines(&question, 76) {
+        lines.push(format!("    {line}"));
+    }
     if let Some(opts) = p
         .as_ref()
         .and_then(|v| v.get("options"))
@@ -5280,6 +5287,48 @@ mod tests {
         assert!(detail.contains("[3] Option C"));
         assert!(detail.contains("or type your own"));
         assert!(detail.contains("Enter/i/r"));
+    }
+
+    #[test]
+    fn user_ask_detail_shows_full_question_when_headline_is_capped() {
+        // The headline compacts long questions for the list; the card detail
+        // (which the gate modal renders) must still carry the complete text.
+        let long_question = format!(
+            "I didn't receive the child's result or any task context in this session. \
+             Could you restate the goal (or the child's output / workflow id) so I can \
+             continue or produce the final answer? {}",
+            "Additional context beyond the cap. ".repeat(4)
+        );
+        assert!(long_question.chars().count() > 240);
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "interaction_id": "ui-long",
+                "question": long_question,
+                "allow_freeform": true,
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(
+            spec.headline.ends_with('…'),
+            "long question must compact in the headline, got: {}",
+            spec.headline
+        );
+        let detail = spec.detail.expect("should have detail");
+        assert!(detail.contains("  question:"));
+        // The tail is exactly what the headline cap cuts off — it must survive
+        // verbatim in the detail block (wrapped, so match within one line).
+        assert!(
+            detail.contains("continue or produce the final answer?"),
+            "detail must contain the full question, got: {detail}"
+        );
+        assert!(
+            detail.contains("Additional context beyond the cap."),
+            "detail must contain the question tail beyond the headline cap"
+        );
     }
 
     #[test]
