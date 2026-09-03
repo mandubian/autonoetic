@@ -270,14 +270,26 @@ pub fn constitution_profile(
     let clauses = glossary
         .into_iter()
         .map(|(id, gloss)| {
-            let (binds, enforcement) = if id.starts_with("Ri-") {
-                ("gateway", rt.rights_enforcement.get(&id).cloned())
+            // Which *enforcement table* holds the citation is legitimately
+            // keyed by prefix — the signed lock carries two tables, and an
+            // `Ri-` id is a key in one of them. Which *power the clause
+            // binds* is not: that is declared per clause in the enforcement
+            // register (#1284), and deriving it from the same prefix is what
+            // made this surface report the agent as responsible for
+            // causal-chain integrity and egress confinement.
+            let enforcement = if id.starts_with("Ri-") {
+                rt.rights_enforcement.get(&id).cloned()
             } else {
-                ("agent", rt.rules_enforcement.get(&id).cloned())
+                rt.rules_enforcement.get(&id).cloned()
             };
+            let binds = crate::enforcement_register::binds(&id)
+                .map(|b| b.label().to_string())
+                .unwrap_or_else(|| {
+                    autonoetic_types::constitution::BINDS_UNDECLARED.to_string()
+                });
             ConstitutionClause {
                 id,
-                binds: binds.to_string(),
+                binds,
                 gloss,
                 enforcement,
             }
@@ -810,13 +822,50 @@ mod tests {
         assert_eq!(p.right_enforcement_count, lock.right_enforcement_count);
         assert!(p.clauses.len() > 100, "expected the full clause set");
 
-        // A P- rule binds the agent and carries an enforcement citation; an
-        // Ri- right binds the gateway.
-        let p11 = p.clauses.iter().find(|c| c.id == "P-1.1").expect("P-1.1");
-        assert_eq!(p11.binds, "agent");
+        // Bind direction comes from the register's declared field (#1284);
+        // the enforcement citation is still keyed by prefix, because which
+        // *table of the signed lock* holds a citation genuinely is a prefix
+        // question. The two are now independent, and this asserts both.
+        let clause = |id: &str| {
+            p.clauses
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+
+        // Declared directly.
+        assert_eq!(clause("Ri-0.2").binds, "enforcer");
+        // Declared through its parent principle: P-15 binds the enforcer, so
+        // P-15.1 does. Under the old derivation this read "agent" — a party
+        // that I-14 forbids from touching an egress label at all.
+        assert_eq!(clause("P-15.1").binds, "enforcer");
+
+        // Not in the register: reports `undeclared` rather than a guess, and
+        // still carries its enforcement citation. This is the deliberate
+        // trade of #1284 part 1 — 109 of 207 clauses lose a prefix-derived
+        // label, including 9 `Ri-*` whose label happened to be right, in
+        // exchange for the guarantee that no reported direction is inferred.
+        // Narrowing the fallback to `Ri-*` "because rights really do bind the
+        // enforcer" would keep a derivation that silently mislabels the first
+        // right which does not (the `Ri-0.15` seat-standing shape). Closing
+        // the gap properly is #1284 part 2.
+        let p11 = clause("P-1.1");
+        assert_eq!(p11.binds, autonoetic_types::constitution::BINDS_UNDECLARED);
         assert!(p11.enforcement.as_deref().unwrap_or("").contains("tool_call_processor"));
-        let ri = p.clauses.iter().find(|c| c.id == "Ri-0.10").expect("Ri-0.10");
-        assert_eq!(ri.binds, "gateway");
+        assert_eq!(
+            clause("Ri-0.10").binds,
+            autonoetic_types::constitution::BINDS_UNDECLARED
+        );
+
+        // The retired party names appear nowhere.
+        for c in &p.clauses {
+            assert!(
+                c.binds != "agent" && c.binds != "gateway",
+                "{} still reports a prefix-derived party name: {}",
+                c.id,
+                c.binds
+            );
+        }
 
         // include_text attaches the full markdown.
         let full = constitution_profile(true);

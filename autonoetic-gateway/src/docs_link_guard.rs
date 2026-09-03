@@ -944,6 +944,22 @@ mod tests {
                 "records why this site pushes one rule and not two — the alias \
                  hid a double-attribution of P-10.6 (#1288)",
             ),
+            // A codebase that fixes a defect should be able to name it. Both
+            // entries are historical citations in a rationale — "this check
+            // would have caught X" — not claims that X still resolves. Scoped
+            // to the exact retired IDs, so a live emission of a *different*
+            // retired ID in this file still fails.
+            (
+                "autonoetic-gateway/src/enforcement_register.rs",
+                "R+9",
+                "names the duplicate clause the non-duplication test exists to \
+                 prevent (#1277)",
+            ),
+            (
+                "autonoetic-gateway/src/enforcement_register.rs",
+                "R-4.14",
+                "names the clause R+9 duplicated (#1277)",
+            ),
             // This file is exempt wholesale: it is the guard, and every
             // retired ID in it is either a doc comment describing what to
             // catch, an allowlist entry, or a fixture in

@@ -392,11 +392,16 @@ impl NativeTool for SelfDescribeTool {
         let rights: Vec<serde_json::Value> = enforcement_register::rights()
             .iter()
             .map(|r| {
+                // `binds` reads the clause's declared field. It was the
+                // literal `"gateway"` — sourcing the clause from the register
+                // but overriding its relation with a hardcoded string, so the
+                // one place that could disagree with the register did.
                 serde_json::json!({
                     "id": r.id,
                     "title": r.title,
                     "guarantee": r.statement,
-                    "binds": "gateway",
+                    "binds": r.binds.label(),
+                    "owed_to": r.owed_to.label(),
                 })
             })
             .collect();
@@ -607,7 +612,12 @@ mod tests {
         // Rights are surfaced front-line, sourced from the register.
         let rights = v["guaranteed"]["rights"].as_array().unwrap();
         assert_eq!(rights.len(), enforcement_register::rights().len());
-        assert!(rights.iter().all(|r| r["binds"] == "gateway"));
+        // Read from each clause's declared field, not a literal: a right is
+        // an *enforcer* duty owed to the agent (#1284). "gateway" named this
+        // implementation rather than the power any implementation must
+        // provide, which is the distinction the power vocabulary draws.
+        assert!(rights.iter().all(|r| r["binds"] == "enforcer"));
+        assert!(rights.iter().all(|r| r["owed_to"] == "autonoetic_agent"));
         assert!(
             rights.iter().any(|r| r["id"] == "Ri-0.14"),
             "expected the wake-up right to be surfaced"

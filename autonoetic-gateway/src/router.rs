@@ -8024,9 +8024,36 @@ mod tests {
         assert!(result["text"].is_null(), "default view omits the markdown");
         let clauses = result["clauses"].as_array().expect("clauses array");
         assert!(clauses.len() > 100);
-        assert!(clauses
-            .iter()
-            .any(|c| c["id"] == "P-1.1" && c["binds"] == "agent"));
+
+        // Bind direction is read from the register's declared field, never
+        // derived from the ID prefix (#1284). Two consequences visible here:
+        //
+        // 1. A registered clause reports its declared power. `P-15.1` is an
+        //    *enforcer* duty — `I-14` forbids an agent from setting, stripping
+        //    or reading an egress label, so the pre-#1284 answer ("agent")
+        //    named a party that cannot comply even in principle.
+        // 2. An unclassified clause says so. `P-1.1` is not in the register,
+        //    and reports `undeclared` rather than the prefix's guess. The
+        //    remaining ~163 numbered clauses are tracked in #1284 part 2.
+        let clause = |id: &str| {
+            clauses
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing from the clause index"))
+        };
+        assert_eq!(clause("P-15.1")["binds"], "enforcer");
+        assert_eq!(clause("Ri-0.2")["binds"], "enforcer");
+        assert_eq!(
+            clause("P-1.1")["binds"],
+            autonoetic_types::constitution::BINDS_UNDECLARED
+        );
+        // No clause reports the retired party names.
+        assert!(
+            !clauses
+                .iter()
+                .any(|c| c["binds"] == "agent" || c["binds"] == "gateway"),
+            "the prefix derivation's party names must not survive anywhere"
+        );
 
         // include_text attaches the full markdown.
         let req = JsonRpcRequest {
