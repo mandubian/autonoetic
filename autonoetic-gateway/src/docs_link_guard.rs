@@ -246,7 +246,10 @@ fn retired_clause_refs(line: &str) -> Vec<String> {
         if dashed {
             j += 1;
         }
-        if pluses == 0 && !dashed {
+        // Exactly the three retired plus-families, or a dashed one. `R++++3`
+        // is not a retired clause — it never existed — so matching it would
+        // report a defect that cannot be fixed by mapping to a successor.
+        if !dashed && !(1..=3).contains(&pluses) {
             i += 1;
             continue;
         }
@@ -911,6 +914,11 @@ mod tests {
         catches("FOR-4.14 and xR+3 and R_4.14", &[]);
         catches("no clause here at all", &[]);
 
+        // Only the three families that existed. `R++++3` was never a clause,
+        // so flagging it would report a defect with no successor to map to.
+        catches("R++++3 and R+++++9", &[]);
+        catches("R+++3 is retired but R++++3 never existed", &["R+++3"]);
+
         // A trailing sentence dot is not part of the ID.
         catches("superseded by R-4.14.", &["R-4.14"]);
     }
@@ -943,7 +951,7 @@ mod tests {
             // Scanning it would make the guard unable to document itself.
             (
                 "autonoetic-gateway/src/docs_link_guard.rs",
-                "R",
+                "*",
                 "the guard's own doc comments, allowlist, and extractor fixtures",
             ),
         ];
@@ -961,8 +969,12 @@ mod tests {
             files_scanned += 1;
             for (lineno, line) in raw.lines().enumerate() {
                 for found in retired_clause_refs(line) {
+                    // Exact ID match, or `*` for a whole file. Not a prefix
+                    // match: an entry for `R+9` would then silently exempt
+                    // `R+90` and `R+99` too, which is how an allowlist stops
+                    // meaning what it says.
                     let exempt = allowed.iter().any(|(path, token, _)| {
-                        rel_str == *path && found.starts_with(token)
+                        rel_str == *path && (*token == "*" || found == *token)
                     });
                     if exempt {
                         continue;
