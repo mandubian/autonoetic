@@ -19,7 +19,6 @@
 //! fresh tempdir per test is not an option here — every scenario below uses a
 //! distinct `agent_id` instead to avoid collisions on the shared workspace.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -32,13 +31,13 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 const INSTALLER_ID: &str = "installer-test-agent";
 
-fn workspace() -> &'static support::TestWorkspace {
-    static WORKSPACE: OnceLock<support::TestWorkspace> = OnceLock::new();
-    WORKSPACE.get_or_init(|| support::TestWorkspace::new().expect("workspace should create"))
+fn workspace() -> &'static crate::support::TestWorkspace {
+    static WORKSPACE: OnceLock<crate::support::TestWorkspace> = OnceLock::new();
+    WORKSPACE.get_or_init(|| crate::support::TestWorkspace::new().expect("workspace should create"))
 }
 
 fn installer_manifest(capabilities: Vec<Capability>) -> AgentManifest {

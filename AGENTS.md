@@ -5,7 +5,7 @@ Developer instruction file for OpenCode sessions working on this repository.
 ## Build & Test
 
 **Always use `cargo nextest run`, never `cargo test`, for verification.**
-`cargo test` executes the ~47 integration-test binaries sequentially and
+`cargo test` executes the gateway's 38 integration-test binaries sequentially and
 `#[serial]` tests serialize within each binary, so its wall time collapses to
 the sum of serial test time (~10 min full workspace measured on a 32-core dev
 box) while `cargo nextest run` runs tests as processes across all cores
@@ -213,14 +213,14 @@ When modifying `LoopGuard`, update all checkpoint construction sites (grep `loop
 
 Integration tests use `tempfile::tempdir()` for isolated workspaces and `serial_test::serial` for state isolation. Tests are self-contained — no external services required.
 
-**Grouped test binaries (#922, in progress):** `autonoetic-gateway/tests/` is
-being collapsed from ~240 single-file binaries into ~5–10 domain binaries
-(`tests/<domain>/main.rs` with one module per former file — done: `egress`).
-When adding a new integration suite, put it in the matching domain binary
-rather than creating a new top-level `tests/*.rs` file. Suites that bind
-ports, use fixed paths, or spawn singleton daemons must stay in their own
-binary (or be refactored to `tempfile` + port-0 first) — cohabiting one
-process requires no cross-test external state.
+**Grouped test binaries (#922, complete):** `autonoetic-gateway/tests/` is
+collapsed from ~240 single-file binaries into 38 domain binaries
+(`tests/<domain>/main.rs` with one module per former file; no top-level
+`tests/*.rs` files remain). When adding a new integration suite, put it in the
+matching domain binary rather than creating a new top-level `tests/*.rs` file.
+Suites that bind ports, use fixed paths, or spawn singleton daemons must stay
+in their own binary (or be refactored to `tempfile` + port-0 first) —
+cohabiting one process requires no cross-test external state.
 
 **Where a test lives (#1001):** pure module semantics stay as `#[cfg(test)]`
 unit tests next to the code (`scheduler/gateway_store/workspace_taint.rs::tests`,
@@ -243,8 +243,8 @@ recursively, so keeping the basename unchanged also works.
 
 Notable test suites:
 - `turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, parallel-join
-- `approved_exec_cache_integration.rs` — cache fingerprint, normalization, full cycle
-- `emergency_stop_root_session_integration.rs` — circuit breaker, grant cleanup
+- `approval/approved_exec_cache_integration.rs` — cache fingerprint, normalization, full cycle
+- `approval/emergency_stop_root_session_integration.rs` — circuit breaker, grant cleanup
 - `promotion/record_e2e.rs` / `promotion/gate_hardening.rs` — severity gating
 - `continuation_hmac_integrity_integration.rs` — HMAC signing, verification, tamper detection
 - `continuation_cleanup_integration.rs` — delete on reject/cancel/withdraw, startup reaper, emergency stop

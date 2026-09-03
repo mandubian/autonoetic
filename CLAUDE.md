@@ -14,7 +14,7 @@ cargo build --release                # Release build
 ### Test
 
 **Always use `cargo nextest run`, never `cargo test`, for verification.**
-`cargo test` executes the ~47 integration-test binaries sequentially and
+`cargo test` executes the gateway's 38 integration-test binaries sequentially and
 `#[serial]` tests serialize within each binary, so its wall time collapses to
 the sum of serial test time (~10 min full workspace measured on a 32-core dev
 box) while `cargo nextest run` runs tests as processes across all cores
@@ -149,10 +149,10 @@ The gateway exposes a REST API for remote agents. Authentication uses HMAC. See 
 
 ### Tests
 
-Integration tests are in `autonoetic-gateway/tests/` (~47 binaries, being
-collapsed into domain binaries — `tests/<domain>/main.rs` with one module per
-former file, e.g. `tests/egress/`; suites binding ports or fixed paths stay
-standalone). They use `tempfile` for isolated workspaces and `serial_test` for
+Integration tests are in `autonoetic-gateway/tests/` (38 domain binaries,
+`tests/<domain>/main.rs` with one module per former file — no top-level
+`tests/*.rs` files remain; suites binding ports or fixed paths stay in their
+own binary). They use `tempfile` for isolated workspaces and `serial_test` for
 state isolation. CLI e2e tests are in `autonoetic/tests/cli_e2e.rs`.
 
 Notable suite for approval continuation:

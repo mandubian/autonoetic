@@ -136,12 +136,12 @@ Do NOT add `resource.revoke` as a runtime tool. Revocation is handled via Phase 
 
 ### Integration tests
 
-- [x] `tests/approved_exec_cache_integration.rs`: Cache record/find/persistence tests
-- [x] `tests/approved_exec_cache_integration.rs`: has_concrete_targets tests (unit + integration)
-- [x] `tests/approved_exec_cache_integration.rs`: normalize_targets tests
-- [x] `tests/approved_exec_cache_integration.rs`: compute_fingerprint tests
-- [x] `tests/approved_exec_cache_integration.rs`: Cache full cycle test (miss → record → hit → miss for different code)
-- [x] `tests/approved_exec_cache_integration.rs`: Opaque targets never cached test
+- [x] `tests/approval/approved_exec_cache_integration.rs`: Cache record/find/persistence tests
+- [x] `tests/approval/approved_exec_cache_integration.rs`: has_concrete_targets tests (unit + integration)
+- [x] `tests/approval/approved_exec_cache_integration.rs`: normalize_targets tests
+- [x] `tests/approval/approved_exec_cache_integration.rs`: compute_fingerprint tests
+- [x] `tests/approval/approved_exec_cache_integration.rs`: Cache full cycle test (miss → record → hit → miss for different code)
+- [x] `tests/approval/approved_exec_cache_integration.rs`: Opaque targets never cached test
 
 ## Security Considerations
 

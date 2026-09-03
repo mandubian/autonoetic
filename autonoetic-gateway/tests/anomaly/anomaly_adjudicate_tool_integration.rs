@@ -17,7 +17,6 @@
 //!   - `anomaly_adjudication.require_terminal_cosign = true` defers terminal
 //!     decisions back to the operator
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -28,7 +27,7 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{AnomalyAdjudicationConfig, GatewayConfig};
 use std::sync::Arc;
 use tempfile::tempdir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn manifest_with(caps: Vec<Capability>) -> AgentManifest {
     AgentManifest {

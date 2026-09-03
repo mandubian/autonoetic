@@ -9,7 +9,7 @@ members = [
 ]
 resolver = "2"
 
-# Build-performance tuning (#919, #920). With 239 gateway integration-test
+# Build-performance tuning (#919, #920). With 38 gateway integration-test
 # binaries, full `debug = 2` produces ~250 MB per test binary (~60 GB of
 # linker output across the suite). Line tables keep backtraces at file:line
 # resolution while cutting binaries ~3.5×; only debugger variable inspection

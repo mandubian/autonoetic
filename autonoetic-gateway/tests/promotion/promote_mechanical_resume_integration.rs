@@ -7,7 +7,6 @@
 //! (initial promote, re-issue after approval, final text); the mechanical path
 //! needs only two.
 
-mod support;
 
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
@@ -117,7 +116,7 @@ fn seed_builder_agent(
     std::fs::create_dir_all(&agent_dir)?;
     std::fs::write(agent_dir.join("SKILL.md"), builder_skill_md())?;
     std::fs::write(agent_dir.join("runtime.lock"), runtime_lock())?;
-    support::seed_agent_revision(store, config, BUILDER_AGENT_ID, &agent_dir)
+    crate::support::seed_agent_revision(store, config, BUILDER_AGENT_ID, &agent_dir)
 }
 
 fn seed_target_revision(
@@ -215,7 +214,7 @@ async fn test_promote_mechanically_re_executes_on_resume_without_llm_re_issue_bo
             "initialize_constitution failed without a fallback runtime: {e:#}"
         );
     }
-    let workspace = support::TestWorkspace::new()?;
+    let workspace = crate::support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.approval_dwell_multiplier = 0.0;
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -229,7 +228,7 @@ async fn test_promote_mechanically_re_executes_on_resume_without_llm_re_issue_bo
 
     let responses = Arc::new(Mutex::new(make_stub_responses()));
     let responses_clone = Arc::clone(&responses);
-    let stub = support::OpenAiStub::spawn(move |_raw, _body| {
+    let stub = crate::support::OpenAiStub::spawn(move |_raw, _body| {
         let responses = Arc::clone(&responses_clone);
         async move {
             let mut queue = responses.lock().unwrap();
@@ -241,8 +240,8 @@ async fn test_promote_mechanically_re_executes_on_resume_without_llm_re_issue_bo
     })
     .await?;
 
-    let _base_url = support::EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
-    let _api_key = support::EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+    let _base_url = crate::support::EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _api_key = crate::support::EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
     let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
     let session_id = "promote-mechanical-resume-session";

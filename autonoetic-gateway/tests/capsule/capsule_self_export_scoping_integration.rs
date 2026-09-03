@@ -4,14 +4,13 @@
 //! any agent. Mirrors the target-scoped capability pattern in
 //! `constitution_private_reasoning_c.rs`.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::capsule::{CapsuleExportTool, CapsuleImportTool};
 use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::capability::Capability;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
     AgentManifest {

@@ -31,7 +31,6 @@ const STACK_BUDGET_BYTES: usize = 1_024 * 1024;
 const CHILD_TEST: &str = "bounded_stack_child";
 const CHILD_ENV: &str = "AUTONOETIC_BOOTSTRAP_STACK_BUDGET_CHILD";
 
-mod support;
 
 #[test]
 fn gateway_bootstrap_fits_within_the_stack_budget() {
