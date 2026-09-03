@@ -177,17 +177,21 @@ fn collapse_repeated_error_results(sanitized: &mut [Message], originals: &[Messa
 }
 
 /// Replace duplicate `Role::Tool` message contents with a short marker. The
-/// first occurrence in the history (or after a different tool result) is
-/// preserved; later duplicates keep their `tool_call_id` so provider
-/// assistant/tool pairing remains valid.
+/// first occurrence of a given result content is preserved in full; every
+/// later repeat — consecutive or interleaved with other calls — keeps its
+/// `tool_call_id` (so provider assistant/tool pairing stays valid) but its
+/// body is replaced with a marker. Interleaved repeats matter in practice:
+/// an agent that re-reads the same already-terminal task outcome several
+/// times a session apart pays full tokens each time unless dedup is
+/// content-global, not just adjacent.
 fn dedup_duplicate_tool_results(messages: &mut [Message]) {
-    let mut last_tool_content: Option<String> = None;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages.iter_mut() {
         if msg.role == Role::Tool && !msg.content.is_empty() {
-            if last_tool_content.as_deref() == Some(msg.content.as_str()) {
-                msg.content = "[duplicate result — see above]".to_string();
+            if seen.contains(&msg.content) {
+                msg.content = "[duplicate result — same content as an earlier tool result above; collapsed to save context]".to_string();
             } else {
-                last_tool_content = Some(msg.content.clone());
+                seen.insert(msg.content.clone());
             }
         }
     }
@@ -1489,9 +1493,9 @@ mod tests {
         assert_eq!(sanitized[1].tool_call_id.as_deref(), Some("tc_1"));
 
         // Second and third consecutive duplicates are replaced by a marker.
-        assert_eq!(sanitized[3].content, "[duplicate result — see above]");
+        assert_eq!(sanitized[3].content, "[duplicate result — same content as an earlier tool result above; collapsed to save context]");
         assert_eq!(sanitized[3].tool_call_id.as_deref(), Some("tc_2"));
-        assert_eq!(sanitized[4].content, "[duplicate result — see above]");
+        assert_eq!(sanitized[4].content, "[duplicate result — same content as an earlier tool result above; collapsed to save context]");
         assert_eq!(sanitized[4].tool_call_id.as_deref(), Some("tc_3"));
 
         // Original history is untouched.
@@ -1540,11 +1544,18 @@ mod tests {
             },
         );
 
-        // The third message is identical to the first but not consecutive, so
-        // it is not collapsed.
+        // Dedup is content-global: the third message repeats the first even
+        // though a different result sits between them, so it collapses (the
+        // repeated re-read pattern that dominated session-0aba5c63's token
+        // burn). Pairing ids stay intact.
         assert_eq!(sanitized[0].content, "result A");
         assert_eq!(sanitized[1].content, "result B");
-        assert_eq!(sanitized[2].content, "result A");
+        assert!(
+            sanitized[2].content.starts_with("[duplicate result"),
+            "non-adjacent repeat collapses, got: {}",
+            sanitized[2].content
+        );
+        assert_eq!(sanitized[2].tool_call_id.as_deref(), Some("tc_3"));
     }
 
     #[test]
@@ -1620,7 +1631,7 @@ mod tests {
 
         // Both are truncated identically, so the second collapses.
         assert!(sanitized[0].content.contains("[..."));
-        assert_eq!(sanitized[1].content, "[duplicate result — see above]");
+        assert_eq!(sanitized[1].content, "[duplicate result — same content as an earlier tool result above; collapsed to save context]");
     }
 
     fn tool_err(id: &str, wf: &str) -> Message {
@@ -1635,6 +1646,65 @@ mod tests {
             reasoning_content: None,
             reasoning_details: None,
         }
+    }
+
+    /// Interleaved identical tool results collapse too (session-0aba5c63: the
+    /// planner re-read the same terminal task outcome 9× with other calls in
+    /// between — the previous consecutive-only dedup never caught those).
+    #[test]
+    fn dedup_collapses_identical_results_that_are_not_adjacent() {
+        let history = vec![
+            Message::user("check the task"),
+            Message::assistant("reading"),
+            Message {
+                id: None,
+                role: Role::Tool,
+                content: r#"{"status":"succeeded","result":"27 tests passed"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message::assistant("now something else"),
+            Message {
+                id: None,
+                role: Role::Tool,
+                content: r#"{"ok":true,"other":"different content"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message::assistant("re-reading the same task"),
+            Message {
+                id: None,
+                role: Role::Tool,
+                content: r#"{"status":"succeeded","result":"27 tests passed"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_3".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: true,
+                collapse_repeated_errors: false,
+            },
+        );
+
+        assert!(sanitized[2].content.contains("27 tests passed"), "first occurrence kept in full");
+        assert!(sanitized[4].content.contains("different content"), "distinct result untouched");
+        assert!(
+            sanitized[6].content.starts_with("[duplicate result"),
+            "interleaved duplicate collapses, got: {}",
+            sanitized[6].content
+        );
+        assert_eq!(sanitized[6].tool_call_id.as_deref(), Some("tc_3"), "pairing id preserved");
     }
 
     /// #705: the same normalized error (different volatile workflow ids),

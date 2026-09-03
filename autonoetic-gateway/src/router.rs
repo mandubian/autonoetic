@@ -1839,6 +1839,17 @@ impl JsonRpcRouter {
                     let event_type_clone = event_type.clone();
                     let source_agent_id = params.source_agent_id.clone();
                     let config = self.config.clone();
+                    // Signal-pump deliveries carry their notification id so a
+                    // failed turn can requeue the wake (see the error branch
+                    // below) — the pump marks the notification Delivered as
+                    // soon as this spawn is accepted, so without this the wake
+                    // is silently lost when the turn never runs.
+                    let signal_request_id_for_requeue: Option<String> =
+                        params.metadata.as_ref().filter(|m| {
+                            m.get("signal_delivered") == Some(&serde_json::Value::Bool(true))
+                        }).and_then(|m| {
+                            m.get("signal_request_id").and_then(|v| v.as_str())
+                        }).map(str::to_string);
 
                     {
                         let mut map = async_results.lock().await;
@@ -1904,9 +1915,32 @@ impl JsonRpcRouter {
                                         );
                                     }
                                     entry.status = AsyncIngestStatus::Failed;
-                                    entry.error = Some(e);
+                                    entry.error = Some(e.clone());
                                     entry.enforced_rules = enforced_rules;
                                     entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                                    // Requeue the signal-pump notification: it
+                                    // was marked Delivered when the spawn was
+                                    // accepted, but the turn failed — without
+                                    // this the wake is lost and the session
+                                    // idles until an operator nudge (observed:
+                                    // session-0aba5c63, 11:10 child-terminal
+                                    // signal delivered mid-turn). attempt_count
+                                    // bounds the redelivery loop.
+                                    if let Some(sig_req) = &signal_request_id_for_requeue {
+                                        if let Some(store) = router.execution.gateway_store() {
+                                            let _ = store.increment_attempt(sig_req, Some(&e.clone()));
+                                            let _ = store.update_notification_status(
+                                                sig_req,
+                                                autonoetic_types::notification::NotificationStatus::Pending,
+                                            );
+                                            tracing::warn!(
+                                                target = "gateway.router",
+                                                signal_request_id = %sig_req,
+                                                error = %e,
+                                                "Async signal turn failed — notification requeued for redelivery"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
