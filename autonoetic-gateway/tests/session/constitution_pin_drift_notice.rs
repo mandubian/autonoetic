@@ -40,13 +40,35 @@ impl CaptureSystemPromptDriver {
 #[async_trait::async_trait]
 impl LlmDriver for CaptureSystemPromptDriver {
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        // Capture the system message **and** the trailing gateway state
+        // notice. #1291-era `7db46891` moved the volatile per-turn tails
+        // (memory context, degradation notice, constitution drift notice,
+        // re-signed attestation) out of the system message so position 0
+        // stays byte-stable for prompt-prefix caches. The notices are still
+        // delivered — in a trailing user-role block — so a test that reads
+        // only the system message reports them as absent.
+        //
+        // Both roles are joined rather than switching to the notice alone,
+        // because these suites also assert *absence* (an undegraded session
+        // gets no degradation notice). Narrowing the capture to the system
+        // message would make every one of those negatives pass vacuously.
         let system_prompt = req
             .messages
             .iter()
             .find(|m| m.role == Role::System)
             .map(|m| m.content.clone())
             .expect("system prompt must be present");
-        self.prompts.lock().unwrap().push(system_prompt);
+        let state_notice = req
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User && m.content.contains("[gateway state notice"))
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.prompts
+            .lock()
+            .unwrap()
+            .push(format!("{system_prompt}\n\n{state_notice}"));
 
         Ok(CompletionResponse {
             text: "done".to_string(),
