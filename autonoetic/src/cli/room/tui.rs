@@ -646,16 +646,28 @@ fn build_info_panel(
                     String::new()
                 };
                 lines.push(format!(
-                    "    {:<24} {:>4} calls  in {}  out {}{}",
+                    "    {:<24} {:>4} calls  in {}  cached {}  out {}{}",
                     model,
                     m.calls,
                     format_tokens(m.input_tokens),
+                    format_tokens(m.cached_tokens),
                     format_tokens(m.output_tokens),
                     err_tag,
                 ));
             }
         }
-        lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
+        let cache_pct = if stats.total_input > 0 {
+            stats.total_cached as f64 / stats.total_input as f64 * 100.0
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "  Tokens     in {}  (cached {} · {:.0}%)   out {}",
+            format_tokens(stats.total_input),
+            format_tokens(stats.total_cached),
+            cache_pct,
+            format_tokens(stats.total_output)
+        ));
         let avg_in = stats.total_input / stats.llm_calls as u64;
         let avg_out = stats.total_output / stats.llm_calls as u64;
         lines.push(format!("  Avg/call   in {}   out {}", format_tokens(avg_in), format_tokens(avg_out)));
@@ -731,7 +743,17 @@ fn build_header(
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
     if stats.llm_calls > 0 {
-        right_parts.push(format!("{} → {} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+        let mut part = format!(
+            "{} → {} ●{}",
+            format_tokens(stats.total_input),
+            format_tokens(stats.total_output),
+            stats.llm_calls
+        );
+        if stats.total_cached > 0 {
+            let pct = stats.total_cached as f64 / stats.total_input.max(1) as f64 * 100.0;
+            part.push_str(&format!(" · cache {:.0}%", pct));
+        }
+        right_parts.push(part);
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
@@ -3766,12 +3788,18 @@ struct ModelStats {
     calls: u64,
     input_tokens: u64,
     output_tokens: u64,
+    /// Prompt-prefix cache hits (subset of `input_tokens`) — billed at the
+    /// discounted cache-read rate.
+    cached_tokens: u64,
     errors: u64,
 }
 
 struct SessionStats {
     total_input: u64,
     total_output: u64,
+    /// Cache-hit subset of `total_input` (0 for sessions without cache
+    /// telemetry — older events lack `cached_tokens`).
+    total_cached: u64,
     llm_calls: u64,
     models: Vec<String>,
     /// Per-model breakdown of calls, tokens, and errors.
@@ -3797,6 +3825,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
     let mut stats = SessionStats {
         total_input: 0,
         total_output: 0,
+        total_cached: 0,
         llm_calls: 0,
         models: Vec::new(),
         per_model: HashMap::new(),
@@ -3813,9 +3842,13 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                     "llm.round" => {
                         let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                         let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        // Cache hits are a subset of the input prompt; clamp so
+                        // a misbehaving provider can't push the sum past `inp`.
+                        let cached = v.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0).min(inp);
                         if inp > 0 || out > 0 {
                             stats.total_input += inp;
                             stats.total_output += out;
+                            stats.total_cached += cached;
                             stats.llm_calls += 1;
                         }
 
@@ -3852,6 +3885,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                             m.calls += 1;
                             m.input_tokens += inp;
                             m.output_tokens += out;
+                            m.cached_tokens += cached;
                         }
                     }
                     "llm.request_failed" => {
@@ -15008,6 +15042,7 @@ mod tests {
         SessionStats {
             total_input: 0,
             total_output: 0,
+            total_cached: 0,
             llm_calls: 0,
             models: Vec::new(),
             per_model: HashMap::new(),
@@ -15017,6 +15052,80 @@ mod tests {
             pending_calls: Vec::new(),
             pending_age_turns: None,
         }
+    }
+
+    // ---- cached-token accounting (#prompt-cache observability) ----
+
+    fn cached_round_entry(in_t: u64, out_t: u64, cached_t: u64) -> SessionTimelineEntry {
+        SessionTimelineEntry {
+            event_id: "ev-cache".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: autonoetic_types::principal::Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: "llm.round".into(),
+            altitude: Altitude::Detail,
+            occurred_at: "2026-06-01T00:00:00Z".into(),
+            payload: Some(
+                serde_json::json!({
+                    "model": "test/model",
+                    "input_tokens": in_t,
+                    "output_tokens": out_t,
+                    "cached_tokens": cached_t,
+                })
+                .to_string(),
+            ),
+            refs: autonoetic_types::session_timeline::TimelineRefs::default(),
+        }
+    }
+
+    #[test]
+    fn session_stats_clamp_and_aggregate_cached_tokens() {
+        let entries = vec![
+            cached_round_entry(1000, 100, 600),
+            // Provider-reported cache hits above the input are clamped to it.
+            cached_round_entry(500, 50, 900),
+            // Events without cache telemetry (older rows) count as 0.
+            cached_round_entry(400, 40, 0),
+        ];
+        let stats = compute_session_stats(&entries);
+        assert_eq!(stats.total_input, 1900);
+        assert_eq!(stats.total_cached, 600 + 500, "clamped to input");
+        assert_eq!(stats.total_output, 190);
+        let m = &stats.per_model["model"];
+        assert_eq!(m.calls, 3);
+        assert_eq!(m.cached_tokens, 1100);
+
+        let header = build_header(
+            "session-root-1",
+            "tui",
+            &stats,
+            0,
+            true,
+            FloorMode::Altitude(Altitude::Normal),
+            true,
+            None,
+            false,
+            120,
+        );
+        assert!(header.contains("cache 58%"), "{header}");
+
+        // A session without cache telemetry keeps the header unchanged.
+        let no_cache = compute_session_stats(&[cached_round_entry(100, 10, 0)]);
+        let plain = build_header(
+            "session-root-1",
+            "tui",
+            &no_cache,
+            0,
+            true,
+            FloorMode::Altitude(Altitude::Normal),
+            true,
+            None,
+            false,
+            120,
+        );
+        assert!(!plain.contains("cache"), "{plain}");
     }
 
     #[test]
