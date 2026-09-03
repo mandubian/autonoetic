@@ -359,6 +359,9 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
         let trace_id_for_log = execution_trace_id.clone();
 
         // Enforce audit-first ordering: no promotion DB mutation without a durable causal append.
+        // `target` carries the artifact id in the lean witness itself (#1278):
+        // "was this artifact promoted?" stays answerable from the witness
+        // alone, without resolving the content-addressed payload.
         let logger = CausalLogger::new(&causal_log_path)?;
         logger.log_durable(
             &manifest.agent.id,
@@ -368,6 +371,8 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
             "tool",
             "promotion_record",
             EntryStatus::Success,
+            Some(artifact_id.as_str()),
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(crate::log_redaction::RedactedPayload::from_raw(
                 serde_json::json!({
                     "arguments": {

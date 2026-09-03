@@ -21,6 +21,28 @@ impl std::fmt::Display for EntryStatus {
     }
 }
 
+/// Witness format version of a [`CausalChainEntry`].
+///
+/// - `1` — the legacy fat witness: the (redacted) payload is embedded inline
+///   and `enforced_rules`/`payload_ref` are absent. Only `payload_hash`
+///   commits to payload content.
+/// - `2` — the lean witness (#1278): the payload leaves the file entirely.
+///   `payload_hash` keeps committing to its content and `payload_ref` points
+///   at the immutable content-addressed copy (`<history>/payloads/<ref>.json`,
+///   ref = the payload's SHA-256 hex). `enforced_rules` is witnessed so I-6
+///   attribution ("every enforcement decision is attributable to a rule ID in
+///   the causal chain") is tamper-evident, not just queryable.
+///
+/// The field is serialized as `"v"` and defaults to `1` on deserialization so
+/// pre-existing segments keep verifying under their original field set — the
+/// entry hash is version-dispatched, never re-interpreted.
+pub const WITNESS_FORMAT_VERSION_V1: u32 = 1;
+pub const WITNESS_FORMAT_VERSION_V2: u32 = 2;
+
+fn default_witness_format_version() -> u32 {
+    WITNESS_FORMAT_VERSION_V1
+}
+
 /// A single entry in the append-only `.jsonl` Causal Chain log.
 ///
 /// **Principal identity**: `actor_id` *is* the principal identity — it is
@@ -28,6 +50,11 @@ impl std::fmt::Display for EntryStatus {
 /// `event_seq`. No `agent_id` → `principal_id` rename is planned; the
 /// generic identity already lives at the ledger layer. See
 /// [`crate::principal`] for the typed principal model.
+///
+/// **Lean witness (v2)**: the `payload` is *not* written to the file — the
+/// entry carries `payload_hash` (fingerprint commitment) and `payload_ref`
+/// (where the content-addressed copy lives). `payload` is only ever
+/// populated when deserializing a v1 entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalChainEntry {
     pub timestamp: String,
@@ -45,12 +72,43 @@ pub struct CausalChainEntry {
     pub target: Option<String>,
     pub status: EntryStatus,
     pub reason: Option<String>,
+    /// Legacy inline payload — v1 entries only. Never serialized by a v2
+    /// writer; present when reading pre-existing segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
     #[serde(default)]
     pub payload_hash: Option<String>,
+    /// Content-addressed payload reference (SHA-256 hex) — v2 entries.
+    /// The bytes live at `<history_dir>/payloads/<ref>.json` beside the
+    /// witness file and must hash to `payload_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_ref: Option<String>,
+    /// Rule/right IDs whose enforcement this entry witnesses (I-6). Bound
+    /// into the v2 entry hash, so attribution is tamper-evident.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enforced_rules: Vec<String>,
+    /// Witness format version — serialized as `"v"`, defaults to `1`.
+    #[serde(
+        rename = "v",
+        default = "default_witness_format_version",
+        skip_serializing_if = "is_v1"
+    )]
+    pub format_version: u32,
     pub prev_hash: String,
     #[serde(default)]
     pub entry_hash: String,
+}
+
+fn is_v1(v: &u32) -> bool {
+    *v == WITNESS_FORMAT_VERSION_V1
+}
+
+impl CausalChainEntry {
+    /// True when this entry was written by the lean (v2) witness: no inline
+    /// payload, `payload_ref` points at the content-addressed copy.
+    pub fn is_lean_witness(&self) -> bool {
+        self.format_version >= WITNESS_FORMAT_VERSION_V2
+    }
 }
 
 pub const RULE_ID_EVENT_ATTRIBUTION: &str = "R+++3";

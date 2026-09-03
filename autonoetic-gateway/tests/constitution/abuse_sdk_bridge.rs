@@ -259,6 +259,8 @@ fn handle_sdk_in_test(
             "abuse",
             "payload_too_large",
             autonoetic_types::causal_chain::EntryStatus::Denied,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_raw(serde_json::json!({
                 "detail": format!("{} bytes exceeds {} limit", line.len(), rate_limiter.max_payload_bytes()),
                 "violation": "payload_too_large",
@@ -309,6 +311,8 @@ fn handle_sdk_in_test(
             "abuse",
             "rate_limited",
             autonoetic_types::causal_chain::EntryStatus::Denied,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_raw(serde_json::json!({
                 "detail": format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit()),
                 "violation": "rate_limited",

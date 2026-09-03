@@ -291,13 +291,27 @@ async fn test_loopback_content_audit_and_negatives_body() -> anyhow::Result<()> 
     let mut agent_content_reads = 0;
     let mut agent_session_ends = 0;
 
+    // Lean witness (#1278): tool_name lives in the content-addressed payload
+    // under `history/payloads/`, referenced from `payload_ref`.
+    let cas_dir = rev_dir.join("history").join("payloads");
+    let cas_payload = |value: &serde_json::Value| -> Option<serde_json::Value> {
+        let reference = value["payload_ref"].as_str()?;
+        let raw = std::fs::read_to_string(cas_dir.join(format!("{reference}.json"))).ok()?;
+        serde_json::from_str(&raw).ok()
+    };
+
     for line in agent_history.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
             if value["session_id"].as_str() == Some(session_id) {
                 if value["action"].as_str() == Some("requested") {
-                    if value["payload"]["tool_name"].as_str() == Some("content_write") {
+                    let payload = cas_payload(&value);
+                    let tool_name = payload
+                        .as_ref()
+                        .and_then(|p| p["tool_name"].as_str())
+                        .unwrap_or("");
+                    if tool_name == "content_write" {
                         agent_content_writes += 1;
-                    } else if value["payload"]["tool_name"].as_str() == Some("resolve") {
+                    } else if tool_name == "resolve" {
                         agent_content_reads += 1;
                     }
                 } else if value["category"].as_str() == Some("session")

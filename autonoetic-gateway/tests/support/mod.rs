@@ -517,6 +517,19 @@ pub fn read_causal_entries(path: &Path) -> anyhow::Result<Vec<CausalChainEntry>>
     read_jsonl_entries(path)
 }
 
+/// Resolve a witness entry's payload to its content (#1278).
+///
+/// v1 entries carry the payload inline; lean (v2) entries point at the
+/// content-addressed copy in `<history>/payloads/<ref>.json` and are verified
+/// against `payload_hash` on the way out. Any witness path under the same
+/// history dir resolves to the same CAS.
+pub fn causal_entry_payload(
+    witness_path: &Path,
+    entry: &CausalChainEntry,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    autonoetic_gateway::causal_chain::resolve_entry_payload(witness_path, entry)
+}
+
 pub async fn require_single_pending_approval(
     execution: Arc<GatewayExecutionService>,
     config: &GatewayConfig,

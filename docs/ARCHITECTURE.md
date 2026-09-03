@@ -87,7 +87,7 @@ The gateway is the security boundary and execution engine. It is a **narrow rule
 | **Execution Service** | Spawns agent sessions, manages lifecycle |
 | **Layer Store** | Content-addressed storage for compressed directory trees (artifact dependencies) |
 | **Content Store** | SHA-256 content-addressable storage for artifacts |
-| **Causal Chain** | Append-only JSONL audit log with hash-chain integrity |
+| **Causal Chain** | Append-only JSONL audit log with hash-chain integrity; lean witness entries carry `payload_hash`/`payload_ref` and the content lives in a content-addressed `payloads/` store (#1278) |
 | **Scheduler** | Manages background reevaluation cadence; wake predicates: `Timer` and `ApprovalResolved` |
 | **Fast Scheduler** | Parallel low-latency loop for sub-second interval jobs (disabled by default) |
 | **Sandbox Runner** | Executes scripts via bubblewrap, docker, or microvm |

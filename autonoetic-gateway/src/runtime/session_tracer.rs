@@ -462,12 +462,24 @@ impl SessionTracer {
         let event_seq = self.next_event_seq();
         let event_id = uuid::Uuid::new_v4().to_string();
 
+        // Attribution and target are extracted once so the JSONL witness and
+        // the DB row carry the same values (#1278) — the witness binds both
+        // into its entry hash, so they must be written, not derived later.
+        let target = payload
+            .as_ref()
+            .and_then(|v| v.get("target"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let enforced_rules = enforced_rules_from_payload(payload.as_ref());
+
         log_causal_event(
             &self.causal_logger,
             &self.agent_id,
             category,
             action,
             status.clone(),
+            target.as_deref(),
+            &enforced_rules,
             payload
                 .as_ref()
                 .map(|v| crate::log_redaction::RedactedPayload::from_redacted(v.clone())),
@@ -494,23 +506,6 @@ impl SessionTracer {
                 .and_then(|v| v.get("reason"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let target = payload
-                .as_ref()
-                .and_then(|v| v.get("target"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let enforced_rules = payload
-                .as_ref()
-                .and_then(|v| v.get("enforced_rules"))
-                .and_then(|v| v.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<String>>()
-                })
-                .filter(|items| !items.is_empty())
-                .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules);
 
             if let Err(e) =
                 store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
@@ -1262,6 +1257,8 @@ fn log_causal_event(
     category: &str,
     action: &str,
     status: EntryStatus,
+    target: Option<&str>,
+    enforced_rules: &[String],
     payload: Option<crate::log_redaction::RedactedPayload>,
     session_id: &str,
     turn_id: Option<&str>,
@@ -1269,7 +1266,16 @@ fn log_causal_event(
 ) -> anyhow::Result<()> {
     logger
         .log(
-            actor_id, session_id, turn_id, event_seq, category, action, status, payload,
+            actor_id,
+            session_id,
+            turn_id,
+            event_seq,
+            category,
+            action,
+            status,
+            target,
+            enforced_rules,
+            payload,
         )
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1280,6 +1286,24 @@ fn log_causal_event(
                 e
             )
         })
+}
+
+/// Extract the witnessed rule set from an event payload — the same shape the
+/// DB write has always accepted (`payload.enforced_rules`), now also bound
+/// into the JSONL witness hash (I-6). Falls back to the baseline attribution
+/// rule when the payload names nothing.
+fn enforced_rules_from_payload(payload: Option<&serde_json::Value>) -> Vec<String> {
+    payload
+        .and_then(|v| v.get("enforced_rules"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules)
 }
 
 fn truncate_for_log(value: &str, max_len: usize) -> String {
@@ -1769,10 +1793,26 @@ mod tests {
             )
             .unwrap();
 
-        let causal_log =
-            fs::read_to_string(agent_dir.join("history").join("causal_chain.jsonl")).unwrap();
+        let causal_path = agent_dir.join("history").join("causal_chain.jsonl");
+        let causal_log = fs::read_to_string(&causal_path).unwrap();
         assert!(
-            causal_log.contains("evidence_ref"),
+            !causal_log.contains("test failed"),
+            "lean witness must not embed payload text"
+        );
+
+        // The evidence pointer lives in the content-addressed payload and
+        // must resolve (and hash-verify) from the entry's payload_ref.
+        let entries = crate::causal_chain::CausalLogger::read_entries(&causal_path).unwrap();
+        let completed = entries
+            .iter()
+            .rev()
+            .find(|e| e.category == "tool_invoke" && e.action == "completed")
+            .expect("completed entry should exist");
+        let resolved = crate::causal_chain::resolve_entry_payload(&causal_path, completed)
+            .expect("payload should resolve and verify")
+            .expect("completed entry should reference a payload");
+        assert!(
+            resolved.get("evidence_ref").is_some(),
             "failed tool results should preserve a full evidence pointer"
         );
 

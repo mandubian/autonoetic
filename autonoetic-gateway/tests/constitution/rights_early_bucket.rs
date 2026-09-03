@@ -30,6 +30,7 @@ use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::support::causal_entry_payload;
 use crate::support::manifest_builder::TestManifest;
 
 fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
@@ -290,7 +291,11 @@ async fn ri_0_7_session_close_commits_causal_event() {
     );
 
     let end = &end_events[0];
-    let payload = end.payload.as_ref().expect("end event should have payload");
+    // Lean witness (#1278): the payload lives in the content-addressed copy.
+    let history_dir = agent_dir.join("history");
+    let payload = causal_entry_payload(&history_dir.join("causal_chain.jsonl"), end)
+        .expect("end event payload should resolve and verify")
+        .expect("end event should have payload");
     let reason = payload.get("reason").and_then(|r| r.as_str());
     assert!(
         reason
@@ -373,6 +378,8 @@ fn ri_0_11_every_event_carries_agent_id() {
             "start",
             EntryStatus::Success,
             None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
+            None,
         )
         .unwrap();
     logger
@@ -384,6 +391,8 @@ fn ri_0_11_every_event_carries_agent_id() {
             "tool",
             "sandbox_exec",
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_redacted(
                 serde_json::json!({"cmd": "ls"}),
             )),
@@ -398,6 +407,8 @@ fn ri_0_11_every_event_carries_agent_id() {
             "tool",
             "content_write",
             EntryStatus::Denied,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_redacted(
                 serde_json::json!({"name": "secret"}),
             )),
@@ -412,6 +423,8 @@ fn ri_0_11_every_event_carries_agent_id() {
             "session",
             "end",
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             None,
         )
         .unwrap();
@@ -453,6 +466,8 @@ fn ri_0_11_hash_chain_integrity() {
             "start",
             EntryStatus::Success,
             None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
+            None,
         )
         .unwrap();
     logger
@@ -464,6 +479,8 @@ fn ri_0_11_hash_chain_integrity() {
             "tool",
             "sandbox_exec",
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_redacted(
                 serde_json::json!({"cmd": "echo hello"}),
             )),
@@ -478,6 +495,8 @@ fn ri_0_11_hash_chain_integrity() {
             "session",
             "end",
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             None,
         )
         .unwrap();
@@ -531,6 +550,8 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
             "tool",
             "sandbox_exec",
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(RedactedPayload::from_redacted(
                 serde_json::json!({"cmd": "ls"}),
             )),
@@ -541,26 +562,13 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
     let original = entries[0].clone();
     assert_eq!(original.actor_id, real_agent);
 
-    let recomputed = autonoetic_gateway::causal_chain::compute_entry_hash(
-        &original.timestamp,
-        &original.log_id,
-        real_agent,
-        &original.session_id,
-        original.turn_id.as_deref(),
-        original.event_seq,
-        &original.category,
-        &original.action,
-        &original.status,
-        original.payload_hash.as_deref(),
-        &original.prev_hash,
-    )
-    .unwrap();
-    assert_eq!(
-        original.entry_hash, recomputed,
-        "original entry_hash must match recomputed hash"
+    let recomputed_ok = autonoetic_gateway::causal_chain::verify_entry_hash(&original).unwrap();
+    assert!(
+        recomputed_ok,
+        "original entry_hash must match the re-derived hash"
     );
 
-    let hash_with_impostor = autonoetic_gateway::causal_chain::compute_entry_hash(
+    let hash_with_impostor = autonoetic_gateway::causal_chain::compute_entry_hash_v2(
         &original.timestamp,
         &original.log_id,
         impostor,
@@ -569,13 +577,16 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
         original.event_seq,
         &original.category,
         &original.action,
+        original.target.as_deref(),
         &original.status,
+        &original.enforced_rules,
         original.payload_hash.as_deref(),
+        original.payload_ref.as_deref(),
         &original.prev_hash,
     )
     .unwrap();
     assert_ne!(
-        recomputed, hash_with_impostor,
+        original.entry_hash, hash_with_impostor,
         "hash with impostor agent_id must differ from original — non-repudiation"
     );
 
@@ -597,5 +608,9 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
     assert_ne!(
         tampered_entry.entry_hash, hash_with_impostor,
         "the stored hash does NOT match what a correct hash for the impostor would be"
+    );
+    assert!(
+        !autonoetic_gateway::causal_chain::verify_entry_hash(tampered_entry).unwrap(),
+        "verification must reject the tampered entry"
     );
 }

@@ -9,6 +9,7 @@ mod observability;
 mod phase3_eval;
 mod recording;
 mod allow_set;
+mod causal_witness;
 mod sandbox_capture;
 mod steward_amendment_drafting;
 mod terminal_workflow_signal_suppress;
