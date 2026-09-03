@@ -2,8 +2,8 @@
 
 
 use crate::support::{
-    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard,
-    JsonRpcClient, OpenAiStub, TestWorkspace,
+    causal_entry_payload, read_causal_entries, seed_agent_revision,
+    spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
 };
 
 fn install_parent_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
@@ -200,13 +200,17 @@ async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<
     let parent_causal_path = parent_rev_dir.join("history/causal_chain.jsonl");
     let child_causal_path = child_rev_dir.join("history/causal_chain.jsonl");
 
-    let trace_label = |entry: &autonoetic_types::causal_chain::CausalChainEntry| -> String {
-        let tool = entry
-            .payload
-            .as_ref()
-            .and_then(|p| p.get("tool_name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+    let trace_label = |entry: &autonoetic_types::causal_chain::CausalChainEntry,
+                       witness_path: &std::path::Path|
+     -> String {
+        // The lean witness (#1278) carries no inline payload — resolve the
+        // content-addressed copy for the tool name.
+        let tool = causal_entry_payload(witness_path, entry)
+            .ok()
+            .flatten()
+            .and_then(|p| p.get("tool_name").and_then(|v| v.as_str()).map(String::from))
+            .unwrap_or_default();
+        let tool = tool.as_str();
         if entry.category == "tool_invoke" && !tool.is_empty() {
             format!("{}/{} {}", entry.category, entry.action, tool)
         } else {
@@ -225,7 +229,10 @@ async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<
             let entries = read_causal_entries(&gateway_causal_path)?;
             for entry in entries {
                 if entry.session_id == session_id {
-                    all_events.push(("gateway".to_string(), trace_label(&entry)));
+                    all_events.push((
+                        "gateway".to_string(),
+                        trace_label(&entry, &gateway_causal_path),
+                    ));
                 }
             }
         }
@@ -233,7 +240,7 @@ async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<
             let entries = read_causal_entries(&parent_causal_path)?;
             for entry in entries {
                 if entry.session_id == session_id {
-                    all_events.push((parent_id.to_string(), trace_label(&entry)));
+                    all_events.push((parent_id.to_string(), trace_label(&entry, &parent_causal_path)));
                 }
             }
         }
@@ -241,7 +248,7 @@ async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<
             let entries = read_causal_entries(&child_causal_path)?;
             for entry in entries {
                 if entry.session_id == session_id {
-                    all_events.push((child_id.to_string(), trace_label(&entry)));
+                    all_events.push((child_id.to_string(), trace_label(&entry, &child_causal_path)));
                 }
             }
         }

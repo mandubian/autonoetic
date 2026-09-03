@@ -852,7 +852,21 @@ pub fn load_agent_traces(
         if !path.exists() {
             continue;
         }
-        let entries = read_trace_entries(&path)?;
+        let mut entries = read_trace_entries(&path)?;
+        // Lean witness entries (#1278) carry `payload_ref`, not the payload.
+        // Resolve refs against the content-addressed copy beside the file so
+        // the display paths below keep showing payload details. Best-effort:
+        // a missing or tampered CAS file degrades to a fingerprint-only row
+        // rather than failing the whole listing.
+        for entry in &mut entries {
+            if entry.payload.is_none() {
+                entry.payload = autonoetic_gateway::causal_chain::resolve_entry_payload(
+                    &path, entry,
+                )
+                .ok()
+                .flatten();
+            }
+        }
         traces.push(AgentTrace {
             agent_id: agent.id().to_string(),
             entries,

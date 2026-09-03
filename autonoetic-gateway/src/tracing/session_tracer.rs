@@ -166,6 +166,8 @@ impl TraceSession {
             "gateway",
             &format!("{}.requested", action),
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             payload.map(crate::log_redaction::RedactedPayload::from_raw),
         )
     }
@@ -186,6 +188,8 @@ impl TraceSession {
             "gateway",
             &format!("{}.completed", action),
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             payload.map(crate::log_redaction::RedactedPayload::from_raw),
         )
     }
@@ -206,6 +210,8 @@ impl TraceSession {
             "gateway",
             &format!("{}.failed", action),
             EntryStatus::Error,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(crate::log_redaction::RedactedPayload::from_raw(
                 serde_json::json!({"reason": reason}),
             )),
@@ -228,6 +234,8 @@ impl TraceSession {
             "gateway",
             &format!("{}.skipped", action),
             EntryStatus::Success,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(crate::log_redaction::RedactedPayload::from_raw(
                 serde_json::json!({"reason": reason}),
             )),
@@ -250,6 +258,8 @@ impl TraceSession {
             "gateway",
             &format!("{}.denied", action),
             EntryStatus::Denied,
+            None,
+            &autonoetic_types::causal_chain::default_enforced_rules(),
             Some(crate::log_redaction::RedactedPayload::from_raw(
                 serde_json::json!({"reason": reason}),
             )),

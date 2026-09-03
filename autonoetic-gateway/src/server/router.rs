@@ -318,6 +318,7 @@ impl MessageRouter {
         let (wire_message, wire_egress_label, wire_withheld) =
             ofp_outbound_wire_fields(message, &session_taint);
         let local_peer_event_ref = emit_federation_message_event(
+            &self.gateway_dir,
             self.gateway_store.clone(),
             &self.node_id,
             peer_node_id,
@@ -360,6 +361,7 @@ impl MessageRouter {
                 suspension_kind: _,
             }) => {
                 let _ = emit_federation_message_event(
+                    &self.gateway_dir,
                     self.gateway_store.clone(),
                     &self.node_id,
                     peer_node_id,
@@ -378,6 +380,7 @@ impl MessageRouter {
                 peer_event_ref,
             }) => {
                 let _ = emit_federation_message_event(
+                    &self.gateway_dir,
                     self.gateway_store.clone(),
                     &self.node_id,
                     peer_node_id,

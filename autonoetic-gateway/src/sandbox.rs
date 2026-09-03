@@ -888,11 +888,11 @@ fn agent_id_from_agent_dir(agent_dir: &std::path::Path) -> anyhow::Result<String
 }
 
 fn next_sdk_event_seq(log_path: &std::path::Path) -> anyhow::Result<u64> {
-    if !log_path.exists() {
-        return Ok(1);
-    }
-    let entries = crate::causal_chain::CausalLogger::read_entries(log_path)?;
-    Ok(entries.last().map(|e| e.event_seq + 1).unwrap_or(1))
+    // Tail read only (#1278): the witness is never re-scanned in full on the
+    // SDK-bridge hot path. These events are witness-only (the DB holds no
+    // sdk-bridge rows), so the per-file counter comes from the last entry,
+    // at O(1) cost in the file size.
+    Ok(crate::causal_chain::last_entry_event_seq(log_path) + 1)
 }
 
 fn log_sdk_memory_event(
@@ -915,6 +915,8 @@ fn log_sdk_memory_event(
         "memory",
         action,
         EntryStatus::Success,
+        None,
+        &autonoetic_types::causal_chain::default_enforced_rules(),
         Some(crate::log_redaction::RedactedPayload::from_raw(payload)),
     )
 }
@@ -931,6 +933,9 @@ fn log_sdk_bridge_abuse(
         fs::create_dir_all(parent)?;
     }
     let logger = crate::causal_chain::CausalLogger::new(&log_path)?;
+    // The violation kind rides in `reason` (bound into the entry hash) so the
+    // denial stays legible in the witness itself; the free-form detail lives
+    // in the content-addressed payload.
     logger.log(
         &actor_id,
         "sdk-bridge",
@@ -939,6 +944,8 @@ fn log_sdk_bridge_abuse(
         "abuse",
         violation,
         EntryStatus::Denied,
+        None,
+        &autonoetic_types::causal_chain::default_enforced_rules(),
         Some(crate::log_redaction::RedactedPayload::from_raw(
             serde_json::json!({
                 "detail": detail,

@@ -153,10 +153,24 @@ async fn test_coder_content_write_via_tool_calls_body() -> anyhow::Result<()> {
 
     for line in agent_history.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            // Lean witness (#1278): tool_name lives in the content-addressed
+            // payload, referenced by `payload_ref` on the entry.
+            let payload_ref = value["payload_ref"].as_str().map(String::from);
+            let tool_name = payload_ref
+                .and_then(|reference| {
+                    let cas = rev_dir
+                        .join("history")
+                        .join("payloads")
+                        .join(format!("{reference}.json"));
+                    std::fs::read_to_string(cas).ok()
+                })
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let tool_name = tool_name
+                .as_ref()
+                .and_then(|p| p["tool_name"].as_str())
+                .unwrap_or("");
             if value["session_id"].as_str() == Some(session_id) {
-                if value["action"].as_str() == Some("requested")
-                    && value["payload"]["tool_name"].as_str() == Some("content_write")
-                {
+                if value["action"].as_str() == Some("requested") && tool_name == "content_write" {
                     content_write_count += 1;
                 }
                 if value["category"].as_str() == Some("session")
@@ -334,9 +348,25 @@ async fn test_coder_multiple_tool_calls_single_turn_body() -> anyhow::Result<()>
     let mut content_write_count = 0;
     for line in agent_history.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            // Lean witness (#1278): resolve tool_name from the CAS copy.
+            let payload_ref = value["payload_ref"].as_str().map(String::from);
+            let payload = payload_ref
+                .and_then(|reference| {
+                    std::fs::read_to_string(
+                        rev_dir
+                            .join("history")
+                            .join("payloads")
+                            .join(format!("{reference}.json")),
+                    )
+                    .ok()
+                })
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
             if value["session_id"].as_str() == Some(session_id)
                 && value["action"].as_str() == Some("requested")
-                && value["payload"]["tool_name"].as_str() == Some("content_write")
+                && payload
+                    .as_ref()
+                    .and_then(|p| p["tool_name"].as_str())
+                    == Some("content_write")
             {
                 content_write_count += 1;
             }

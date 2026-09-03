@@ -189,10 +189,37 @@ fn federation_rules_for_message_continuity() -> Vec<String> {
     rules
 }
 
+/// The gateway's chain tip, witness-first (#1278).
+///
+/// The lean JSONL witness is tamper-evident end to end (per-entry hashes plus
+/// prev-linkage), while `causal_events` is a mutable SQLite mirror — an
+/// attestation composed from the DB attests whatever the DB currently says.
+/// So the tip comes from the witness's latest `federation` entry; the DB
+/// search remains only as a fallback for witnesses that predate #1278 and
+/// hold no federation entries. The witness hash is opaque to peers (they
+/// verify the signature, not the derivation), so the hash *kind* changing is
+/// not a protocol break.
 fn latest_federation_chain_tip(
+    gateway_dir: &Path,
     gateway_store: Option<&Arc<crate::scheduler::gateway_store::GatewayStore>>,
 ) -> (String, String) {
     let genesis = ("genesis".to_string(), sha256_hex(b"genesis"));
+    let history_dir = gateway_dir.join("history");
+    match crate::causal_chain::read_all_entries_across_segments(&history_dir) {
+        Ok(entries) => {
+            if let Some(entry) = entries.iter().rev().find(|e| e.category == "federation") {
+                return (entry.log_id.clone(), entry.entry_hash.clone());
+            }
+        }
+        Err(e) => {
+            warn!(
+                target: "federation",
+                error = %e,
+                "failed to read causal witness for chain tip; falling back to DB"
+            );
+        }
+    }
+
     let Some(store) = gateway_store else {
         return genesis;
     };
@@ -284,7 +311,7 @@ pub fn compose_local_chain_attestation(
     gateway_dir: &Path,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
 ) -> anyhow::Result<(ChainAttestation, String)> {
-    let (event_id, chain_prefix_hash) = latest_federation_chain_tip(gateway_store.as_ref());
+    let (event_id, chain_prefix_hash) = latest_federation_chain_tip(gateway_dir, gateway_store.as_ref());
     compose_chain_attestation(gateway_id, gateway_dir, event_id, chain_prefix_hash)
 }
 
@@ -328,7 +355,16 @@ pub fn verify_chain_attestation(
 }
 
 /// Emit a federation message event and return the local peer reference.
+///
+/// The event is witnessed in the gateway's causal chain *before* the DB
+/// mirror write (#1278): the chain tip that `compose_local_chain_attestation`
+/// signs comes from the witness, so a federation continuity event that never
+/// reached the witness would be invisible to attestation. The DB write stays
+/// the queryable mirror; the witness write is best-effort and warns loudly
+/// on failure.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_federation_message_event(
+    gateway_dir: &Path,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     local_gateway_id: &str,
     peer_gateway_id: &str,
@@ -361,10 +397,6 @@ pub fn emit_federation_message_event(
         entry_hash: entry_hash.clone(),
     };
 
-    let Some(store) = gateway_store else {
-        return local_ref;
-    };
-
     let now = chrono::Utc::now();
     let payload = serde_json::json!({
         "gateway_id": local_gateway_id,
@@ -375,6 +407,50 @@ pub fn emit_federation_message_event(
         "peer_event_ref": peer_event_ref,
         "entry_hash": entry_hash,
     });
+
+    // Witness first: the attestation tip is read from this file.
+    let witness_path = gateway_dir.join("history").join("causal_chain.jsonl");
+    if let Some(parent) = witness_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match crate::causal_chain::CausalLogger::new(&witness_path) {
+        Ok(logger) => {
+            if let Err(e) = logger.log(
+                "gateway",
+                "system",
+                None,
+                now.timestamp_millis().max(0) as u64,
+                "federation",
+                action,
+                status.clone(),
+                Some(peer_gateway_id),
+                &federation_rules_for_message_continuity(),
+                Some(crate::log_redaction::RedactedPayload::from_redacted(
+                    payload.clone(),
+                )),
+            ) {
+                warn!(
+                    target: "federation",
+                    error = %e,
+                    peer_gateway_id = peer_gateway_id,
+                    action = action,
+                    "Failed to witness federation continuity event in the causal chain"
+                );
+            }
+        }
+        Err(e) => warn!(
+            target: "federation",
+            error = %e,
+            peer_gateway_id = peer_gateway_id,
+            action = action,
+            "Failed to open causal witness for federation continuity event"
+        ),
+    }
+
+    let Some(store) = gateway_store else {
+        return local_ref;
+    };
+
     let event = autonoetic_types::causal_chain::CausalEventRecord {
         event_id,
         agent_id: "gateway".to_string(),
@@ -910,6 +986,7 @@ async fn handle_inbound_connection(
                                     None
                                 };
                                 let local_peer_event_ref = emit_federation_message_event(
+                                    &gateway_dir,
                                     gateway_store.clone(),
                                     &local_node_id,
                                     &peer_node_id,
@@ -940,6 +1017,7 @@ async fn handle_inbound_connection(
                                     code: 500,
                                     message: format!("Agent spawn failed: {}", e),
                                     peer_event_ref: Some(emit_federation_message_event(
+                                        &gateway_dir,
                                         gateway_store.clone(),
                                         &local_node_id,
                                         &peer_node_id,
@@ -965,6 +1043,7 @@ async fn handle_inbound_connection(
                                 sender_agent, peer_node_id
                             ),
                             peer_event_ref: Some(emit_federation_message_event(
+                                &gateway_dir,
                                 gateway_store.clone(),
                                 &local_node_id,
                                 &peer_node_id,
@@ -986,6 +1065,7 @@ async fn handle_inbound_connection(
                             message: "AgentMessage sender is required for federated delivery"
                                 .into(),
                             peer_event_ref: Some(emit_federation_message_event(
+                                &gateway_dir,
                                 gateway_store.clone(),
                                 &local_node_id,
                                 &peer_node_id,

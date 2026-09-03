@@ -21,20 +21,40 @@ agent_dir/history/causal_chain.jsonl
 
 ### Entry Structure
 
+The JSONL file is a **witness**, not a second store (#1278): since witness
+format `v: 2`, entries carry the payload's *fingerprint* — `payload_hash`
+(its SHA-256) and `payload_ref` (the key of its content-addressed copy under
+`<history>/payloads/<ref>.json`) — never the payload itself. The file stays
+small enough to ship offsite or seal on WORM media, and
+`causal_chain::verify_chain` re-derives every entry hash and prev-linkage to
+prove the history has not been rewritten. `enforced_rules` is bound into the
+entry hash, so enforcement attribution (I-6) is tamper-evident too.
+
 ```json
 {
-  "event_id": "uuid-v4",
+  "v": 2,
+  "timestamp": "2026-03-15T10:30:00Z",
+  "log_id": "uuid-v4",
+  "actor_id": "coder.default",
   "session_id": "session-123",
   "turn_id": "turn-abc",
   "event_seq": 42,
   "category": "tool",
   "action": "requested",
-  "timestamp": "2026-03-15T10:30:00Z",
-  "payload": {"tool_name": "content_write", ...},
-  "entry_hash": "sha256:...",
-  "prev_hash": "sha256:..."
+  "target": "content_write",
+  "status": "SUCCESS",
+  "reason": null,
+  "enforced_rules": ["R+++3"],
+  "payload_hash": "sha256-of-payload",
+  "payload_ref": "same-sha256-cas-key",
+  "entry_hash": "sha256-over-the-fields-above",
+  "prev_hash": "sha256-of-previous-entry"
 }
 ```
+
+Pre-existing segments written before #1278 (`v` absent, payload inline) keep
+verifying under their original field set — hash computation dispatches on the
+entry's format version, it never re-interprets old entries.
 
 The `event_id` is the universal correlation key: execution traces, session reports, and the observability surface all join back to the causal chain via this field.
 
