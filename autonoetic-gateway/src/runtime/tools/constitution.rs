@@ -443,7 +443,8 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             .unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to mark amendment invitations answered for {}: {}",
-                    proposal_id, e
+                    proposal_id,
+                    e
                 );
                 0
             });
@@ -541,8 +542,8 @@ mod tests {
     #[test]
     fn extract_numbered_rule_row() {
         init_default_constitution();
-        // P-10.9 is the federation constitution-digest rule (graduated from
-        // the former P-10.9) — a normal numbered rule row.
+        // P-10.9 is the federation constitution-digest rule — a normal
+        // numbered rule row, as opposed to a §0 right or a §13 invariant.
         let extract =
             extract_section(constitution_text().as_ref(), "P-10.9").expect("P-10.9 must exist");
         assert!(extract.contains("P-10.9"));

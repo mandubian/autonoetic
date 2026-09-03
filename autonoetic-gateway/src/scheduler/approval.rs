@@ -364,7 +364,12 @@ pub fn apply_decision(
 
     // ── 1c. Promotion attempt ledger reset (issue #720) ────────────────
     if decision.status == ApprovalStatus::Approved {
-        if let ScheduledAction::RevisionPromote { agent_id, revision_id, .. } = &decision.action {
+        if let ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            ..
+        } = &decision.action
+        {
             if let Ok(Some(rev)) = store.get_agent_revision(revision_id) {
                 if let Err(e) = store.reset_promotion_attempts(agent_id, &rev.content_digest) {
                     tracing::warn!(
@@ -1371,12 +1376,11 @@ pub fn approve_request_with_options(
                     .map(|(_, v)| (f.name.clone(), v.clone()))
             })
             .collect();
-        let record_secret_name =
-            crate::runtime::tools::credential::store_collected_secret_values(
-                &mut vault,
-                credential_id,
-                &collected,
-            );
+        let record_secret_name = crate::runtime::tools::credential::store_collected_secret_values(
+            &mut vault,
+            credential_id,
+            &collected,
+        );
         vault.persist_to_file(&vault_path)?;
 
         // Extract the setup label from the payload so dedup stays scoped to
@@ -1388,8 +1392,11 @@ pub fn approve_request_with_options(
 
         // Default `inject_as` to the service-derived env var when the flow did
         // not pass one, matching the credential_setup completion path.
-        let inject_as = inject_as
-            .or_else(|| Some(autonoetic_types::runtime_lock::inject_as_for_service(service)));
+        let inject_as = inject_as.or_else(|| {
+            Some(autonoetic_types::runtime_lock::inject_as_for_service(
+                service,
+            ))
+        });
 
         // Create the CredentialRecord with full metadata
         let cred = autonoetic_types::agent::CredentialRecord {
@@ -1730,7 +1737,6 @@ fn unblock_task_on_approval(
     if let Ok(Some(existing)) =
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
-
         if existing.status.is_terminal() {
             tracing::debug!(
                 target: "approval",
@@ -2345,7 +2351,7 @@ mod tests {
         };
         store.create_approval(&mut request).unwrap();
 
-        // Credential prompts carry an P-2.24 confirmation phrase, derived on
+        // Credential prompts carry a P-2.24 confirmation phrase, derived on
         // create; both calls supply it so the phrase gate is not what refuses
         // the duplicate.
         let phrase = store
@@ -3407,14 +3413,15 @@ mod tests {
         );
 
         use autonoetic_types::background::ApprovalStatus;
-        use autonoetic_types::egress::{
-            EgressDeclassificationTarget, EgressLabel, Sink,
-        };
+        use autonoetic_types::egress::{EgressDeclassificationTarget, EgressLabel, Sink};
 
         store
             .restrict_workspace_egress_label("coder.abc", &EgressLabel::local_only())
             .unwrap();
-        assert!(store.get_workspace_egress_label("coder.abc").unwrap().is_some());
+        assert!(store
+            .get_workspace_egress_label("coder.abc")
+            .unwrap()
+            .is_some());
 
         let decision = ApprovalDecision {
             request_id: "apr-ws1".to_string(),
@@ -3449,7 +3456,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            store.get_workspace_egress_label("coder.abc").unwrap().is_none(),
+            store
+                .get_workspace_egress_label("coder.abc")
+                .unwrap()
+                .is_none(),
             "an approved workspace declassification must clear the durable label"
         );
     }
