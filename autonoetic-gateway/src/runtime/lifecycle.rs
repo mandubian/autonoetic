@@ -493,7 +493,30 @@ pub(crate) fn detect_constitution_drift(
 /// Gateway-authored kicks already arrive as user-role messages (router.rs
 /// `Gateway event type: ...` envelope), so this introduces no new
 /// message-shape risk.
+/// Opening bytes of the trailing gateway state notice. Load-bearing: it is how
+/// [`append_volatile_state_message`] recognises and evicts the previous turn's
+/// notice, so it must stay a stable prefix of the rendered block.
+pub(crate) const VOLATILE_STATE_NOTICE_PREFIX: &str = "[gateway state notice";
+
 fn append_volatile_state_message(history: &mut Vec<Message>, tails: Vec<String>) {
+    // Drop any notice left by an earlier turn *before* deciding whether to
+    // append a new one. These tails are volatile by definition — a re-signed
+    // attestation, a one-shot drift notice, a degradation notice that lapses
+    // when capabilities are restored — so a stale copy is not merely wasted
+    // context, it contradicts the current one.
+    //
+    // Without this, they accumulated one block per turn: the `retain` on this
+    // path drops only `System` messages, and the notice is `User`. By turn N
+    // an agent saw N attestation blocks, N-1 of them reporting stale budget,
+    // capabilities and pending approvals — while its system prompt teaches it
+    // that the attestation is authoritative and its own memory is not
+    // (Ri-0.1). It also made the one-shot drift notice permanent in effect:
+    // consumed correctly on detection, then visible in history forever.
+    history.retain(|m| {
+        !(matches!(m.role, crate::llm::Role::User)
+            && m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX))
+    });
+
     let body: Vec<String> = tails
         .into_iter()
         .filter(|s| !s.trim().is_empty())
@@ -6555,6 +6578,89 @@ fn waiting_for_child_yield_reason(
 mod tests {
     use super::*;
     use autonoetic_types::agent::SessionState;
+
+    // -- append_volatile_state_message (volatility) -------------------------
+
+    fn notice_blocks(history: &[Message]) -> Vec<&str> {
+        history
+            .iter()
+            .filter(|m| {
+                matches!(m.role, crate::llm::Role::User)
+                    && m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX)
+            })
+            .map(|m| m.content.as_str())
+            .collect()
+    }
+
+    /// A volatile tail is *volatile*: exactly one notice survives, carrying
+    /// the current turn's state.
+    ///
+    /// These blocks moved out of the byte-stable system message into a
+    /// trailing user-role notice for prompt-prefix caching. Nothing evicted
+    /// the previous turn's copy — the `retain` on that path drops only
+    /// `System` messages — so they accumulated one per turn, and an agent on
+    /// turn N read N attestation blocks with N-1 reporting stale budget and
+    /// capabilities, against a system prompt telling it the attestation is
+    /// authoritative and its own memory is not (Ri-0.1).
+    #[test]
+    fn volatile_state_notice_replaces_the_previous_turn_rather_than_stacking() {
+        let mut history = vec![
+            Message::system("stable prefix".to_string()),
+            Message::user("turn one".to_string()),
+        ];
+
+        append_volatile_state_message(&mut history, vec!["attestation: turn 1".to_string()]);
+        assert_eq!(notice_blocks(&history).len(), 1);
+        assert!(notice_blocks(&history)[0].contains("turn 1"));
+
+        history.push(Message::user("turn two".to_string()));
+        append_volatile_state_message(&mut history, vec!["attestation: turn 2".to_string()]);
+
+        let blocks = notice_blocks(&history);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "a second turn must replace the notice, not append a second one"
+        );
+        assert!(blocks[0].contains("turn 2"), "the surviving block is the current one");
+        assert!(
+            !history.iter().any(|m| m.content.contains("attestation: turn 1")),
+            "the stale attestation must be gone, not merely outranked"
+        );
+
+        // The operator's own turns are untouched — only gateway notices are
+        // evicted.
+        let user_turns: Vec<&str> = history
+            .iter()
+            .filter(|m| {
+                matches!(m.role, crate::llm::Role::User)
+                    && !m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX)
+            })
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(user_turns, vec!["turn one", "turn two"]);
+    }
+
+    /// A turn with nothing volatile to report still evicts the stale notice.
+    ///
+    /// This is the one-shot case: a constitution drift notice is consumed on
+    /// the turn that detects it, so the next turn contributes no tails. If
+    /// eviction were coupled to appending, the drift notice would remain
+    /// visible for the rest of the session — consumed correctly, yet
+    /// permanent in effect.
+    #[test]
+    fn a_turn_with_no_tails_still_clears_the_stale_notice() {
+        let mut history = vec![Message::user("turn one".to_string())];
+        append_volatile_state_message(&mut history, vec!["drift notice".to_string()]);
+        assert_eq!(notice_blocks(&history).len(), 1);
+
+        append_volatile_state_message(&mut history, vec![]);
+        assert!(
+            notice_blocks(&history).is_empty(),
+            "no tails this turn means no notice this turn"
+        );
+        assert_eq!(history.len(), 1, "the operator's turn survives");
+    }
 
     // -- session_is_degraded (P-7.18 scope) --------------------------------
 
