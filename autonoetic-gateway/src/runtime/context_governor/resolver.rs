@@ -23,6 +23,12 @@ pub fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
 /// Manifest/env first, then gateway `llm_presets` via `llm_preset_mapping`.
 /// If still unknown and provider is OpenRouter, use the public models API cache.
 /// For other providers, falls back to static table and local server probe cache.
+///
+/// A locally probed context window (model server `/v1/models` /
+/// `/props`) **clamps** any manifest/configured value: an explicit
+/// `context_window_tokens` larger than what the server actually supports
+/// would otherwise let oversized prompts through to a hard provider error
+/// (observed: config 240k vs ninfer `--max-context` 160k).
 pub async fn resolve_context_window_for_run(
     manifest: &AgentManifest,
     model: &str,
@@ -30,15 +36,28 @@ pub async fn resolve_context_window_for_run(
     local_context: Option<&Arc<LocalModelContextCache>>,
     gateway_config: Option<&GatewayConfig>,
 ) -> Option<u32> {
-    if let Some(w) = resolve_context_window_tokens(manifest) {
-        return Some(w);
-    }
-    if let Some(config) = gateway_config {
-        if let Some(w) =
-            context_window_tokens_from_gateway_config(&manifest.agent.id, config)
+    let declared = if let Some(w) = resolve_context_window_tokens(manifest) {
+        Some(w)
+    } else if let Some(config) = gateway_config {
+        context_window_tokens_from_gateway_config(&manifest.agent.id, config)
+    } else {
+        None
+    };
+    // Clamp the declared value against the live model server, when probed.
+    if let Some(local) = local_context {
+        if let Some(base_url) = manifest
+            .llm_config
+            .as_ref()
+            .and_then(|c| c.base_url.as_deref())
+            .filter(|u| !u.is_empty())
         {
-            return Some(w);
+            if let Some(probed) = local.get(base_url, model) {
+                return Some(declared.map_or(probed, |w| w.min(probed)));
+            }
         }
+    }
+    if let Some(w) = declared {
+        return Some(w);
     }
     if let Some(w) = static_context_window(model) {
         return Some(w);
@@ -285,5 +304,31 @@ mod tests {
         .await;
 
         assert_eq!(resolved, Some(32_768));
+    }
+
+    #[tokio::test]
+    async fn probed_local_context_window_clamps_configured_value() {
+        let local = Arc::new(LocalModelContextCache::new());
+        local.insert("http://localhost:8080/v1/chat/completions", "qwen", 160_000);
+
+        // Configured 240k vs server-reported 160k (the observed drift): the
+        // probe clamps so the governor never builds prompts the server rejects.
+        let mut manifest = minimal_manifest("planner.default", Some(240_000));
+        if let Some(cfg) = manifest.llm_config.as_mut() {
+            cfg.base_url = Some("http://localhost:8080/v1/chat/completions".to_string());
+        }
+        let resolved =
+            resolve_context_window_for_run(&manifest, "qwen", None, Some(&local), None).await;
+        assert_eq!(resolved, Some(160_000));
+
+        // A configured value below the probed server limit stays untouched —
+        // the operator's tighter budget is honored.
+        let mut manifest = minimal_manifest("planner.default", Some(114_688));
+        if let Some(cfg) = manifest.llm_config.as_mut() {
+            cfg.base_url = Some("http://localhost:8080/v1/chat/completions".to_string());
+        }
+        let resolved =
+            resolve_context_window_for_run(&manifest, "qwen", None, Some(&local), None).await;
+        assert_eq!(resolved, Some(114_688));
     }
 }

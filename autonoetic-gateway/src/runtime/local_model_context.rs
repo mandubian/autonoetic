@@ -38,10 +38,17 @@ impl LocalModelContextCache {
         }
     }
 
-    /// Probe presets that lack `context_window_tokens` and have a probeable base URL.
+    /// Probe presets that have a probeable base URL.
+    ///
+    /// Presets *with* an explicit `context_window_tokens` are probed too: the
+    /// configured value may drift from the model server's reality (an
+    /// auto-generated guess, a model swap, a `--max-context` change) and the
+    /// gateway must not send prompts the server will reject. The configured
+    /// value is clamped against the probed one at resolve time
+    /// ([`crate::runtime::context_governor::resolver::resolve_context_window_for_run`]).
     pub async fn warm_from_config(&self, client: &Client, config: &GatewayConfig) {
         for (name, preset) in &config.llm_presets {
-            if preset.routing.is_some() || preset.context_window_tokens.is_some() {
+            if preset.routing.is_some() {
                 continue;
             }
             let Some(model) = preset.model.as_deref().filter(|m| !m.is_empty()) else {
