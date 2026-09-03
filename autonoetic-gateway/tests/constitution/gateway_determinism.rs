@@ -1,4 +1,4 @@
-//! Constitution R++9 capstone: gateway decisions are pure functions of
+//! Constitution I-10 capstone: gateway decisions are pure functions of
 //! declared capability-set, tool-call input, and recorded session state.
 //!
 //! This property test intentionally exercises deterministic decision surfaces only:
@@ -477,7 +477,7 @@ proptest! {
     })]
 
     #[test]
-    fn r_plus_plus_9_gateway_decisions_are_pure_functions(input in gateway_input_strategy()) {
+    fn i_10_gateway_decisions_are_pure_functions(input in gateway_input_strategy()) {
         let first = evaluate_gateway_decision(&input);
         let second = evaluate_gateway_decision(&input);
         let third = evaluate_gateway_decision(&input);

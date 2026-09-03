@@ -140,7 +140,7 @@ fn emit_federation_constitution_event(
 
     let now = chrono::Utc::now();
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-    rules.push("R+++2".to_string());
+    rules.push("P-10.9".to_string());
     let payload = serde_json::json!({
         "peer_node_id": peer_node_id,
         "peer_addr": peer_addr.to_string(),
@@ -184,7 +184,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn federation_rules_for_message_continuity() -> Vec<String> {
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-    rules.push("R++7".to_string());
+    // One push, not two: this site used to push `R++7` *and* `P-10.6`, which
+    // the migration revealed to be the same clause under two names. Emitting
+    // it twice would double-count it in `contract_health`.
     rules.push("P-10.6".to_string());
     rules
 }
@@ -311,7 +313,8 @@ pub fn compose_local_chain_attestation(
     gateway_dir: &Path,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
 ) -> anyhow::Result<(ChainAttestation, String)> {
-    let (event_id, chain_prefix_hash) = latest_federation_chain_tip(gateway_dir, gateway_store.as_ref());
+    let (event_id, chain_prefix_hash) =
+        latest_federation_chain_tip(gateway_dir, gateway_store.as_ref());
     compose_chain_attestation(gateway_id, gateway_dir, event_id, chain_prefix_hash)
 }
 

@@ -54,7 +54,7 @@ fn invariants(text: &str) -> Vec<(String, String)> {
 
 /// An invariant "declares its enforcement" when its text names a code path, a
 /// symbol, or an explicit status — i.e. a reader can go check. Bare prose
-/// cannot fail, which is what made `R+9` survivable for months.
+/// cannot fail, which is what made `P-4.14` survivable for months.
 fn declares_enforcement(statement: &str) -> bool {
     statement.contains(".rs")
         || statement.contains("::")

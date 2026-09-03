@@ -130,7 +130,7 @@ Grep the test suite for `["error"]` / `unwrap_err` / `is_err` near each migrated
 ```bash
 cargo build -p autonoetic-gateway
 cargo test -p autonoetic-gateway            # focus the touched tools' suites
-cargo test -p autonoetic-gateway --test constitution_r_5_11_uniform_error_envelope
+cargo test -p autonoetic-gateway --test constitution p_5_11_uniform_error_envelope
 ```
-Consider extending `constitution_r_5_11_uniform_error_envelope.rs` to assert `error_type` is present
+Consider extending `tests/constitution/p_5_11_uniform_error_envelope.rs` to assert `error_type` is present
 on every tool failure (guard against regressions).

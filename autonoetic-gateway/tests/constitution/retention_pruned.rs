@@ -1,4 +1,4 @@
-//! Constitution R+17 / P-8.17: Retention pruning emits causal event.
+//! Constitution P-8.17: Retention pruning emits causal event.
 //!
 //! When data retention is applied, the gateway must emit a single
 //! `retention.pruned` causal event per batch with counts and bounds.
@@ -11,7 +11,7 @@ use autonoetic_types::causal_chain::default_enforced_rules;
 use autonoetic_types::config::RetentionConfig;
 
 #[test]
-fn r_plus_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
+fn p_8_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -38,7 +38,7 @@ fn r_plus_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
+fn p_8_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -107,7 +107,7 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
+fn p_8_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -158,7 +158,7 @@ fn r_plus_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
+fn p_8_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -205,7 +205,7 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
 /// `retention.pruned` event. Before this the table had no retention at all
 /// while being the fastest-growing table in the store.
 #[test]
-fn r_plus_17_post_promotion_reviews_are_pruned_and_reported() -> anyhow::Result<()> {
+fn p_8_17_post_promotion_reviews_are_pruned_and_reported() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);

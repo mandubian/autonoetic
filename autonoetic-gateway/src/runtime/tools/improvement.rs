@@ -223,7 +223,7 @@ impl NativeTool for AbReplayTool {
                                      from baseline. To allow this comparison, either \
                                      (1) set `improve.allow_capability_changes: true` and ensure the change \
                                      is not high-blast-radius, or \
-                                     (2) promote the revision manually through the R++2 capability-delta gate.".to_string(),
+                                     (2) promote the revision manually through the P-2.25 capability-delta gate.".to_string(),
                             }).to_string());
                         }
                         SurfaceChangePolicy::AllowWithStrictHoldout { reason } => {

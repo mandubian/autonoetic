@@ -2352,7 +2352,7 @@ impl GatewayExecutionService {
             category: "background".to_string(),
             action: format!("emergency_stop.initiated:{}", stop_id),
             status: "success".to_string(),
-            enforced_rules: vec!["R+++3".to_string(), "P-7.1".to_string()],
+            enforced_rules: vec!["I-6".to_string(), "P-7.1".to_string()],
             target: None,
             payload: Some(
                 serde_json::json!({
@@ -3963,7 +3963,7 @@ impl GatewayExecutionService {
                             session_id
                         );
 
-                        // ── Spawn-chain depth cap (R+3 / P-7.15) ─────────────
+                        // ── Spawn-chain depth cap (P-7.15) ─────────────
                         // `session_id` here is the *target* session (the child's).
                         // For the scheduler path this is always `{parent}/{agent}-{uuid}`,
                         // so its depth = parent_depth + 1. The check below ensures
@@ -4104,7 +4104,7 @@ impl GatewayExecutionService {
             }
             // Re-open the session transcript for this turn.  Between turns
             // close_session sets the status to 'completed', which the orphan-
-            // child reaper (R+12) treats as "parent terminated" and will cancel
+            // child reaper (P-7.16) treats as "parent terminated" and will cancel
             // any active children.  Resetting to 'active' at the start of every
             // turn prevents immediate orphaning of children spawned during this
             // turn's execution.

@@ -8,7 +8,7 @@
 //!      input with no entrypoints — i.e. an intent-only bundle.
 //!   2. `agent_revision_create_from_intent` accepts an `artifact_ref`
 //!      alongside `execution_mode = reasoning` and produces a revision
-//!      keyed on that artifact_id (so `promotion_record` and R++2
+//!      keyed on that artifact_id (so `promotion_record` and P-2.25
 //!      capability-delta gating both work uniformly).
 //!
 //! Neither of these is a *new* capability — `artifact_build` already
@@ -230,7 +230,7 @@ fn revision_create_from_intent_accepts_artifact_ref_for_reasoning_mode() {
 
     // The revision must record the artifact_id we passed — this is the
     // identity invariant Track B relies on (promotion_record and
-    // R++2 both key on artifact_id).
+    // P-2.25 both key on artifact_id).
     let stored_artifact = parsed
         .get("artifact_id")
         .and_then(|v| v.as_str())

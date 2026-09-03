@@ -1,4 +1,4 @@
-//! Constitution R+12 — Orphan-child reaper aborts the live Tokio task handle.
+//! Constitution P-7.16 — Orphan-child reaper aborts the live Tokio task handle.
 //!
 //! Companion to `constitution_lifecycle_orphan_reaper.rs`. Those tests prove the
 //! reaper updates the DB (transcript -> failed, task -> Cancelled, causal event).

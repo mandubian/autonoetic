@@ -137,11 +137,11 @@ pub struct ApproveOptions {
     /// `Some(true)` (the default), grants are created normally.
     pub create_grant: Option<bool>,
     /// Capability type names the operator explicitly acknowledges as part of
-    /// approving a `RevisionPromote` request (R++2). Must match the union of
+    /// approving a `RevisionPromote` request (P-2.25). Must match the union of
     /// `added_capabilities + broadened_capabilities` exactly. Empty for any
     /// other action type.
     pub acknowledged_capabilities: Vec<String>,
-    /// R++4: Confirmation phrase for destructive approval classes. Must match
+    /// P-2.24: Confirmation phrase for destructive approval classes. Must match
     /// the `confirm_phrase` stored on the approval request exactly (case-insensitive).
     pub confirm_phrase: Option<String>,
     /// Session ID of the agent-decider, when the decider is an agent. Used for
@@ -364,7 +364,12 @@ pub fn apply_decision(
 
     // ── 1c. Promotion attempt ledger reset (issue #720) ────────────────
     if decision.status == ApprovalStatus::Approved {
-        if let ScheduledAction::RevisionPromote { agent_id, revision_id, .. } = &decision.action {
+        if let ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            ..
+        } = &decision.action
+        {
             if let Ok(Some(rev)) = store.get_agent_revision(revision_id) {
                 if let Err(e) = store.reset_promotion_attempts(agent_id, &rev.content_digest) {
                     tracing::warn!(
@@ -1194,7 +1199,7 @@ pub fn approve_request_with_options(
         );
     }
 
-    // R++4: Dwell time enforcement. Reject if the approval was decided too
+    // P-2.24: Dwell time enforcement. Reject if the approval was decided too
     // quickly after the request was created (operator must see the prompt
     // for a minimum time before confirming).
     if let Some(min_dwell_ms) = req.min_dwell_ms {
@@ -1209,7 +1214,7 @@ pub fn approve_request_with_options(
         if effective_dwell > 0 {
             let created = chrono::DateTime::parse_from_rfc3339(&req.created_at).map_err(|e| {
                 anyhow::anyhow!(
-                    "R++4: Cannot parse created_at '{}' for dwell-time check: {}",
+                    "P-2.24: Cannot parse created_at '{}' for dwell-time check: {}",
                     req.created_at,
                     e
                 )
@@ -1219,7 +1224,7 @@ pub fn approve_request_with_options(
                 .num_milliseconds();
             if elapsed_ms < effective_dwell {
                 anyhow::bail!(
-                    "R++4: Dwell time not met — this approval class requires {} ms \
+                    "P-2.24: Dwell time not met — this approval class requires {} ms \
                      before confirmation, but only {} ms have elapsed since creation. \
                      Wait and retry.",
                     effective_dwell,
@@ -1229,20 +1234,20 @@ pub fn approve_request_with_options(
         }
     }
 
-    // R++4: Confirm phrase enforcement. Destructive approval classes require
+    // P-2.24: Confirm phrase enforcement. Destructive approval classes require
     // the operator to type a specific phrase to confirm.
     if let Some(ref required_phrase) = req.confirm_phrase {
         let provided = options.confirm_phrase.as_deref().unwrap_or("");
         if !provided.eq_ignore_ascii_case(required_phrase) {
             anyhow::bail!(
-                "R++4: Confirmation phrase required for this approval class. \
+                "P-2.24: Confirmation phrase required for this approval class. \
                  Expected: '{}'. Provide via --confirm-phrase.",
                 required_phrase
             );
         }
     }
 
-    // R++2: a `RevisionPromote` approval can only be approved when the
+    // P-2.25: a `RevisionPromote` approval can only be approved when the
     // operator names every added/broadened capability via
     // `--acknowledge-capability`. The set must match exactly — silent
     // accretion is the threat we are defending against.
@@ -1269,7 +1274,7 @@ pub fn approve_request_with_options(
             let missing: Vec<&str> = required.difference(&acknowledged).copied().collect();
             let extra: Vec<&str> = acknowledged.difference(&required).copied().collect();
             anyhow::bail!(
-                "Capability-accretion approval (R++2) for agent '{}' revision '{}' \
+                "Capability-accretion approval (P-2.25) for agent '{}' revision '{}' \
                  requires the operator to acknowledge each added/broadened capability \
                  by name via --acknowledge-capability. Required: [{}]. Missing: [{}]. \
                  Unexpected: [{}].",
@@ -1371,12 +1376,11 @@ pub fn approve_request_with_options(
                     .map(|(_, v)| (f.name.clone(), v.clone()))
             })
             .collect();
-        let record_secret_name =
-            crate::runtime::tools::credential::store_collected_secret_values(
-                &mut vault,
-                credential_id,
-                &collected,
-            );
+        let record_secret_name = crate::runtime::tools::credential::store_collected_secret_values(
+            &mut vault,
+            credential_id,
+            &collected,
+        );
         vault.persist_to_file(&vault_path)?;
 
         // Extract the setup label from the payload so dedup stays scoped to
@@ -1388,8 +1392,11 @@ pub fn approve_request_with_options(
 
         // Default `inject_as` to the service-derived env var when the flow did
         // not pass one, matching the credential_setup completion path.
-        let inject_as = inject_as
-            .or_else(|| Some(autonoetic_types::runtime_lock::inject_as_for_service(service)));
+        let inject_as = inject_as.or_else(|| {
+            Some(autonoetic_types::runtime_lock::inject_as_for_service(
+                service,
+            ))
+        });
 
         // Create the CredentialRecord with full metadata
         let cred = autonoetic_types::agent::CredentialRecord {
@@ -1730,7 +1737,6 @@ fn unblock_task_on_approval(
     if let Ok(Some(existing)) =
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
-
         if existing.status.is_terminal() {
             tracing::debug!(
                 target: "approval",
@@ -2345,7 +2351,7 @@ mod tests {
         };
         store.create_approval(&mut request).unwrap();
 
-        // Credential prompts carry an R++4 confirmation phrase, derived on
+        // Credential prompts carry a P-2.24 confirmation phrase, derived on
         // create; both calls supply it so the phrase gate is not what refuses
         // the duplicate.
         let phrase = store
@@ -3407,14 +3413,15 @@ mod tests {
         );
 
         use autonoetic_types::background::ApprovalStatus;
-        use autonoetic_types::egress::{
-            EgressDeclassificationTarget, EgressLabel, Sink,
-        };
+        use autonoetic_types::egress::{EgressDeclassificationTarget, EgressLabel, Sink};
 
         store
             .restrict_workspace_egress_label("coder.abc", &EgressLabel::local_only())
             .unwrap();
-        assert!(store.get_workspace_egress_label("coder.abc").unwrap().is_some());
+        assert!(store
+            .get_workspace_egress_label("coder.abc")
+            .unwrap()
+            .is_some());
 
         let decision = ApprovalDecision {
             request_id: "apr-ws1".to_string(),
@@ -3449,7 +3456,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            store.get_workspace_egress_label("coder.abc").unwrap().is_none(),
+            store
+                .get_workspace_egress_label("coder.abc")
+                .unwrap()
+                .is_none(),
             "an approved workspace declassification must clear the durable label"
         );
     }

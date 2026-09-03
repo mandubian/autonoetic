@@ -471,7 +471,7 @@ fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
     emit(vec!["P-7.5"])?;
     emit(vec!["Ri-0.14"])?;
     emit(vec!["P-9.99"])?;
-    emit(vec!["R+++3"])?; // default placeholder — skipped entirely
+    emit(vec!["I-6"])?; // default placeholder — skipped entirely
 
     let health = store.contract_health(None)?;
     assert_eq!(

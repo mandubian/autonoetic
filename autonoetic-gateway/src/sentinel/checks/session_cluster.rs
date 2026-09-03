@@ -257,7 +257,7 @@ mod tests {
                 category     TEXT NOT NULL,
                 action       TEXT NOT NULL,
                 status       TEXT NOT NULL,
-                enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]',
+                enforced_rules TEXT NOT NULL DEFAULT '[\"I-6\"]',
                 target       TEXT,
                 payload      TEXT,
                 payload_ref  TEXT,

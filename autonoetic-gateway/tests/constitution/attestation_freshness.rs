@@ -1,4 +1,4 @@
-//! Constitution R++1 — Attestation freshness: block reflects current turn
+//! Constitution P-6.23 — Attestation freshness: block reflects current turn
 //! state.
 //!
 //! Tests that:

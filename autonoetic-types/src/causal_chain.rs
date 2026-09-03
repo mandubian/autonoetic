@@ -111,7 +111,7 @@ impl CausalChainEntry {
     }
 }
 
-pub const RULE_ID_EVENT_ATTRIBUTION: &str = "R+++3";
+pub const RULE_ID_EVENT_ATTRIBUTION: &str = "I-6";
 
 pub fn default_enforced_rules() -> Vec<String> {
     vec![RULE_ID_EVENT_ATTRIBUTION.to_string()]
@@ -318,7 +318,7 @@ mod redaction_tests {
             category: "tool".into(),
             action: "sandbox_exec".into(),
             status: "SUCCESS".into(),
-            enforced_rules: vec!["R+++3".into()],
+            enforced_rules: vec!["I-6".into()],
             target: Some("api.github.com".into()),
             payload: Some(
                 r#"{"authorization":"Bearer eyJhbGc.foo.bar","user_id":42}"#.into(),

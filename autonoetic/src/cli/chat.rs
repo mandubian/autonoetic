@@ -8052,7 +8052,7 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             ..
         } => {
             let mut v = vec![
-                "type: revision_promote (R++2 capability accretion)".to_string(),
+                "type: revision_promote (P-2.25 capability accretion)".to_string(),
                 format!("  agent: {}", clamp_chat_field(agent_id)),
                 format!("  outgoing: {}", clamp_chat_field(outgoing_revision_id)),
                 format!("  incoming: {}", clamp_chat_field(revision_id)),

@@ -1,6 +1,6 @@
-//! Constitution R+14 / P-1.11: Deny-by-default on unknown tool names.
+//! Constitution P-1.11: Deny-by-default on unknown tool names.
 //!
-//! R+14: Unknown tool names must deny by default, not silent-allow.
+//! P-1.11: Unknown tool names must deny by default, not silent-allow.
 //! The policy engine already implements this — these tests pin the
 //! behavior so any regression is caught.
 //!
@@ -45,7 +45,7 @@ fn manifest_no_capabilities() -> AgentManifest {
 }
 
 #[test]
-fn r_plus_14_unknown_tool_name_denied() {
+fn p_1_11_unknown_tool_name_denied() {
     let manifest = manifest_with_sandbox(vec!["web."]);
     let policy = PolicyEngine::new(manifest);
     let decision = policy.can_invoke_tool("totally_bogus_tool_xyz");
@@ -57,7 +57,7 @@ fn r_plus_14_unknown_tool_name_denied() {
 }
 
 #[test]
-fn r_plus_14_no_capability_denies_known_tool() {
+fn p_1_11_no_capability_denies_known_tool() {
     let manifest = manifest_no_capabilities();
     let policy = PolicyEngine::new(manifest);
     let decision = policy.can_invoke_tool("web_search");
@@ -68,7 +68,7 @@ fn r_plus_14_no_capability_denies_known_tool() {
 }
 
 #[test]
-fn r_plus_14_non_matching_prefix_denied() {
+fn p_1_11_non_matching_prefix_denied() {
     let manifest = manifest_with_sandbox(vec!["web."]);
     let policy = PolicyEngine::new(manifest);
 
@@ -90,7 +90,7 @@ fn r_plus_14_non_matching_prefix_denied() {
 }
 
 #[test]
-fn r_plus_14_wildcard_allows_all() {
+fn p_1_11_wildcard_allows_all() {
     let manifest = manifest_with_sandbox(vec!["*"]);
     let policy = PolicyEngine::new(manifest);
     assert!(policy.can_invoke_tool("anything_goes").is_allowed());
@@ -98,7 +98,7 @@ fn r_plus_14_wildcard_allows_all() {
 }
 
 #[test]
-fn r_plus_14_empty_tool_name_denied_without_wildcard() {
+fn p_1_11_empty_tool_name_denied_without_wildcard() {
     let manifest = manifest_with_sandbox(vec!["web."]);
     let policy = PolicyEngine::new(manifest);
 
@@ -110,7 +110,7 @@ fn r_plus_14_empty_tool_name_denied_without_wildcard() {
 }
 
 #[test]
-fn r_plus_14_wildcard_allows_empty_tool_name() {
+fn p_1_11_wildcard_allows_empty_tool_name() {
     let manifest = manifest_with_sandbox(vec!["*"]);
     let policy = PolicyEngine::new(manifest);
 
@@ -122,7 +122,7 @@ fn r_plus_14_wildcard_allows_empty_tool_name() {
 }
 
 #[test]
-fn r_plus_14_nonexistent_tool_rejected_by_registry() {
+fn p_1_11_nonexistent_tool_rejected_by_registry() {
     let registry = default_registry();
     assert!(
         !registry.has_tool("totally_bogus_tool_xyz"),

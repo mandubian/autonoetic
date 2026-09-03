@@ -1,6 +1,6 @@
 //! Log redaction helpers to avoid leaking secrets in traces.
 //!
-//! The [`RedactedPayload`] newtype enforces R+9: redaction happens **before**
+//! The [`RedactedPayload`] newtype enforces P-4.14: redaction happens **before**
 //! causal-chain append. Callers must wrap payloads through one of the
 //! constructors; raw `serde_json::Value` cannot be passed to
 //! [`CausalLogger::log`] or [`CausalLogger::log_durable`].

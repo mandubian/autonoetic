@@ -99,7 +99,7 @@ How these are produced and what enforces them is in
 The `error` code field is additive — existing tools keep working without it. New
 and migrated tool failures should set a stable `code`. The migration of the
 remaining bare-`anyhow` failure sites onto coded `ToolError`s proceeds
-incrementally; the P-5.11 guard (`constitution_r_5_11_uniform_error_envelope.rs`)
+incrementally; the P-5.11 guard (`autonoetic-gateway/tests/constitution/p_5_11_uniform_error_envelope.rs`)
 enforces the envelope shape.
 
 > The amendment that adds the `error` code to P-5.11 ships unsigned in

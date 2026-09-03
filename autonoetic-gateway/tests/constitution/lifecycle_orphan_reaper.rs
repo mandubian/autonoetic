@@ -1,4 +1,4 @@
-//! Constitution R+12 — Orphan-child reaper on parent termination.
+//! Constitution P-7.16 — Orphan-child reaper on parent termination.
 
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -95,7 +95,7 @@ async fn orphan_reaper_cancels_child_when_parent_ends() {
     let ev = reaped.unwrap();
     assert_eq!(ev.category, "session");
     assert_eq!(ev.status, "error");
-    assert!(ev.enforced_rules.contains(&"R+12".to_string()));
+    assert!(ev.enforced_rules.contains(&"P-7.16".to_string()));
     assert_eq!(ev.target.as_deref(), Some(parent_id));
 }
 

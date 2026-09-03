@@ -5,7 +5,7 @@ use autonoetic_types::background::{GrantScope, GrantTarget};
 use tempfile::tempdir;
 
 #[test]
-fn r_10_7_cross_root_grant_reuse_is_rejected() -> anyhow::Result<()> {
+fn p_10_7_cross_root_grant_reuse_is_rejected() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;

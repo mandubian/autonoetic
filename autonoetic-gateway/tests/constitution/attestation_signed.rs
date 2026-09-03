@@ -1,4 +1,4 @@
-//! Constitution R++1 — Signed turn-boundary state attestation: signature
+//! Constitution P-6.23 — Signed turn-boundary state attestation: signature
 //! verification and tamper detection.
 //!
 //! Tests that:

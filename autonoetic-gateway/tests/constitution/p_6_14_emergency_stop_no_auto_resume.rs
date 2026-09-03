@@ -62,7 +62,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
 }
 
 #[tokio::test]
-async fn r_6_14_emergency_stop_checkpoint_cannot_auto_resume() -> anyhow::Result<()> {
+async fn p_6_14_emergency_stop_checkpoint_cannot_auto_resume() -> anyhow::Result<()> {
     let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let session_id = "session-r-6-14";
@@ -96,7 +96,7 @@ async fn r_6_14_emergency_stop_checkpoint_cannot_auto_resume() -> anyhow::Result
 /// cascade repeatedly.
 #[tokio::test]
 #[serial_test::serial]
-async fn r_6_14_dispatch_path_refuses_emergency_stop_checkpoint() -> anyhow::Result<()> {
+async fn p_6_14_dispatch_path_refuses_emergency_stop_checkpoint() -> anyhow::Result<()> {
     use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
     use crate::support::{seed_agent_revision};
 

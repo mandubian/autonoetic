@@ -1,4 +1,4 @@
-//! Constitution R+1 — Structured capability scopes mandatory for all capabilities.
+//! Constitution P-1.2 — Structured capability scopes mandatory for all capabilities.
 //!
 //! Bare-string capability declarations (e.g. `"ReadAccess"`) are rejected for
 //! every capability type when routed through the lenient LLM normalization path
@@ -35,13 +35,13 @@ fn lenient_path_rejects_all_bare_strings() {
         let result = normalize_capability_from_llm(serde_json::Value::String(name.to_string()));
         assert!(
             result.is_err(),
-            "R+1: bare-string '{}' should be rejected by lenient path, but was accepted",
+            "P-1.2: bare-string '{}' should be rejected by lenient path, but was accepted",
             name
         );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains(name),
-            "R+1: error for '{}' should name the capability, got: {}",
+            "P-1.2: error for '{}' should name the capability, got: {}",
             name,
             msg
         );
@@ -126,7 +126,7 @@ fn lenient_path_accepts_all_tagged_objects() {
         let result = normalize_capability_from_llm(value.clone());
         assert!(
             result.is_ok(),
-            "R+1: tagged object for '{}' should be accepted, got error: {}",
+            "P-1.2: tagged object for '{}' should be accepted, got error: {}",
             name,
             result.unwrap_err()
         );

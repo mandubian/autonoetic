@@ -1,4 +1,4 @@
-//! Constitution R+8: Vault master-key presence probe at gateway startup.
+//! Constitution P-4.15: Vault master-key presence probe at gateway startup.
 //!
 //! The gateway probes the vault master key at boot and emits a
 //! `vault.key_probe` causal event. This ensures misconfiguration is
@@ -32,7 +32,7 @@ impl Drop for SharedSecretGuard {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_key_present_via_env() {
+fn p_4_15_probe_key_present_via_env() {
     clear_vault_env();
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
@@ -52,7 +52,7 @@ fn r_plus_8_probe_key_present_via_env() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_key_present_via_file() {
+fn p_4_15_probe_key_present_via_file() {
     clear_vault_env();
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     let temp = tempfile::tempdir().unwrap();
@@ -74,7 +74,7 @@ fn r_plus_8_probe_key_present_via_file() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_key_present_via_auto_generated() {
+fn p_4_15_probe_key_present_via_auto_generated() {
     clear_vault_env();
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     let temp = tempfile::tempdir().unwrap();
@@ -97,7 +97,7 @@ fn r_plus_8_probe_key_present_via_auto_generated() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_not_configured() {
+fn p_4_15_probe_not_configured() {
     clear_vault_env();
     let temp = tempfile::tempdir().unwrap();
     let result = probe_master_key(temp.path());
@@ -107,7 +107,7 @@ fn r_plus_8_probe_not_configured() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_file_missing() {
+fn p_4_15_probe_file_missing() {
     clear_vault_env();
     std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", "/nonexistent/vault.key");
 
@@ -127,7 +127,7 @@ fn r_plus_8_probe_file_missing() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_invalid_env_key() {
+fn p_4_15_probe_invalid_env_key() {
     clear_vault_env();
     std::env::set_var("AUTONOETIC_VAULT_KEY", "not-valid-hex");
 
@@ -147,7 +147,7 @@ fn r_plus_8_probe_invalid_env_key() {
 
 #[test]
 #[serial]
-fn r_plus_8_probe_invalid_file_content() {
+fn p_4_15_probe_invalid_file_content() {
     clear_vault_env();
     let temp = tempfile::tempdir().unwrap();
     let key_path = temp.path().join("vault.key");
@@ -169,7 +169,7 @@ fn r_plus_8_probe_invalid_file_content() {
 
 #[test]
 #[serial]
-fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
+fn p_4_15_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
     clear_vault_env();
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
@@ -190,7 +190,7 @@ fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
     assert_eq!(probe.agent_id, "gateway");
     assert_eq!(probe.session_id, "system");
     assert_eq!(probe.status, "SUCCESS");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     assert!(probe.reason.is_some());
     let payload: serde_json::Value =
         serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
@@ -202,7 +202,7 @@ fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
 
 #[test]
 #[serial]
-fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
+fn p_4_15_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
     clear_vault_env();
 
     let tempdir = tempfile::tempdir()?;
@@ -219,7 +219,7 @@ fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
         .expect("vault.key_probe event must be emitted");
 
     assert_eq!(probe.status, "ERROR");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     assert!(probe.reason.is_some());
     let reason = probe.reason.as_deref().unwrap();
     assert!(
@@ -232,7 +232,7 @@ fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
 
 #[test]
 #[serial]
-fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
+fn p_4_15_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
     clear_vault_env();
     std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", "/nonexistent/vault.key");
 
@@ -250,7 +250,7 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
         .expect("vault.key_probe event must be emitted");
 
     assert_eq!(probe.status, "ERROR");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     let reason = probe.reason.as_deref().unwrap();
     assert!(
         reason.contains("missing"),
@@ -267,7 +267,7 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn r_plus_8_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Result<()> {
+async fn p_4_15_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Result<()> {
     clear_vault_env();
     let previous_secret = std::env::var("AUTONOETIC_SHARED_SECRET").ok();
     let _secret_guard = SharedSecretGuard(previous_secret);
@@ -294,8 +294,8 @@ async fn r_plus_8_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Res
         .expect_err("startup must fail-shut when vault key is missing");
     let message = err.to_string();
     assert!(
-        message.contains("Vault master key probe failed (R+8)"),
-        "startup error should reference R+8 fail-shut probe: {message}"
+        message.contains("Vault master key probe failed (P-4.15)"),
+        "startup error should reference P-4.15 fail-shut probe: {message}"
     );
 
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);

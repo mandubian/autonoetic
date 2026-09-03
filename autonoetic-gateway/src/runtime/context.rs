@@ -839,7 +839,7 @@ impl AgentExecutor {
         }
     }
 
-    /// Compose, sign, and render the R++1 state-attestation tail for the
+    /// Compose, sign, and render the P-6.23 state-attestation tail for the
     /// current turn. Returns:
     ///   - `Ok(Some(tail))` whenever the gateway has a directory to keep
     ///     the identity key in (the production path);

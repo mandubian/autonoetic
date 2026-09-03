@@ -2506,7 +2506,7 @@ pub fn try_complete_workflow(
 /// Called from `close_session` when a child session terminates abnormally.
 /// Without this, tasks stay `Running` forever because `close_session` only
 /// finalizes transcripts — it has no callback into the workflow task layer.
-/// The orphan reaper (R+12) only fires when the *parent* is terminal, so
+/// The orphan reaper (P-7.16) only fires when the *parent* is terminal, so
 /// a child that dies while the parent is alive/suspended leaves tasks stuck.
 pub fn fail_running_tasks_for_session(
     config: &GatewayConfig,

@@ -69,7 +69,7 @@ fn gateway_bootstrap_fits_within_the_stack_budget() {
 /// `--test-threads=1`, which would otherwise run tests on the 8 MiB main
 /// thread and make this vacuous).
 ///
-/// Harness reused from `constitution/r_8_6_retention_policy_startup.rs`: drive
+/// Harness reused from `constitution/p_8_6_retention_policy_startup.rs`: drive
 /// startup through the deep paths (retention pass, constitution snapshot +
 /// signature verify) and force a fast, *expected* failure by pre-binding the
 /// OFP port. Reaching `address already in use` proves the entire pre-bind

@@ -76,7 +76,7 @@ fn assert_error_envelope_shape(payload: &serde_json::Value) {
 }
 
 #[test]
-fn r_5_11_uniform_error_envelope_contract() -> anyhow::Result<()> {
+fn p_5_11_uniform_error_envelope_contract() -> anyhow::Result<()> {
     let constitution_validation_error = invoke("constitution_read", r#"{"section":"Ri-9.99"}"#)?;
     assert_error_envelope_shape(&constitution_validation_error);
 

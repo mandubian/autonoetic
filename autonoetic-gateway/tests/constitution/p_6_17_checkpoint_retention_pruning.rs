@@ -61,7 +61,7 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
 }
 
 #[test]
-fn r_6_17_prune_checkpoints_respects_keep_last() -> anyhow::Result<()> {
+fn p_6_17_prune_checkpoints_respects_keep_last() -> anyhow::Result<()> {
     let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let session_id = "session-r-6-17";

@@ -189,6 +189,50 @@ fn parse_clause_id(s: &str) -> Option<usize> {
     Some(len)
 }
 
+/// Does this literal *read* as a clause reference — `<letters><+ or ->< digits>`,
+/// optionally dotted? Deliberately wider than [`parse_clause_id`], which knows
+/// only the families in force today: a legacy `R+12` must be *caught*, not
+/// silently unparsed. That false negative is what let #1277's IDs survive a
+/// first draft of this guard.
+fn looks_like_clause_ref(s: &str) -> bool {
+    let Some(sep) = s.find(['+', '-']) else {
+        return false;
+    };
+    if sep == 0 || !s[..sep].chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let rest = s[sep..].trim_start_matches(['+', '-']);
+    !rest.is_empty()
+        && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && rest.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Identity helper so the emitter patterns read as a list rather than raw
+/// string literals inline in the test.
+fn regex_lite(pat: &'static str) -> &'static str {
+    pat
+}
+
+/// Every `"..."` literal on a line, contents only. Good enough for clause-id
+/// extraction: ids contain no escapes.
+fn string_literals(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            if let Some(close) = line[i + 1..].find('"') {
+                out.push(&line[i + 1..i + 1 + close]);
+                i += close + 2;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Collect `.md` and `.rs` files worth scanning, as workspace-relative paths.
 fn collect_sources(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -676,6 +720,93 @@ mod tests {
         for reject in ["U-4", "P-3", "P-1", "P-7", "O-3", "Ri-0.19"] {
             assert!(!ids.contains(reject), "unexpectedly resolved {reject}");
         }
+    }
+
+    /// Clause IDs that the runtime *emits* were checked against nothing, which
+    /// is how 26 pre-restructure identifiers (`R+*`, `R++*`, `R+++*`) survived
+    /// the `P-x.y` migration inside `fail_mode.rs`, six `enforced_rules`
+    /// emitters, and a SQL column default — see #1277.
+    ///
+    /// Scope is deliberately narrow: only positions where an ID is a
+    /// **machine claim** — `rule_id:`, `enforced_rules`, `rules.push(...)`.
+    /// Those feed contract health, so a dead ID silently books enforcement
+    /// against `unattributed` instead of the clause that fired.
+    ///
+    /// Prose is *not* scanned, because a comment may legitimately cite a
+    /// principle family (`P-7`, which the register models as a parent, not a
+    /// clause) or an RFC-reserved clause that is deliberately not yet enacted
+    /// (`O-3`/`O-4`/`O-5`). An earlier, broader version of this guard flagged
+    /// 62 such sites — including a test asserting `O-3` is *absent* — which is
+    /// noise, not signal.
+    #[test]
+    fn every_emitted_clause_id_resolves() {
+        let root = workspace_root();
+        let known = active_constitution_clause_ids(&root);
+        assert!(
+            known.len() > 100,
+            "clause extraction went blind: {}",
+            known.len()
+        );
+
+        // Positions where the ID is consumed mechanically, not narrated.
+        let emitters = [
+            regex_lite("rule_id: \""),
+            regex_lite("enforced_rules"),
+            regex_lite("rules.push(\""),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        for rel in collect_sources(&root) {
+            let p = rel.to_string_lossy().replace('\\', "/");
+            // `src/` only: the `tests/` trees legitimately assert absence.
+            if !rel.extension().is_some_and(|e| e == "rs") || !p.contains("/src/") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in production_prefix(&raw).lines().enumerate() {
+                if !emitters.iter().any(|m| line.contains(m)) {
+                    continue;
+                }
+                for cap in string_literals(line) {
+                    if !looks_like_clause_ref(cap) {
+                        continue;
+                    }
+                    scanned += 1;
+                    if known.contains(cap) {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} emits clause `{}`, which the active constitution ({}) \
+                         does not declare\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        cap,
+                        autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            scanned > 150,
+            "expected to scan the fail-mode table and the emitters; saw only {scanned} \
+             clause literals — this guard is no longer looking at the right positions"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} site(s) emit a clause ID the constitution does not declare. \
+             `enforced_rules` is read by contract health, so a dead ID books \
+             enforcement as `unattributed` rather than against the clause that \
+             fired. Map it to its successor — the pre-restructure versions under \
+             `docs/constitution/versions/` record the target in the old status \
+             cell — or delete the emission.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
     }
 
     /// A clause ID printed on a diagram is the same promise as a `docs/…` path:

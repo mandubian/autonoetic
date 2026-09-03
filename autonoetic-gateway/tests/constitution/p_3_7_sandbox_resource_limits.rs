@@ -33,7 +33,7 @@ impl Drop for EnvRestore {
 
 #[test]
 #[serial]
-fn r_3_7_driver_specific_profiles_are_mandatory() {
+fn p_3_7_driver_specific_profiles_are_mandatory() {
     const DOCKER_IMAGE_ENV: &str = "AUTONOETIC_DOCKER_IMAGE";
     const FIRECRACKER_CONFIG_ENV: &str = "AUTONOETIC_FIRECRACKER_CONFIG";
 

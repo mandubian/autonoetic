@@ -295,7 +295,7 @@ fn bootstrap_agent_inner(
         // the on-disk file matches the current gateway build SHA. Without
         // this, the deployed runtime.lock keeps either the `replace-me`
         // placeholder (template case) or a stale real SHA (upgrade case),
-        // and `check_runtime_lock_drift` (R+7/R+18) trips on the first
+        // and `check_runtime_lock_drift` (P-8.12/P-8.12) trips on the first
         // session turn. The revision's runtime.lock is already correct
         // (built from the in-memory `lock_content`), so this only fixes
         // the deployed copy.

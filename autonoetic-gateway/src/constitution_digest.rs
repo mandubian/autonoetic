@@ -1,4 +1,4 @@
-//! Canonical constitution digest utilities (R+++2).
+//! Canonical constitution digest utilities (P-10.9).
 //!
 //! Digest input is intentionally explicit and deterministic:
 //! - full constitution text

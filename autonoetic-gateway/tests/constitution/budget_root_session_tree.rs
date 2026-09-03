@@ -1,4 +1,4 @@
-//! Constitution R+4 / P-6.21 — Root-session tree budget.
+//! Constitution P-6.21 — Root-session tree budget.
 //!
 //! Tokens, tool invocations, wall clock, and price are aggregated across all
 //! descendants of a root session and enforced at the tree level, not only

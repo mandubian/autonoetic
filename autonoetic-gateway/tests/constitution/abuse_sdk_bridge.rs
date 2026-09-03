@@ -1,6 +1,6 @@
-//! Constitution R+10: Sandbox→gateway SDK-bridge rate and payload-size limits.
+//! Constitution P-7.21: Sandbox→gateway SDK-bridge rate and payload-size limits.
 //!
-//! R+10 ensures that a sandboxed process cannot flood the gateway or balloon
+//! P-7.21 ensures that a sandboxed process cannot flood the gateway or balloon
 //! the content store through unbounded SDK bridge calls. Per-session rate
 //! limit (default 100/sec) and per-call payload size cap (default 1 MiB).
 //! Violations return structured errors and log `sdk_bridge_abuse` to the
@@ -36,7 +36,7 @@ fn parse_response(raw: &str) -> serde_json::Value {
 }
 
 #[test]
-fn r10_rate_limiter_allows_under_limit() {
+fn p_7_21_rate_limiter_allows_under_limit() {
     let limiter = SdkBridgeRateLimiter::new(10, 1024);
     let t = 1000;
     for _ in 0..10 {
@@ -45,7 +45,7 @@ fn r10_rate_limiter_allows_under_limit() {
 }
 
 #[test]
-fn r10_rate_limiter_blocks_over_limit() {
+fn p_7_21_rate_limiter_blocks_over_limit() {
     let limiter = SdkBridgeRateLimiter::new(5, 1024);
     let t = 2000;
     for _ in 0..5 {
@@ -58,7 +58,7 @@ fn r10_rate_limiter_blocks_over_limit() {
 }
 
 #[test]
-fn r10_rate_limiter_default_config() {
+fn p_7_21_rate_limiter_default_config() {
     assert_eq!(
         SDK_BRIDGE_RATE_LIMIT_PER_SEC, 100,
         "default rate limit should be 100/sec"
@@ -70,7 +70,7 @@ fn r10_rate_limiter_default_config() {
 }
 
 #[test]
-fn r10_oversized_payload_returns_error() {
+fn p_7_21_oversized_payload_returns_error() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("test-agent");
     std::fs::create_dir_all(agent_dir.join("history")).unwrap();
@@ -144,7 +144,7 @@ fn r10_oversized_payload_returns_error() {
 }
 
 #[test]
-fn r10_rate_limited_returns_error() {
+fn p_7_21_rate_limited_returns_error() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("test-agent");
     std::fs::create_dir_all(agent_dir.join("history")).unwrap();

@@ -208,7 +208,7 @@ pub struct GateRequest<'a> {
 
 /// Unified result returned by `GateService::check`.
 ///
-/// Every variant carries `enforced_rules` for R+++3 compliance: the
+/// Every variant carries `enforced_rules` for I-6 compliance: the
 /// constitutional rule IDs that drove the decision.
 #[derive(Debug)]
 pub enum GateResult {
@@ -262,7 +262,7 @@ impl GateResult {
         }
     }
 
-    /// Constitutional rule IDs that drove this gate decision (R+++3).
+    /// Constitutional rule IDs that drove this gate decision (I-6).
     pub fn enforced_rules(&self) -> &[&'static str] {
         match self {
             GateResult::Cleared { enforced_rules, .. } => enforced_rules,
@@ -2147,7 +2147,7 @@ mod tests {
             config: None,
             context: DecisionContext::tier2(
                 "Promote rev-1 of agent-a to active alias",
-                "R++2 capability delta ack needed before promotion",
+                "P-2.25 capability delta ack needed before promotion",
                 "NetworkAccess added vs rev-1-old baseline",
                 "Acknowledge each added capability by name before approving",
             ),
@@ -2178,7 +2178,7 @@ mod tests {
             config: None,
             context: DecisionContext::tier2(
                 "Promote rev-2 of agent-b to active alias",
-                "R++2 capability delta ack needed before promotion",
+                "P-2.25 capability delta ack needed before promotion",
                 "NetworkAccess added vs rev-2-old baseline",
                 "Acknowledge each added capability by name before approving",
             ),
@@ -2214,7 +2214,7 @@ mod tests {
             config: None,
             context: DecisionContext::tier2(
                 "Promote rev-1 of agent-a to active alias (retry)",
-                "R++2 capability delta ack needed before promotion",
+                "P-2.25 capability delta ack needed before promotion",
                 "NetworkAccess added vs rev-1-old baseline",
                 "Acknowledge each added capability by name before approving",
             ),

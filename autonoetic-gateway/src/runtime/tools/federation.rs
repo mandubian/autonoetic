@@ -616,7 +616,7 @@ impl NativeTool for FederationEscalateTool {
         // carries both the federation jury context and the capability delta,
         // under Critical hardening (5s dwell + confirm phrase + capability ack).
         // The operator decides once; `agent_revision_promote` then accepts this
-        // single approval as covering BOTH the R++2 capability gate and the
+        // single approval as covering BOTH the P-2.25 capability gate and the
         // FullJury review gate. When there is no capability delta (e.g. a new
         // zero-cap agent, or no broadening), there is nothing to ack — the
         // federation review stands alone as a `SessionEscalate{PromotionReview}`
@@ -668,7 +668,7 @@ impl NativeTool for FederationEscalateTool {
                             // Fail closed (#746 review): a delta-computation
                             // failure must not downgrade the review to jury-only
                             // — that would let a cap-bearing new agent bypass
-                            // R++2 via new_agent_approved_via_escalation, and
+                            // P-2.25 via new_agent_approved_via_escalation, and
                             // reintroduce the double decision for existing
                             // agents. Surface the error; escalate again once
                             // the underlying issue is fixed.
@@ -676,7 +676,7 @@ impl NativeTool for FederationEscalateTool {
                                 format!(
                                     "capability delta computation failed for '{}' rev '{}': {}. \
                                      Refusing to downgrade the promotion review to jury-only \
-                                     (R++2 fail-closed); fix the underlying error and re-escalate.",
+                                     (P-2.25 fail-closed); fix the underlying error and re-escalate.",
                                     args.agent_id, canonical_revision_id, e
                                 ),
                                 None::<String>,
@@ -716,7 +716,7 @@ impl NativeTool for FederationEscalateTool {
                         format!(
                             "could not load declared capabilities for '{}' from artifact \
                              '{}': {}. Refusing to downgrade the promotion review to \
-                             jury-only (R++2 fail-closed). {}",
+                             jury-only (P-2.25 fail-closed). {}",
                             args.agent_id, caller_ref, e, fix_hint
                         ),
                         None::<String>,
@@ -758,14 +758,14 @@ impl NativeTool for FederationEscalateTool {
                 .collect();
 
             // #1094: promotion-identity dedup. The merged card exists so ONE
-            // operator decision covers both the R++2 capability delta and the
+            // operator decision covers both the P-2.25 capability delta and the
             // jury verdicts. When a bare `RevisionPromote` approval for the
             // same promotion identity `(agent, revision, outgoing, added,
             // broadened)` already exists, the operator has already been asked
             // about this promotion — do NOT mint a second card (observed
             // double-approval: session-53043b4c, apr-6150b08d + apr-23d36590):
             //   approved (all verdicts pass) → escalation auto-cleared and
-            //       linked to that approval; the promote side (FullJury + R++2)
+            //       linked to that approval; the promote side (FullJury + P-2.25)
             //       consumes the single decision via the approved projection.
             //   pending                        → escalation linked to it; the
             //       one pending decision resolves both the approval and the
@@ -844,7 +844,7 @@ impl NativeTool for FederationEscalateTool {
                             format!(
                                 "Promotion of '{}' revision '{}' was already REJECTED by the \
                                  operator (approval '{}'). Refusing to re-ask the same promotion \
-                                 decision (R++2). Escalate again only for a new revision or a new \
+                                 decision (P-2.25). Escalate again only for a new revision or a new \
                                  decision.",
                                 args.agent_id, canonical_revision_id, existing.request_id
                             ),
@@ -889,7 +889,7 @@ impl NativeTool for FederationEscalateTool {
                         "Federated promotion of agent {} revision {} (jury + capability delta)",
                         args.agent_id, canonical_revision_id
                     ),
-                    "R++2 capability acknowledgement + federation jury review (#738 single decision)",
+                    "P-2.25 capability acknowledgement + federation jury review (#738 single decision)",
                     format!(
                         "Added capabilities: {:?}; broadened: {:?}; artifact {} with {} role verdict(s). \
                          Approve only if you acknowledge each capability AND accept the jury verdicts.",
