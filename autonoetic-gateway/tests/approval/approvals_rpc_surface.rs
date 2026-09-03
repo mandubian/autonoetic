@@ -34,6 +34,7 @@ fn seed_approval(store: &std::sync::Arc<GatewayStore>, request_id: &str) {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         },
         approval_level: ApprovalLevel::Operator,
@@ -78,6 +79,7 @@ async fn pending_approvals_lists_seeded_and_roundtrips_action() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         }
     );
@@ -113,6 +115,7 @@ async fn pending_approvals_never_serves_a_credential_to_an_operator_surface() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["x".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
         approval_level: ApprovalLevel::Operator,
@@ -183,6 +186,7 @@ async fn approval_for_operator_never_serves_a_credential() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["x".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
         approval_level: ApprovalLevel::Operator,

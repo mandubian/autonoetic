@@ -285,6 +285,7 @@ impl NativeTool for ArtifactPrepareTool {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(targets.clone()),
+            detected_mounts: None,
             intent: None,
         };
 

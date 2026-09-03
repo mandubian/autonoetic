@@ -33,6 +33,7 @@ fn secret_bearing_request() -> ApprovalRequest {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["x".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
         created_at: chrono::Utc::now().to_rfc3339(),

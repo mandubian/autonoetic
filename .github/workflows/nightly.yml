@@ -53,3 +53,34 @@ jobs:
       # serial ordering is load-bearing for some of them.
       - name: Ignored e2e
         run: cargo nextest run --workspace --profile ci --run-ignored ignored-only
+
+  # #1002 slice 6 (issue #1296) — the `allow_set` fleet validation. The DP-1
+  # default flip made the gateway-asserted mount set the production shape, so
+  # a nightly canary runs the sandbox-heavy suites on real bubblewrap plus the
+  # DP-1 drift guard (config default must stay `allow_set`). A red here means
+  # the strict mode is breaking or the default is drifting back to `legacy` —
+  # both are exactly what this job exists to surface (RFC §9.6/§10).
+  allow-set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install bubblewrap and mold
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap mold
+
+      # Real-bubblewrap allow_set composition tests (tests/event/allow_set.rs),
+      # sandbox tier suites, the declared-mount resolver + approval surfaces,
+      # and the egress domain the mount set eventually feeds.
+      - name: Sandbox domains under allow_set
+        run: cargo nextest run --workspace --profile ci -E 'test(sandbox) or test(allow_set) or test(declared_mount) or test(mount_grant) or test(host_fs)'
+
+      # Ignored #[ignore]'d sandbox e2e (real offline-sandbox runs under the
+      # default allow_set mode).
+      - name: Ignored sandbox e2e
+        run: cargo nextest run --workspace --profile ci --run-ignored ignored-only -E 'test(sandbox)'

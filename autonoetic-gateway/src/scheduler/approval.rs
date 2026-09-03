@@ -360,6 +360,82 @@ pub fn apply_decision(
                 }
             }
         }
+
+        // ── 1b. Session mount grants (#1002 slice 5) ───────────────────
+        // The filesystem analog of the hosts block above: an approved exec
+        // whose manifest declared uncovered host mounts materializes one
+        // mount grant per `MountRequest`, so the agent's retry resolves the
+        // previously-denied declarations. Same scope/expiry options; same
+        // opt-out via `create_grant: false`.
+        if let Some(requests) = decision.action.detected_mounts() {
+            if !requests.is_empty() {
+                if let Some(root_sid) = &decision.root_session_id {
+                    let scope = options
+                        .grant_scope
+                        .clone()
+                        .unwrap_or(GrantScope::RootSession);
+                    let computed_expiry = if options.grant_expires_at.is_none()
+                        && config.default_grant_ttl_secs > 0
+                    {
+                        let ttl_secs =
+                            i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
+                        let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now());
+                        let t = base + chrono::Duration::seconds(ttl_secs);
+                        Some(t.to_rfc3339())
+                    } else {
+                        None
+                    };
+                    let expires_at = options
+                        .grant_expires_at
+                        .as_deref()
+                        .or(computed_expiry.as_deref());
+                    // Deny beats grant, also at mint time: a request whose
+                    // canonical path sits at/above/inside the gateway deny-mask
+                    // is silently skipped (warned) — the resolver refuses to
+                    // honor such a grant anyway, so writing the row would only
+                    // manufacture audit noise that looks like coverage.
+                    let protected =
+                        crate::sandbox::driver::bubblewrap::canonical_host_deny_paths();
+                    for request in requests {
+                        let canonical = std::path::Path::new(&request.canonical_path);
+                        if protected
+                            .iter()
+                            .any(|pp| canonical.starts_with(pp) || pp.starts_with(canonical))
+                        {
+                            tracing::warn!(
+                                target: "approval",
+                                request_id = %decision.request_id,
+                                canonical_path = %request.canonical_path,
+                                "Refusing to materialize a mount grant over a protected path"
+                            );
+                            continue;
+                        }
+                        if let Err(e) = store.insert_session_mount_grant(
+                            root_sid,
+                            &decision.session_id,
+                            &decision.agent_id,
+                            &request.canonical_path,
+                            request.readonly,
+                            &scope,
+                            &decision.decided_by,
+                            &decision.decided_at,
+                            Some(&decision.request_id),
+                            expires_at,
+                        ) {
+                            tracing::warn!(
+                                target: "approval",
+                                request_id = %decision.request_id,
+                                canonical_path = %request.canonical_path,
+                                error = %e,
+                                "Failed to insert session mount grant"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── 1c. Promotion attempt ledger reset (issue #720) ────────────────
@@ -2560,6 +2636,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
@@ -2648,6 +2725,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
@@ -2708,6 +2786,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         };
         let install = || ScheduledAction::AgentInstall {
@@ -2830,6 +2909,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2026-06-18T00:00:00Z".to_string(),
@@ -2898,6 +2978,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             approval_level: ApprovalLevel::Operator,
@@ -2968,6 +3049,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -2994,6 +3076,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -3020,6 +3103,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -3046,6 +3130,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -3073,6 +3158,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -3365,6 +3451,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -3477,6 +3564,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         };
         let level = super::resolve_approval_level(&cfg, &action);
@@ -3506,6 +3594,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
@@ -3581,6 +3670,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),

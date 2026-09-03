@@ -158,6 +158,7 @@ fn sandbox_exec_approval_under_taint_materializes_host_scoped_declass() -> anyho
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["example.com".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
         status: ApprovalStatus::Approved,

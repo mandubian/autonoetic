@@ -1073,9 +1073,14 @@ pub async fn handle_gateway_grants(
             // server-side (the CLI previously wrote one locally).
             let mut count: u64 = 0;
             let mut declass_count: u64 = 0;
+            let mut mount_count: u64 = 0;
             for (kind, sink) in [
                 ("session_approval", &mut count),
                 ("egress_declassification", &mut declass_count),
+                // #1002 slice 5: mount grants ride the same revoke loop; a
+                // `--host` filter value is interpreted as a host path for
+                // this kind (at-or-above semantics).
+                ("session_mount", &mut mount_count),
             ] {
                 let result = rpc.call(
                     "grants.revoke",
@@ -1089,12 +1094,15 @@ pub async fn handle_gateway_grants(
                 )?;
                 *sink = result["revoked"].as_u64().unwrap_or(0);
             }
-            if count == 0 && declass_count == 0 {
+            if count == 0 && declass_count == 0 && mount_count == 0 {
                 println!("No matching grants found for session {}", root_session);
             } else {
                 println!("Revoked {} grant(s) for session {} (reason: {})", count, root_session, reason_text);
                 if declass_count > 0 {
                     println!("Revoked {} egress declassification grant(s)", declass_count);
+                }
+                if mount_count > 0 {
+                    println!("Revoked {} session mount grant(s)", mount_count);
                 }
                 if let Some(ref host_val) = host {
                     println!("  Host filter: {}", host_val);

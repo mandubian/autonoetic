@@ -4030,6 +4030,20 @@ mod tests {
         assert_eq!(config.max_background_due_per_tick, 32);
     }
 
+    /// DP-1 drift guard (#1002 slice 4/#1296): `sandbox.host_fs` defaults to
+    /// `allow_set` — the blanket host-`/` ro-bind is a deprecated opt-out, so
+    /// an accidental default flip back to `legacy` must fail loudly. The
+    /// nightly `allow-set` job runs this alongside the real-bubblewrap suites.
+    #[test]
+    fn sandbox_host_fs_defaults_to_allow_set() {
+        assert_eq!(default_host_fs_mode(), "allow_set");
+        let config = GatewayConfig::default();
+        assert_eq!(config.sandbox.host_fs, "allow_set");
+        // A config that omits the key deserializes to the allow_set default.
+        let parsed: GatewayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.sandbox.host_fs, "allow_set");
+    }
+
     // --- #842: proactive soft_budget_tokens derivation ---
 
     /// Build a minimal preset with only the fields the derivation reads.

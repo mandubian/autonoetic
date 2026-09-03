@@ -101,6 +101,7 @@ fn high_risk_exec() -> ScheduledAction {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: Some(vec!["stooq.com".to_string()]),
+        detected_mounts: None,
         intent: None,
     }
 }
@@ -113,6 +114,7 @@ fn standard_exec() -> ScheduledAction {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: None,
+        detected_mounts: None,
         intent: None,
     }
 }

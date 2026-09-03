@@ -1570,6 +1570,7 @@ mod decided_by_kind_tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             approval_level: ApprovalLevel::Operator,

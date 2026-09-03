@@ -1270,6 +1270,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: chrono::Utc::now().to_rfc3339(),

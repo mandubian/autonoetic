@@ -1215,6 +1215,16 @@ impl AgentExecutor {
                             "Failed to delete session grants on session close"
                         );
                     }
+                    // Mount grants die with the root session as well
+                    // (#1002 slice 5) — same suspension preservation rule as
+                    // the host grants above.
+                    if let Err(e) = gs.delete_session_mount_grants(&root_sid) {
+                        tracing::warn!(
+                            root_session_id = %root_sid,
+                            error = %e,
+                            "Failed to delete session mount grants on session close"
+                        );
+                    }
                     // Egress: the session's `egress_policy` dies with the root
                     // session (RFC data-envelopes §5.4). Only on a real close —
                     // a suspended session resumes and must keep its rules.

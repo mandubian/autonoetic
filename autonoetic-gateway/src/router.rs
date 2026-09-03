@@ -4223,6 +4223,7 @@ impl JsonRpcRouter {
                 enum GrantKindParam {
                     SessionApproval,
                     EgressDeclassification,
+                    SessionMount,
                 }
                 fn default_grant_revoke_reason() -> String {
                     "Revoked by operator".to_string()
@@ -4257,6 +4258,7 @@ impl JsonRpcRouter {
                 // without it the host/all path applies (CLI, real count).
                 let mut session_approval_count: usize = 0;
                 let mut egress_declassification_count: usize = 0;
+                let mut session_mount_count: usize = 0;
                 match params.grant_kind {
                     GrantKindParam::EgressDeclassification => {
                         egress_declassification_count = if let Some(gid) = params.grant_id {
@@ -4341,18 +4343,58 @@ impl JsonRpcRouter {
                             }
                         };
                     }
+                    GrantKindParam::SessionMount => {
+                        session_mount_count = if let Some(gid) = params.grant_id {
+                            // Same root scoping as the other per-row paths.
+                            match store.revoke_session_mount_grant_by_id(
+                                &params.root_session_id,
+                                gid,
+                                &params.reason,
+                            ) {
+                                Ok(b) => usize::from(b),
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!("grants.revoke (session mount) failed: {}", e),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Mount grants revoke at-or-above the given path
+                            // (`host` carries the path for this kind), or all
+                            // active mount grants under the root when omitted.
+                            match store.revoke_session_mount_grants(
+                                &params.root_session_id,
+                                params.host.as_deref(),
+                                &params.reason,
+                            ) {
+                                Ok(count) => count,
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!("grants.revoke (session mount) failed: {}", e),
+                                    );
+                                }
+                            }
+                        };
+                    }
                 }
-                let revoked = session_approval_count + egress_declassification_count;
+                let revoked =
+                    session_approval_count + egress_declassification_count + session_mount_count;
                 // CONTRACT — `revoke_grants` causal-event payload schema.
                 // Both emitters of `category: "grant_revocation" / action:
                 // "revoke_grants"` MUST share one canonical schema so audit
                 // views / contract-health tallies parse a single shape:
-                //   { reason, count, egress_declassification_revoked }
-                // where `count` = session-approval grants revoked and
+                //   { reason, count, egress_declassification_revoked,
+                //     session_mount_revoked }
+                // where `count` = session-approval grants revoked,
                 // `egress_declassification_revoked` = declassification grants
-                // revoked. This RPC path additionally emits provenance keys
-                // (`grant_kind`, `host`, `revoked_by`) the CLI omits;
-                // consumers MUST ignore unknown keys. If you add a third
+                // revoked, and `session_mount_revoked` = mount grants revoked
+                // (#1002 slice 5). This RPC path additionally emits provenance
+                // keys (`grant_kind`, `host`, `revoked_by`) the CLI omits;
+                // consumers MUST ignore unknown keys. If you add another
                 // emitter or a new grant kind, extend BOTH sites (here and
                 // `handle_gateway_grants` in cli/gateway.rs) — see PR #962.
                 //
@@ -4364,9 +4406,11 @@ impl JsonRpcRouter {
                     "reason": params.reason,
                     "count": session_approval_count,
                     "egress_declassification_revoked": egress_declassification_count,
+                    "session_mount_revoked": session_mount_count,
                     "grant_kind": match params.grant_kind {
                         GrantKindParam::SessionApproval => "session_approval",
                         GrantKindParam::EgressDeclassification => "egress_declassification",
+                        GrantKindParam::SessionMount => "session_mount",
                     },
                     "grant_id": params.grant_id,
                     "host": params.host,
