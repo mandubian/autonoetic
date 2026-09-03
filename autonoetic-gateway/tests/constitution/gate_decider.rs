@@ -146,6 +146,7 @@ fn sandbox_action() -> ScheduledAction {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: Some(vec!["example.com".to_string()]),
+        detected_mounts: None,
         intent: None,
     }
 }

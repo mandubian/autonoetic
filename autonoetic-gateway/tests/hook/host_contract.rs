@@ -362,6 +362,7 @@ fn grant_drift_emits_causal_event_for_host_outside_contract() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["evil.com".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
         status: ApprovalStatus::Approved,

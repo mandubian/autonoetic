@@ -16,6 +16,14 @@ When an agent requests a privileged action (network access, file system writes, 
 
 5. **Approval Flood Cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`.
 
+## Session Mount Grants (#1002 slice 5)
+
+The filesystem analog of the network host grants: when a SKILL.md declares `runtime.mounts` entries that neither `sandbox.allowed_mount_roots` (nor `_rw`) nor an existing grant covers, `sandbox_exec` suspends with a **mount approval** carrying a `MountRequest` per path (raw `host_path`, canonicalized path, ro/rw). Approval materializes rows in the `session_mount_grants` table — session-scoped (`GrantScope::RootSession` default, or `Session`), expiring on `default_grant_ttl_secs`, one-shot via `create_grant: false` — and the agent retries with `approval_ref`.
+
+- **Coverage semantics**: prefix-based on canonical host paths (a grant at `/data` covers `/data/mail`, never `/database`), with a per-row read-only ceiling — an `ro` grant never cures an `rw` declaration; the manifest's rw intent rides the request so the operator sees it.
+- **Deny beats grant at every stage**: declarations overlapping the gateway directory or an operator deny-list entry are never granted, at mint time (the grant row is refused) and at resolution time — they fail terminally with a `mount_denied` envelope instead of raising an approval, since no decision can cure them. Missing host paths likewise stay terminal.
+- **Lifecycle**: soft-revocation (row kept as audit trail) via `grants.revoke` with `grant_kind: "session_mount"` (`host` carries the path; revoking a path kills every grant **containing** it — the grant at that path and any broader ancestor grant that would otherwise keep it exposed), the same `default_grant_ttl_secs` expiry and scheduler reaper as host grants, and hard deletion on emergency stop and root-session close.
+
 ## Gate Types
 
 | Gate Type | Description | Resolution |

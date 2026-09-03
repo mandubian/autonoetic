@@ -105,6 +105,22 @@ pub struct RevisionPromoteFederationContext {
     pub planner_synthesis: String,
 }
 
+/// One declared host mount (#1002 slice 5) an exec requested that no allowlist
+/// entry or session grant covers — the payload an operator is asked to decide
+/// on. `canonical_path` is the resolution-checked form (tilde-expanded,
+/// symlink-canonicalized); `readonly` mirrors the manifest declaration. An
+/// approved request materializes a session mount grant for `canonical_path`;
+/// paths protected by the gateway deny-mask are never granted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MountRequest {
+    /// The manifest's raw `host_path` (pre-expansion), kept for display.
+    pub host_path: String,
+    /// Canonicalized host path the grant would cover (prefix semantics: the
+    /// grant also covers paths under it).
+    pub canonical_path: String,
+    pub readonly: bool,
+}
+
 /// Actions that can be stored in reevaluation state and executed by the background scheduler,
 /// or used as the *subject* of an approval request (ApprovalRequest/ApprovalDecision).
 ///
@@ -139,6 +155,13 @@ pub enum ScheduledAction {
         evidence_ref: Option<String>,
         #[serde(default)]
         detected_hosts: Option<Vec<String>>,
+        /// Declared host mounts (#1002 slice 5) the manifest requested that
+        /// neither the operator allowlist nor a session mount grant covers.
+        /// Carried on the approval subject so an operator decision can
+        /// materialize session mount grants — the filesystem analog of
+        /// `detected_hosts`.
+        #[serde(default)]
+        detected_mounts: Option<Vec<MountRequest>>,
         /// Agent-stated purpose from `sandbox_exec` `intent` (operator-facing).
         #[serde(default)]
         intent: Option<String>,
@@ -423,6 +446,17 @@ impl ScheduledAction {
         }
     }
 
+    /// Declared host mounts (#1002 slice 5) awaiting an operator decision.
+    ///
+    /// Returns `None` when the action carries no mount requests — only
+    /// `SandboxExec` can, mirroring `detected_hosts`.
+    pub fn detected_mounts(&self) -> Option<&[MountRequest]> {
+        match self {
+            Self::SandboxExec { detected_mounts, .. } => detected_mounts.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::WriteFile { .. } => "write_file",
@@ -584,6 +618,7 @@ impl ScheduledAction {
                 requires_approval,
                 evidence_ref,
                 detected_hosts,
+                detected_mounts,
                 intent,
             } => Self::SandboxExec {
                 command: super::redaction::redact_embedded_secrets(command),
@@ -591,6 +626,7 @@ impl ScheduledAction {
                 requires_approval: *requires_approval,
                 evidence_ref: evidence_ref.clone(),
                 detected_hosts: detected_hosts.clone(),
+                detected_mounts: detected_mounts.clone(),
                 intent: intent.clone(),
             },
             Self::WriteFile {
@@ -658,6 +694,7 @@ impl ScheduledAction {
                 dependencies,
                 requires_approval,
                 detected_hosts,
+                detected_mounts,
                 intent,
                 ..
             } => Self::SandboxExec {
@@ -672,6 +709,9 @@ impl ScheduledAction {
                 requires_approval,
                 evidence_ref: None,
                 detected_hosts,
+                // An agent-class approver still needs to know which host path
+                // it is being asked to grant (#1002 slice 5).
+                detected_mounts,
                 intent,
             },
             Self::WriteFile {
@@ -1351,6 +1391,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            detected_mounts: None,
             intent: None,
         }
     }
@@ -1362,6 +1403,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            detected_mounts: None,
             intent: None,
         }
     }
@@ -1928,12 +1970,40 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["a.example.com".into(), "b.example.com".into()]),
+            detected_mounts: None,
             intent: None,
         };
         assert_eq!(
             a.detected_hosts(),
             Some(vec!["a.example.com".into(), "b.example.com".into()])
         );
+    }
+
+    #[test]
+    fn sandbox_exec_detected_mounts_accessor_round_trips() {
+        let a = ScheduledAction::SandboxExec {
+            command: "".into(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: None,
+            detected_mounts: Some(vec![crate::background::MountRequest {
+                host_path: "~/mail".into(),
+                canonical_path: "/home/u/mail".into(),
+                readonly: true,
+            }]),
+            intent: None,
+        };
+        assert_eq!(a.detected_mounts().unwrap().len(), 1);
+        // Other variants carry no mount requests.
+        assert!(ScheduledAction::WriteFile {
+            path: "p".into(),
+            content: "c".into(),
+            requires_approval: false,
+            evidence_ref: None,
+        }
+        .detected_mounts()
+        .is_none());
     }
 
     #[test]
@@ -1944,6 +2014,7 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         };
         assert_eq!(a.detected_hosts(), None);

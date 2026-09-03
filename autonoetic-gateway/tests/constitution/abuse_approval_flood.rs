@@ -19,6 +19,7 @@ fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
         action: ScheduledAction::SandboxExec {
             command: format!("echo {}", ix),
             detected_hosts: Some(vec![format!("host-{}.example.com", ix)]),
+            detected_mounts: None,
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,

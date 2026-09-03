@@ -48,6 +48,7 @@ pub mod sentinel_disagreements;
 pub mod session_envelopes;
 pub mod session_inference;
 mod session_outcomes;
+mod session_mount_grants;
 mod session_spawn_lineage;
 mod session_taint;
 mod session_timeline;
@@ -84,7 +85,9 @@ const LIVE_DIGEST_RETRY_CAPACITY: usize = LIVE_DIGEST_BUFFER_CAPACITY * 16;
 
 pub use messages::AgentMessageRecord;
 pub use residency::SessionResidency;
+pub use session_mount_grants::SessionMountGrant;
 pub use served_party::{
+
     is_distinct_served_user, operator_default, parse_served_party_token,
     record_at_ingress as record_served_party_at_ingress, BindOutcome, ServedParty,
     ServedPartySource, ServedPartyToken,

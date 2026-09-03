@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 86;
+const SCHEMA_VERSION_LATEST: i64 = 87;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -571,6 +571,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_decider_model_pin_v84(conn)?;
     apply_decider_gate_routings_v85(conn)?;
     apply_session_served_party_v86(conn)?;
+    apply_session_mount_grants_v87(conn)?;
 
     Ok(())
 }
@@ -3845,6 +3846,60 @@ fn apply_session_served_party_v86(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// v87: `session_mount_grants` (#1002 slice 5, issue #1296).
+///
+/// The filesystem analog of `session_approval_grants`: when an operator
+/// approves a sandbox exec whose manifest declared host mounts outside
+/// `sandbox.allowed_mount_roots`, each request materializes a row here and
+/// `resolve_declared_mounts` cures the matching denial on retry. Rows are
+/// session-scoped (`GrantScope` semantics, `*` sentinel for root-wide), expire
+/// on the same `default_grant_ttl_secs` clock, soft-revoke like host grants,
+/// and are deleted by emergency stop / root-session close exactly like the
+/// host tables. Coverage is by canonical host path (prefix semantics) with a
+/// read-only ceiling per row — an `ro` row never cures an `rw` request.
+fn apply_session_mount_grants_v87(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 87 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_mount_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            session_id TEXT NOT NULL DEFAULT '',
+            agent_id TEXT NOT NULL,
+            -- Canonicalized host path the grant covers (prefix semantics).
+            canonical_path TEXT NOT NULL,
+            -- 1 = read-only ceiling, 0 = read-write. A ro row never cures an
+            -- rw declaration; an rw row cures both.
+            readonly INTEGER NOT NULL DEFAULT 1,
+            scope TEXT NOT NULL DEFAULT 'root_session',
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            source_approval_id TEXT,
+            expires_at TEXT,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            UNIQUE(root_session_id, session_id, agent_id, scope, canonical_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mount_grants_root_agent
+          ON session_mount_grants(root_session_id, agent_id);
+        CREATE INDEX IF NOT EXISTS idx_mount_grants_root
+          ON session_mount_grants(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![87_i64, "session_mount_grants", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_session_liveness_v83(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
@@ -4160,6 +4215,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, "alice");
+    }
+
+    /// v87 creates `session_mount_grants` (#1002 slice 5) and bumps
+    /// SCHEMA_VERSION_LATEST.
+    #[test]
+    fn v87_creates_session_mount_grants_and_bumps_supported_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap(); // idempotent
+
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 87",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "v87 must be recorded exactly once");
+
+        let recorded_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            SCHEMA_VERSION_LATEST >= recorded_max,
+            "SCHEMA_VERSION_LATEST ({SCHEMA_VERSION_LATEST}) must cover the highest applied \
+             migration ({recorded_max}), or the gateway rejects its own database"
+        );
+
+        conn.execute(
+            "INSERT INTO session_mount_grants
+                (root_session_id, session_id, agent_id, canonical_path, readonly,
+                 scope, granted_by, granted_at)
+             VALUES ('root-1', 'root-1', 'coder.default', '/data', 1,
+                     'root_session', 'operator', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // The UNIQUE(root, session, agent, scope, path) key is what makes the
+        // insert path an upsert: re-approval of the same request must update
+        // the row (widening ro → rw) instead of stacking duplicate coverage.
+        let dup = conn.execute(
+            "INSERT INTO session_mount_grants
+                (root_session_id, session_id, agent_id, canonical_path, readonly,
+                 scope, granted_by, granted_at)
+             VALUES ('root-1', 'root-1', 'coder.default', '/data', 1,
+                     'root_session', 'operator', '2026-01-02T00:00:00Z')",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate mount grants for one key must be rejected");
+
+        let readonly: i64 = conn
+            .query_row(
+                "SELECT readonly FROM session_mount_grants WHERE canonical_path = '/data'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(readonly, 1);
     }
 
     /// v73 creates `egress_session_policies` and bumps SCHEMA_VERSION_LATEST.

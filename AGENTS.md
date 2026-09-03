@@ -187,6 +187,7 @@ Five layers of approval dedup (checked in order):
 
 Additional approval features:
 - **Grant revocation**: `gateway grants revoke --root-session <id> --host X` without emergency stop; emits `grant_revocation` causal event.
+- **Session mount grants** (#1002 slice 5): the filesystem analog of session grants — an approved `sandbox_exec` carrying uncovered `runtime.mounts` requests materializes `session_mount_grants` rows (canonical-path prefix coverage, per-row ro ceiling, same TTL/scope/revocation machinery); the declared-mount resolver cures the matching denial on retry. Protected-path and missing-path declarations are never grantable — they fail terminally. See `docs/wiki/approval-system.md`.
 - **Continuation HMAC**: signed with `continuation_key` (or derived from `node_id`); verified on resume; action-equality check vs stored approval.
 - **Continuation cleanup**: on resume, reject/cancel/withdraw, gateway startup reaper, emergency stop, task cancellation.
 

@@ -1278,11 +1278,19 @@ pub struct MountDenial {
 /// bind a missing source) — is denied loudly. The manifest alone never widens
 /// filesystem reach; the config allowlist is the grant, like
 /// `NetworkAccess.hosts`.
+///
+/// #1002 slice 5: `session_grants` are the operator-approved session mount
+/// grants minted by an approval decision — a denial whose canonical path a
+/// live grant covers (prefix semantics, ro ceiling respected) is cured exactly
+/// like an allowlisted path. Protected-path and missing-path denials are never
+/// curable: grants cannot shadow the deny-mask, and bwrap cannot bind a
+/// missing source regardless of authorization.
 pub fn resolve_declared_mounts(
     declared: &[autonoetic_types::agent::DeclaredMount],
     allowed_roots: &[String],
     allowed_rw_roots: &[String],
     protected_paths: &[PathBuf],
+    session_grants: &[crate::scheduler::gateway_store::SessionMountGrant],
 ) -> (Vec<SandboxMount>, Vec<MountDenial>) {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let mut granted = Vec::new();
@@ -1307,6 +1315,17 @@ pub fn resolve_declared_mounts(
 
     let covered_by = |canonical: &Path, roots: &[PathBuf]| {
         roots.iter().any(|root| canonical.starts_with(root))
+    };
+    // Session mount grant coverage (#1002 slice 5): prefix semantics on
+    // canonical paths — a grant at `/data` covers `/data/mail` — with a
+    // read-only ceiling (an ro grant never satisfies an rw request; rw
+    // satisfies both). `Path::starts_with` is component-wise, so `/data`
+    // never matches `/database`.
+    let grant_allows = |canonical: &Path, needs_rw: bool| {
+        session_grants.iter().any(|g| {
+            let grant_path = Path::new(&g.canonical_path);
+            canonical.starts_with(grant_path) && (!g.readonly || !needs_rw)
+        })
     };
     // Deny beats grant (#1163 review finding 1): a declared mount that is at,
     // above, or inside a protected path would shadow the bwrap deny-mask
@@ -1382,13 +1401,24 @@ pub fn resolve_declared_mounts(
         }
         if !covered_by(&canonical, &canonical_roots) && !covered_by(&canonical, &canonical_rw_roots)
         {
+            // An operator-approved session mount grant cures the allowlist
+            // denial (#1002 slice 5) — the approval path, not just config.
+            if grant_allows(&canonical, !mount.readonly) {
+                let dest = canonical.to_string_lossy().to_string();
+                granted.push(SandboxMount {
+                    source: canonical,
+                    dest,
+                    readonly: mount.readonly,
+                });
+                continue;
+            }
             let mut d = MountDenial {
                 host_path: mount.host_path.clone(),
                 canonical_path: canonical.to_string_lossy().to_string(),
                 reason: [
-                        "not under any sandbox.allowed_mount_roots entry — ask the ",
-                        "operator to extend the allowlist (config) or remove the ",
-                        "declaration",
+                        "not under any sandbox.allowed_mount_roots entry — the exec is raised ",
+                        "for operator approval (session-scoped mount grant) unless the ",
+                        "declaration is removed",
                     ]
                     .concat()
                     .to_string(),
@@ -1404,6 +1434,11 @@ pub fn resolve_declared_mounts(
         let effective_readonly = if mount.readonly {
             true
         } else if covered_by(&canonical, &canonical_rw_roots) {
+            false
+        } else if grant_allows(&canonical, true) {
+            // An rw session grant covers the rw declaration the ro allowlist
+            // cannot (the grant was minted from an approved request, so the
+            // operator already saw the rw intent).
             false
         } else {
             let mut d = MountDenial {
@@ -1877,7 +1912,34 @@ mod declared_mount_tests {
         rw_roots: &[String],
         protected: &[PathBuf],
     ) -> (Vec<SandboxMount>, Vec<MountDenial>) {
-        resolve_declared_mounts(mounts, ro_roots, rw_roots, protected)
+        resolve_with_grants(mounts, ro_roots, rw_roots, protected, &[])
+    }
+
+    fn resolve_with_grants(
+        mounts: &[autonoetic_types::agent::DeclaredMount],
+        ro_roots: &[String],
+        rw_roots: &[String],
+        protected: &[PathBuf],
+        grants: &[crate::scheduler::gateway_store::SessionMountGrant],
+    ) -> (Vec<SandboxMount>, Vec<MountDenial>) {
+        resolve_declared_mounts(mounts, ro_roots, rw_roots, protected, grants)
+    }
+
+    /// A session mount grant row covering `path`, for resolver tests.
+    fn grant(path: &Path, readonly: bool) -> crate::scheduler::gateway_store::SessionMountGrant {
+        crate::scheduler::gateway_store::SessionMountGrant {
+            id: 1,
+            root_session_id: "root".into(),
+            session_id: "root".into(),
+            agent_id: "agent-a".into(),
+            canonical_path: path.to_string_lossy().to_string(),
+            readonly,
+            scope: autonoetic_types::background::GrantScope::RootSession,
+            granted_by: "op".into(),
+            granted_at: "2026-01-01T00:00:00Z".into(),
+            source_approval_id: None,
+            expires_at: None,
+        }
     }
 
     fn s(p: &std::path::Path) -> String {
@@ -2202,6 +2264,102 @@ mod declared_mount_tests {
             "{}",
             denied[0].reason
         );
+    }
+
+    /// #1002 slice 5: a live session mount grant cures an allowlist denial —
+    /// the approval path, not just config.
+    #[test]
+    fn session_grant_cures_allowlist_denial() {
+        let tmp = tmpdir();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let (granted, denied) = resolve_with_grants(
+            &[declared(&s(&outside), true)],
+            &[],
+            &[],
+            &[],
+            &[grant(&outside, true)],
+        );
+        assert!(denied.is_empty(), "unexpected denials: {denied:?}");
+        assert_eq!(granted.len(), 1);
+        assert!(granted[0].readonly);
+        assert_eq!(granted[0].source, outside);
+    }
+
+    /// An ro grant covers an ro declaration under it but never an rw one —
+    /// the grant ceiling holds even though the operator approved the path.
+    #[test]
+    fn ro_grant_does_not_cure_rw_request() {
+        let tmp = tmpdir();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let (granted, denied) = resolve_with_grants(
+            &[declared(&s(&outside), false)],
+            &[],
+            &[],
+            &[],
+            &[grant(&outside, true)],
+        );
+        assert!(granted.is_empty());
+        assert_eq!(denied.len(), 1);
+    }
+
+    /// An rw grant cures both ro and rw declarations at and under its path.
+    #[test]
+    fn rw_grant_cures_rw_request_under_prefix() {
+        let tmp = tmpdir();
+        let root = tmp.path().join("grant-root");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let grants = [grant(&root, false)];
+        let (granted, denied) = resolve_with_grants(
+            &[declared(&s(&nested), false), declared(&s(&root), true)],
+            &[],
+            &[],
+            &[],
+            &grants,
+        );
+        assert!(denied.is_empty(), "unexpected denials: {denied:?}");
+        assert_eq!(granted.len(), 2);
+        assert!(!granted[0].readonly, "rw declaration cured rw");
+        assert!(granted[1].readonly, "ro declaration stays ro");
+    }
+
+    /// Grant coverage is component-wise: `/data` never covers `/database`.
+    #[test]
+    fn grant_prefix_is_component_wise() {
+        let tmp = tmpdir();
+        let grant_root = tmp.path().join("data");
+        let sibling = tmp.path().join("database");
+        std::fs::create_dir_all(&grant_root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (granted, _denied) = resolve_with_grants(
+            &[declared(&s(&sibling), true)],
+            &[],
+            &[],
+            &[],
+            &[grant(&grant_root, true)],
+        );
+        assert!(granted.is_empty(), "sibling prefix must not be covered");
+    }
+
+    /// Deny beats grant, resolver side: a grant over a protected path is
+    /// inert — the protected-path denial is never cured.
+    #[test]
+    fn grant_cannot_cure_protected_path_denial() {
+        let tmp = tmpdir();
+        let protected_dir = tmp.path().join("protected");
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        let (granted, denied) = resolve_with_grants(
+            &[declared(&s(&protected_dir), true)],
+            &[],
+            &[],
+            &[protected_dir.clone()],
+            &[grant(&protected_dir, true)],
+        );
+        assert!(granted.is_empty(), "protected path must stay denied");
+        assert_eq!(denied.len(), 1);
+        assert!(denied[0].reason.contains("protected path"));
     }
 }
 

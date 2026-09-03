@@ -174,6 +174,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["example.com".to_string()]),
+            detected_mounts: None,
             intent: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::High);
@@ -187,6 +188,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::Standard);

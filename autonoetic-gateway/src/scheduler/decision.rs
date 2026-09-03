@@ -179,6 +179,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),

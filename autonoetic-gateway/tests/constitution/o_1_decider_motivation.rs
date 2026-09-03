@@ -20,6 +20,7 @@ fn pending_sandbox_approval(id: &str) -> ApprovalRequest {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         },
         created_at: "2026-06-01T00:00:00Z".to_string(),

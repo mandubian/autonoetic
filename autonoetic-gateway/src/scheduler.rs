@@ -97,6 +97,9 @@ async fn run_scheduler_tick_common(
         if let Err(e) = store.prune_expired_grants() {
             tracing::warn!(error = %e, "Failed to prune expired session approval grants");
         }
+        if let Err(e) = store.prune_expired_mount_grants() {
+            tracing::warn!(error = %e, "Failed to prune expired session mount grants");
+        }
         if let Err(e) = reap_expired_residencies(store.as_ref()) {
             tracing::warn!(error = %e, "Failed to reap expired session residencies");
         }
@@ -4383,6 +4386,7 @@ mod stuck_task_tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             created_at: chrono::Utc::now().to_rfc3339(),

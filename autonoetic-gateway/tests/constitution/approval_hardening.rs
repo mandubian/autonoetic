@@ -124,6 +124,7 @@ fn p_2_24_risk_classification_sandbox_exec_with_hosts_is_high() {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: Some(vec!["x.com".to_string()]),
+        detected_mounts: None,
         intent: None,
     };
     assert_eq!(classify_approval_risk(&action), ApprovalRisk::High);
@@ -445,6 +446,7 @@ fn rejecting_a_gate_scrubs_the_credential_from_its_stored_action() -> anyhow::Re
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["x".to_string()]),
+            detected_mounts: None,
             intent: None,
         },
     );
@@ -498,6 +500,7 @@ fn retention_prunes_decided_approvals_but_never_pending_ones() -> anyhow::Result
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: None,
+        detected_mounts: None,
         intent: None,
     };
 

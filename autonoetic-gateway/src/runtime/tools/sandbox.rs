@@ -1720,6 +1720,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     requires_approval: true,
                     evidence_ref: None,
                     detected_hosts: Some(normalized_targets.clone()),
+                    detected_mounts: None,
                     intent: args.intent.clone(),
                 };
                 let reason = sandbox_approval_operator_reason(
@@ -2543,40 +2544,306 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     protected.push(canon_gw);
                 }
             }
+            // #1002 slice 5: operator-approved session mount grants cure
+            // allowlist denials exactly like allowlist roots do — fetch the
+            // live grants for this root before resolving.
+            let session_grants = match (
+                gateway_store.as_ref(),
+                root_session_id.as_deref(),
+                session_id,
+            ) {
+                (Some(store), Some(root), Some(sid)) => store
+                    .active_session_mount_grants(root, sid, &manifest.agent.id)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
             let (granted, denied) = crate::sandbox::resolve_declared_mounts(
                 &manifest.runtime.mounts,
                 allowed_roots,
                 allowed_rw_roots,
                 &protected,
+                &session_grants,
             );
             if !denied.is_empty() {
-                let denials: Vec<serde_json::Value> = denied
+                // Approval eligibility (#1002 slice 5): only denials a mount
+                // grant could ever cure are worth an operator decision — a
+                // protected-path overlap or a missing host path would still
+                // fail after approval (grants cannot shadow the deny-mask;
+                // bwrap cannot bind a missing source), so those stay terminal.
+                let protected_set: Vec<std::path::PathBuf> = protected.clone();
+                let approval_eligible = |canonical: &str| -> bool {
+                    !canonical.is_empty()
+                        && std::fs::canonicalize(canonical).is_ok()
+                        && !protected_set.iter().any(|pp| {
+                            let c = std::path::Path::new(canonical);
+                            c.starts_with(pp) || pp.starts_with(c)
+                        })
+                };
+                let (eligible, ineligible): (Vec<&crate::sandbox::MountDenial>, Vec<_>) = denied
+                    .iter()
+                    .partition(|d| approval_eligible(&d.canonical_path));
+                if !ineligible.is_empty() {
+                    let denials: Vec<serde_json::Value> = denied
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "host_path": d.host_path,
+                                "canonical_path": d.canonical_path,
+                                "reason": d.reason,
+                            })
+                        })
+                        .collect();
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "message": format!(
+                            "sandbox_exec: {} declared runtime.mounts entr{} cannot be granted \
+                             (protected path or missing on host) — fix or remove the \
+                             declaration(s); approval cannot cure these.",
+                            denials.len(),
+                            if denials.len() == 1 { "y is" } else { "ies are" }
+                        ),
+                        "mount_denied": denials,
+                        // No rule id cited until filesystem-mount scoping has a
+                        // registered enforcement entry — an unregistered id lands
+                        // in contract-health `unattributed` (#1163 review
+                        // finding 3).
+                    })
+                    .to_string());
+                }
+
+                // Every remaining denial is a real operator decision: raise the
+                // mount gate (#1002 slice 5) unless there is no store/config to
+                // hold it — then keep the legacy fail-closed refusal.
+                let (store, cfg) = match (gateway_store.as_ref(), config) {
+                    (Some(s), Some(c)) => (s, c),
+                    _ => {
+                        let denials: Vec<serde_json::Value> = denied
+                            .iter()
+                            .map(|d| {
+                                serde_json::json!({
+                                    "host_path": d.host_path,
+                                    "canonical_path": d.canonical_path,
+                                    "reason": d.reason,
+                                })
+                            })
+                            .collect();
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": format!(
+                                "sandbox_exec: {} declared runtime.mounts entr{} not covered by \
+                                 sandbox.allowed_mount_roots and no approval store is available — \
+                                 extend the allowlist (config) or remove the declaration(s).",
+                                denials.len(),
+                                if denials.len() == 1 { "y is" } else { "ies are" }
+                            ),
+                            "mount_denied": denials,
+                        })
+                        .to_string());
+                    }
+                };
+                let requests: Vec<autonoetic_types::background::MountRequest> = eligible
                     .iter()
                     .map(|d| {
-                        serde_json::json!({
-                            "host_path": d.host_path,
-                            "canonical_path": d.canonical_path,
-                            "reason": d.reason,
-                        })
+                        let readonly = manifest
+                            .runtime
+                            .mounts
+                            .iter()
+                            .find(|m| m.host_path == d.host_path)
+                            .map(|m| m.readonly)
+                            .unwrap_or(true);
+                        autonoetic_types::background::MountRequest {
+                            host_path: d.host_path.clone(),
+                            canonical_path: d.canonical_path.clone(),
+                            readonly,
+                        }
                     })
                     .collect();
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "permission",
-                    "message": format!(
-                        "sandbox_exec: {} declared runtime.mounts entr{} not covered by \
-                         sandbox.allowed_mount_roots — ask the operator to extend the \
-                         allowlist (config) or remove the declaration(s).",
-                        denials.len(),
-                        if denials.len() == 1 { "y is" } else { "ies are" }
-                    ),
-                    "mount_denied": denials,
-                    // No rule id cited until filesystem-mount scoping has a
-                    // registered enforcement entry — an unregistered id lands
-                    // in contract-health `unattributed` (#1163 review
-                    // finding 3).
-                })
-                .to_string());
+                let mount_targets: Vec<String> = requests
+                    .iter()
+                    .map(|r| r.canonical_path.clone())
+                    .collect();
+                let action = ScheduledAction::SandboxExec {
+                    command: effective_command.clone(),
+                    // `args.dependencies` was consumed by the dependency plan
+                    // above; the mount decision turns on the command and the
+                    // requested paths, not the dependency spec.
+                    dependencies: None,
+                    requires_approval: true,
+                    evidence_ref: None,
+                    detected_hosts: None,
+                    detected_mounts: Some(requests.clone()),
+                    intent: args.intent.clone(),
+                };
+                let mount_list = mount_targets.join(", ");
+                let summary = format!(
+                    "sandbox_exec: {} declared host mount(s) need approval: {}",
+                    requests.len(),
+                    mount_list
+                );
+                let reason = format!(
+                    "manifest declares host path(s) [{}] outside sandbox.allowed_mount_roots; \
+                     approval materializes a session-scoped mount grant",
+                    mount_list
+                );
+                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                let gate_result = gate.check(crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: action.clone(),
+                        targets: mount_targets.clone(),
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id,
+                    run_context,
+                    config: Some(cfg),
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("sandbox.exec mount request: {mount_list}"),
+                        format!(
+                            "sandbox exec declares host mount(s) [{mount_list}] not covered by \
+                             sandbox.allowed_mount_roots"
+                        ),
+                        "grants read access to the listed host paths inside the sandbox for this \
+                         root session (write access where requested); effects depend on the command",
+                        "Approve if these host paths are expected for this agent's task; reject \
+                         if the declarations are unexpected",
+                    )
+                    .with_analysis(reason.clone()),
+                    summary: summary.clone(),
+                    approval_ref: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    request_id: None,
+                    turn_id: None,
+                })?;
+                match gate_result {
+                    crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                        let approval = build_approval_details(
+                            &autonoetic_types::background::ApprovalRequest {
+                                request_id: gate_id.clone(),
+                                agent_id: manifest.agent.id.clone(),
+                                session_id: session_id.unwrap_or("").to_string(),
+                                root_session_id: None,
+                                workflow_id: None,
+                                task_id: None,
+                                action,
+                                created_at: String::new(),
+                                status: None,
+                                decided_at: None,
+                                decided_by: None,
+                                reason: Some(reason),
+                                evidence_ref: None,
+                                decision_reason: None,
+                                approval_level:
+                                    autonoetic_types::background::ApprovalLevel::Operator,
+                                min_dwell_ms: None,
+                                confirm_phrase: None,
+                                code_excerpts: None,
+                                risk_summary: None,
+
+                                expires_at: None,
+                            },
+                            "sandbox_exec",
+                            summary,
+                            "approval_ref",
+                            serde_json::json!({
+                                "command": effective_command,
+                                "intent": args.intent.clone(),
+                                "mount_requests": requests,
+                                "note": "Approval materializes session-scoped mount grants; then retry with approval_ref.",
+                            }),
+                        );
+                        return serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "exit_code": null,
+                            "stdout": "",
+                            "stderr": format!(
+                                "Declared host mounts require operator approval (request_id: {gate_id}). After approval, retry with approval_ref.",
+                            ),
+                            "approval_required": true,
+                            "suspended": true,
+                            "request_id": gate_id,
+                            "mount_approval": true,
+                            "message": "Execution suspended pending operator decision on the declared host mounts.",
+                            "approval": approval,
+                        }))
+                        .map_err(Into::into);
+                    }
+                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                        let approval = build_approval_details(
+                            &autonoetic_types::background::ApprovalRequest {
+                                request_id: gate_id.clone(),
+                                agent_id: manifest.agent.id.clone(),
+                                session_id: session_id.unwrap_or("").to_string(),
+                                root_session_id: None,
+                                workflow_id: None,
+                                task_id: None,
+                                action,
+                                created_at: String::new(),
+                                status: None,
+                                decided_at: None,
+                                decided_by: None,
+                                reason: Some(reason),
+                                evidence_ref: None,
+                                decision_reason: None,
+                                approval_level:
+                                    autonoetic_types::background::ApprovalLevel::Operator,
+                                min_dwell_ms: None,
+                                confirm_phrase: None,
+                                code_excerpts: None,
+                                risk_summary: None,
+
+                                expires_at: None,
+                            },
+                            "sandbox_exec",
+                            summary,
+                            "approval_ref",
+                            serde_json::json!({
+                                "command": effective_command,
+                                "mount_requests": requests,
+                                "approval_already_pending": true,
+                                "note": "A mount approval is already pending for this session. After operator approval, retry with approval_ref.",
+                            }),
+                        );
+                        return serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "exit_code": null,
+                            "stdout": "",
+                            "stderr": format!(
+                                "Sandbox mount approval already pending (request_id: {gate_id}). After approval, retry with approval_ref.",
+                            ),
+                            "approval_required": true,
+                            "approval_already_pending": true,
+                            "suspended": true,
+                            "request_id": gate_id,
+                            "mount_approval": true,
+                            "message": "Execution suspended; a mount approval is already pending.",
+                            "approval": approval,
+                        }))
+                        .map_err(Into::into);
+                    }
+                    // Unreachable in practice: a cleared gate means session
+                    // grants already covered these targets, but we only raise
+                    // the gate when resolution still denied them. Fail loudly
+                    // rather than silently run with the declared mounts
+                    // missing (the #1002 failure mode this slice exists to
+                    // prevent).
+                    crate::runtime::human_gate::GateResult::Cleared { .. }
+                    | crate::runtime::human_gate::GateResult::PolicyAllowed { .. } => {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": "sandbox_exec: mount gate cleared but the declared mounts remain unresolved — refusing to run with mounts silently missing",
+                            "mount_denied": denied.iter().map(|d| serde_json::json!({
+                                "host_path": d.host_path,
+                                "canonical_path": d.canonical_path,
+                                "reason": d.reason,
+                            })).collect::<Vec<_>>(),
+                        })
+                        .to_string());
+                    }
+                }
             }
             declared_granted_mounts = granted;
         }
@@ -3745,6 +4012,7 @@ mod approval_ref_binding_tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                detected_mounts: None,
                 intent: None,
             },
             status: ApprovalStatus::Approved,
@@ -4053,11 +4321,11 @@ mod declared_mount_gate_tests {
         serde_json::from_str(&out).unwrap()
     }
 
-    /// A declared mount the allowlist doesn't cover fails the exec with a
-    /// structured mount_denied envelope that names the grant — not a bare
-    /// ENOENT, and not a silent drop.
+    /// A declared mount the allowlist doesn't cover suspends the exec with a
+    /// mount approval request (#1002 slice 5) — the operator decision path,
+    /// not a bare ENOENT and not a terminal refusal.
     #[test]
-    fn uncovered_declared_mount_fails_with_denial_envelope() {
+    fn uncovered_declared_mount_suspends_with_mount_approval() {
         let tmp = tempfile::tempdir().unwrap();
         let secret = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&secret).unwrap();
@@ -4071,25 +4339,31 @@ mod declared_mount_gate_tests {
             crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
                 .unwrap(),
         );
-        let v = run(&manifest, &config, &tmp.path().join("agent"), store);
+        let v = run(&manifest, &config, &tmp.path().join("agent"), store.clone());
         assert_eq!(v["ok"], serde_json::json!(false), "result: {v}");
-        assert_eq!(v["error_type"], "permission");
-        let denied = v["mount_denied"].as_array().expect("mount_denied array");
-        assert_eq!(denied.len(), 1);
-        assert!(
-            denied[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("allowed_mount_roots"),
-            "denial must name the grant: {denied:?}"
+        assert_eq!(v["approval_required"], serde_json::json!(true), "result: {v}");
+        assert_eq!(v["suspended"], serde_json::json!(true), "result: {v}");
+        assert_eq!(v["mount_approval"], serde_json::json!(true), "result: {v}");
+        let request_id = v["request_id"].as_str().expect("request_id");
+        // The pending approval carries the mount requests so the operator card
+        // and the grant materialization both see the same payload.
+        let pending = store.get_approval(request_id).unwrap().expect("pending row");
+        let mounts = pending.action.detected_mounts().expect("detected_mounts");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path, secret.to_string_lossy().to_string());
+        assert_eq!(
+            mounts[0].canonical_path,
+            secret.canonicalize().unwrap().to_string_lossy().to_string()
         );
+        assert!(mounts[0].readonly);
     }
 
-    /// rw ceiling at the tool surface: a manifest asking `readonly: false`
-    /// under an ro-only root fails with the teaching refusal naming
-    /// `allowed_mount_roots_rw` (#1163 review finding 2).
+    /// rw ceiling at the tool surface (#1163 review finding 2) is now also an
+    /// operator decision: the manifest's rw intent rides the mount request
+    /// (`readonly: false`) so approval materializes an rw grant explicitly,
+    /// never a silent downgrade.
     #[test]
-    fn rw_mount_without_rw_root_fails_with_teaching_refusal() {
+    fn rw_mount_without_rw_root_suspends_with_rw_mount_request() {
         let tmp = tempfile::tempdir().unwrap();
         let mail = tmp.path().join("mail");
         std::fs::create_dir_all(&mail).unwrap();
@@ -4103,16 +4377,47 @@ mod declared_mount_gate_tests {
             crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
                 .unwrap(),
         );
+        let v = run(&manifest, &config, &tmp.path().join("agent"), store.clone());
+        assert_eq!(v["approval_required"], serde_json::json!(true), "result: {v}");
+        let request_id = v["request_id"].as_str().expect("request_id");
+        let pending = store.get_approval(request_id).unwrap().expect("pending row");
+        let mounts = pending.action.detected_mounts().expect("detected_mounts");
+        assert_eq!(mounts.len(), 1);
+        assert!(!mounts[0].readonly, "rw intent must reach the operator card");
+    }
+
+    /// Deny beats grant at the surface: a declaration overlapping a protected
+    /// path can never be cured by approval, so it stays a terminal refusal —
+    /// no approval is minted for it. (nextest runs each test in its own
+    /// process, so seeding the global deny-path registry here is safe.)
+    #[test]
+    fn protected_path_declaration_fails_terminal_without_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let protected_dir = tmp.path().join("operator-secret");
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        crate::sandbox::driver::bubblewrap::init_host_deny_paths(vec![protected_dir.clone()]);
+        let manifest = manifest_with_mounts(vec![autonoetic_types::agent::DeclaredMount {
+            host_path: protected_dir.to_string_lossy().to_string(),
+            readonly: true,
+        }]);
+        let config = config_with_roots(vec![]);
+
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
+                .unwrap(),
+        );
         let v = run(&manifest, &config, &tmp.path().join("agent"), store);
         assert_eq!(v["ok"], serde_json::json!(false), "result: {v}");
+        assert_eq!(v["error_type"], "permission", "result: {v}");
+        assert!(
+            v["approval_required"].is_null(),
+            "protected-path denial must not raise an approval: {v}"
+        );
         let denied = v["mount_denied"].as_array().expect("mount_denied array");
         assert_eq!(denied.len(), 1);
         assert!(
-            denied[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("allowed_mount_roots_rw"),
-            "denial must name the rw ceiling: {denied:?}"
+            denied[0]["reason"].as_str().unwrap().contains("protected path"),
+            "denial must name the protected path: {denied:?}"
         );
     }
 

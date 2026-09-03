@@ -2523,6 +2523,16 @@ impl GatewayExecutionService {
                 "Failed to delete session grants during emergency stop"
             );
         }
+        // Mount grants die with the run too (#1002 slice 5) — approved host
+        // reach must not outlive the emergency stop that ended it.
+        if let Err(e) = store.delete_session_mount_grants(root_session_id) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to delete session mount grants during emergency stop"
+            );
+        }
         if let Err(e) = store.revoke_session_envelopes_for_root(root_session_id) {
             tracing::warn!(
                 target: "emergency_stop",

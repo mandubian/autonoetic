@@ -12,4 +12,5 @@ mod grant_revocation;
 mod host_constant_resolution;
 mod interaction_rpc_surface;
 mod scope_targets;
+mod session_mount_grants;
 mod waiter_fanin;

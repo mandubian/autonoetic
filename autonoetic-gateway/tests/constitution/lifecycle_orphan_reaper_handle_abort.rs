@@ -257,6 +257,7 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            detected_mounts: None,
             intent: None,
         },
         approval_level: ApprovalLevel::Operator,

@@ -25,6 +25,7 @@ fn sandbox_action() -> ScheduledAction {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: None,
+        detected_mounts: None,
         intent: None,
     }
 }

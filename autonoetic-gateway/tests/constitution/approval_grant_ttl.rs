@@ -214,6 +214,7 @@ fn make_sandbox_exec_request(
         action: ScheduledAction::SandboxExec {
             command: "curl https://api.example.com".to_string(),
             detected_hosts: Some(hosts.into_iter().map(String::from).collect()),
+            detected_mounts: None,
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,

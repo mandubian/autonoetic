@@ -610,6 +610,7 @@ impl NativeTool for ArtifactExecTool {
                     requires_approval: true,
                     evidence_ref: None,
                     detected_hosts: Some(concrete_targets.clone()),
+                    detected_mounts: None,
                     intent: args.intent.clone(),
                 };
                 let reason = artifact_exec_approval_operator_reason(

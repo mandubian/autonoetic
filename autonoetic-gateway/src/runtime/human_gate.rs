@@ -2394,6 +2394,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["api.example.com".to_string()]),
+            detected_mounts: None,
             intent: None,
         };
 
@@ -2439,6 +2440,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["api.example.com".to_string()]),
+            detected_mounts: None,
             intent: None,
         };
         let req = GateRequest {
@@ -2605,6 +2607,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(targets.clone()),
+            detected_mounts: None,
             intent: None,
         };
         let req = GateRequest {
