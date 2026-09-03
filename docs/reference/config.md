@@ -1201,6 +1201,14 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 | `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
 | `decider_obligations.adjudication_sla_secs` | u64 | `604800` | Adjudication SLA (#771 D.1): a constitutional proposal (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is stamped `sla_breached_at` and a causal event + notification are emitted. The item's status is unchanged — the decision is still owed. `0` disables the check. |
 
+### Decider Dispatch
+
+Run-scoped decider appointments (#1191, `gateway deciders …`). Phase 1 seats are advisory-only: a routed gate wakes the seat for one bounded turn, the verdict is recorded on the ledger, and the gate still parks for the operator.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `decider_dispatch_timeout_secs` | u64 | `120` | Upper bound on a seat's advisory deliberation (#1198). When the bound is exceeded — or the seat fails, escalates (P-2.21), or answers without a parsable motivated verdict — the routing keeps its null verdict and the gate parks for the operator. A dead night watch degrades to the status quo, never to auto-approval. |
+
 ### Amendment Invitations
 
 Mechanical civic invitation from repeated friction (#771 D.2). When the same rule is denied to the same agent alias at least `threshold` times within `window_secs`, the gateway issues a durable invitation to draft an amendment (Ri-0.8). The gateway executes a pre-committed threshold and never judges the rule (Lawful Executor). An invitation is not an amendment and carries no authority; it is surfaced in the agent's signed turn attestation as a one-line summary (rule + denial count) and as a `ConstitutionalProposal` notification. Open invitations expire after `window_secs` elapses.

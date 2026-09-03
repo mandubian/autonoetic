@@ -919,6 +919,43 @@ impl GatewayStore {
         decider_appointments::list_routings_awaiting_verdict(&conn, appointment_id)
     }
 
+    /// Every routing ever made under one appointment, oldest first — the
+    /// agreement-rate ledger (#1198).
+    pub fn list_decider_routings_for_appointment(
+        &self,
+        appointment_id: &str,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderGateRouting>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_routings_for_appointment(&conn, appointment_id)
+    }
+
+    pub fn get_decider_gate_routing(
+        &self,
+        routing_id: &str,
+    ) -> Result<Option<autonoetic_types::decider_appointment::DeciderGateRouting>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::get_gate_routing(&conn, routing_id)
+    }
+
+    /// Fill a routing row's verdict. Returns false when the row is unknown or
+    /// already answered — a duplicate dispatch never rewrites the record.
+    pub fn record_decider_gate_verdict(
+        &self,
+        routing_id: &str,
+        verdict: &str,
+        reason: &str,
+        verdict_at: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::record_routing_verdict(
+            &conn,
+            routing_id,
+            verdict,
+            reason,
+            verdict_at,
+        )
+    }
+
     // ── Decider appointments (#1195) ─────────────────────────────────────
     //
     // Storage only: validation (capability containment, Critical refusal,

@@ -976,6 +976,61 @@ pub async fn handle_gateway_deciders(
                 );
             }
         }
+        GatewayDeciderCommands::Agreement {
+            appointment_id,
+            include_routings,
+            json,
+        } => {
+            let result = rpc.call(
+                "deciders.agreement",
+                serde_json::json!({
+                    "appointment_id": appointment_id,
+                    "include_routings": include_routings,
+                }),
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+            let comparable = result["comparable"].as_u64().unwrap_or(0);
+            let agreed = result["agreed"].as_u64().unwrap_or(0);
+            let disagreed = result["disagreed"].as_u64().unwrap_or(0);
+            let unanswered = result["unanswered"].as_u64().unwrap_or(0);
+            println!("Agreement ledger for {}", appointment_id);
+            println!("  advised:    {}", result["with_agent_verdict"].as_u64().unwrap_or(0));
+            println!("  comparable: {} (human also decided)", comparable);
+            println!("  agreed:     {}", agreed);
+            println!("  disagreed:  {}", disagreed);
+            println!("  unanswered: {} (seat never answered; excluded from the rate)", unanswered);
+            // No stored aggregate: the rate exists only when computed, and
+            // only when at least one gate carries both verdicts.
+            match result["rate"].as_f64() {
+                Some(rate) => println!(
+                    "  rate:       {:.1}% — calibration evidence for binding authority (§4.4)",
+                    rate * 100.0
+                ),
+                None => println!(
+                    "  rate:       n/a — no gate yet carries both an agent verdict and a human decision"
+                ),
+            }
+            if let Some(rows) = result["routings"].as_array() {
+                println!();
+                println!(
+                    "{:<24} {:<10} {:<9} {:<9} {}",
+                    "GATE", "KIND", "RISK", "AGENT", "HUMAN"
+                );
+                for r in rows {
+                    println!(
+                        "{:<24} {:<10} {:<9} {:<9} {}",
+                        r["gate_id"].as_str().unwrap_or("?"),
+                        r["gate_kind"].as_str().unwrap_or("?"),
+                        r["gate_risk"].as_str().unwrap_or("?"),
+                        r["verdict"].as_str().unwrap_or("—"),
+                        r["human_decision"].as_str().unwrap_or("pending"),
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }

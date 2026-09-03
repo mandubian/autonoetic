@@ -1039,6 +1039,20 @@ pub enum GatewayDeciderCommands {
         #[arg(long, default_value = "operator")]
         revoked_by: String,
     },
+    /// The advisory-verdict ledger's calibration reading (#1198): agent
+    /// verdicts vs. eventual human decisions, computed on read from the
+    /// ledger — there is no stored aggregate. Phase 2 binding appointments
+    /// are gated on this evidence (§4.4, advisory before binding).
+    Agreement {
+        /// Appointment identifier.
+        appointment_id: String,
+        /// Include the per-gate ledger rows.
+        #[arg(long)]
+        include_routings: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

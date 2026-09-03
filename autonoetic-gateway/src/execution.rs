@@ -635,6 +635,35 @@ impl std::fmt::Debug for ClarificationOutcome {
     }
 }
 
+/// Outcome of waking a decider seat for one routed gate (#1198).
+///
+/// There are exactly two shapes, and the difference is the whole safety
+/// argument: `Advised` means a terminal verdict with a motivation was
+/// recorded on the routing row; `Parked` means nothing was recorded and the
+/// gate waits for the operator exactly as if no seat existed. Every failure
+/// mode — dead seat, dwell bound, P-2.21 escalation, unparsable reply, a
+/// human who decided first — lands in `Parked`. In phase 1 every seat is
+/// advisory, so `Advised` never resolves the gate either; the distinction
+/// still matters because it is the shape phase 2 inherits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeciderDispatchOutcome {
+    /// Terminal verdict recorded on the routing row. The gate itself remains
+    /// parked for the operator while the seat is advisory.
+    Advised { verdict: String, reason: String },
+    /// No verdict recorded; the routing row keeps its null verdict and the
+    /// gate parks for the operator.
+    Parked { reason: String },
+}
+
+impl std::fmt::Display for DeciderDispatchOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Advised { verdict, .. } => write!(f, "seat advised {verdict}"),
+            Self::Parked { reason } => write!(f, "gate parked ({reason})"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SpawnResult {
     pub agent_id: String,
@@ -864,7 +893,7 @@ impl GatewayExecutionService {
         self.local_model_context_cache.clone()
     }
 
-    fn attach_model_metadata(
+    pub(crate) fn attach_model_metadata(
         &self,
         runtime: AgentExecutor,
         openrouter_catalog: Arc<OpenRouterCatalog>,
@@ -1173,7 +1202,7 @@ impl GatewayExecutionService {
         Ok(binding.agent_id)
     }
 
-    fn resolve_spawn_inference_profile(
+    pub(crate) fn resolve_spawn_inference_profile(
         &self,
         agent_id: &str,
         manifest: &autonoetic_types::agent::AgentManifest,
@@ -5352,6 +5381,200 @@ impl GatewayExecutionService {
                 let detail = format!("clarification turn failed: {}", e);
                 store.add_gate_message(approval_id, "system", &detail)?;
                 Err(e)
+            }
+        }
+    }
+
+    /// Wake a decider seat for one routed gate and capture its verdict
+    /// (#1198). The production entry point: builds the seat's real driver
+    /// from its resolved inference profile and bounds the deliberation by
+    /// `decider_dispatch_timeout_secs`.
+    pub async fn dispatch_decider_routing(
+        &self,
+        routing_id: &str,
+    ) -> anyhow::Result<DeciderDispatchOutcome> {
+        let dwell = std::time::Duration::from_secs(
+            self.config.decider_dispatch_timeout_secs.max(1),
+        );
+        self.dispatch_decider_routing_inner(routing_id, None, dwell)
+            .await
+    }
+
+    /// Test/worker entry point with the driver injected, so dispatch can be
+    /// exercised without a live model endpoint.
+    pub async fn dispatch_decider_routing_with_driver(
+        &self,
+        routing_id: &str,
+        driver: Arc<dyn crate::llm::LlmDriver>,
+        dwell: std::time::Duration,
+    ) -> anyhow::Result<DeciderDispatchOutcome> {
+        self.dispatch_decider_routing_inner(routing_id, Some(driver), dwell)
+            .await
+    }
+
+    async fn dispatch_decider_routing_inner(
+        &self,
+        routing_id: &str,
+        driver_override: Option<Arc<dyn crate::llm::LlmDriver>>,
+        dwell: std::time::Duration,
+    ) -> anyhow::Result<DeciderDispatchOutcome> {
+        use crate::runtime::lifecycle::{AgentExecutor, TurnOutcome};
+        use crate::runtime::openrouter_catalog::OpenRouterCatalog;
+
+        let store = self.require_store()?;
+        let park = |reason: &str| Ok(DeciderDispatchOutcome::Parked { reason: reason.to_string() });
+
+        // Every early return below is the graduated fallback: the routing row
+        // keeps its null verdict and the gate parks for the operator. None of
+        // them is an error — a seat that cannot answer degrades to the status
+        // quo, never to auto-approval.
+        let Some(routing) = store.get_decider_gate_routing(routing_id)? else {
+            return park("unknown routing");
+        };
+        if routing.verdict.is_some() {
+            return park("routing already carries a verdict");
+        }
+        let Some(appointment) = store.get_decider_appointment(&routing.appointment_id)? else {
+            return park("appointment no longer exists");
+        };
+        if appointment.is_expired(&chrono::Utc::now().to_rfc3339()) {
+            return park("appointment is revoked or expired");
+        }
+        let Some(approval) = store.get_approval(&routing.gate_id)? else {
+            return park("gate no longer exists");
+        };
+        if approval.decided_at.is_some() {
+            return park("the human decided first; advice would be moot");
+        }
+        let Some(decider_session) = routing
+            .decider_session
+            .clone()
+            .or_else(|| appointment.decider_session.clone())
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return park("seat has no decider session");
+        };
+
+        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+        let repo = crate::agent::AgentRepository::from_config(&self.config);
+        let mut loaded = repo
+            .get_sync_from_store(&routing.decider_agent, &gateway_dir, Some(store))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "decider agent '{}' failed to load: {} (the gate parks)",
+                    routing.decider_agent,
+                    e
+                )
+            })?;
+        let profile =
+            self.resolve_spawn_inference_profile(&routing.decider_agent, &loaded.manifest, &decider_session)?;
+        // `appoint` refuses a routing preset at appointment time; re-checking
+        // here is defence in depth, not redundancy — the config could have
+        // changed since the seat was seated (#1232 surfaces such drift).
+        if profile.is_routing_preset {
+            return park("seat resolves to a routing preset; per-gate model variation is not seatable");
+        }
+        let driver: Arc<dyn crate::llm::LlmDriver> = match driver_override {
+            Some(d) => d,
+            None => crate::llm::build_driver(profile.llm_config.clone(), self.http_client.clone())?,
+        };
+        // Propagate the resolved llm_config so the context governor sees the
+        // same closure the seat was seated with.
+        loaded.manifest.llm_config = Some(profile.llm_config.clone());
+
+        let card = crate::decider_dispatch::build_gate_card(&appointment, &routing, &approval);
+        let card_digest = sha256_hex(&card);
+
+        let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
+        let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
+        let mut runtime = self.attach_model_metadata(
+            AgentExecutor::new(
+                loaded.manifest,
+                loaded.instructions,
+                driver,
+                loaded.dir,
+                crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
+                self.gateway_store.clone(),
+            )
+            .with_resolved_inference(profile)
+            .with_gateway_dir(gateway_dir)
+            .with_config(self.config.clone())
+            .with_session_budget(Some(self.session_budget.clone()))
+            .with_root_session_budget(Some(self.root_session_budget.clone()))
+            .with_middleware(middleware)
+            .with_session_id(decider_session.clone())
+            .with_active_executions(Some(self.active_executions.clone()))
+            .with_http_client(self.http_client.clone())
+            .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+            .with_guard_degraded_sessions(Some(self.guard_degraded_sessions.clone()))
+            .with_persona(self.persona.clone())
+            .with_extended_instructions(loaded.extended_instructions.clone()),
+            openrouter_catalog,
+        );
+
+        // The bound on deliberation: past it the seat has not answered, which
+        // is a park, not a failure of the gate.
+        //
+        // The gate card is seeded as the kickoff user turn directly:
+        // `execute_with_history` is a *continuation* primitive — it composes
+        // the system prompt and volatile tails but never injects
+        // `initial_user_message` (that is `execute_loop`'s job for spawned
+        // sessions). A seat woken with an empty history would deliberate on
+        // nothing. The card therefore lives *only* in the history: setting
+        // `initial_user_message` too would double it if this path ever
+        // switched to `execute_loop`, or if the continuation primitive grew a
+        // seed of its own.
+        let mut history: Vec<crate::llm::Message> = vec![crate::llm::Message::user(card)];
+        let turn = tokio::time::timeout(dwell, runtime.execute_with_history(&mut history)).await;
+        let reply = match turn {
+            Err(_) => {
+                return park("dwell bound exceeded");
+            }
+            Ok(Err(e)) => {
+                let detail = e.to_string();
+                let detail = if detail.len() > 200 { detail[..200].to_string() } else { detail };
+                return park(&format!("seat turn failed: {detail}"));
+            }
+            Ok(Ok(TurnOutcome::Completed(reply))) => reply.unwrap_or_default(),
+            Ok(Ok(other)) => {
+                return park(&format!("seat turn ended without a ruling: {:?}", other));
+            }
+        };
+
+        match crate::decider_dispatch::parse_advisory_verdict(&reply) {
+            crate::decider_dispatch::ParsedAdvisoryVerdict::Terminal(v) => {
+                let now = chrono::Utc::now().to_rfc3339();
+                let recorded = store.record_decider_gate_verdict(
+                    &routing.routing_id,
+                    &v.verdict,
+                    &v.reason,
+                    &now,
+                )?;
+                if !recorded {
+                    // Lost a race with a duplicate dispatch; the first verdict
+                    // stands and this turn's text is discarded.
+                    return park("another dispatch recorded the verdict first");
+                }
+                // A verdict spends the seat's gate budget like any decision.
+                let _ = store.record_decider_gate_decided(&routing.appointment_id);
+                crate::decider_dispatch::emit_advice_event(
+                    store,
+                    &appointment,
+                    &routing,
+                    &v,
+                    &card_digest,
+                    &decider_session,
+                );
+                Ok(DeciderDispatchOutcome::Advised {
+                    verdict: v.verdict,
+                    reason: v.reason,
+                })
+            }
+            crate::decider_dispatch::ParsedAdvisoryVerdict::Escalated => {
+                park("seat escalated (P-2.21): the gate parks for the operator")
+            }
+            crate::decider_dispatch::ParsedAdvisoryVerdict::Unparsable => {
+                park("seat reply carried no parsable verdict, or none with a motivation (O-1)")
             }
         }
     }

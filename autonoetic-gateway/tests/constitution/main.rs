@@ -25,6 +25,7 @@ mod degraded_inspection_available;
 mod decider_appointment;
 mod decider_gate_routing;
 mod decider_seat_lifecycle;
+mod decider_verdict_ledger;
 mod denial_affordances;
 mod deny_unknown_tools;
 mod egress_data_localization;

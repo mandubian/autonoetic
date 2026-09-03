@@ -12,6 +12,7 @@ pub mod causal_chain;
 pub mod config;
 pub mod constitution_digest;
 pub mod decider_appointment;
+pub mod decider_dispatch;
 pub mod constitution_glossary;
 pub mod denial_affordances;
 /// Repo-hygiene guard: every `docs/…` path cited by a live doc, an agent

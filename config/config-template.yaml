@@ -322,6 +322,14 @@ decider_obligations:
   # Default: 604800 (7 days).
   adjudication_sla_secs: 604800
 
+# ── Decider dispatch (#1198) ─────────────────────────────────────────
+# Upper bound (secs) on a seated decider's advisory deliberation. A routed
+# gate wakes the seat for one bounded turn; if the bound is exceeded, the seat
+# failed, escalated, or answered unparsably, the routing keeps its null
+# verdict and the gate parks for the operator — a dead night watch degrades
+# to the status quo, never to auto-approval. Default: 120.
+decider_dispatch_timeout_secs: 120
+
 # ── Amendment Invitations (citizenship RFC #771 D.2) ────────────────
 # When a rule is denied to the same agent alias at least `threshold` times
 # within `window_secs`, the gateway issues a durable invitation to draft an

@@ -11,6 +11,7 @@
 //! a mechanical check with a named reason, not reserved judgment.
 
 use anyhow::Result;
+use serde::Serialize;
 
 use autonoetic_types::background::ApprovalRisk;
 use autonoetic_types::capability::Capability;
@@ -450,7 +451,91 @@ pub fn route_gate_to_decider(
             "Failed to record gate routing on the causal chain"
         );
     }
+
+    // #1198: the dispatch half is event-driven at routing time — the seat is
+    // woken now, not swept later. Before the dispatch worker is installed
+    // (tests, one-shot CLIs) this is a no-op and the routing simply stays
+    // unanswered until the startup sweep re-wakes it.
+    crate::decider_dispatch::notify_routing(&routing.routing_id);
+
     Ok(Some(routing))
+}
+
+/// The agreement-rate ledger, computed on read (#1198).
+///
+/// Joins every routing under one appointment with its gate's eventual human
+/// decision. Nothing is stored: the rate exists only when asked for, derived
+/// from the two structural records — the seat's verdict in
+/// `decider_gate_routings`, the operator's in `approvals` — never asserted as
+/// an aggregate (§3.2: standing is *computed, never asserted*).
+///
+/// A routing whose verdict is null is simply absent from the tally: a dead or
+/// timed-out seat is not a disagreement, and an unanswered referral must not
+/// silently drag the rate toward perfection. The buckets are kept separate so
+/// the caller can show the gap honestly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct AgreementTally {
+    /// Routings the seat answered with a terminal verdict.
+    pub with_agent_verdict: u32,
+    /// Of those, the ones the human also decided (approved or rejected).
+    pub comparable: u32,
+    /// Agent and human ruled the same way.
+    pub agreed: u32,
+    /// Agent and human ruled differently.
+    pub disagreed: u32,
+    /// Gates routed but never answered by the seat — dead seat, dwell bound,
+    /// P-2.21 escalation, unparsable reply. Visible so "no verdict" is never
+    /// mistaken for agreement.
+    pub unanswered: u32,
+}
+
+impl AgreementTally {
+    /// Agreed / comparable. `None` until at least one gate has both verdicts:
+    /// an empty or wholly-unanswered ledger has no rate, and reporting a
+    /// 100% rate over zero comparable cases is exactly the "asserted, not
+    /// computed" failure this ledger exists to prevent.
+    pub fn rate(&self) -> Option<f64> {
+        if self.comparable == 0 {
+            None
+        } else {
+            Some(self.agreed as f64 / self.comparable as f64)
+        }
+    }
+}
+
+/// Compute the agreement tally for one appointment from the ledger.
+pub fn agreement_tally_for_appointment(
+    store: &GatewayStore,
+    appointment_id: &str,
+) -> Result<AgreementTally> {
+    let mut tally = AgreementTally::default();
+    for routing in store.list_decider_routings_for_appointment(appointment_id)? {
+        let Some(verdict) = routing.verdict.as_deref() else {
+            tally.unanswered += 1;
+            continue;
+        };
+        tally.with_agent_verdict += 1;
+        let Some(approval) = store.get_approval(&routing.gate_id)? else {
+            continue;
+        };
+        use autonoetic_types::background::ApprovalStatus;
+        let human = match approval.status {
+            Some(ApprovalStatus::Approved) => Some("approve"),
+            Some(ApprovalStatus::Rejected) => Some("reject"),
+            // Cancelled/stale: the gate went moot, not comparable.
+            _ => None,
+        };
+        let Some(human) = human else {
+            continue;
+        };
+        tally.comparable += 1;
+        if human == verdict {
+            tally.agreed += 1;
+        } else {
+            tally.disagreed += 1;
+        }
+    }
+    Ok(tally)
 }
 
 fn held_gate_kinds(capabilities: &[Capability]) -> Vec<String> {
