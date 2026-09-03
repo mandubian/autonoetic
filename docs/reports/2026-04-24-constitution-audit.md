@@ -6,8 +6,9 @@
 > This document is **historical** — it records findings at a point in
 > time (2026-04-24). The active constitution is now
 > `docs/constitution/versions/2026.07.08/constitution.md` (also reachable via
-> `docs/constitution/CURRENT`); the active backlog is
-> `docs/constitution/roadmap.md`.
+> `docs/constitution/CURRENT`). The plan that answered this audit is complete and
+> archived at `docs/archived/gateway-constitution-roadmap.md`; open work now lives
+> in `docs/proposals/README.md`.
 
 ## Purpose
 
@@ -309,5 +310,5 @@ Secondary:
 
 ## Next steps
 
-See `docs/constitution/roadmap.md` for the prioritized plan to
-close the gaps identified here.
+The prioritized plan that closed the gaps identified here is complete and
+archived at `docs/archived/gateway-constitution-roadmap.md`.

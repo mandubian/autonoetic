@@ -17,7 +17,7 @@ Three entry points, then eight directories sorted by **what you came here for**.
 | [`reference/`](reference) | Contracts you code against: CLI, config keys, HTTP API, SQLite schema, `SKILL.md` fields, tool errors, capabilities | integrating |
 | [`concepts/`](concepts) | Why it is built this way — philosophy, separation of powers, planner principles | trying to understand |
 | [`internals/`](internals) | How the runtime does it, by subsystem: [`prompt/`](internals/prompt) [`sandbox/`](internals/sandbox) [`storage/`](internals/storage) [`session/`](internals/session) [`egress/`](internals/egress) | changing the runtime |
-| [`constitution/`](constitution) | The governance corpus: signed versions, the [enforcement register](constitution/enforcement-register.md), signing, key management, roadmap | reading the law |
+| [`constitution/`](constitution) | The governance corpus: signed versions, the [enforcement register](constitution/enforcement-register.md), signing, key management | reading the law |
 | [`wiki/`](wiki) | Short digests served to **agents** at runtime via `wiki_list` / `wiki_get` — not the human reference | editing what agents read |
 | [`proposals/`](proposals) | In-flight design and RFC work, one status table in [`proposals/README.md`](proposals/README.md) — a test asserts every proposal is listed | proposing a change |
 | [`reports/`](reports) | Dated and immutable: audits, validations, [postmortems](reports/postmortems), comparative studies | looking for evidence |
