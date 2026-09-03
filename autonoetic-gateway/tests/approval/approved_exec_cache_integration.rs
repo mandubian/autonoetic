@@ -9,7 +9,6 @@
 //! These tests verify both the cache module directly AND the integration
 //! with sandbox.exec through the tool registry.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::approved_exec_cache::{
@@ -23,7 +22,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn create_pattern(category: DetectedPatternCategory, pattern: &str) -> DetectedPattern {
     DetectedPattern {

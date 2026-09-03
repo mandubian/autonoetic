@@ -12,7 +12,6 @@
 //!     `max_pending_anomaly_flags_per_reporter` are rejected loudly with
 //!     `anomaly_flag_flood`
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -20,7 +19,7 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use std::sync::Arc;
 use tempfile::tempdir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn zero_capability_manifest() -> AgentManifest {
     AgentManifest {

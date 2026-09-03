@@ -48,11 +48,11 @@ The guiding principle of the factorization:
 There are **three** prose mechanisms, each for a different kind of content.
 
 **Every addition costs tokens on every turn.** The fixed prompt is measured by
-`tests/prompt_composition_budget.rs`, which prints a per-layer breakdown and
+`tests/prompt/prompt_composition_budget.rs`, which prints a per-layer breakdown and
 enforces a steady-state ceiling per agent:
 
 ```bash
-cargo test -p autonoetic-gateway --test prompt_composition_budget -- --nocapture
+cargo nextest run -p autonoetic-gateway --test prompt prompt_composition_budget --nocapture
 ```
 
 If that test fails, a change added weight paid on every turn. The fix is

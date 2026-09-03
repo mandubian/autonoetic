@@ -12,6 +12,7 @@ mod gate_hardening;
 mod gate_mocked_network_e2e;
 mod gate_network_isolation_decision;
 mod governor;
+mod promote_mechanical_resume_integration;
 mod record_e2e;
 mod record_evaluator_fail;
 mod record_findings_validation;

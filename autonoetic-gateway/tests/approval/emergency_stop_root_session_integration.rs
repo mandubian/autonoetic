@@ -1,6 +1,5 @@
 //! Phase 2C: `root_session.emergency_stop` durable halt + checkpoint.
 
-mod support;
 
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
@@ -17,7 +16,7 @@ use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::{Duration, Utc};
 use std::sync::Arc;
-use support::{seed_agent_revision, TestWorkspace};
+use crate::support::{seed_agent_revision, TestWorkspace};
 
 fn write_planner_agent(agents_dir: &std::path::Path) -> anyhow::Result<()> {
     let agent_dir = agents_dir.join("planner.default");

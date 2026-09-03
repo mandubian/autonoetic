@@ -3,6 +3,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod capsule_self_export_scoping_integration;
 mod phase4_advanced_modes;
 mod pipeline;
 mod tools;

@@ -53,12 +53,12 @@ Three findings matter more than the numbers:
 
 ## 2. What the prompt is actually made of
 
-Measured by `autonoetic-gateway/tests/prompt_composition_budget.rs`, which
+Measured by `autonoetic-gateway/tests/prompt/prompt_composition_budget.rs`, which
 composes real prompt inputs from the repo's own `SKILL.md` files plus the live
 tool registry:
 
 ```bash
-cargo test -p autonoetic-gateway --test prompt_composition_budget -- --nocapture
+cargo nextest run -p autonoetic-gateway --test prompt prompt_composition_budget --nocapture
 ```
 
 The planner at the start of the study:
