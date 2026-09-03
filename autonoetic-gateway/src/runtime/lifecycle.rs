@@ -2076,6 +2076,7 @@ impl AgentExecutor {
             0,
             response.usage.input_tokens,
             response.usage.output_tokens,
+            response.usage.cached_tokens,
         );
 
         if response.text.trim().is_empty() {
@@ -4593,6 +4594,7 @@ impl AgentExecutor {
                 response.tool_calls.len(),
                 response.usage.input_tokens,
                 response.usage.output_tokens,
+                response.usage.cached_tokens,
             );
 
             if !skip_llm {
@@ -4621,19 +4623,28 @@ impl AgentExecutor {
                 );
             }
 
-            // Some providers occasionally return an empty completion with
-            // stop_reason Other(""). Retry a small bounded number of times at
-            // gateway level before surfacing an error to planner.
+            // Some providers occasionally return an empty completion — either
+            // with stop_reason Other("") or (worse) a plausible-looking EndTurn
+            // carrying zero output tokens (a provider failure, not a model
+            // decision; it used to end the turn silently and idle the session).
+            // Retry a small bounded number of times at gateway level before
+            // surfacing an error to planner.
             if is_retryable_empty_other_response(&response)
                 && empty_other_retries_used < max_empty_other_retries
             {
                 empty_other_retries_used += 1;
+                let retry_reason = if matches!(response.stop_reason, crate::llm::StopReason::EndTurn)
+                {
+                    "empty_end_turn_zero_output"
+                } else {
+                    "empty_other_stop_reason"
+                };
                 let _ = tracer.log_event(
                     "llm",
                     "completion_retry",
                     autonoetic_types::causal_chain::EntryStatus::Success,
                     Some(serde_json::json!({
-                        "reason": "empty_other_stop_reason",
+                        "reason": retry_reason,
                         "attempt": empty_other_retries_used,
                         "max_retries": max_empty_other_retries,
                     })),
@@ -4652,9 +4663,10 @@ impl AgentExecutor {
 
             // Detect empty LLM responses (Ok but zero output tokens and no text).
             // This catches providers that silently return nothing instead of an error.
-            // The narrower `is_retryable_empty_other_response` retry above handles
-            // the Other("") case with automatic retry; this logs *any* empty result
-            // that survived that retry (or had a different stop reason).
+            // The `is_retryable_empty_other_response` retry above handles both the
+            // Other("") case and zero-output EndTurn with automatic retry; this
+            // logs *any* empty result that survived that retry (or had a
+            // different stop reason).
             if response.text.trim().is_empty()
                 && response.tool_calls.is_empty()
                 && response.usage.output_tokens == 0

@@ -330,6 +330,7 @@ impl LiveDigestWriter {
         tool_calls: usize,
         in_tok: u64,
         out_tok: u64,
+        cached_tok: u64,
     ) -> anyhow::Result<()> {
         // Only record rounds with no tool calls (tool calls already have their own entries)
         if tool_calls > 0 {
@@ -337,11 +338,17 @@ impl LiveDigestWriter {
         }
         use std::fmt::Write;
         let mut buf = String::new();
-        let tok_short = if in_tok > 0 || out_tok > 0 {
-            format!(" ({}→{} tok)", in_tok, out_tok)
+        let mut tok_short = if in_tok > 0 || out_tok > 0 {
+            format!(" ({}→{} tok", in_tok, out_tok)
         } else {
             String::new()
         };
+        if !tok_short.is_empty() {
+            if cached_tok > 0 {
+                let _ = write!(tok_short, ", {cached_tok} cached");
+            }
+            tok_short.push(')');
+        }
         let _ = writeln!(
             buf,
             "* 🧠 **LLM round:** model={}, stop={}, out={}{})",

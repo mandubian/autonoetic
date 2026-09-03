@@ -20,9 +20,24 @@ pub(crate) fn max_other_empty_retries() -> usize {
 }
 
 pub(crate) fn is_retryable_empty_other_response(response: &crate::llm::CompletionResponse) -> bool {
-    matches!(&response.stop_reason, StopReason::Other(s) if s.trim().is_empty())
-        && response.tool_calls.is_empty()
-        && response.text.trim().is_empty()
+    let empty_payload = response.tool_calls.is_empty() && response.text.trim().is_empty();
+    if !empty_payload {
+        return false;
+    }
+    match &response.stop_reason {
+        // Provider said stop with an empty reason — always suspect.
+        StopReason::Other(s) => s.trim().is_empty(),
+        // A legitimate end-of-turn always carries the final assistant message
+        // (or at least one output token of hidden reasoning). Zero output
+        // tokens means the provider failed, not that the model chose to stop —
+        // e.g. ninfer returning empty completions under load, which used to
+        // end the turn silently and idle the session until an operator nudge.
+        StopReason::EndTurn => response.usage.output_tokens == 0,
+        // `ToolUse` with an empty tool set is contradictory provider output —
+        // treat it like the other zero-progress failures and retry.
+        StopReason::ToolUse => true,
+        StopReason::MaxTokens | StopReason::StopSequence => false,
+    }
 }
 
 /// Emit a `context_pressure_high` causal event when utilization crosses the
@@ -208,5 +223,51 @@ mod tests {
             usage: TokenUsage::default(),
         };
         assert!(!is_retryable_empty_other_response(&not_retryable));
+    }
+
+    #[test]
+    fn zero_output_end_turn_is_retryable_provider_failure() {
+        // What ninfer returned 3× on 2026-09-03: EndTurn with zero usage —
+        // a provider failure that used to end the turn silently.
+        let empty_end_turn = CompletionResponse {
+            text: String::new(),
+            tool_calls: vec![],
+            reasoning_content: None,
+            reasoning_details: None,
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        };
+        assert!(is_retryable_empty_other_response(&empty_end_turn));
+
+        // A real end-of-turn carries the final message (or reasoning tokens).
+        let normal_end_turn = CompletionResponse {
+            text: "final answer".to_string(),
+            tool_calls: vec![],
+            reasoning_content: None,
+            reasoning_details: None,
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 5,
+                reasoning_tokens: 4,
+                cached_tokens: 0,
+            },
+        };
+        assert!(!is_retryable_empty_other_response(&normal_end_turn));
+
+        // Tool calls take precedence even at zero reported usage.
+        let with_tool_call = CompletionResponse {
+            text: String::new(),
+            tool_calls: vec![crate::llm::ToolCall {
+                id: "c1".into(),
+                name: "resolve".into(),
+                arguments: "{}".into(),
+            }],
+            reasoning_content: None,
+            reasoning_details: None,
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        };
+        assert!(!is_retryable_empty_other_response(&with_tool_call));
     }
 }

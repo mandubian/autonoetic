@@ -264,6 +264,7 @@ impl SessionTracer {
         tool_calls: usize,
         input_tokens: u64,
         output_tokens: u64,
+        cached_tokens: u64,
     ) -> anyhow::Result<()> {
         if let Some(w) = &self.live_digest {
             let model_short = model.split('/').last().unwrap_or(model);
@@ -273,6 +274,7 @@ impl SessionTracer {
                 tool_calls,
                 input_tokens,
                 output_tokens,
+                cached_tokens,
             )?;
         }
         self.append_live_digest_event(
@@ -282,7 +284,8 @@ impl SessionTracer {
                 "stop_reason": stop_reason,
                 "tool_calls": tool_calls,
                 "input_tokens": input_tokens,
-                "output_tokens": output_tokens
+                "output_tokens": output_tokens,
+                "cached_tokens": cached_tokens
             })),
         );
         Ok(())
