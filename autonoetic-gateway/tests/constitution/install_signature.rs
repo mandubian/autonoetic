@@ -124,7 +124,7 @@ fn create_test_revision(
 }
 
 #[test]
-fn r11_config_default_is_strict() {
+fn p_9_13_config_default_is_strict() {
     let config = GatewayConfig::default();
     assert!(
         !config.trust_unsigned_bundles,
@@ -133,7 +133,7 @@ fn r11_config_default_is_strict() {
 }
 
 #[test]
-fn r11_auto_signs_revision_on_create() {
+fn p_9_13_auto_signs_revision_on_create() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let (_revision_id, rev) = create_test_revision(&temp, &gw_dir, &store);
@@ -147,7 +147,7 @@ fn r11_auto_signs_revision_on_create() {
 }
 
 #[test]
-fn r11_auto_signature_verifies_against_gateway_key() {
+fn p_9_13_auto_signature_verifies_against_gateway_key() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let key = GatewayIdentityKey::load_or_generate(&gw_dir).unwrap();
@@ -171,7 +171,7 @@ fn r11_auto_signature_verifies_against_gateway_key() {
 }
 
 #[test]
-fn r11_tampered_digest_does_not_verify() {
+fn p_9_13_tampered_digest_does_not_verify() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let key = GatewayIdentityKey::load_or_generate(&gw_dir).unwrap();
@@ -193,7 +193,7 @@ fn r11_tampered_digest_does_not_verify() {
 }
 
 #[test]
-fn r11_wrong_key_does_not_verify() {
+fn p_9_13_wrong_key_does_not_verify() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
 
@@ -217,7 +217,7 @@ fn r11_wrong_key_does_not_verify() {
 }
 
 #[test]
-fn r11_response_includes_signed_by_when_signed() {
+fn p_9_13_response_includes_signed_by_when_signed() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let manifest = test_manifest();

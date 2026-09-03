@@ -3963,7 +3963,7 @@ impl GatewayExecutionService {
                             session_id
                         );
 
-                        // ── Spawn-chain depth cap (P-7.15 / P-7.15) ─────────────
+                        // ── Spawn-chain depth cap (P-7.15) ─────────────
                         // `session_id` here is the *target* session (the child's).
                         // For the scheduler path this is always `{parent}/{agent}-{uuid}`,
                         // so its depth = parent_depth + 1. The check below ensures

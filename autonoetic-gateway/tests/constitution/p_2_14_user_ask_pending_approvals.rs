@@ -23,7 +23,7 @@ fn no_capability_manifest() -> AgentManifest {
 }
 
 #[test]
-fn r_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> {
+fn p_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> {
     let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");

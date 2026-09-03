@@ -37,7 +37,7 @@ fn cas_payload_for_last_entry(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn r9_bearer_token_never_appears_raw_in_jsonl() {
+fn p_4_14_bearer_token_never_appears_raw_in_jsonl() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("agent");
     let path = {
@@ -83,7 +83,7 @@ fn r9_bearer_token_never_appears_raw_in_jsonl() {
 }
 
 #[test]
-fn r9_api_key_env_assignment_never_appears_raw() {
+fn p_4_14_api_key_env_assignment_never_appears_raw() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("agent");
     let path = {
@@ -124,7 +124,7 @@ fn r9_api_key_env_assignment_never_appears_raw() {
 }
 
 #[test]
-fn r9_query_param_secret_never_appears_raw() {
+fn p_4_14_query_param_secret_never_appears_raw() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("agent");
     let path = {
@@ -165,7 +165,7 @@ fn r9_query_param_secret_never_appears_raw() {
 }
 
 #[test]
-fn r9_json_sensitive_key_value_redacted() {
+fn p_4_14_json_sensitive_key_value_redacted() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("agent");
     let path = {
@@ -220,14 +220,14 @@ fn r9_json_sensitive_key_value_redacted() {
 }
 
 #[test]
-fn r9_from_redacted_passes_through_unmodified() {
+fn p_4_14_from_redacted_passes_through_unmodified() {
     let payload = serde_json::json!({"reason": "agent_exit", "safe": true});
     let rp = RedactedPayload::from_redacted(payload.clone());
     assert_eq!(rp.into_inner(), payload);
 }
 
 #[test]
-fn r9_durable_path_also_redacts() {
+fn p_4_14_durable_path_also_redacts() {
     let temp = tempdir().unwrap();
     let agent_dir = temp.path().join("agent");
     let path = {

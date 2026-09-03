@@ -101,7 +101,7 @@ fn assert_decision_eq(
 // --- Idempotency: same inputs → same verdict ---
 
 #[test]
-fn r_plus_plus_9_can_connect_net_idempotent() {
+fn i_10_can_connect_net_idempotent() {
     let engine = PolicyEngine::new(network_manifest(vec!["api.example.com", "*.cdn.org"]));
     for host in &["api.example.com", "cdn.org", "unknown.com", "*", ""] {
         let a = engine.can_connect_net(host);
@@ -111,7 +111,7 @@ fn r_plus_plus_9_can_connect_net_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_exec_shell_idempotent() {
+fn i_10_can_exec_shell_idempotent() {
     let engine = PolicyEngine::new(code_exec_manifest(vec!["python3", "bash"]));
     for cmd in &[
         "python3 script.py",
@@ -127,7 +127,7 @@ fn r_plus_plus_9_can_exec_shell_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_invoke_tool_idempotent() {
+fn i_10_can_invoke_tool_idempotent() {
     let engine = PolicyEngine::new(sandbox_fn_manifest(vec!["web.", "sandbox.exec"]));
     for tool in &["web.fetch", "sandbox.exec", "unknown.tool", ""] {
         let a = engine.can_invoke_tool(tool);
@@ -137,7 +137,7 @@ fn r_plus_plus_9_can_invoke_tool_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_read_path_idempotent() {
+fn i_10_can_read_path_idempotent() {
     let engine = PolicyEngine::new(read_access_manifest(vec!["self/", "shared/"]));
     for path in &["self/data", "shared/file.txt", "other/secret", ""] {
         let a = engine.can_read_path(path);
@@ -147,7 +147,7 @@ fn r_plus_plus_9_can_read_path_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_write_path_idempotent() {
+fn i_10_can_write_path_idempotent() {
     let engine = PolicyEngine::new(write_access_manifest(vec!["self/"]));
     for path in &["self/out", "etc/passwd", ""] {
         let a = engine.can_write_path(path);
@@ -157,7 +157,7 @@ fn r_plus_plus_9_can_write_path_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_spawn_agent_idempotent() {
+fn i_10_can_spawn_agent_idempotent() {
     let engine = PolicyEngine::new(spawn_manifest(5));
     let a = engine.can_spawn_agent();
     let b = engine.can_spawn_agent();
@@ -170,7 +170,7 @@ fn r_plus_plus_9_can_spawn_agent_idempotent() {
 }
 
 #[test]
-fn r_plus_plus_9_can_message_agent_idempotent() {
+fn i_10_can_message_agent_idempotent() {
     let engine = PolicyEngine::new(message_manifest(vec!["coder.*"]));
     for target in &["coder.default", "planner.default", ""] {
         let a = engine.can_message_agent(target);
@@ -182,28 +182,28 @@ fn r_plus_plus_9_can_message_agent_idempotent() {
 // --- Input sensitivity: different inputs → different verdicts ---
 
 #[test]
-fn r_plus_plus_9_network_verdict_depends_on_host() {
+fn i_10_network_verdict_depends_on_host() {
     let engine = PolicyEngine::new(network_manifest(vec!["api.example.com"]));
     assert!(engine.can_connect_net("api.example.com").is_allowed());
     assert!(!engine.can_connect_net("evil.com").is_allowed());
 }
 
 #[test]
-fn r_plus_plus_9_shell_verdict_depends_on_command() {
+fn i_10_shell_verdict_depends_on_command() {
     let engine = PolicyEngine::new(code_exec_manifest(vec!["python3"]));
     assert!(engine.can_exec_shell("python3 run.py").is_allowed());
     assert!(!engine.can_exec_shell("rm -rf /").is_allowed());
 }
 
 #[test]
-fn r_plus_plus_9_tool_verdict_depends_on_name() {
+fn i_10_tool_verdict_depends_on_name() {
     let engine = PolicyEngine::new(sandbox_fn_manifest(vec!["web."]));
     assert!(engine.can_invoke_tool("web.fetch").is_allowed());
     assert!(!engine.can_invoke_tool("sandbox.exec").is_allowed());
 }
 
 #[test]
-fn r_plus_plus_9_no_caps_denies_everything() {
+fn i_10_no_caps_denies_everything() {
     let engine = PolicyEngine::new(base_manifest(vec![]));
     assert!(!engine.can_connect_net("any.com").is_allowed());
     assert!(!engine.can_exec_shell("echo hi").is_allowed());
@@ -216,14 +216,14 @@ fn r_plus_plus_9_no_caps_denies_everything() {
 }
 
 #[test]
-fn r_plus_plus_9_wildcard_allows_all_hosts() {
+fn i_10_wildcard_allows_all_hosts() {
     let engine = PolicyEngine::new(network_manifest(vec!["*"]));
     assert!(engine.can_connect_net("anything.example.com").is_allowed());
     assert!(engine.can_connect_net("192.168.1.1").is_allowed());
 }
 
 #[test]
-fn r_plus_plus_9_verdict_is_pure_over_many_calls() {
+fn i_10_verdict_is_pure_over_many_calls() {
     let engine = PolicyEngine::new(base_manifest(vec![
         Capability::NetworkAccess {
             hosts: vec!["api.github.com".to_string()],
@@ -248,7 +248,7 @@ fn r_plus_plus_9_verdict_is_pure_over_many_calls() {
 }
 
 #[test]
-fn r_plus_plus_9_emergency_stop_requires_capability() {
+fn i_10_emergency_stop_requires_capability() {
     let with_cap = base_manifest(vec![Capability::EmergencyStop]);
     let without_cap = base_manifest(vec![]);
     assert!(PolicyEngine::new(with_cap)
@@ -260,7 +260,7 @@ fn r_plus_plus_9_emergency_stop_requires_capability() {
 }
 
 #[test]
-fn r_plus_plus_9_spawn_limit_reflects_capability() {
+fn i_10_spawn_limit_reflects_capability() {
     let engine = PolicyEngine::new(spawn_manifest(10));
     assert_eq!(engine.spawn_agent_limit(), Some(10));
 

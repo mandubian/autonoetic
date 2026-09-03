@@ -11,58 +11,58 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use std::sync::Arc;
 
 #[test]
-fn r_plus_plus_8_detects_sigsys_exit_code() {
+fn p_7_22_detects_sigsys_exit_code() {
     let attempts = detect_sandbox_escape_indicators("some stderr", Some(159));
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].indicator, "SIGSYS");
 }
 
 #[test]
-fn r_plus_plus_8_detects_bad_system_call_in_stderr() {
+fn p_7_22_detects_bad_system_call_in_stderr() {
     let attempts = detect_sandbox_escape_indicators("Bad system call", None);
     assert!(!attempts.is_empty());
     assert!(attempts.iter().any(|a| a.indicator == "SIGSYS"));
 }
 
 #[test]
-fn r_plus_plus_8_detects_seccomp_violation() {
+fn p_7_22_detects_seccomp_violation() {
     let attempts = detect_sandbox_escape_indicators("seccomp violation detected", None);
     assert!(!attempts.is_empty());
     assert!(attempts.iter().any(|a| a.indicator == "SECCOMP_DENY"));
 }
 
 #[test]
-fn r_plus_plus_8_detects_operation_not_permitted() {
+fn p_7_22_detects_operation_not_permitted() {
     let attempts = detect_sandbox_escape_indicators("mount: Operation not permitted", None);
     assert!(attempts.iter().any(|a| a.indicator == "SECCOMP_DENY"));
 }
 
 #[test]
-fn r_plus_plus_8_detects_mount_attempt() {
+fn p_7_22_detects_mount_attempt() {
     let attempts = detect_sandbox_escape_indicators("mount: /dev/sda1 is write-protected", None);
     assert!(attempts.iter().any(|a| a.indicator == "ESCAPE_SYSCALL"));
 }
 
 #[test]
-fn r_plus_plus_8_detects_ptrace_reference() {
+fn p_7_22_detects_ptrace_reference() {
     let attempts = detect_sandbox_escape_indicators("ptrace: Operation not permitted", None);
     assert!(attempts.iter().any(|a| a.indicator == "ESCAPE_SYSCALL"));
 }
 
 #[test]
-fn r_plus_plus_8_detects_proc_self_exe() {
+fn p_7_22_detects_proc_self_exe() {
     let attempts = detect_sandbox_escape_indicators("cat /proc/self/exe", None);
     assert!(attempts.iter().any(|a| a.indicator == "ESCAPE_SYSCALL"));
 }
 
 #[test]
-fn r_plus_plus_8_no_false_positives_on_clean_output() {
+fn p_7_22_no_false_positives_on_clean_output() {
     let attempts = detect_sandbox_escape_indicators("hello world\nall good\n", Some(0));
     assert!(attempts.is_empty());
 }
 
 #[test]
-fn r_plus_plus_8_records_escape_attempt_to_db() -> anyhow::Result<()> {
+fn p_7_22_records_escape_attempt_to_db() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -86,7 +86,7 @@ fn r_plus_plus_8_records_escape_attempt_to_db() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_plus_8_counts_multiple_attempts_per_session() -> anyhow::Result<()> {
+fn p_7_22_counts_multiple_attempts_per_session() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -109,14 +109,14 @@ fn r_plus_plus_8_counts_multiple_attempts_per_session() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_plus_8_config_default_thresholds() {
+fn p_7_22_config_default_thresholds() {
     let config = autonoetic_types::config::GatewayConfig::default();
     assert_eq!(config.escape_attempt_degrade_threshold, 5);
     assert_eq!(config.escape_attempt_emergency_threshold, 20);
 }
 
 #[test]
-fn r_plus_plus_8_counts_are_session_scoped() -> anyhow::Result<()> {
+fn p_7_22_counts_are_session_scoped() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -154,7 +154,7 @@ fn r_plus_plus_8_counts_are_session_scoped() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_plus_8_threshold_zero_means_disabled() {
+fn p_7_22_threshold_zero_means_disabled() {
     let config = autonoetic_types::config::GatewayConfig {
         escape_attempt_degrade_threshold: 0,
         escape_attempt_emergency_threshold: 0,
@@ -165,7 +165,7 @@ fn r_plus_plus_8_threshold_zero_means_disabled() {
 }
 
 #[test]
-fn r_plus_plus_8_sessions_exceeding_threshold_returns_matching_sessions() -> anyhow::Result<()> {
+fn p_7_22_sessions_exceeding_threshold_returns_matching_sessions() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -206,7 +206,7 @@ fn r_plus_plus_8_sessions_exceeding_threshold_returns_matching_sessions() -> any
 }
 
 #[test]
-fn r_plus_plus_8_sessions_exceeding_threshold_zero_returns_empty() -> anyhow::Result<()> {
+fn p_7_22_sessions_exceeding_threshold_zero_returns_empty() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -229,7 +229,7 @@ fn r_plus_plus_8_sessions_exceeding_threshold_zero_returns_empty() -> anyhow::Re
 }
 
 #[test]
-fn r_plus_plus_8_emit_escape_threshold_event_creates_causal_event() -> anyhow::Result<()> {
+fn p_7_22_emit_escape_threshold_event_creates_causal_event() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -245,7 +245,7 @@ fn r_plus_plus_8_emit_escape_threshold_event_creates_causal_event() -> anyhow::R
 }
 
 #[test]
-fn r_plus_plus_8_escape_threshold_surfaces_on_timeline() -> anyhow::Result<()> {
+fn p_7_22_escape_threshold_surfaces_on_timeline() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);

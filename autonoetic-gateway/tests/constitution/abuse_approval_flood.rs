@@ -1,4 +1,4 @@
-//! Constitution test: P-7.17 / P-7.17 — Approval flood cap.
+//! Constitution test: P-7.17 — Approval flood cap.
 //!
 //! Verifies that pending approvals per root_session_id are bounded.
 //! The N+1th request is rejected with `approval_flood`, and the first

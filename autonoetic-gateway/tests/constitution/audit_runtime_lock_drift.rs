@@ -1,4 +1,4 @@
-//! Constitution P-8.12 / P-8.12 — Runtime-lock drift check at session start.
+//! Constitution P-8.12 — Runtime-lock drift check at session start.
 
 
 use autonoetic_gateway::runtime::install_contract::GATEWAY_BUILD_SHA256;

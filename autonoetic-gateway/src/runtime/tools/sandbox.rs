@@ -3036,7 +3036,7 @@ mod network_error_detection_tests {
     }
 
     #[test]
-    fn evaluation_blocked_message_mentions_r16_and_constitution() {
+    fn evaluation_blocked_message_mentions_p_3_10_and_constitution() {
         let mut body = json!({
             "ok": true,
             "exit_code": 0,

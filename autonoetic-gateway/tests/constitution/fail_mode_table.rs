@@ -51,7 +51,7 @@ const CONSTITUTION_RULE_IDS: &[&str] = &[
 ];
 
 #[test]
-fn r_plus_plus_10_every_constitutional_rule_has_fail_mode() {
+fn i_11_every_constitutional_rule_has_fail_mode() {
     let mut missing: Vec<&str> = Vec::new();
     for rule_id in CONSTITUTION_RULE_IDS {
         if lookup_fail_mode(rule_id).is_none() {
@@ -66,7 +66,7 @@ fn r_plus_plus_10_every_constitutional_rule_has_fail_mode() {
 }
 
 #[test]
-fn r_plus_plus_10_no_duplicate_entries() {
+fn i_11_no_duplicate_entries() {
     let entries = all_entries();
     let mut seen = std::collections::HashSet::new();
     let mut dupes = Vec::new();
@@ -83,7 +83,7 @@ fn r_plus_plus_10_no_duplicate_entries() {
 }
 
 #[test]
-fn r_plus_plus_10_all_five_modes_represented() {
+fn i_11_all_five_modes_represented() {
     let modes: Vec<FailMode> = all_entries().iter().map(|(_, m)| *m).collect();
     assert!(
         modes.contains(&FailMode::RefuseBoot),
@@ -108,7 +108,7 @@ fn r_plus_plus_10_all_five_modes_represented() {
 }
 
 #[test]
-fn r_plus_plus_10_r_6_5_is_refuse_session_start() {
+fn i_11_p_6_5_is_refuse_session_start() {
     let mode = lookup_fail_mode("P-6.5").expect("P-6.5 must have a fail-mode entry");
     assert_eq!(
         mode,
@@ -118,19 +118,19 @@ fn r_plus_plus_10_r_6_5_is_refuse_session_start() {
 }
 
 #[test]
-fn r_plus_plus_10_r_7_18_is_degrade() {
+fn i_11_p_7_18_is_degrade() {
     let mode = lookup_fail_mode("P-7.18").expect("P-7.18 must have a fail-mode entry");
     assert_eq!(mode, FailMode::Degrade);
 }
 
 #[test]
-fn r_plus_plus_10_r_plus_plus_8_escape_is_degrade() {
+fn i_11_p_7_22_escape_is_degrade() {
     let mode = lookup_fail_mode("P-7.22").expect("P-7.22 must have a fail-mode entry");
     assert_eq!(mode, FailMode::Degrade);
 }
 
 #[test]
-fn r_plus_plus_10_catalog_unavailable_refuses_cost_budgeted_session() {
+fn i_11_catalog_unavailable_refuses_cost_budgeted_session() {
     let registry = SessionBudgetRegistry::new(SessionBudgetConfig {
         max_session_price_usd: Some(1.0),
         ..Default::default()
@@ -150,7 +150,7 @@ fn r_plus_plus_10_catalog_unavailable_refuses_cost_budgeted_session() {
 }
 
 #[test]
-fn r_plus_plus_10_catalog_available_succeeds_cost_budgeted_session() {
+fn i_11_catalog_available_succeeds_cost_budgeted_session() {
     let registry = SessionBudgetRegistry::new(SessionBudgetConfig {
         max_session_price_usd: Some(1.0),
         ..Default::default()
@@ -164,7 +164,7 @@ fn r_plus_plus_10_catalog_available_succeeds_cost_budgeted_session() {
 }
 
 #[test]
-fn r_plus_plus_10_no_price_limit_allows_none_cost() {
+fn i_11_no_price_limit_allows_none_cost() {
     let registry = SessionBudgetRegistry::new(SessionBudgetConfig {
         max_session_price_usd: None,
         ..Default::default()
@@ -178,12 +178,12 @@ fn r_plus_plus_10_no_price_limit_allows_none_cost() {
 }
 
 #[test]
-fn r_plus_plus_10_lookup_returns_none_for_unknown_rule() {
+fn i_11_lookup_returns_none_for_unknown_rule() {
     assert!(lookup_fail_mode("R-999").is_none());
 }
 
 #[test]
-fn r_plus_plus_10_negative_price_limit_allows_none_cost() {
+fn i_11_negative_price_limit_allows_none_cost() {
     let registry = SessionBudgetRegistry::new(SessionBudgetConfig {
         max_session_price_usd: Some(-1.0),
         ..Default::default()
@@ -197,7 +197,7 @@ fn r_plus_plus_10_negative_price_limit_allows_none_cost() {
 }
 
 #[test]
-fn r_plus_plus_10_entries_by_fail_mode_returns_correct_subset() {
+fn i_11_entries_by_fail_mode_returns_correct_subset() {
     let degrade_entries = entries_by_fail_mode(FailMode::Degrade);
     assert!(
         degrade_entries.contains(&"P-7.18"),

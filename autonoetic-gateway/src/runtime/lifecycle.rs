@@ -5233,7 +5233,7 @@ impl AgentExecutor {
                 }
             }
 
-            // Root session tree budget check (P-6.21 / P-6.21)
+            // Root session tree budget check (P-6.21)
             if let Some(root_budget) = self.root_session_budget.clone() {
                 if let Err(e) = root_budget.check_pre_llm(root_session_id) {
                     return Err(self.save_and_yield_root_budget(history, turn_id, e));

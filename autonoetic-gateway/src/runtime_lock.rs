@@ -1,4 +1,4 @@
-//! Runtime Lock resolution and drift detection (P-8.12 / P-8.12).
+//! Runtime Lock resolution and drift detection (P-8.12).
 
 use autonoetic_types::runtime_lock::RuntimeLock;
 use std::path::Path;

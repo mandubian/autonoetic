@@ -91,7 +91,7 @@ fn config() -> autonoetic_types::config::GatewayConfig {
 }
 
 #[test]
-fn r4_risk_classification_revision_promote_is_critical() {
+fn p_2_24_risk_classification_revision_promote_is_critical() {
     let action = ScheduledAction::RevisionPromote {
         agent_id: "a".to_string(),
         revision_id: "r".to_string(),
@@ -105,7 +105,7 @@ fn r4_risk_classification_revision_promote_is_critical() {
 }
 
 #[test]
-fn r4_risk_classification_credential_prompt_is_critical() {
+fn p_2_24_risk_classification_credential_prompt_is_critical() {
     let action = ScheduledAction::CredentialPrompt {
         service: "aws".to_string(),
         credential_id: "cred_1".to_string(),
@@ -117,7 +117,7 @@ fn r4_risk_classification_credential_prompt_is_critical() {
 }
 
 #[test]
-fn r4_risk_classification_sandbox_exec_with_hosts_is_high() {
+fn p_2_24_risk_classification_sandbox_exec_with_hosts_is_high() {
     let action = ScheduledAction::SandboxExec {
         command: "curl https://x.com".to_string(),
         dependencies: None,
@@ -130,7 +130,7 @@ fn r4_risk_classification_sandbox_exec_with_hosts_is_high() {
 }
 
 #[test]
-fn r4_risk_classification_write_file_is_standard() {
+fn p_2_24_risk_classification_write_file_is_standard() {
     let action = ScheduledAction::WriteFile {
         path: "/tmp/f".to_string(),
         content: "data".to_string(),
@@ -141,7 +141,7 @@ fn r4_risk_classification_write_file_is_standard() {
 }
 
 #[test]
-fn r4_enrich_sets_dwell_and_phrase_for_critical() {
+fn p_2_24_enrich_sets_dwell_and_phrase_for_critical() {
     let mut req = make_critical_request(&chrono::Utc::now().to_rfc3339());
     assert!(req.min_dwell_ms.is_none());
     assert!(req.confirm_phrase.is_none());
@@ -154,7 +154,7 @@ fn r4_enrich_sets_dwell_and_phrase_for_critical() {
 }
 
 #[test]
-fn r4_enrich_no_dwell_for_standard() {
+fn p_2_24_enrich_no_dwell_for_standard() {
     let mut req = make_standard_request();
     enrich_request(&mut req, None);
     assert!(req.min_dwell_ms.is_none());
@@ -162,7 +162,7 @@ fn r4_enrich_no_dwell_for_standard() {
 }
 
 #[test]
-fn r4_dwell_time_rejects_too_fast() {
+fn p_2_24_dwell_time_rejects_too_fast() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 
@@ -203,7 +203,7 @@ fn r4_dwell_time_rejects_too_fast() {
 }
 
 #[test]
-fn r4_confirm_phrase_rejects_wrong_phrase() {
+fn p_2_24_confirm_phrase_rejects_wrong_phrase() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 
@@ -242,7 +242,7 @@ fn r4_confirm_phrase_rejects_wrong_phrase() {
 }
 
 #[test]
-fn r4_confirm_phrase_rejects_missing_phrase() {
+fn p_2_24_confirm_phrase_rejects_missing_phrase() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 
@@ -269,7 +269,7 @@ fn r4_confirm_phrase_rejects_missing_phrase() {
 }
 
 #[test]
-fn r4_approve_succeeds_after_dwell_with_correct_phrase() {
+fn p_2_24_approve_succeeds_after_dwell_with_correct_phrase() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 
@@ -301,7 +301,7 @@ fn r4_approve_succeeds_after_dwell_with_correct_phrase() {
 }
 
 #[test]
-fn r4_standard_approval_no_phrase_needed() {
+fn p_2_24_standard_approval_no_phrase_needed() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 
@@ -326,7 +326,7 @@ fn r4_standard_approval_no_phrase_needed() {
 }
 
 #[test]
-fn r4_hardening_persisted_in_store() {
+fn p_2_24_hardening_persisted_in_store() {
     let temp = tempdir().unwrap();
     let (_gw_dir, store) = setup_gateway(temp.path());
 

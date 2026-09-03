@@ -402,7 +402,7 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
 }
 
 #[test]
-fn agent_decider_cannot_spoof_session_id_to_bypass_r_10_7() -> anyhow::Result<()> {
+fn agent_decider_cannot_spoof_session_id_to_bypass_p_10_7() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
@@ -463,7 +463,7 @@ fn agent_decider_cannot_spoof_session_id_to_bypass_r_10_7() -> anyhow::Result<()
 }
 
 #[test]
-fn agent_decider_without_session_id_is_rejected_r_10_7() -> anyhow::Result<()> {
+fn agent_decider_without_session_id_is_rejected_p_10_7() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");

@@ -37,7 +37,7 @@ fn seed_grant(
 }
 
 #[test]
-fn r_plus_13_grant_roundtrip_with_expires_at() -> anyhow::Result<()> {
+fn p_2_23_grant_roundtrip_with_expires_at() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -71,7 +71,7 @@ fn r_plus_13_grant_roundtrip_with_expires_at() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_13_expired_grant_does_not_cover_targets() -> anyhow::Result<()> {
+fn p_2_23_expired_grant_does_not_cover_targets() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -97,7 +97,7 @@ fn r_plus_13_expired_grant_does_not_cover_targets() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_13_valid_grant_covers_targets() -> anyhow::Result<()> {
+fn p_2_23_valid_grant_covers_targets() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -120,7 +120,7 @@ fn r_plus_13_valid_grant_covers_targets() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_13_grant_without_expiry_covers_targets_forever() -> anyhow::Result<()> {
+fn p_2_23_grant_without_expiry_covers_targets_forever() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -145,7 +145,7 @@ fn r_plus_13_grant_without_expiry_covers_targets_forever() -> anyhow::Result<()>
 }
 
 #[test]
-fn r_plus_13_prune_expired_grants_removes_expired_rows() -> anyhow::Result<()> {
+fn p_2_23_prune_expired_grants_removes_expired_rows() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -182,7 +182,7 @@ fn r_plus_13_prune_expired_grants_removes_expired_rows() -> anyhow::Result<()> {
 }
 
 #[test]
-fn r_plus_13_config_default_grant_ttl_secs_is_24h() {
+fn p_2_23_config_default_grant_ttl_secs_is_24h() {
     let config = autonoetic_types::config::GatewayConfig::default();
     assert_eq!(
         config.default_grant_ttl_secs, 86400,
@@ -191,7 +191,7 @@ fn r_plus_13_config_default_grant_ttl_secs_is_24h() {
 }
 
 #[test]
-fn r_plus_13_zero_ttl_disables_auto_expiry() {
+fn p_2_23_zero_ttl_disables_auto_expiry() {
     let config = autonoetic_types::config::GatewayConfig {
         default_grant_ttl_secs: 0,
         ..Default::default()
@@ -236,7 +236,7 @@ fn make_sandbox_exec_request(
 }
 
 #[test]
-fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> anyhow::Result<()> {
+fn p_2_23_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -290,7 +290,7 @@ fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> 
 }
 
 #[test]
-fn r_plus_13_approval_resolution_no_expiry_when_default_ttl_zero() -> anyhow::Result<()> {
+fn p_2_23_approval_resolution_no_expiry_when_default_ttl_zero() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -332,7 +332,7 @@ fn r_plus_13_approval_resolution_no_expiry_when_default_ttl_zero() -> anyhow::Re
 }
 
 #[test]
-fn r_plus_13_approval_resolution_explicit_ttl_overrides_default() -> anyhow::Result<()> {
+fn p_2_23_approval_resolution_explicit_ttl_overrides_default() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);

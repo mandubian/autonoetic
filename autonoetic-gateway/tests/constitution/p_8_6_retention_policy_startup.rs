@@ -31,7 +31,7 @@ impl Drop for EnvRestore {
 
 #[serial]
 #[tokio::test(flavor = "current_thread")]
-async fn r_8_6_retention_applies_during_server_bootstrap() -> anyhow::Result<()> {
+async fn p_8_6_retention_applies_during_server_bootstrap() -> anyhow::Result<()> {
     let workspace = crate::support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.retention.causal_events_days = 1;
