@@ -4361,9 +4361,10 @@ impl JsonRpcRouter {
                                 }
                             }
                         } else {
-                            // Mount grants revoke at-or-above the given path
-                            // (`host` carries the path for this kind), or all
-                            // active mount grants under the root when omitted.
+                            // Mount grants revoke every grant containing the
+                            // given path (`host` carries the path for this
+                            // kind), or all active mount grants under the
+                            // root when omitted.
                             match store.revoke_session_mount_grants(
                                 &params.root_session_id,
                                 params.host.as_deref(),

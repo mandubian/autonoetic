@@ -309,7 +309,9 @@ fn revocation_expiry_and_path_scoped_revoke() -> anyhow::Result<()> {
         2
     );
 
-    // Revoking the parent path kills both grants (at-or-above semantics).
+    // Revoking the deeper path kills both grants: every grant containing
+    // `mail` dies — the `/data/mail` grant and the `/data` grant that would
+    // otherwise keep exposing it.
     let revoked = store.revoke_session_mount_grants(
         "root-rev",
         Some(&mail.to_string_lossy()),

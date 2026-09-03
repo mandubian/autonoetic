@@ -169,10 +169,11 @@ pub(super) fn delete_grants_for_root(conn: &Connection, root_session_id: &str) -
 }
 
 /// Operator revocation. Marks grants revoked (UPDATE, never DELETE — the row
-/// is the audit trail). With `path`, revokes every grant at or **above** that
-/// path — revoking `/data` kills both the `/data` grant and a narrower
-/// `/data/mail` grant whose coverage contains the revoked path; without
-/// `path`, every active grant under the root.
+/// is the audit trail). With `path`, revokes every grant **containing** that
+/// path — revoking `/data/mail/deep` kills the grants at `/data/mail` and at
+/// `/data` (either would still expose the revoked path) but leaves a narrower
+/// `/data/mail/deep/child` grant alone; without `path`, every active grant
+/// under the root.
 pub(super) fn revoke_grants_for_root(
     conn: &Connection,
     root_session_id: &str,
@@ -294,9 +295,11 @@ impl super::GatewayStore {
         delete_grants_for_root(&conn, root_session_id)
     }
 
-    /// Revoke (not delete) mount grants for a root session — at-or-above
-    /// `path` when given, all active grants otherwise. Returns the number of
-    /// rows transitioned.
+    /// Revoke (not delete) mount grants for a root session — every grant
+    /// **containing** `path` when given (the grant itself or any of its
+    /// ancestors, since a broader grant would otherwise keep the path
+    /// exposed), all active grants otherwise. Returns the number of rows
+    /// transitioned.
     pub fn revoke_session_mount_grants(
         &self,
         root_session_id: &str,

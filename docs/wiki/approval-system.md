@@ -22,7 +22,7 @@ The filesystem analog of the network host grants: when a SKILL.md declares `runt
 
 - **Coverage semantics**: prefix-based on canonical host paths (a grant at `/data` covers `/data/mail`, never `/database`), with a per-row read-only ceiling — an `ro` grant never cures an `rw` declaration; the manifest's rw intent rides the request so the operator sees it.
 - **Deny beats grant at every stage**: declarations overlapping the gateway directory or an operator deny-list entry are never granted, at mint time (the grant row is refused) and at resolution time — they fail terminally with a `mount_denied` envelope instead of raising an approval, since no decision can cure them. Missing host paths likewise stay terminal.
-- **Lifecycle**: soft-revocation (row kept as audit trail) via `grants.revoke` with `grant_kind: "session_mount"` (`host` carries the path; revoking at-or-above a path kills every grant containing it), the same `default_grant_ttl_secs` expiry and scheduler reaper as host grants, and hard deletion on emergency stop and root-session close.
+- **Lifecycle**: soft-revocation (row kept as audit trail) via `grants.revoke` with `grant_kind: "session_mount"` (`host` carries the path; revoking a path kills every grant **containing** it — the grant at that path and any broader ancestor grant that would otherwise keep it exposed), the same `default_grant_ttl_secs` expiry and scheduler reaper as host grants, and hard deletion on emergency stop and root-session close.
 
 ## Gate Types
 

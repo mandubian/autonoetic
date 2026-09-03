@@ -1079,7 +1079,7 @@ pub async fn handle_gateway_grants(
                 ("egress_declassification", &mut declass_count),
                 // #1002 slice 5: mount grants ride the same revoke loop; a
                 // `--host` filter value is interpreted as a host path for
-                // this kind (at-or-above semantics).
+                // this kind (revokes every grant containing the path).
                 ("session_mount", &mut mount_count),
             ] {
                 let result = rpc.call(
@@ -1105,7 +1105,13 @@ pub async fn handle_gateway_grants(
                     println!("Revoked {} session mount grant(s)", mount_count);
                 }
                 if let Some(ref host_val) = host {
-                    println!("  Host filter: {}", host_val);
+                    if mount_count > 0 {
+                        // For session_mount grants the filter value is a host
+                        // PATH (revokes grants containing it), not a hostname.
+                        println!("  Filter (host or mount path): {}", host_val);
+                    } else {
+                        println!("  Host filter: {}", host_val);
+                    }
                 }
             }
         }
