@@ -279,14 +279,43 @@ fn principles() -> Vec<Relation> {
     ]
 }
 
+/// What a clause obliges — the three declared fields, **without an id**.
+///
+/// Deliberately id-less. Lookups can resolve by inheritance (`P-15.1` takes
+/// `P-15`'s relation), so a returned value carrying an `id` would carry the
+/// *parent's* id while the caller asked about the child. Every caller that
+/// then assumed `result.id == queried_id` would be quietly wrong. Removing
+/// the field removes the assumption; [`declared_at`] answers the provenance
+/// question explicitly for the callers that actually have it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fields {
+    pub binds: Binds,
+    pub owed_to: OwedTo,
+    pub verified_by: VerifiedBy,
+}
+
+impl Relation {
+    fn fields(self) -> Fields {
+        Fields { binds: self.binds, owed_to: self.owed_to, verified_by: self.verified_by }
+    }
+}
+
+/// The classified table, built once.
+fn table() -> &'static [Relation] {
+    static TABLE: std::sync::OnceLock<Vec<Relation>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut out = rights();
+        out.extend(obligations());
+        out.extend(served_party());
+        out.extend(invariants());
+        out.extend(principles());
+        out
+    })
+}
+
 /// Every classified clause, in constitutional order.
-pub fn relations() -> Vec<Relation> {
-    let mut out = rights();
-    out.extend(obligations());
-    out.extend(served_party());
-    out.extend(invariants());
-    out.extend(principles());
-    out
+pub fn relations() -> &'static [Relation] {
+    table()
 }
 
 /// The declared relation for `clause_id`, or `None` if it is not yet
@@ -296,12 +325,29 @@ pub fn relations() -> Vec<Relation> {
 /// classified and the child is not — `P-15.1` from `P-15`. Inheritance is
 /// from the *declared parent*, never from the ID prefix: `Ri-0.15` does not
 /// inherit from `Ri-0`, because `Ri-0` is a section, not a clause.
-pub fn relation(clause_id: &str) -> Option<Relation> {
-    if let Some(exact) = relations().into_iter().find(|r| r.id == clause_id) {
-        return Some(exact);
+pub fn relation(clause_id: &str) -> Option<Fields> {
+    resolve(clause_id).map(|(_, fields)| fields)
+}
+
+/// Which declared clause supplied `clause_id`'s relation — itself when
+/// classified directly, or the parent it inherited from. `None` when
+/// unclassified.
+///
+/// Exists so "is this clause classified in its own right?" is answerable
+/// without comparing ids to a value that may legitimately differ.
+pub fn declared_at(clause_id: &str) -> Option<&'static str> {
+    resolve(clause_id).map(|(id, _)| id)
+}
+
+fn resolve(clause_id: &str) -> Option<(&'static str, Fields)> {
+    if let Some(exact) = table().iter().find(|r| r.id == clause_id) {
+        return Some((exact.id, exact.fields()));
     }
     let parent = clause_id.split_once('.')?.0;
-    relations().into_iter().find(|r| r.id == parent)
+    table()
+        .iter()
+        .find(|r| r.id == parent)
+        .map(|r| (r.id, r.fields()))
 }
 
 /// Clause IDs the active constitution declares that this table does not yet
@@ -333,7 +379,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn declared_ids() -> Vec<&'static str> {
-        relations().into_iter().map(|r| r.id).collect()
+        relations().iter().map(|r| r.id).collect()
     }
 
     /// Clause ids read straight from the active constitution *file*.
@@ -435,6 +481,38 @@ mod tests {
         );
     }
 
+    /// An inherited lookup says *what* the clause obliges without claiming to
+    /// be the clause.
+    ///
+    /// `relation()` used to return the parent's whole `Relation`, id included,
+    /// so `relation("P-15.1").id` was `"P-15"` — a value a caller could
+    /// reasonably read as "the clause I asked about". The id cannot simply be
+    /// rewritten to the queried one (`Relation.id` is `&'static str` and the
+    /// query is not), so the field is gone from lookup results entirely and
+    /// [`declared_at`] answers provenance for callers that need it.
+    #[test]
+    fn an_inherited_lookup_reports_its_source_separately() {
+        // Nothing inherits today — no section grouping is law-side — so use a
+        // classified clause to pin the exact case first.
+        assert_eq!(declared_at("Ri-0.15"), Some("Ri-0.15"));
+        assert_eq!(declared_at("I-8"), Some("I-8"));
+        assert_eq!(declared_at("P-8.1"), Some("P-8.1"));
+
+        // Unclassified stays unclassified in both accessors, rather than one
+        // reporting a parent the other does not.
+        assert!(relation("P-1.1").is_none());
+        assert!(declared_at("P-1.1").is_none());
+
+        // The two accessors never disagree about classification.
+        for id in ["Ri-0.2", "U-1", "O-6", "I-14", "P-1.1", "nonsense"] {
+            assert_eq!(
+                relation(id).is_some(),
+                declared_at(id).is_some(),
+                "{id}: relation() and declared_at() disagree on classification"
+            );
+        }
+    }
+
     /// Sub-clause inheritance resolves through the *declared parent*, and
     /// only there.
     #[test]
@@ -466,8 +544,8 @@ mod tests {
     /// prefix conflates universality with bind direction (RFC defect 1.4).
     #[test]
     fn invariants_are_not_uniform() {
-        let inv: Vec<Relation> = relations()
-            .into_iter()
+        let inv: Vec<&Relation> = relations()
+            .iter()
             .filter(|r| r.id.starts_with("I-"))
             .collect();
         let owed: HashSet<OwedTo> = inv.iter().map(|r| r.owed_to).collect();

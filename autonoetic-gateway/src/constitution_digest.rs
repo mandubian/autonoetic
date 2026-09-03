@@ -596,28 +596,49 @@ pub fn clause_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// True when `s` is exactly a clause ID — a known family prefix followed by
-/// digits, optionally dotted. Rejects section headers (`Ri-0`), prose, and
-/// table separators.
+/// True when `s` is exactly a clause ID.
+///
+/// Whether a dot is required is **family-dependent**, because the document
+/// numbers the families differently:
+///
+/// | family | shape | a bare `X-N` is |
+/// |---|---|---|
+/// | `Ri-`, `P-` | always `Ri-0.2`, `P-15.1` | a **section**, not a clause |
+/// | `O-`, `U-`, `I-` | always flat: `O-1`, `U-3`, `I-14` | the clause itself |
+///
+/// So the dot rule cannot be uniform in either direction: requiring one
+/// everywhere drops all 21 `O-`/`U-`/`I-` clauses, and allowing one everywhere
+/// admits `P-2` — a section heading — as a clause. Admitting a section would
+/// inflate the clause census, and the census is what
+/// `constitution_relations::tests::the_unclassified_count_is_a_ratchet`
+/// counts, so the ratchet would move for a reason that is not a clause.
+///
+/// Today no undotted `Ri-`/`P-` appears as a whole table cell, so this is a
+/// latent defect rather than a live miscount — closed here because a counting
+/// primitive that is only accidentally right is not a counting primitive.
 fn is_whole_clause_id(s: &str) -> bool {
-    let Some(rest) = ["Ri-", "P-", "O-", "U-", "I-"]
+    let Some((family, rest)) = ["Ri-", "P-", "O-", "U-", "I-"]
         .into_iter()
-        .find_map(|f| s.strip_prefix(f))
+        .find_map(|f| s.strip_prefix(f).map(|rest| (f, rest)))
     else {
         return false;
     };
     if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return false;
     }
-    // `1`, `0.13`, `15.2` — but not `0.` or `.3` or `1..2`.
+    let sectioned = matches!(family, "Ri-" | "P-");
+
+    // `1`, `0.13`, `15.2` — but not `0.`, `.3` or `1..2`.
     let mut parts = rest.split('.');
     let first = parts.next().unwrap_or_default();
     if first.is_empty() {
         return false;
     }
     match parts.next() {
-        None => true,
-        Some(second) => !second.is_empty() && parts.next().is_none(),
+        // Undotted: a clause only in the flat families.
+        None => !sectioned,
+        // Dotted: a clause only in the sectioned families.
+        Some(second) => sectioned && !second.is_empty() && parts.next().is_none(),
     }
 }
 
@@ -772,6 +793,40 @@ fn normalize_config_path_label(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The dot rule is **family-dependent**, and getting it uniform in either
+    /// direction is a real miscount: requiring a dot everywhere drops all 21
+    /// `O-`/`U-`/`I-` clauses, and allowing one everywhere admits `P-2` — a
+    /// section heading — as a clause, inflating the census the
+    /// unclassified-clause ratchet counts.
+    #[test]
+    fn clause_ids_admit_flat_families_and_reject_section_headings() {
+        // Sectioned families: dotted only.
+        assert!(is_whole_clause_id("Ri-0.2"));
+        assert!(is_whole_clause_id("P-15.1"));
+        assert!(!is_whole_clause_id("Ri-0"), "Ri-0 is a section, not a clause");
+        assert!(!is_whole_clause_id("P-2"), "P-2 is a section, not a clause");
+
+        // Flat families: undotted only.
+        assert!(is_whole_clause_id("O-1"));
+        assert!(is_whole_clause_id("U-3"));
+        assert!(is_whole_clause_id("I-14"));
+        assert!(!is_whole_clause_id("I-1.2"), "invariants are never dotted");
+
+        // Malformed and non-clauses.
+        for bad in ["", "P-", "P-0.", "P-.3", "P-1..2", "ID", "---", "X-1", "P-1.2.3"] {
+            assert!(!is_whole_clause_id(bad), "{bad:?} must not parse as a clause");
+        }
+
+        // End to end: a section heading in a table cell is not counted.
+        let doc = "\
+| ID | Rule | Source | Enforcement | Status |\n\
+| P-2 | section heading that should not count | x | y | ENFORCED |\n\
+| P-2.20 | a real clause | x | y | ENFORCED |\n\
+| O-1 | a flat clause | x | y | ENFORCED |\n\
+- **I-14 (The egress label plane is gateway-only.)** bullet form\n";
+        assert_eq!(clause_ids(doc), vec!["P-2.20", "O-1", "I-14"]);
+    }
     use super::*;
 
     #[test]
