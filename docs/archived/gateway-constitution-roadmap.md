@@ -1,4 +1,26 @@
 # Gateway Constitution Roadmap
+> **⚠ SUPERSEDED (2026-09-02) — plan complete, archived.** Every phase below is
+> marked `ENFORCED`; this document is the historical record of the audit → plan →
+> landed trail, not a live backlog.
+>
+> What is live now:
+>
+> - **What each clause requires and what enforces it** —
+>   `docs/constitution/enforcement-register.md` and the active constitution under
+>   `docs/constitution/versions/` (pointer: `docs/constitution/CURRENT`).
+> - **The findings this plan answered** —
+>   `docs/reports/2026-04-24-constitution-audit.md`.
+> - **What is still open** — `docs/proposals/README.md`.
+>
+> Kept rather than deleted because the signed constitutions cite it **22 times**
+> in their clause `Source` columns, and signed bytes cannot be amended without
+> re-signing. It is archived under its historically-cited basename
+> (`gateway-constitution-roadmap.md`) so 21 of those citations resolve by
+> filename; see the resolution table in `docs/constitution/README.md`.
+>
+> Clause IDs in the headings below were migrated from the pre-restructure
+> `R+`/`R++` scheme in #1277; the "(was R++8)"-style annotations are retained
+> deliberately, since the citing signed texts still use the old names.
 
 > Prioritized plan to close the gaps identified in the 2026-04-24 audit.
 >

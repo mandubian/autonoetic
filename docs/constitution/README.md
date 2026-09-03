@@ -56,7 +56,7 @@ docs that the signed texts cite:
 |---|---|
 | `docs/philosophy.md` | [`../concepts/philosophy.md`](../concepts/philosophy.md) |
 | `docs/config-reference.md` | [`../reference/config.md`](../reference/config.md) |
-| `docs/gateway-constitution-roadmap.md` | [`roadmap.md`](roadmap.md) |
+| `docs/gateway-constitution-roadmap.md` | [`../archived/gateway-constitution-roadmap.md`](../archived/gateway-constitution-roadmap.md) — plan complete, archived 2026-09-02 |
 | `docs/gateway-constitution-audit-2026-04-24.md` | [`../reports/2026-04-24-constitution-audit.md`](../reports/2026-04-24-constitution-audit.md) |
 
 The enforcement tables also name two docs by bare filename in their **Doc**
