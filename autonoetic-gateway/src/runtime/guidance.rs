@@ -544,6 +544,23 @@ reasonable default or a clearly-better interpretation does not warrant a round-t
                 .to_string(),
         },
         GuidanceBlock {
+            // Turn-yield hygiene: models sometimes believe a turn must be
+            // "closed" with a final tool call and burn a full round on a
+            // placeholder (`resolve` on a known ref, a stub `content_write`,
+            // a confirmation re-read) — observed as `intent: "No-op write to
+            // end turn cleanly"` in session-0aba5c63. The mechanical truth:
+            // a turn ends when the reply carries no tool calls.
+            id: "turn.yield_without_placeholder_tools",
+            when: GuidanceCondition::Always,
+            priority: 5,
+            prose: "**End the turn with your final reply — never a closing tool call.** When the work \
+for this turn is done, emit the final message and stop. Placeholder no-ops — a `resolve` on a ref \
+you already resolved, a stub `content_write` 'to end the turn cleanly', a confirmation re-read — are \
+never needed: a turn ends the moment your reply carries no tool calls. Each closing call burns a \
+full model round and reads to the Sentinel as loop pressure."
+                .to_string(),
+        },
+        GuidanceBlock {
             // D.7b planner doctrine: Sentinel notices are advisory self-correction signals.
             // Only applies to lead planners; other agents rely on their own SKILL.md doctrine
             // or the LoopGuard directly.
