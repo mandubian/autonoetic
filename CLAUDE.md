@@ -12,11 +12,27 @@ cargo build --release                # Release build
 ```
 
 ### Test
+
+**Always use `cargo nextest run`, never `cargo test`, for verification.**
+`cargo test` executes the ~47 integration-test binaries sequentially and
+`#[serial]` tests serialize within each binary, so its wall time collapses to
+the sum of serial test time (~10 min full workspace measured on a 32-core dev
+box) while `cargo nextest run` runs tests as processes across all cores
+(~1 min). If nextest is missing, install it first — do not fall back to
+`cargo test`:
+
 ```bash
-cargo test                                          # Run all tests
-cargo test --test agent_install_approval_e2e        # Run a single integration test
-cargo test --test full_lifecycle_integration        # Run lifecycle integration test
-RUST_LOG=autonoetic=debug cargo test               # Run with debug logging
+curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+# or: cargo install cargo-nextest --locked
+```
+
+```bash
+cargo nextest run                              # Run all tests
+cargo nextest run -p autonoetic-gateway        # Gateway crate only (most tests live here)
+cargo nextest run -E 'test(turn_continuation)' # Run tests matching a name filter
+cargo nextest run --profile ci                 # Serial CI semantics (flake reproduction)
+RUST_LOG=autonoetic=debug cargo nextest run    # Run with debug logging
+cargo test --doc                               # Doc-tests only (nextest does not run these)
 ```
 
 ### Run
@@ -38,14 +54,14 @@ When `docs/constitution/versions/<version>/constitution.md` changes, run the
 maintained script (requires PyNaCl: `python3 -m pip install pynacl`):
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.06.05 \
+python3 docs/constitution/recompute_lock.py --version 2026.09.02 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
 ```
 
 To intentionally rotate signer material:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.06.05 --generate-key
+python3 docs/constitution/recompute_lock.py --version 2026.09.02 --generate-key
 ```
 
 If signer key rotated, update `trusted_signers` for
@@ -55,11 +71,13 @@ If signer key rotated, update `trusted_signers` for
 - `config/config-template.yaml`
 - `docs/reference/config.md`
 
-Then validate:
+Then validate (the lock test is a `--lib` unit test; the constitution suites
+live in the `constitution` domain binary — there is no
+`constitution_r_8_6_*` binary anymore):
 
 ```bash
-cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
-cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
+cargo nextest run -p autonoetic-gateway --lib constitution_lock_matches_canonical_digest_and_counts
+cargo nextest run -p autonoetic-gateway --test constitution r_8_6_retention_policy_startup
 ```
 
 Canonicalization details are documented in `docs/constitution/signing.md`.
@@ -131,7 +149,11 @@ The gateway exposes a REST API for remote agents. Authentication uses HMAC. See 
 
 ### Tests
 
-Integration tests are in `autonoetic-gateway/tests/` (30+ tests). They use `tempfile` for isolated workspaces and `serial_test` for state isolation. CLI e2e tests are in `autonoetic/tests/cli_e2e.rs`.
+Integration tests are in `autonoetic-gateway/tests/` (~47 binaries, being
+collapsed into domain binaries — `tests/<domain>/main.rs` with one module per
+former file, e.g. `tests/egress/`; suites binding ports or fixed paths stay
+standalone). They use `tempfile` for isolated workspaces and `serial_test` for
+state isolation. CLI e2e tests are in `autonoetic/tests/cli_e2e.rs`.
 
 Notable suite for approval continuation:
 - `autonoetic-gateway/tests/turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, and parallel-join behavior
@@ -140,9 +162,9 @@ Notable suite for approval continuation:
 test, so run these before assuming a doc change is free:
 
 ```bash
-cargo test -p autonoetic-gateway --lib docs_link_guard   # paths, relative links, anchors, labels, symbols, proposals index
-cargo test -p autonoetic-gateway --lib wiki              # wiki canonical pointers + digest budget + config/env citations
-cargo test -p autonoetic --bins docs_coverage            # every CLI subcommand documented; documented globals exist
+cargo nextest run -p autonoetic-gateway --lib docs_link_guard   # paths, relative links, anchors, labels, symbols, proposals index
+cargo nextest run -p autonoetic-gateway --lib wiki              # wiki canonical pointers + digest budget + config/env citations
+cargo nextest run -p autonoetic --bins docs_coverage            # every CLI subcommand documented; documented globals exist
 ```
 
 What they enforce: a cited `docs/…` path or relative link resolves; a `#anchor`
@@ -161,11 +183,12 @@ digest-signed bytes). These live in the **lib/bin** targets because PR CI runs
 `--lib --bins` only.
 
 **Ignored (manual) sandbox e2e** — require a host `bwrap` and execute real code, so they are NOT run in CI:
-- `autonoetic-gateway/tests/promotion_gate_mocked_network_e2e.rs` — proves the promotion gate runs a `urllib`-importing but mocked test suite offline (passes) and that a real network call fails offline. Run with:
+- `autonoetic-gateway/tests/promotion/gate_mocked_network_e2e.rs` (module in the `promotion` domain binary) — proves the promotion gate runs a `urllib`-importing but mocked test suite offline (passes) and that a real network call fails offline. Run with:
   ```bash
-  cargo test -p autonoetic-gateway --test promotion_gate_mocked_network_e2e -- --ignored --nocapture
+  cargo nextest run -p autonoetic-gateway --test promotion gate_mocked_network_e2e \
+    --run-ignored ignored-only --nocapture
   ```
-  Its CI-safe decision counterpart (no sandbox) is `promotion_gate_network_isolation_decision.rs`.
+  Its CI-safe decision counterpart (no sandbox) is `promotion/gate_network_isolation_decision.rs`.
 
 ## Key Documentation
 

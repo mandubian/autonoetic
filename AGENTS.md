@@ -4,13 +4,28 @@ Developer instruction file for OpenCode sessions working on this repository.
 
 ## Build & Test
 
+**Always use `cargo nextest run`, never `cargo test`, for verification.**
+`cargo test` executes the ~47 integration-test binaries sequentially and
+`#[serial]` tests serialize within each binary, so its wall time collapses to
+the sum of serial test time (~10 min full workspace measured on a 32-core dev
+box) while `cargo nextest run` runs tests as processes across all cores
+(~1 min). If nextest is missing, install it first — do not fall back to
+`cargo test`:
+
+```bash
+curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+# or: cargo install cargo-nextest --locked
+```
+
 ```bash
 cargo build                                    # Build all workspace crates
 cargo build -p autonoetic-gateway              # Build a single crate
-cargo test                                     # Run all tests
-cargo test -p autonoetic-gateway               # Gateway crate only (most tests live here)
-cargo test --test turn_continuation_approval   # Run a single integration test file
-RUST_LOG=autonoetic=debug cargo test           # Debug logging during tests
+cargo nextest run                              # Run all tests
+cargo nextest run -p autonoetic-gateway        # Gateway crate only (most tests live here)
+cargo nextest run -E 'test(turn_continuation)' # Run tests matching a name filter
+cargo nextest run --profile ci                 # Serial CI semantics (flake reproduction)
+RUST_LOG=autonoetic=debug cargo nextest run    # Debug logging during tests
+cargo test --doc                               # Doc-tests only (nextest does not run these)
 ```
 
 No linter or formatter is configured. There is no `cargo clippy` or `rustfmt` CI gate — run `cargo build` to verify.
@@ -26,8 +41,8 @@ cargo run -p autonoetic --features dev-web --bin autonoetic run
 
 Plain builds (no features) stay self-contained — always the prod shape.
 
-**Test runner:** CI uses [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`).
-Each test runs in its own process; `.config/nextest.toml` defines two profiles:
+**Test runner:** [cargo-nextest](https://nexte.st), locally and in CI. Each test
+runs in its own process; `.config/nextest.toml` defines two profiles:
 
 ```bash
 cargo nextest run -p autonoetic-gateway                       # local default: parallel

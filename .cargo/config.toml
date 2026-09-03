@@ -1,5 +1,9 @@
 [alias]
 xtask = "run -p xtask --"
+# `cargo t` == `cargo nextest run` — the sanctioned test runner (see AGENTS.md).
+# Built-in commands cannot be shadowed, so `cargo test` still reaches libtest;
+# use the alias (or nextest directly) to get cross-binary parallelism.
+t = "nextest run"
 
 # Faster linking on Linux via mold (#919, #920). Scoped to
 # x86_64-unknown-linux-gnu so macOS/Windows checkouts are unaffected; on Linux
