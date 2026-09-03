@@ -58,7 +58,7 @@ pub async fn run_watchdog(
         .llm_config
         .clone()
         .context("watchdog.default is missing llm_config in SKILL.md")?;
-    let driver = build_driver(llm_config, reqwest::Client::new())?;
+    let driver = build_driver(llm_config, autonoetic_gateway::llm::build_llm_client())?;
 
     // Surface the latest Layer 1 trajectory health snapshot to the watchdog
     // so it does not re-derive what the deterministic monitor already computed.

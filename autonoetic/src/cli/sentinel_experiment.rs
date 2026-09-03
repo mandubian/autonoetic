@@ -315,7 +315,7 @@ async fn run_watchdog_fast(
         .llm_config
         .clone()
         .context("watchdog-fast.default is missing llm_config in SKILL.md")?;
-    let driver = build_driver(llm_config, reqwest::Client::new())?;
+    let driver = build_driver(llm_config, autonoetic_gateway::llm::build_llm_client())?;
 
     // Empty registry — no tools at all. The manifest's `capabilities: []`
     // is necessary but not sufficient to disable tools because some are

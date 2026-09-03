@@ -65,7 +65,7 @@ pub async fn handle_mcp_expose(agent_id: &str, config_path: &Path) -> anyhow::Re
 
     let mut server = AgentMcpServer::new(CliAgentExecutor {
         agents_dir: config.agents_dir,
-        client: reqwest::Client::new(),
+        client: autonoetic_gateway::llm::build_llm_client(),
     });
     server.register_agent(ExposedAgent {
         id: loaded.manifest.agent.id,

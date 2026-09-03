@@ -172,6 +172,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("autonoetic/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let (provider, _original_entry, model, base_url, api_key_env) = super::model_discovery::interactive_select(&client).await?;
@@ -361,6 +362,7 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("autonoetic/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
