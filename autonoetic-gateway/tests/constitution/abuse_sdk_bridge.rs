@@ -1,6 +1,6 @@
-//! Constitution R+10: Sandbox→gateway SDK-bridge rate and payload-size limits.
+//! Constitution P-7.21: Sandbox→gateway SDK-bridge rate and payload-size limits.
 //!
-//! R+10 ensures that a sandboxed process cannot flood the gateway or balloon
+//! P-7.21 ensures that a sandboxed process cannot flood the gateway or balloon
 //! the content store through unbounded SDK bridge calls. Per-session rate
 //! limit (default 100/sec) and per-call payload size cap (default 1 MiB).
 //! Violations return structured errors and log `sdk_bridge_abuse` to the

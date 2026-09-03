@@ -1,4 +1,4 @@
-//! Constitution R++9: Policy engine determinism property test.
+//! Constitution I-10: Policy engine determinism property test.
 //!
 //! Verifies that the gateway's policy decisions are pure functions of
 //! their declared inputs (capability-set, tool-call). Every PolicyEngine

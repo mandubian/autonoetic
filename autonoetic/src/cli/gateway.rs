@@ -445,7 +445,7 @@ pub async fn handle_gateway_approvals(
                 );
                 if let Some(phrase) = &approval.confirm_phrase {
                     println!(
-                        "  ↳ R++4 confirm phrase required (verify before approving): \"{phrase}\""
+                        "  ↳ P-2.24 confirm phrase required (verify before approving): \"{phrase}\""
                     );
                 }
             }
@@ -598,7 +598,7 @@ pub async fn handle_gateway_approvals(
                             broadened_capabilities,
                             ..
                         } => {
-                            println!("\nAction: revision_promote (R++2 capability accretion)");
+                            println!("\nAction: revision_promote (P-2.25 capability accretion)");
                             println!("  Agent:           {}", agent_id);
                             println!("  Outgoing:        {}", outgoing_revision_id);
                             println!("  Incoming:        {}", revision_id);
@@ -622,10 +622,10 @@ pub async fn handle_gateway_approvals(
                     }
 
                     if let Some(dwell) = a.min_dwell_ms {
-                        println!("\nR++4 min dwell: {} ms", dwell);
+                        println!("\nP-2.24 min dwell: {} ms", dwell);
                     }
                     if let Some(ref phrase) = a.confirm_phrase {
-                        println!("R++4 confirm:   --confirm-phrase '{}'", phrase);
+                        println!("P-2.24 confirm:   --confirm-phrase '{}'", phrase);
                     }
 
                     if let Ok(raw_msgs) = rpc.call(
@@ -1646,7 +1646,7 @@ async fn run_interactive_approvals(
                         lines.push(Line::from(vec![
                             Span::styled("Note:    ", Style::default().fg(Color::Gray)),
                             Span::styled(
-                                "approve from CLI with --acknowledge-capability for each (R++2)",
+                                "approve from CLI with --acknowledge-capability for each (P-2.25)",
                                 Style::default().fg(Color::DarkGray),
                             ),
                         ]));
@@ -2154,7 +2154,7 @@ async fn run_interactive_approvals(
                         if let Some(idx) = state.selected() {
                             let req = &items[idx];
 
-                            // RevisionPromote (R++2) requires per-capability
+                            // RevisionPromote (P-2.25) requires per-capability
                             // acknowledgement that the TUI cannot collect
                             // safely. Direct the operator to the CLI form
                             // rather than letting `approve_request` always
@@ -2164,7 +2164,7 @@ async fn run_interactive_approvals(
                                 autonoetic_types::background::ScheduledAction::RevisionPromote { .. }
                             ) {
                                 status_msg = format!(
-                                    "{} approve from CLI: `gateway approvals approve {} --acknowledge-capability <TYPE>` for each added/broadened cap (R++2)",
+                                    "{} approve from CLI: `gateway approvals approve {} --acknowledge-capability <TYPE>` for each added/broadened cap (P-2.25)",
                                     "\u{26a0}",
                                     req.request_id,
                                 );
@@ -2902,7 +2902,7 @@ fn truncate_field(s: &str, max: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Constitution amendment proposals — R+++1 (issue #92)
+// Constitution amendment proposals — Ri-0.8 (issue #92)
 // ---------------------------------------------------------------------------
 
 // Single source of truth lives in the gateway store module so the CLI and the
@@ -3466,7 +3466,7 @@ fn parse_egress_sink(spec: &str) -> anyhow::Result<autonoetic_types::egress::Sin
 /// On approval the grant is materialized via the `apply_decision` §1d path
 /// and `egress.declassified` is emitted. There is deliberately no
 /// approve-in-one-step flag: EgressDeclassify is a high-risk class and the
-/// R++4 dwell between filing and decision is part of the hardening.
+/// P-2.24 dwell between filing and decision is part of the hardening.
 pub async fn handle_gateway_egress_declassify(
     config_path: &Path,
     root_session: &str,

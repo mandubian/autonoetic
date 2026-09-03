@@ -140,7 +140,7 @@ fn emit_federation_constitution_event(
 
     let now = chrono::Utc::now();
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-    rules.push("R+++2".to_string());
+    rules.push("P-10.9".to_string());
     let payload = serde_json::json!({
         "peer_node_id": peer_node_id,
         "peer_addr": peer_addr.to_string(),
@@ -184,7 +184,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn federation_rules_for_message_continuity() -> Vec<String> {
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-    rules.push("R++7".to_string());
+    rules.push("P-10.6".to_string());
     rules.push("P-10.6".to_string());
     rules
 }

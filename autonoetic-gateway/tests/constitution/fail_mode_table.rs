@@ -1,4 +1,4 @@
-//! Constitution R++10: Unified fail-mode table.
+//! Constitution I-11: Unified fail-mode table.
 //!
 //! Every constitutional invariant has a declared failure action in one
 //! place.  The five modes are: refuse-boot, refuse-session-start,
@@ -23,9 +23,9 @@ const CONSTITUTION_RULE_IDS: &[&str] = &[
     "P-1.1", "P-1.2", "P-1.3", "P-1.4", "P-1.5", "P-1.6", "P-1.7", "P-1.8", "P-1.9", "P-1.10",
     "P-1.11", // §2 Approval Gates
     "P-2.1", "P-2.2", "P-2.3", "P-2.4", "P-2.5", "P-2.6", "P-2.7", "P-2.8", "P-2.9", "P-2.10",
-    "P-2.11", "P-2.12", "P-2.13", "P-2.14", "P-2.15", "P-2.16", "P-2.17",
-    // §3 Sandbox Isolation
-    "P-3.1", "P-3.2", "P-3.3", "P-3.4", "P-3.5", "P-3.6", "P-3.7", "P-3.8", "P-3.9",
+    "P-2.11", "P-2.12", "P-2.13", "P-2.14", "P-2.15", "P-2.16", "P-2.17", "Ri-0.14", "Ri-0.15",
+    "Ri-0.16", "Ri-0.17", "Ri-0.18", "P-2.23", "P-2.24", // §3 Sandbox Isolation
+    "P-3.1", "P-3.2", "P-3.3", "P-3.4", "P-3.5", "P-3.6", "P-3.7", "P-3.8", "P-3.9", "P-3.10",
     // §4 Credential & Secret Protection
     "P-4.1", "P-4.2", "P-4.3", "P-4.4", "P-4.5", "P-4.6", "P-4.7", "P-4.8", "P-4.9", "P-4.10",
     "P-4.11", "P-4.12", "P-4.13", "P-4.14", // §5 I/O Schema Validation
@@ -33,7 +33,7 @@ const CONSTITUTION_RULE_IDS: &[&str] = &[
     "P-5.11", "P-5.12", "P-5.13", // §6 Session, Workflow & Budget
     "P-6.1", "P-6.2", "P-6.3", "P-6.4", "P-6.5", "P-6.6", "P-6.7", "P-6.8", "P-6.9", "P-6.10",
     "P-6.11", "P-6.12", "P-6.13", "P-6.14", "P-6.15", "P-6.16", "P-6.17", "P-6.18", "P-6.19",
-    "P-6.20", "P-6.21", "P-6.22", "P-6.23",
+    "P-6.20", "P-6.21", "P-6.22", "P-6.23", "P-4.15",
     // §7 Abuse / Hard-Stop / Circuit Breakers
     "P-7.1", "P-7.2", "P-7.3", "P-7.4", "P-7.5", "P-7.6", "P-7.7", "P-7.8", "P-7.9", "P-7.10",
     "P-7.11", "P-7.12", "P-7.13", "P-7.14", "P-7.15", "P-7.16", "P-7.17", "P-7.18",
@@ -43,14 +43,11 @@ const CONSTITUTION_RULE_IDS: &[&str] = &[
     // §9 Agent Install & Provenance
     "P-9.1", "P-9.2", "P-9.3", "P-9.4", "P-9.5", "P-9.6", "P-9.7", "P-9.8", "P-9.9", "P-9.10",
     "P-9.11", "P-9.12", "P-9.13", "P-9.14", // §10 Federation / Remote
-    "P-10.1", "P-10.2", "P-10.3", "P-10.4", "P-10.5", "P-10.6", "P-10.7", "P-10.8",
+    "P-10.1", "P-10.2", "P-10.3", "P-10.4", "P-10.5", "P-10.6", "P-10.7", "P-10.8", "P-10.9",
     // §11 Inter-Agent Messaging
-    "P-11.1", "P-11.2", "P-11.3", "P-11.4", "P-11.5", "P-11.6", "P-11.7", "P-11.8",
-    // R+ additions
-    "R+1", "R+2", "R+3", "R+4", "R+5", "R+6", "R+7", "R+8", "R+9", "R+10", "R+11", "R+12", "R+13",
-    "R+14", "R+15", "R+16", "R+17", "R+18", // R++ additions
-    "R++4", "R++7", "R++8", "R++9", "R++10", // R+++ additions
-    "R+++1", "R+++2", "R+++3",
+    "P-11.1", "P-11.2", "P-11.3", "P-11.4", "P-11.5", "P-11.6", "P-11.7", "P-11.8", "P-7.21",
+    "P-7.22", // §13 Cross-cutting invariants
+    "I-6", "I-10", "I-11",
 ];
 
 #[test]
@@ -63,7 +60,7 @@ fn r_plus_plus_10_every_constitutional_rule_has_fail_mode() {
     }
     assert!(
         missing.is_empty(),
-        "R++10: the following rules are missing fail-mode entries: {:?}",
+        "I-11: the following rules are missing fail-mode entries: {:?}",
         missing
     );
 }
@@ -80,7 +77,7 @@ fn r_plus_plus_10_no_duplicate_entries() {
     }
     assert!(
         dupes.is_empty(),
-        "R++10: duplicate fail-mode entries for: {:?}",
+        "I-11: duplicate fail-mode entries for: {:?}",
         dupes
     );
 }
@@ -128,7 +125,7 @@ fn r_plus_plus_10_r_7_18_is_degrade() {
 
 #[test]
 fn r_plus_plus_10_r_plus_plus_8_escape_is_degrade() {
-    let mode = lookup_fail_mode("R++8").expect("R++8 must have a fail-mode entry");
+    let mode = lookup_fail_mode("P-7.22").expect("P-7.22 must have a fail-mode entry");
     assert_eq!(mode, FailMode::Degrade);
 }
 
@@ -142,7 +139,7 @@ fn r_plus_plus_10_catalog_unavailable_refuses_cost_budgeted_session() {
     let result = registry.record_llm_completion("scope-1", 100, 50, None);
     assert!(
         result.is_err(),
-        "P-6.5/R++10: record_llm_completion with None cost must fail when max_session_price_usd is set"
+        "P-6.5/I-11: record_llm_completion with None cost must fail when max_session_price_usd is set"
     );
     let err = result.unwrap_err().to_string();
     assert!(
@@ -207,8 +204,8 @@ fn r_plus_plus_10_entries_by_fail_mode_returns_correct_subset() {
         "P-7.18 must be in degrade entries"
     );
     assert!(
-        degrade_entries.contains(&"R++8"),
-        "R++8 must be in degrade entries"
+        degrade_entries.contains(&"P-7.22"),
+        "P-7.22 must be in degrade entries"
     );
     assert!(
         !degrade_entries.contains(&"P-7.1"),

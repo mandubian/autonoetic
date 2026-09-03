@@ -1,4 +1,4 @@
-//! Constitution R+6 durability intent checks.
+//! Constitution P-8.16 durability intent checks.
 
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;

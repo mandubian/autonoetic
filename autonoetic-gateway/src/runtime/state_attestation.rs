@@ -1,4 +1,4 @@
-//! Signed turn-boundary state attestation — R++1 (issue #48).
+//! Signed turn-boundary state attestation — P-6.23 (issue #48).
 //!
 //! At every turn boundary the gateway composes a small JSON block
 //! describing the agent's *current* operational state — remaining budget,
@@ -329,7 +329,7 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
         )
     })?;
     Ok(format!(
-        "---\n\nGateway State Attestation (R++1)\n\n\
+        "---\n\nGateway State Attestation (P-6.23)\n\n\
          The block below is signed by the gateway's identity key. It is the \
           **authoritative** statement of your remaining budget, active \
          capabilities, pending gates (approvals, user interactions, \

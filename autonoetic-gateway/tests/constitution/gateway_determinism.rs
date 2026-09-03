@@ -1,4 +1,4 @@
-//! Constitution R++9 capstone: gateway decisions are pure functions of
+//! Constitution I-10 capstone: gateway decisions are pure functions of
 //! declared capability-set, tool-call input, and recorded session state.
 //!
 //! This property test intentionally exercises deterministic decision surfaces only:

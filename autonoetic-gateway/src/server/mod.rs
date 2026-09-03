@@ -150,7 +150,7 @@ impl GatewayServer {
             if !probe_result.is_present() {
                 let detail = vault_probe_failure_reason(&probe_result);
                 anyhow::bail!(
-                    "Vault master key probe failed (R+8): {}. Refusing startup. Configure AUTONOETIC_VAULT_KEY, AUTONOETIC_VAULT_KEY_PATH, or provision {}/.gateway/vault.key",
+                    "Vault master key probe failed (P-4.15): {}. Refusing startup. Configure AUTONOETIC_VAULT_KEY, AUTONOETIC_VAULT_KEY_PATH, or provision {}/.gateway/vault.key",
                     detail,
                     self.config.agents_dir.display()
                 );

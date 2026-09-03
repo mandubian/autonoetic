@@ -542,7 +542,7 @@ mod tests {
     fn extract_numbered_rule_row() {
         init_default_constitution();
         // P-10.9 is the federation constitution-digest rule (graduated from
-        // the former R+++2) — a normal numbered rule row.
+        // the former P-10.9) — a normal numbered rule row.
         let extract =
             extract_section(constitution_text().as_ref(), "P-10.9").expect("P-10.9 must exist");
         assert!(extract.contains("P-10.9"));

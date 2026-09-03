@@ -1,4 +1,4 @@
-//! Constitution R+16 — Promotion-gate execution denied network access.
+//! Constitution P-3.10 — Promotion-gate execution denied network access.
 //!
 //! Evaluator and auditor sessions (agents with Evaluation capability)
 //! must have network namespace unshared regardless of declared
@@ -35,21 +35,21 @@ fn evaluation_capability_forces_network_off() {
     // Simulate approval_validated_for_command granting network
     overrides.share_net = true;
 
-    // Now apply R+16 (mirrors the logic in sandbox_exec / execute_script_in_sandbox)
+    // Now apply P-3.10 (mirrors the logic in sandbox_exec / execute_script_in_sandbox)
     overrides.force_network_off = true;
     overrides.share_net = false;
 
     assert!(overrides.force_network_off);
     assert!(
         !overrides.share_net,
-        "R+16 overrides NetworkAccess for evaluation agents"
+        "P-3.10 overrides NetworkAccess for evaluation agents"
     );
 
     let mut argv = vec!["--unshare-all".to_string()];
     autonoetic_gateway::sandbox::append_bwrap_isolation_flags(&mut argv, Some(&overrides));
     assert!(
         !argv.contains(&"--share-net".to_string()),
-        "R+16 must suppress --share-net even after approval grants network"
+        "P-3.10 must suppress --share-net even after approval grants network"
     );
 }
 

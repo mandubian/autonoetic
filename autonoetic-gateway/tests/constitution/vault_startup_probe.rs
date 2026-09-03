@@ -1,4 +1,4 @@
-//! Constitution R+8: Vault master-key presence probe at gateway startup.
+//! Constitution P-4.15: Vault master-key presence probe at gateway startup.
 //!
 //! The gateway probes the vault master key at boot and emits a
 //! `vault.key_probe` causal event. This ensures misconfiguration is
@@ -190,7 +190,7 @@ fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
     assert_eq!(probe.agent_id, "gateway");
     assert_eq!(probe.session_id, "system");
     assert_eq!(probe.status, "SUCCESS");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     assert!(probe.reason.is_some());
     let payload: serde_json::Value =
         serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
@@ -219,7 +219,7 @@ fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
         .expect("vault.key_probe event must be emitted");
 
     assert_eq!(probe.status, "ERROR");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     assert!(probe.reason.is_some());
     let reason = probe.reason.as_deref().unwrap();
     assert!(
@@ -250,7 +250,7 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
         .expect("vault.key_probe event must be emitted");
 
     assert_eq!(probe.status, "ERROR");
-    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.enforced_rules.iter().any(|r| r == "P-4.15"));
     let reason = probe.reason.as_deref().unwrap();
     assert!(
         reason.contains("missing"),
@@ -294,8 +294,8 @@ async fn r_plus_8_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Res
         .expect_err("startup must fail-shut when vault key is missing");
     let message = err.to_string();
     assert!(
-        message.contains("Vault master key probe failed (R+8)"),
-        "startup error should reference R+8 fail-shut probe: {message}"
+        message.contains("Vault master key probe failed (P-4.15)"),
+        "startup error should reference P-4.15 fail-shut probe: {message}"
     );
 
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);

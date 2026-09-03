@@ -1497,7 +1497,7 @@ fn test_egress_declassify_intake_file_then_approve() {
     );
 
     // Decide it through the normal approval surface. EgressDeclassify is a
-    // high-risk class — the R++4 dwell (3s) must elapse between filing and
+    // high-risk class — the P-2.24 dwell (3s) must elapse between filing and
     // decision.
     std::thread::sleep(Duration::from_millis(3200));
     let approve = run_autonoetic(

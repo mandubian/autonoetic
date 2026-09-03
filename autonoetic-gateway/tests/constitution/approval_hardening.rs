@@ -1,4 +1,4 @@
-//! Constitution R++4: Operator approval hardening.
+//! Constitution P-2.24: Operator approval hardening.
 //!
 //! Three sub-features:
 //! 1. Dwell time — minimum visible seconds before confirm enables for high-risk approvals
@@ -191,8 +191,8 @@ fn r4_dwell_time_rejects_too_fast() {
 
     let err = result.expect_err("should reject — dwell time not met");
     assert!(
-        err.to_string().contains("R++4"),
-        "error should reference R++4: {}",
+        err.to_string().contains("P-2.24"),
+        "error should reference P-2.24: {}",
         err
     );
     assert!(
@@ -230,8 +230,8 @@ fn r4_confirm_phrase_rejects_wrong_phrase() {
 
     let err = result.expect_err("should reject — wrong confirm phrase");
     assert!(
-        err.to_string().contains("R++4"),
-        "error should reference R++4: {}",
+        err.to_string().contains("P-2.24"),
+        "error should reference P-2.24: {}",
         err
     );
     assert!(
@@ -265,7 +265,7 @@ fn r4_confirm_phrase_rejects_missing_phrase() {
     );
 
     let err = result.expect_err("should reject — missing confirm phrase");
-    assert!(err.to_string().contains("R++4"));
+    assert!(err.to_string().contains("P-2.24"));
 }
 
 #[test]

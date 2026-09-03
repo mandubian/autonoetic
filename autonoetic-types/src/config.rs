@@ -1205,7 +1205,7 @@ pub struct GatewayConfig {
     /// Promotion-completeness cursor for **first admission of a brand-new agent**
     /// (no outgoing revision). When `true` (default), promoting a new
     /// capability-bearing agent requires operator approval — its whole capability
-    /// set is "new", so it is treated as maximal broadening (R++2). Set to `false`
+    /// set is "new", so it is treated as maximal broadening (P-2.25). Set to `false`
     /// to let a fully-audited new agent self-promote (autonomous self-evolution):
     /// the completeness gate (auditor/evaluator pass, distinct identities,
     /// reviewable artifact) still applies and is always fail-closed; only the

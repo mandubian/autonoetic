@@ -55,7 +55,7 @@ pub fn hardening_for_action(action: &ScheduledAction) -> ApprovalHardening {
         // RFC credential-egress-host-authorization: approving a
         // credential_request approves *secret delivery to a host* (the
         // gateway injects the secret), so the operator retypes a
-        // host-naming phrase — the same R++4 protection the registration
+        // host-naming phrase — the same P-2.24 protection the registration
         // class gets, even though the risk class is High.
         ApprovalRisk::High if matches!(action, ScheduledAction::CredentialRequest { .. }) => {
             Some(confirm_phrase_for(action))
@@ -202,7 +202,7 @@ mod tests {
     fn credential_request_high_risk_carries_host_phrase() {
         // RFC credential-egress-host-authorization: the vault injects the
         // secret, so approving a credential_request approves secret delivery
-        // to a host — High risk, but with the R++4 host-naming phrase.
+        // to a host — High risk, but with the P-2.24 host-naming phrase.
         let action = ScheduledAction::CredentialRequest {
             credential_id: "cred_github_001".to_string(),
             url: "https://api.github.com/repos/rust-lang/rust".to_string(),

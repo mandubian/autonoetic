@@ -895,12 +895,12 @@ fn create_revision_from_files(
                 tracing::warn!(
                     target: "revision",
                     error = %e,
-                    "R+11: Gateway identity key unavailable, proceeding unsigned (trust_unsigned_bundles)"
+                    "P-9.13: Gateway identity key unavailable, proceeding unsigned (trust_unsigned_bundles)"
                 );
                 (None, None)
             } else {
                 return Err(anyhow::anyhow!(
-                    "R+11: Failed to load gateway identity key for auto-signing: {}. \
+                    "P-9.13: Failed to load gateway identity key for auto-signing: {}. \
                      Set trust_unsigned_bundles: true in config for local development.",
                     e
                 ));
@@ -1099,7 +1099,7 @@ fn create_revision_from_files(
         "agent_ref": format!("{}@{}", common.agent_id, revision_id),
         "short_ref": short_ref,
         "agent_id": common.agent_id,
-        // The store-side artifact identity: promotion_record and R++2 key on
+        // The store-side artifact identity: promotion_record and P-2.25 key on
         // it (the #1144 regression — dropped in c7383a55, restored).
         "artifact_id": rev.artifact_id,
         "artifact_ref": common.source_ref,
@@ -2804,7 +2804,7 @@ struct RevisionPromoteArgs {
     reason: Option<String>,
     required_eval_run_id: Option<String>,
     /// Approval reference returned by an earlier promote call that hit the
-    /// capability-delta gate (R++2). When supplied and approved, the gate is
+    /// capability-delta gate (P-2.25). When supplied and approved, the gate is
     /// bypassed for this exact (agent_id, revision_id) pair.
     #[serde(default)]
     approval_ref: Option<String>,
@@ -2931,7 +2931,7 @@ do not re-issue."
                     "revision_id": { "type": "string", "description": "Revision ID to promote (must be in candidate or ready status)" },
                     "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" },
                     "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" },
-                    "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." },
+                    "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (P-2.25). Pass it on retry to bypass the gate." },
                     "force": { "type": "boolean", "description": "Optional: bypass the promotion safety governor (issue #25). Requires `force_reason`; emits a `governor.override` causal event." },
                     "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
                     "smoke_test_task_id": { "type": "string", "description": "Task id of a successful smoke-test run for this candidate revision. Required for new capability-bearing agents (NetworkAccess or CodeExecution)." },
@@ -3188,7 +3188,7 @@ do not re-issue."
             .map(|c| c.capability_delta_gate_mode)
             .unwrap_or(CapabilityDeltaGateMode::Strict);
 
-        // R++2: capability-delta gating. The gate fires on broadening relative
+        // P-2.25: capability-delta gating. The gate fires on broadening relative
         // to the outgoing revision and is only bypassed by an approved
         // `RevisionPromote` approval whose acknowledgement matches the delta
         // exactly. The `approval_ref` argument is how a retry call reuses an
@@ -3220,7 +3220,7 @@ do not re-issue."
             };
         // #738: a federation-minted merged `RevisionPromote` (carrying
         // `federation_context`) is the single operator decision for this
-        // promotion. If one is already approved, it covers the R++2 capability
+        // promotion. If one is already approved, it covers the P-2.25 capability
         // gate for both new AND existing agents — no second approval needed.
         let merged_federation_promote_approved = match rev.artifact_id.as_deref() {
             Some(aid) => {
@@ -3236,7 +3236,7 @@ do not re-issue."
         };
         // #1094: same single-decision guarantee for the bare-first ordering —
         // an approved escalation whose linked approval is an approved
-        // `RevisionPromote` for this agent+revision satisfies R++2 without an
+        // `RevisionPromote` for this agent+revision satisfies P-2.25 without an
         // explicit `approval_ref` (the caller may not know the linked id).
         let escalation_linked_promote_approved = match rev.artifact_id.as_deref() {
             Some(aid) => find_escalation_linked_approved_promote_approval(
@@ -3423,14 +3423,14 @@ do not re-issue."
                 let approval_message = if outgoing_revision_id.is_empty() {
                     format!(
                         "Promoting new agent '{}' for the first time: all declared capabilities \
-                         require operator acknowledgement (R++2 / promotion-completeness). \
+                         require operator acknowledgement (P-2.25 / promotion-completeness). \
                          Operator approval is required.{}",
                         args.agent_id, reass_suffix
                     )
                 } else if capability_delta.is_some() {
                     format!(
                         "Capability set broadened relative to outgoing revision '{}'. Operator \
-                         approval is required (R++2).{}",
+                         approval is required (P-2.25).{}",
                         outgoing_revision_id, reass_suffix
                     )
                 } else {
@@ -3441,7 +3441,7 @@ do not re-issue."
                     )
                 };
 
-                // Route the R++2 capability/reassignment ack through the unified
+                // Route the P-2.25 capability/reassignment ack through the unified
                 // GateService. It provides the same cross-root dedup that
                 // find_matching_revision_promote_approval_for_root used to do
                 // (#723's identical-action join now handles cross-session joins),
@@ -3472,7 +3472,7 @@ do not re-issue."
                             "Promote revision {} of agent {} to active alias",
                             args.revision_id, args.agent_id
                         ),
-                        "R++2 capability/reassignment acknowledgement required before promotion",
+                        "P-2.25 capability/reassignment acknowledgement required before promotion",
                         format!(
                             "Capabilities being added: {:?}; broadened: {:?}; outgoing baseline: {}",
                             added_capabilities, broadened_capabilities, outgoing_revision_id
@@ -3540,7 +3540,7 @@ do not re-issue."
                             agent_id = %args.agent_id,
                             revision_id = %args.revision_id,
                             source = ?source,
-                            "R++2 capability gate cleared via GateService"
+                            "P-2.25 capability gate cleared via GateService"
                         );
                     }
                     GateResult::AlreadyPending { gate_id, .. }
@@ -5353,7 +5353,7 @@ fn approval_execution_context(
     }
 }
 
-/// Look up an existing approval by ID and decide whether the R++2 gate may be
+/// Look up an existing approval by ID and decide whether the P-2.25 gate may be
 /// bypassed for this retry. All four conditions must hold:
 ///   (a) the action is `RevisionPromote` for exactly this `(agent_id, revision_id)`,
 ///   (b) the approval status is `Approved`,
@@ -5485,7 +5485,7 @@ fn check_revision_promote_approval(
 /// `federation_context`) linked to an escalation projection for this
 /// `(artifact_id, revision_id)`. Returns the approval id when found, so
 /// `agent_revision_promote` can treat the single federation-minted decision as
-/// covering both the R++2 capability gate and the FullJury review gate —
+/// covering both the P-2.25 capability gate and the FullJury review gate —
 /// avoiding a second operator approval for the same promotion.
 ///
 /// The lookup chain is: escalation projection (by artifact+revision) → its
@@ -5563,7 +5563,7 @@ fn find_merged_federation_promote_approval(
 /// linked approval carries no `federation_context`. The operator's decision
 /// is real nonetheless: an approved escalation whose linked approval is an
 /// approved `RevisionPromote` for this agent+revision (baseline-consistent)
-/// satisfies the R++2 capability gate without an explicit `approval_ref`.
+/// satisfies the P-2.25 capability gate without an explicit `approval_ref`.
 fn find_escalation_linked_approved_promote_approval(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     agent_id: &str,
@@ -5692,7 +5692,7 @@ pub(crate) fn check_capability_delta(
     // Determine the outgoing capability baseline. A brand-new agent (no current
     // alias) has an EMPTY baseline — every declared capability is "added"
     // relative to nothing — so a capability-bearing first promotion is maximal
-    // broadening and requires operator approval (R++2 / the promotion-
+    // broadening and requires operator approval (P-2.25 / the promotion-
     // completeness invariant). A zero-capability new agent yields an empty delta
     // and is relieved. Returning `None` here (the previous behavior) was the
     // fail-open that let new agents promote with no operator approval.

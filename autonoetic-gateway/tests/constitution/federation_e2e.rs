@@ -1478,7 +1478,7 @@ fn merged_approval_digest_mismatch_does_not_satisfy_jury() {
         expires_at: None,
     };
     store.create_approval(&mut approval).unwrap();
-    // Approve through the real decision path so the R++2 invariants (Critical
+    // Approve through the real decision path so the P-2.25 invariants (Critical
     // dwell via backdated created_at, confirm phrase, capability
     // acknowledgements) are exercised rather than bypassed (#746 review).
     let rev_prefix = &revision_id[..revision_id.len().min(16)];
@@ -1779,7 +1779,7 @@ fn count_revision_promote_approvals(store: &GatewayStore) -> usize {
 #[test]
 fn bare_promote_approved_then_escalate_single_decision() {
     // #1094 core scenario (observed double-approval, session-53043b4c): the
-    // builder's bare R++2 approval lands first; the planner's escalation must
+    // builder's bare P-2.25 approval lands first; the planner's escalation must
     // NOT mint a second card. The escalation auto-clears from the approved
     // decision, and the promote consumes the single decision — even without
     // an explicit approval_ref.
@@ -1840,7 +1840,7 @@ fn bare_promote_approved_then_escalate_single_decision() {
     assert_eq!(
         json.get("ok").and_then(|v| v.as_bool()),
         Some(true),
-        "single approved bare decision must cover R++2 + FullJury: {json}"
+        "single approved bare decision must cover P-2.25 + FullJury: {json}"
     );
 }
 
@@ -2296,7 +2296,7 @@ fn escalate_existing_agent_requires_seeded_revision() {
 ///    `unseeded:<artifact>` key and the merged `RevisionPromote` approval is
 ///    created in Pending.
 /// 2. The operator approves that merged approval (capability ack + confirm
-///    phrase) — both the R++2 capability gate AND the FullJury jury gate are
+///    phrase) — both the P-2.25 capability gate AND the FullJury jury gate are
 ///    satisfied by this single operator decision.
 /// 3. agent-factory seeds the real revision (`rev_sha256:...`) into the store
 ///    and onto disk.

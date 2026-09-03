@@ -1,4 +1,4 @@
-//! Constitution R+11: Gateway auto-signing of agent revision bundles.
+//! Constitution P-9.13: Gateway auto-signing of agent revision bundles.
 //!
 //! The gateway automatically signs every revision with its Ed25519 identity key
 //! at creation time. The signature covers the full canonical content digest

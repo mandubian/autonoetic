@@ -1923,10 +1923,10 @@ struct GateInput {
     /// Rejections always require motivation (§O). Approvals may require it for
     /// elevated/external actions — the gateway enforces that on submit.
     motivation_required: bool,
-    /// R++4: destructive approval classes require typing this phrase exactly
+    /// P-2.24: destructive approval classes require typing this phrase exactly
     /// (case-insensitive) instead of optional motivation.
     required_confirm_phrase: Option<String>,
-    /// R++2: `revision_promote` approvals — auto-filled from the timeline payload.
+    /// P-2.25: `revision_promote` approvals — auto-filled from the timeline payload.
     acknowledged_capabilities: Vec<String>,
     /// CredentialPrompt approvals: secret fields to collect (empty = not a cred prompt).
     /// Populated from `approvals.inspect` when the approval action is `credential_prompt`.
@@ -8721,7 +8721,7 @@ fn approval_approve_params(gi: &GateInput) -> serde_json::Value {
         "decided_by": "operator",
     });
     // §O: destructive / elevated approvals need a non-empty motivation on the
-    // `reason` field. For R++4 confirm-phrase gates the typed phrase satisfies
+    // `reason` field. For P-2.24 confirm-phrase gates the typed phrase satisfies
     // both obligations — do not send confirm_phrase without reason.
     if gi.required_confirm_phrase.is_some() {
         if !text.is_empty() {

@@ -1,4 +1,4 @@
-//! Unified fail-mode table (R++10).
+//! Unified fail-mode table (I-11).
 //!
 //! Every constitutional invariant has a declared failure action in one
 //! place.  The five fail modes are:
@@ -95,6 +95,26 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     FailModeEntry {
         rule_id: "Ri-0.13",
         fail_mode: FailMode::EmergencyStop,
+    },
+    FailModeEntry {
+        rule_id: "Ri-0.14",
+        fail_mode: FailMode::Degrade,
+    },
+    FailModeEntry {
+        rule_id: "Ri-0.15",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
+    FailModeEntry {
+        rule_id: "Ri-0.16",
+        fail_mode: FailMode::LogOnly,
+    },
+    FailModeEntry {
+        rule_id: "Ri-0.17",
+        fail_mode: FailMode::LogOnly,
+    },
+    FailModeEntry {
+        rule_id: "Ri-0.18",
+        fail_mode: FailMode::RefuseSessionStart,
     },
     // §1 Capability & Rights
     FailModeEntry {
@@ -230,6 +250,14 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "P-2.29",
         fail_mode: FailMode::RefuseSessionStart,
     },
+    FailModeEntry {
+        rule_id: "P-2.23",
+        fail_mode: FailMode::LogOnly,
+    },
+    FailModeEntry {
+        rule_id: "P-2.24",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
     // §3 Sandbox Isolation
     FailModeEntry {
         rule_id: "P-3.1",
@@ -265,6 +293,10 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     },
     FailModeEntry {
         rule_id: "P-3.9",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
+    FailModeEntry {
+        rule_id: "P-3.10",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §4 Credential & Secret Protection
@@ -323,6 +355,10 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     FailModeEntry {
         rule_id: "P-4.14",
         fail_mode: FailMode::EmergencyStop,
+    },
+    FailModeEntry {
+        rule_id: "P-4.15",
+        fail_mode: FailMode::RefuseBoot,
     },
     // §5 I/O Schema Validation
     FailModeEntry {
@@ -543,6 +579,14 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "P-7.18",
         fail_mode: FailMode::Degrade,
     },
+    FailModeEntry {
+        rule_id: "P-7.21",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
+    FailModeEntry {
+        rule_id: "P-7.22",
+        fail_mode: FailMode::Degrade,
+    },
     // §8 Audit & Traceability
     FailModeEntry {
         rule_id: "P-8.1",
@@ -710,6 +754,10 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "P-10.8",
         fail_mode: FailMode::RefuseBoot,
     },
+    FailModeEntry {
+        rule_id: "P-10.9",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
     // §11 Inter-Agent Messaging
     FailModeEntry {
         rule_id: "P-11.1",
@@ -743,112 +791,20 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "P-11.8",
         fail_mode: FailMode::EmergencyStop,
     },
-    // R+ additions
+    // §13 Cross-cutting invariants. I-11 is this table: its own failure
+    // action is refuse-boot, because a gateway that cannot say how an
+    // invariant fails must not start.
     FailModeEntry {
-        rule_id: "R+1",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+2",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+3",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+4",
-        fail_mode: FailMode::EmergencyStop,
-    },
-    FailModeEntry {
-        rule_id: "R+5",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+6",
-        fail_mode: FailMode::RefuseBoot,
-    },
-    FailModeEntry {
-        rule_id: "R+7",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+8",
-        fail_mode: FailMode::RefuseBoot,
-    },
-    FailModeEntry {
-        rule_id: "R+9",
-        fail_mode: FailMode::EmergencyStop,
-    },
-    FailModeEntry {
-        rule_id: "R+10",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+11",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+12",
-        fail_mode: FailMode::EmergencyStop,
-    },
-    FailModeEntry {
-        rule_id: "R+13",
+        rule_id: "I-6",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R+14",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+15",
-        fail_mode: FailMode::RefuseBoot,
-    },
-    FailModeEntry {
-        rule_id: "R+16",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+17",
-        fail_mode: FailMode::LogOnly,
-    },
-    FailModeEntry {
-        rule_id: "R+18",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    // R++ additions
-    FailModeEntry {
-        rule_id: "R++4",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R++7",
-        fail_mode: FailMode::LogOnly,
-    },
-    FailModeEntry {
-        rule_id: "R++8",
-        fail_mode: FailMode::Degrade,
-    },
-    FailModeEntry {
-        rule_id: "R++9",
+        rule_id: "I-10",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R++10",
+        rule_id: "I-11",
         fail_mode: FailMode::RefuseBoot,
-    },
-    // R+++ additions
-    FailModeEntry {
-        rule_id: "R+++1",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+++2",
-        fail_mode: FailMode::RefuseSessionStart,
-    },
-    FailModeEntry {
-        rule_id: "R+++3",
-        fail_mode: FailMode::LogOnly,
     },
     // §15 Data Egress Localization (#910 / constitution 2026.07.30). All three
     // rules fail *mid-turn* by construction: the chokepoint aborts the

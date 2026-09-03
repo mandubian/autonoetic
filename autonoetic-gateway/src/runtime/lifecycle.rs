@@ -3377,7 +3377,7 @@ impl AgentExecutor {
                 system_instructions.push_str("\n\n");
                 system_instructions.push_str(&notice);
             }
-            // R++1: re-sign the state-attestation tail every turn so the
+            // P-6.23: re-sign the state-attestation tail every turn so the
             // facts in the block (turn counter, pending approvals, budget)
             // reflect the current state, not last-turn's snapshot.
             if let Some(tail) = self.build_state_attestation_tail()? {
@@ -5233,7 +5233,7 @@ impl AgentExecutor {
                 }
             }
 
-            // Root session tree budget check (R+4 / P-6.21)
+            // Root session tree budget check (P-6.21 / P-6.21)
             if let Some(root_budget) = self.root_session_budget.clone() {
                 if let Err(e) = root_budget.check_pre_llm(root_session_id) {
                     return Err(self.save_and_yield_root_budget(history, turn_id, e));

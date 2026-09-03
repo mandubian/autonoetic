@@ -66,7 +66,7 @@ fn seed_envelope(
         category: "egress".to_string(),
         action: "egress.envelope_labeled".to_string(),
         status: "active".to_string(),
-        enforced_rules: vec!["R+++3".to_string()],
+        enforced_rules: vec!["I-6".to_string()],
         target: Some(envelope_id.to_string()),
         payload: Some(payload.to_string()),
         payload_ref: None,

@@ -4,7 +4,7 @@
 //!
 //! 1. `approval_mode: required` (executor.default's documented shape):
 //!    declaration-wide, approval-per-host — the operator approval is the
-//!    effective control, with the host named on the card and in the R++4
+//!    effective control, with the host named on the card and in the P-2.24
 //!    phrase. A general-purpose execution role cannot enumerate its hosts;
 //!    an enumeration would fail shut on the very first undeclared host
 //!    (`undeclared_remote_target`), recreating the "full factory pipeline

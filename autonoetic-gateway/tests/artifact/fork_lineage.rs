@@ -249,7 +249,7 @@ fn backfill_from_causal_events_populates_lineage() -> anyhow::Result<()> {
         category: "session".to_string(),
         action: "session.forked".to_string(),
         status: "success".to_string(),
-        enforced_rules: vec!["R+++3".to_string()],
+        enforced_rules: vec!["I-6".to_string()],
         target: None,
         payload: Some(serde_json::json!({"source_session_id": parent}).to_string()),
         payload_ref: None,

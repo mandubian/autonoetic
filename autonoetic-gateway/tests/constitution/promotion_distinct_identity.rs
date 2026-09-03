@@ -1,4 +1,4 @@
-//! Constitution R++3 — Distinct evaluator/auditor identity at promotion.
+//! Constitution P-2.17 — Distinct evaluator/auditor identity at promotion.
 //!
 //! The evaluator and auditor backing a promotion must be distinct agent
 //! identities (not merely distinct sessions of the same agent). A single

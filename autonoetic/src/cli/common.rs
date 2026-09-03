@@ -537,7 +537,7 @@ pub enum GatewayCommands {
     /// File an egress declassification request (RFC §8): widen a content
     /// target to a sink. Files a pending approval; decide it with
     /// `gateway approvals approve <request-id>` (EgressDeclassify is a
-    /// high-risk class — R++4 dwell time applies between filing and
+    /// high-risk class — P-2.24 dwell time applies between filing and
     /// decision). On approval the grant is materialized and
     /// `egress.declassified` is emitted.
     EgressDeclassify {
@@ -576,7 +576,7 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayCronCommands,
     },
-    /// Manage agent-submitted constitutional amendment proposals (R+++1).
+    /// Manage agent-submitted constitutional amendment proposals (Ri-0.8).
     Constitution {
         #[command(subcommand)]
         command: GatewayConstitutionCommands,
@@ -847,12 +847,12 @@ pub enum GatewayApprovalCommands {
         /// Absolute expiry timestamp (RFC3339).
         #[arg(long)]
         until: Option<String>,
-        /// Acknowledge a capability that this approval grants (R++2).
+        /// Acknowledge a capability that this approval grants (P-2.25).
         /// Required for `RevisionPromote` approvals — must name every
         /// added/broadened capability type. Repeatable.
         #[arg(long = "acknowledge-capability", value_name = "TYPE")]
         acknowledge_capabilities: Vec<String>,
-        /// Confirmation phrase for destructive approval classes (R++4).
+        /// Confirmation phrase for destructive approval classes (P-2.24).
         /// Required when the approval has a `confirm_phrase` field set
         /// (e.g. RevisionPromote, CredentialPrompt). Case-insensitive match.
         #[arg(long = "confirm-phrase")]

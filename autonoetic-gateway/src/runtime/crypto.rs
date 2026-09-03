@@ -4,8 +4,8 @@
 //!   manifests to prevent tampering and knowledge poisoning.
 //! - `GatewayIdentityKey`: per-gateway Ed25519 keypair persisted under the
 //!   gateway directory, used to sign turn-boundary state attestations
-//!   (R++1) and (later) to identify the gateway in federation handshakes
-//!   (R+++2).
+//!   (P-6.23) and (later) to identify the gateway in federation handshakes
+//!   (P-10.9).
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::{rngs::OsRng, RngCore};
@@ -113,7 +113,7 @@ impl GatewayIdentityKey {
                 tracing::info!(
                     target: "crypto",
                     path = %private_path.display(),
-                    "Generated new gateway identity key (Ed25519, R++1 attestation)"
+                    "Generated new gateway identity key (Ed25519, P-6.23 attestation)"
                 );
                 Ok(Self {
                     signing_key,

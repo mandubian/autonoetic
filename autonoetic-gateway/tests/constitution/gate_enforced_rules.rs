@@ -1,4 +1,4 @@
-//! R+++3 compliance for GateService: every gate decision carries enforced rule IDs.
+//! I-6 compliance for GateService: every gate decision carries enforced rule IDs.
 //!
 //! These tests verify that `GateResult` variants produced by `GateService::check()`
 //! include the correct constitutional rule references, enabling real-time compliance
@@ -35,7 +35,7 @@ fn make_action(url: &str) -> ScheduledAction {
     }
 }
 
-/// R+++3: pre-validated bypass records P-2.6.
+/// I-6: pre-validated bypass records P-2.6.
 #[test]
 fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -71,7 +71,7 @@ fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: session grant clearance records P-2.4.
+/// I-6: session grant clearance records P-2.4.
 #[test]
 fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -120,7 +120,7 @@ fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: dedup returns AlreadyPending with P-2.3.
+/// I-6: dedup returns AlreadyPending with P-2.3.
 #[test]
 fn r3_dedup_enforces_r_2_3() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -177,7 +177,7 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: new approval suspension records P-2.1, P-2.2, P-2.18.
+/// I-6: new approval suspension records P-2.1, P-2.2, P-2.18.
 #[test]
 fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -226,7 +226,7 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: approval_ref clearance records P-2.6.
+/// I-6: approval_ref clearance records P-2.6.
 #[test]
 fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -305,7 +305,7 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: user_input gate records P-2.13 and P-2.18.
+/// I-6: user_input gate records P-2.13 and P-2.18.
 #[test]
 fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -351,7 +351,7 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: escalation gate records P-2.18.
+/// I-6: escalation gate records P-2.18.
 #[test]
 fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;

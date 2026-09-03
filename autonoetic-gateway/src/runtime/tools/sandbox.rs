@@ -576,7 +576,7 @@ pub fn apply_network_isolation_failure_to_result(
     }
 
     let reason = if evaluation_blocked {
-        "Promotion evaluation sessions have no network access (gateway constitution rule R+16). \
+        "Promotion evaluation sessions have no network access (gateway constitution rule P-3.10). \
          Use constitution.read to inspect the rule. Mock all external services in tests so they \
          run offline."
     } else if has_network_cap {
@@ -669,7 +669,7 @@ pub(crate) fn classify_script_network_failure(
         return None;
     }
     let reason = if evaluation_blocked {
-        "promotion/evaluation runs are network-isolated (constitution rule R+16): the sandbox ran \
+        "promotion/evaluation runs are network-isolated (constitution rule P-3.10): the sandbox ran \
          with the network namespace unshared on purpose. Mock all external services so the script \
          runs offline."
     } else if has_network_cap {
@@ -2694,7 +2694,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             }
         }
 
-        // R++8: Sandbox-escape-attempt accounting. Detect escape indicators
+        // P-7.22: Sandbox-escape-attempt accounting. Detect escape indicators
         // in stderr/exit code, record per session, and trigger degradation or
         // emergency stop when thresholds are crossed.
         {
@@ -2718,7 +2718,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             tracing::warn!(
                                 target: "sandbox_exec",
                                 error = %e,
-                                "Failed to record sandbox escape attempt (R++8)"
+                                "Failed to record sandbox escape attempt (P-7.22)"
                             );
                         }
                     }
@@ -2737,7 +2737,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 session_id = %sid,
                                 count = count,
                                 threshold = emergency_threshold,
-                                "Sandbox escape attempts exceeded emergency threshold (R++8)"
+                                "Sandbox escape attempts exceeded emergency threshold (P-7.22)"
                             );
                             if let Err(e) = store.emit_escape_threshold_event(
                                 sid,
@@ -2758,7 +2758,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 session_id = %sid,
                                 count = count,
                                 threshold = degrade_threshold,
-                                "Sandbox escape attempts exceeded degradation threshold (R++8)"
+                                "Sandbox escape attempts exceeded degradation threshold (P-7.22)"
                             );
                             if let Err(e) = store.emit_escape_threshold_event(
                                 sid,
@@ -3054,8 +3054,8 @@ mod network_error_detection_tests {
         assert_eq!(body["ok"], json!(false));
         let msg = body["network_warning"].as_str().unwrap();
         assert!(
-            msg.contains("R+16"),
-            "evaluation-blocked message should reference R+16: {msg}"
+            msg.contains("P-3.10"),
+            "evaluation-blocked message should reference P-3.10: {msg}"
         );
         assert!(
             msg.contains("constitution"),
@@ -3107,7 +3107,7 @@ mod network_error_detection_tests {
             "{diag}"
         );
         assert!(diag.contains("approval cannot create connectivity"), "{diag}");
-        assert!(!diag.contains("R+16"), "{diag}");
+        assert!(!diag.contains("P-3.10"), "{diag}");
     }
 
     #[test]
@@ -3122,7 +3122,7 @@ mod network_error_detection_tests {
     fn script_classification_evaluation_blocked_case_names_r16() {
         let stderr = "requests.exceptions.ConnectionError: boom\n";
         let diag = super::classify_script_network_failure("", stderr, true, true).unwrap();
-        assert!(diag.contains("R+16"), "{diag}");
+        assert!(diag.contains("P-3.10"), "{diag}");
         assert!(diag.contains("Mock all external services"), "{diag}");
     }
 }

@@ -1013,7 +1013,7 @@ mod policy_decision_hook_tests {
     #[test]
     fn emits_success_when_non_baseline_rule_present() {
         let mut rules = default_enforced_rules();
-        rules.push("R+16".into());
+        rules.push("P-3.10".into());
         let ev = sample_record("SUCCESS", rules);
         assert!(causal_event_notifies_policy_decision(&ev));
     }

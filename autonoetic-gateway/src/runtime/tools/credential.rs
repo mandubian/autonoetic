@@ -511,7 +511,7 @@ impl NativeTool for CredentialRequestTool {
                 // violation routes to the host approval minted below — the
                 // gateway injects the secret, so that approval is precisely
                 // an "operator sends this secret to this host" decision, with
-                // the host on the card and in the R++4 confirm phrase. The
+                // the host on the card and in the P-2.24 confirm phrase. The
                 // static SKILL.md declaration stays authoritative for
                 // programmatic (sandbox) egress; a host covered by neither
                 // still fails shut here.

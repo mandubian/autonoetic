@@ -308,7 +308,7 @@ impl GatewayStore {
     pub fn emit_vault_key_probe_event(&self, result: &crate::vault::KeyProbeResult) {
         let now = chrono::Utc::now();
         let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-        rules.push("R+8".to_string());
+        rules.push("P-4.15".to_string());
         let (status, reason, payload) = match result {
             crate::vault::KeyProbeResult::Present { source } => (
                 autonoetic_types::causal_chain::EntryStatus::Success.to_string(),
@@ -653,7 +653,7 @@ impl GatewayStore {
     /// the `enforced_rules` carried on causal events and attributing each
     /// rule/right ID to its owning clause via the enforcement register.
     ///
-    /// The `R+++3` event-attribution placeholder (every event carries it by
+    /// The `I-6` event-attribution placeholder (every event carries it by
     /// default) is skipped — only events that named a concrete rule/right
     /// contribute. Real rule IDs not yet in the register surface in
     /// `ContractHealth::unattributed`, keeping migration gaps visible rather
@@ -1948,7 +1948,7 @@ impl GatewayStore {
         Ok(results)
     }
 
-    /// Find active or suspended sessions whose parent session has ended (orphan detection for R+12).
+    /// Find active or suspended sessions whose parent session has ended (orphan detection for P-7.16).
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
     /// for each orphaned child. A child is orphaned if its parent's `lifecycle_state`
@@ -2127,7 +2127,7 @@ impl GatewayStore {
     ) -> Result<()> {
         let now = chrono::Utc::now();
         let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-        rules.push("R++8".to_string());
+        rules.push("P-7.22".to_string());
         let event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: format!("escape-threshold-{}", uuid::Uuid::new_v4()),
             agent_id: "gateway".to_string(),

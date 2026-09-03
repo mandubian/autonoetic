@@ -1,4 +1,4 @@
-//! Constitution Ri-0.8 / R+++1 — Amendment proposal channel for agents (issue #92).
+//! Constitution Ri-0.8 / Ri-0.8 — Amendment proposal channel for agents (issue #92).
 //!
 //! Verifies the `constitution_propose_amendment` native tool and the
 //! supporting persistence layer:

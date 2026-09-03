@@ -710,7 +710,7 @@ pub enum SessionState {
 ///
 /// Replaces the overloaded transcript `status = "completed"` which conflated
 /// "session terminated normally" with "session hibernated between turns".
-/// The orphan reaper (R+12) and `try_complete_workflow` read this single field
+/// The orphan reaper (P-7.16) and `try_complete_workflow` read this single field
 /// instead of inferring lifecycle position from transcript status plus auxiliary
 /// heuristics.
 ///

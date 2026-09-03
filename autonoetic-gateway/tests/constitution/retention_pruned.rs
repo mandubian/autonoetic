@@ -1,4 +1,4 @@
-//! Constitution R+17 / P-8.17: Retention pruning emits causal event.
+//! Constitution P-8.17 / P-8.17: Retention pruning emits causal event.
 //!
 //! When data retention is applied, the gateway must emit a single
 //! `retention.pruned` causal event per batch with counts and bounds.

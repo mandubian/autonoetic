@@ -101,7 +101,7 @@ async fn run_scheduler_tick_common(
             tracing::warn!(error = %e, "Failed to reap expired session residencies");
         }
 
-        // R++8: Check for sessions exceeding sandbox escape thresholds
+        // P-7.22: Check for sessions exceeding sandbox escape thresholds
         let degrade_threshold = execution.config().escape_attempt_degrade_threshold;
         let emergency_threshold = execution.config().escape_attempt_emergency_threshold;
         if emergency_threshold > 0 {
@@ -109,7 +109,7 @@ async fn run_scheduler_tick_common(
                 for (sid, root_sid, count) in sessions {
                     if !execution.is_session_degraded(&sid).await {
                         let reason = format!(
-                            "sandbox escape attempts ({}) exceeded emergency threshold ({}) (R++8)",
+                            "sandbox escape attempts ({}) exceeded emergency threshold ({}) (P-7.22)",
                             count, emergency_threshold
                         );
                         if let Err(e) = execution
@@ -133,7 +133,7 @@ async fn run_scheduler_tick_common(
                 for (sid, _root_sid, count) in sessions {
                     if !execution.is_session_degraded(&sid).await {
                         let reason = format!(
-                            "sandbox escape attempts ({}) exceeded degradation threshold ({}) (R++8)",
+                            "sandbox escape attempts ({}) exceeded degradation threshold ({}) (P-7.22)",
                             count, degrade_threshold
                         );
                         if let Err(e) = execution.degrade_session(&sid, &reason).await {
@@ -318,7 +318,7 @@ async fn run_scheduler_tick_common(
         tracing::warn!(error = %e, "Failed to reconcile paused child-wait tasks");
     }
 
-    // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
+    // Orphan-child reaper: cancel children of terminated parent sessions (P-7.16)
     if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to reap orphaned sessions");
     }
@@ -1378,7 +1378,7 @@ pub async fn reap_orphaned_sessions(
             parent_session_id = %parent_session_id,
             root_session_id = %root_session_id,
             agent_id = %agent_id,
-            "Reaping orphaned session (R+12)"
+            "Reaping orphaned session (P-7.16)"
         );
 
         // Force the terminal lifecycle rather than going through the polite
@@ -1401,7 +1401,7 @@ pub async fn reap_orphaned_sessions(
             category: "session".to_string(),
             action: "parent_terminated".to_string(),
             status: "error".to_string(),
-            enforced_rules: vec!["R+12".to_string()],
+            enforced_rules: vec!["P-7.16".to_string()],
             target: Some(parent_session_id.clone()),
             payload: Some(
                 serde_json::json!({
@@ -1455,7 +1455,7 @@ pub async fn reap_orphaned_sessions(
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
                 task.result_summary =
-                    Some("child_abandoned: parent session terminated (R+12)".to_string());
+                    Some("child_abandoned: parent session terminated (P-7.16)".to_string());
                 let _ = crate::scheduler::workflow_store::save_task_run(
                     &config,
                     Some(store.as_ref()),
@@ -1511,7 +1511,7 @@ pub async fn reap_orphaned_sessions(
                         child_session_id = %child_session_id,
                         wf_id = %wf_id,
                         aborted,
-                        "R+12: aborted in-flight task handles for abandoned child"
+                        "P-7.16: aborted in-flight task handles for abandoned child"
                     );
                 }
             }

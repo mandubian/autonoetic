@@ -1,4 +1,4 @@
-//! Constitution R+15 — Constant-time shared-secret comparison.
+//! Constitution P-10.8 — Constant-time shared-secret comparison.
 
 
 use autonoetic_gateway::runtime::content_store::ContentStore;

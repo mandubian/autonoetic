@@ -1,4 +1,4 @@
-//! Constitution R++2 — Capability-delta gating at promotion (issue #49).
+//! Constitution P-2.25 — Capability-delta gating at promotion (issue #49).
 //!
 //! `agent_revision_promote` must not silently flip the alias when the new
 //! revision's capability set broadens relative to the outgoing one. Detection
@@ -282,7 +282,7 @@ fn approve_without_acknowledgement_is_rejected() {
     let err = result.expect_err("approval without acknowledgement must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("Capability-accretion approval (R++2)"),
+        msg.contains("Capability-accretion approval (P-2.25)"),
         "{}",
         msg
     );
@@ -416,7 +416,7 @@ fn identical_caps_no_approval_required() {
         assert_ne!(
             resp["error"].as_str(),
             Some("capability_delta_requires_approval"),
-            "identical capability sets must not trigger the R++2 gate: {:?}",
+            "identical capability sets must not trigger the P-2.25 gate: {:?}",
             resp
         );
     }
@@ -521,7 +521,7 @@ fn duplicate_promote_request_coalesces_before_creating_second_approval() {
 
 #[test]
 fn approval_ref_bypass_is_invalidated_when_alias_moves() {
-    // R++2 hardening: an approval acknowledges a delta against a *specific*
+    // P-2.25 hardening: an approval acknowledges a delta against a *specific*
     // outgoing baseline. If the alias has moved between approval-mint and
     // retry, the bypass must NOT engage — the operator never acknowledged
     // the (potentially different) delta against the new baseline.
@@ -645,7 +645,7 @@ fn approval_ref_bypasses_gate_after_approval() {
     )
     .expect("approval should succeed with exact acknowledgement");
 
-    // Retry with approval_ref. The R++2 gate must be bypassed. The promote
+    // Retry with approval_ref. The P-2.25 gate must be bypassed. The promote
     // may still fail at downstream gates (artifact review, eval run) — what
     // we are asserting is that the response no longer carries the
     // `capability_delta_requires_approval` error.
@@ -660,7 +660,7 @@ fn approval_ref_bypasses_gate_after_approval() {
         assert_ne!(
             retry["error"].as_str(),
             Some("capability_delta_requires_approval"),
-            "approved approval_ref must bypass the R++2 gate: {:?}",
+            "approved approval_ref must bypass the P-2.25 gate: {:?}",
             retry
         );
     }

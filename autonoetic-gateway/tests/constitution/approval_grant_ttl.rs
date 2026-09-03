@@ -1,4 +1,4 @@
-//! Constitution R+13: Approval grant TTL.
+//! Constitution P-2.23: Approval grant TTL.
 //!
 //! Session approval grants must have a default TTL (24h). When a grant
 //! expires, it re-opens the approval gate — the target must be re-approved.

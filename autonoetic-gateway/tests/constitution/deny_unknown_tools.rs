@@ -1,6 +1,6 @@
-//! Constitution R+14 / P-1.11: Deny-by-default on unknown tool names.
+//! Constitution P-1.11 / P-1.11: Deny-by-default on unknown tool names.
 //!
-//! R+14: Unknown tool names must deny by default, not silent-allow.
+//! P-1.11: Unknown tool names must deny by default, not silent-allow.
 //! The policy engine already implements this — these tests pin the
 //! behavior so any regression is caught.
 //!

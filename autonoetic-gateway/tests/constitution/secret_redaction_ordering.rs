@@ -1,6 +1,6 @@
-//! Constitution R+9: Redaction-before-write ordering invariant.
+//! Constitution P-4.14: Redaction-before-write ordering invariant.
 //!
-//! R+9 guarantees that redaction runs **before** causal-chain append on every
+//! P-4.14 guarantees that redaction runs **before** causal-chain append on every
 //! path that can contain secret-shaped content. This is enforced at the type
 //! level: `CausalLogger::log()` and `log_durable()` accept only
 //! `Option<RedactedPayload>`, making it a compile error to pass raw strings.
@@ -69,7 +69,7 @@ fn r9_bearer_token_never_appears_raw_in_jsonl() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         !on_disk.contains(secret_token),
-        "R+9 violation: raw bearer token found in JSONL"
+        "P-4.14 violation: raw bearer token found in JSONL"
     );
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(
@@ -115,7 +115,7 @@ fn r9_api_key_env_assignment_never_appears_raw() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         !on_disk.contains(secret_value),
-        "R+9 violation: raw API key found in JSONL"
+        "P-4.14 violation: raw API key found in JSONL"
     );
     assert!(
         !cas_payload_for_last_entry(&path).contains(secret_value),
@@ -156,7 +156,7 @@ fn r9_query_param_secret_never_appears_raw() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         !on_disk.contains(secret_param),
-        "R+9 violation: raw API key in query param found in JSONL"
+        "P-4.14 violation: raw API key in query param found in JSONL"
     );
     assert!(
         !cas_payload_for_last_entry(&path).contains(secret_param),
@@ -198,11 +198,11 @@ fn r9_json_sensitive_key_value_redacted() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         !on_disk.contains("my-secret-token-value"),
-        "R+9 violation: raw token value found in JSONL"
+        "P-4.14 violation: raw token value found in JSONL"
     );
     assert!(
         !on_disk.contains("hunter2"),
-        "R+9 violation: raw password value found in JSONL"
+        "P-4.14 violation: raw password value found in JSONL"
     );
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(
@@ -261,7 +261,7 @@ fn r9_durable_path_also_redacts() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         !on_disk.contains("sk-secret-key-for-testing-only"),
-        "R+9 violation: log_durable path leaked secret"
+        "P-4.14 violation: log_durable path leaked secret"
     );
     let cas_payload = cas_payload_for_last_entry(&path);
     assert!(

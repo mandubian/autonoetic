@@ -225,7 +225,7 @@ impl MessageRouter {
             .iter()
             .any(|ext| ext.eq_ignore_ascii_case("msg_hmac"));
 
-        // 2. Exchange signed chain attestations (R++7)
+        // 2. Exchange signed chain attestations (P-10.6)
         let (local_attestation, local_public_key_b64) = compose_local_chain_attestation(
             &self.node_id,
             &self.gateway_dir,

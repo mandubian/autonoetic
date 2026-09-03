@@ -1,4 +1,4 @@
-//! Constitution R++8: Sandbox-escape-attempt accounting.
+//! Constitution P-7.22: Sandbox-escape-attempt accounting.
 //!
 //! Sandbox escape indicators (SIGSYS, seccomp denials, mount/ptrace attempts)
 //! are detected in sandbox output, recorded per session, and counted.

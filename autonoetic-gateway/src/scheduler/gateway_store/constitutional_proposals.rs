@@ -1,4 +1,4 @@
-//! Constitutional amendment proposal persistence — R+++1 / Ri-0.8 (issue #92).
+//! Constitutional amendment proposal persistence — Ri-0.8 / Ri-0.8 (issue #92).
 //!
 //! Agents holding the `ConstitutionalProposal` capability submit proposals to
 //! amend the gateway constitution. Proposals are durable (every proposal gets

@@ -104,7 +104,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
             category     TEXT NOT NULL,
             action       TEXT NOT NULL,
             status       TEXT NOT NULL,
-            enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]',
+            enforced_rules TEXT NOT NULL DEFAULT '[\"I-6\"]',
             target       TEXT,
             payload      TEXT,
             payload_ref  TEXT,
@@ -2783,13 +2783,13 @@ fn apply_causal_event_enforced_rules_v21(conn: &mut Connection) -> Result<()> {
     )?;
     if col_count == 0 {
         conn.execute(
-            "ALTER TABLE causal_events ADD COLUMN enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]'",
+            "ALTER TABLE causal_events ADD COLUMN enforced_rules TEXT NOT NULL DEFAULT '[\"I-6\"]'",
             [],
         )?;
     }
 
     conn.execute(
-        "UPDATE causal_events SET enforced_rules = '[\"R+++3\"]' WHERE enforced_rules IS NULL OR trim(enforced_rules) = ''",
+        "UPDATE causal_events SET enforced_rules = '[\"I-6\"]' WHERE enforced_rules IS NULL OR trim(enforced_rules) = ''",
         [],
     )?;
 

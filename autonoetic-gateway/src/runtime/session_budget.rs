@@ -137,7 +137,7 @@ impl SessionBudgetRegistry {
                         .unwrap_or_else(|| "refuse-session-start".to_string());
                     anyhow::bail!(
                         "Session cost-budget enforcement requires price estimation but \
-                         catalog is unavailable (P-6.5, R++10: fail-mode={}). \
+                         catalog is unavailable (P-6.5, I-11: fail-mode={}). \
                          Refusing untracked LLM completion (scope: {})",
                         mode,
                         scope
