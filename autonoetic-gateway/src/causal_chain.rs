@@ -42,7 +42,6 @@ use crate::log_redaction::RedactedPayload;
 pub struct CausalLogger {
     pub log_path: PathBuf,
     last_hash: Mutex<String>,
-    entry_count: Mutex<usize>,
 }
 
 impl CausalLogger {
@@ -62,26 +61,24 @@ impl CausalLogger {
             }
         }
 
-        let (last_hash, entry_count) = load_last_hash_and_count(&log_path)?;
+        // Tail read only: construction costs O(last line), not O(file), so
+        // opening a logger per call site (SDK bridge, promotion, federation
+        // emits) never re-scans the witness.
+        let last_hash = load_last_hash_tail(&log_path);
 
         Ok(Self {
             log_path,
             last_hash: Mutex::new(last_hash),
-            entry_count: Mutex::new(entry_count),
         })
     }
 
     #[cfg(test)]
     pub fn test_logger(log_path: impl Into<PathBuf>) -> Self {
         let log_path = log_path.into();
-        let (last_hash, entry_count) = load_last_hash_and_count(&log_path).unwrap_or((
-            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            0,
-        ));
+        let last_hash = load_last_hash_tail(&log_path);
         Self {
             log_path,
             last_hash: Mutex::new(last_hash),
-            entry_count: Mutex::new(entry_count),
         }
     }
 
@@ -127,10 +124,6 @@ impl CausalLogger {
         append_entry(&self.log_path, &entry)?;
 
         *last_hash_guard = entry.entry_hash;
-
-        if let Ok(mut count) = self.entry_count.lock() {
-            *count += 1;
-        }
 
         Ok(())
     }
@@ -182,10 +175,6 @@ impl CausalLogger {
         file.sync_all()?;
 
         *last_hash_guard = entry.entry_hash;
-
-        if let Ok(mut count) = self.entry_count.lock() {
-            *count += 1;
-        }
 
         Ok(())
     }
@@ -315,15 +304,29 @@ fn is_noop_witness(log_path: &Path) -> bool {
 }
 
 /// Write `value` into the CAS under its SHA-256 and return the hex key.
-/// Files are immutable: an existing file with this name already holds these
-/// exact bytes, so a present file is never rewritten.
+///
+/// Files are immutable and content-addressed, so a file already present under
+/// this key must hold exactly these bytes. It is verified anyway: a leftover
+/// from a crash mid-write (or disk corruption) would otherwise stay broken
+/// forever while the witness entry commits to `payload_hash` — silently
+/// poisoning every later `resolve_entry_payload`. A bad file is replaced with
+/// the correct bytes via temp-file + rename, which is atomic within the
+/// directory, so no reader ever observes a partial copy.
 fn put_payload(cas_dir: PathBuf, value: &serde_json::Value) -> anyhow::Result<String> {
     let encoded = serde_json::to_string(value)?;
     let key = sha256_hex(&encoded)?;
     std::fs::create_dir_all(&cas_dir)?;
     let path = cas_dir.join(format!("{key}.json"));
-    if !path.exists() {
-        std::fs::write(&path, &encoded)?;
+    let intact = std::fs::read_to_string(&path)
+        .map(|existing| existing == encoded)
+        .unwrap_or(false);
+    if !intact {
+        let tmp = cas_dir.join(format!(
+            ".{key}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&tmp, &encoded)?;
+        std::fs::rename(&tmp, &path)?;
     }
     Ok(key)
 }
@@ -541,7 +544,11 @@ pub fn verify_chain(history_dir: &Path) -> anyhow::Result<ChainVerification> {
 /// The last entry's `event_seq`, read from the tail of the file only.
 ///
 /// This is the counter primitive the SDK bridge needs — O(1) in the file
-/// size, so the witness is never re-read in full on a hot path (#1278).
+/// size for lean (v2) entries, so the witness is never re-read in full on a
+/// hot path (#1278). Legacy v1 lines can embed large inline payloads; when
+/// the final line outgrows the tail window, the window grows until the line
+/// is complete, so a giant last line degrades to one bounded re-read instead
+/// of silently resetting the counter to 1 (duplicate `event_seq`s).
 pub fn last_entry_event_seq(log_path: &Path) -> u64 {
     let Ok(mut file) = std::fs::File::open(log_path) else {
         return 0;
@@ -553,55 +560,82 @@ pub fn last_entry_event_seq(log_path: &Path) -> u64 {
     if len == 0 {
         return 0;
     }
-    // A v2 entry is well under a KiB; 64 KiB covers any plausible tail line
-    // (and v1 lines, which carry inline payloads, stay in budget too).
-    const TAIL_WINDOW: u64 = 64 * 1024;
-    let start = len.saturating_sub(TAIL_WINDOW);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return 0;
-    }
-    let mut tail = Vec::new();
-    if file.read_to_end(&mut tail).is_err() {
-        return 0;
-    }
-    let Some(last_line) = tail
-        .split(|b| *b == b'\n')
-        .rev()
-        .map(|line| line.trim_ascii())
-        .find(|line| !line.is_empty())
-    else {
+    let Some(last_line) = read_tail_last_line(&mut file, len) else {
         return 0;
     };
-    serde_json::from_slice::<CausalChainEntry>(last_line)
+    serde_json::from_slice::<CausalChainEntry>(last_line.trim_ascii())
         .map(|entry| entry.event_seq)
         .unwrap_or(0)
 }
 
-#[allow(dead_code)]
-fn load_last_hash(log_path: &PathBuf) -> anyhow::Result<String> {
-    let (hash, _) = load_last_hash_and_count(log_path)?;
-    Ok(hash)
-}
+/// The final non-empty line of a file, read backwards from the end.
+///
+/// Starts with a 64 KiB tail window — a v2 entry is well under a KiB — and
+/// grows geometrically when the last line turns out to be longer (legacy v1
+/// entries embed their payload inline), capped by the file size. A "line" is
+/// complete once a `\n` precedes it inside the window (or the window reaches
+/// the file start).
+fn read_tail_last_line(file: &mut std::fs::File, len: u64) -> Option<Vec<u8>> {
+    let mut window = 64 * 1024u64;
+    loop {
+        let start = len.saturating_sub(window);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).ok()?;
 
-fn load_last_hash_and_count(log_path: &PathBuf) -> anyhow::Result<(String, usize)> {
-    if !log_path.exists() {
-        return Ok(("genesis".to_string(), 0));
-    }
-
-    let content = std::fs::read_to_string(log_path)?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-
-    if lines.is_empty() {
-        return Ok(("genesis".to_string(), 0));
-    }
-
-    let last_line = lines.last().unwrap();
-    if let Ok(entry) = serde_json::from_str::<CausalChainEntry>(last_line) {
-        if !entry.entry_hash.trim().is_empty() {
-            return Ok((entry.entry_hash, lines.len()));
+        // The candidate is the last non-empty chunk. It is *complete* only if
+        // a newline precedes it inside the window (its chunk index > 0) or
+        // the window reaches the file start — otherwise the window opened in
+        // the middle of exactly this line, and the trailing '\n' at EOF (or
+        // its absence) proves nothing about the chunk's left edge.
+        let chunks: Vec<&[u8]> = tail.split(|b| *b == b'\n').collect();
+        let candidate = chunks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, chunk)| !chunk.trim_ascii().is_empty());
+        match candidate {
+            Some((idx, chunk)) if idx > 0 || start == 0 => return Some(chunk.to_vec()),
+            // Incomplete last line (or an all-whitespace window): grow and
+            // retry — the cap at `len` guarantees termination at start == 0.
+            _ if start > 0 => {
+                window = window.saturating_mul(4).min(len);
+            }
+            _ => return None,
         }
     }
-    Ok((sha256_hex(last_line)?, lines.len()))
+}
+
+/// The chain tip, read from the tail of the file only — same contract as the
+/// previous full-scan loader (entry_hash of the final line; a raw sha256 for
+/// pre-hash legacy lines; "genesis" when absent), at O(last line) cost.
+fn load_last_hash_tail(log_path: &Path) -> String {
+    const GENESIS: &str = "genesis";
+    let Ok(mut file) = std::fs::File::open(log_path) else {
+        return GENESIS.to_string();
+    };
+    let len = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(_) => return GENESIS.to_string(),
+    };
+    if len == 0 {
+        return GENESIS.to_string();
+    }
+    let Some(last_line) = read_tail_last_line(&mut file, len) else {
+        return GENESIS.to_string();
+    };
+    let Ok(last_line) = std::str::from_utf8(last_line.trim_ascii()) else {
+        return GENESIS.to_string();
+    };
+    if last_line.is_empty() {
+        return GENESIS.to_string();
+    }
+    if let Ok(entry) = serde_json::from_str::<CausalChainEntry>(last_line) {
+        if !entry.entry_hash.trim().is_empty() {
+            return entry.entry_hash;
+        }
+    }
+    sha256_hex(last_line).unwrap_or_else(|_| GENESIS.to_string())
 }
 
 fn payload_hash(payload: &Option<serde_json::Value>) -> anyhow::Result<Option<String>> {
@@ -801,6 +835,136 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(last_entry_event_seq(&path), 42);
+    }
+
+    #[test]
+    fn put_payload_repairs_a_corrupted_existing_file_atomically() {
+        let temp = tempdir().unwrap();
+        let cas_dir = temp.path().to_path_buf();
+        let value = serde_json::json!({"k": "v"});
+        let encoded = serde_json::to_string(&value).unwrap();
+        let key = sha256_hex(&encoded).unwrap();
+        let path = cas_dir.join(format!("{key}.json"));
+
+        // Leftover from a crash mid-write: truncated, wrong bytes.
+        std::fs::write(&path, r#"{"k":"#).unwrap();
+
+        let returned = put_payload(cas_dir.clone(), &value).unwrap();
+        assert_eq!(returned, key);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            encoded,
+            "corrupted CAS file must be repaired, not trusted"
+        );
+
+        // A subsequent put with the same content is a verified no-op.
+        let returned = put_payload(cas_dir.clone(), &value).unwrap();
+        assert_eq!(returned, key);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), encoded);
+    }
+
+    #[test]
+    fn last_entry_event_seq_handles_last_line_larger_than_the_tail_window() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("causal_chain.jsonl");
+
+        // Small v2 entry first, then a legacy v1-style line whose inline
+        // payload pushes it past the 64 KiB default tail window.
+        let logger = CausalLogger::new(&path).unwrap();
+        logger
+            .log(
+                "agent-a",
+                "sdk-bridge",
+                None,
+                1,
+                "memory",
+                "read",
+                EntryStatus::Success,
+                None,
+                &default_rules(),
+                None,
+            )
+            .unwrap();
+
+        let padding = "x".repeat(200 * 1024);
+        let fat_v1 = serde_json::json!({
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "log_id": "fat-1",
+            "actor_id": "agent-a",
+            "session_id": "sdk-bridge",
+            "event_seq": 997,
+            "category": "memory",
+            "action": "read",
+            "status": "SUCCESS",
+            "payload": {"blob": padding},
+            "payload_hash": null,
+            "prev_hash": "genesis",
+            "entry_hash": "",
+        });
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{fat_v1}").unwrap();
+        drop(file);
+
+        assert_eq!(
+            last_entry_event_seq(&path),
+            997,
+            "an oversized final line must be read completely, never reset the counter"
+        );
+    }
+
+    #[test]
+    fn logger_constructor_takes_only_the_tail_for_the_chain_tip() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("causal_chain.jsonl");
+
+        let logger = CausalLogger::new(&path).unwrap();
+        logger
+            .log(
+                "agent-a",
+                "session-1",
+                None,
+                1,
+                "tool",
+                "sandbox_exec",
+                EntryStatus::Success,
+                None,
+                &default_rules(),
+                Some(RedactedPayload::from_redacted(serde_json::json!({"n": 1}))),
+            )
+            .unwrap();
+        let tip = {
+            let entries = CausalLogger::read_entries(&path).unwrap();
+            entries.last().unwrap().entry_hash.clone()
+        };
+
+        // A fresh logger must resume exactly at the tip — the constructor
+        // reads the last line, not the whole file.
+        let logger2 = CausalLogger::new(&path).unwrap();
+        logger2
+            .log(
+                "agent-a",
+                "session-1",
+                None,
+                2,
+                "tool",
+                "sandbox_exec",
+                EntryStatus::Success,
+                None,
+                &default_rules(),
+                None,
+            )
+            .unwrap();
+        let entries = CausalLogger::read_entries(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].prev_hash, tip);
+        assert!(
+            verify_chain(temp.path()).unwrap().is_intact(),
+            "chain must continue across logger instances"
+        );
     }
 
     #[test]

@@ -56,7 +56,14 @@ Pre-existing segments written before #1278 (`v` absent, payload inline) keep
 verifying under their original field set — hash computation dispatches on the
 entry's format version, it never re-interprets old entries.
 
-The `event_id` is the universal correlation key: execution traces, session reports, and the observability surface all join back to the causal chain via this field.
+Two identifiers live side by side, and they are **not** the same value: the
+witness entry's `log_id` identifies the JSONL line (generated inside the
+causal logger), while the tracer generates a separate `event_id` for the
+SQLite mirror row (`causal_events`). The `event_id` remains the universal
+correlation key across execution traces, session reports, and the
+observability surface; a DB row and its witness entry correspond by
+`session_id` + `event_seq` + `timestamp` (and by payload content hash), not
+by id.
 
 ### Key Events
 
