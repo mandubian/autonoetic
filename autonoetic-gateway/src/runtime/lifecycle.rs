@@ -462,14 +462,57 @@ pub(crate) fn detect_constitution_drift(
     let notice_text = format!(
         "---\n\nConstitution Drift Notice (Ri-0.5)\n\n\
          The law changed while this session was suspended: from version {} ({}) \
-         to version {} ({}). The current attestation block in this system prompt \
-         is authoritative going forward.\n",
+         to version {} ({}). The attestation block in the gateway state notice \
+         below is authoritative going forward.\n",
         pinned_version,
         short(pinned_digest),
         current_version,
         short(current_digest),
     );
     Some(ConstitutionDriftNotice { payload, notice_text })
+}
+
+/// Append volatile per-turn state tails (memory context, degradation notice,
+/// constitution drift notice, re-signed state attestation, workflow status) as
+/// a trailing user-role notice instead of mutating the system message.
+///
+/// Raw token-prefix cache providers (llama.cpp/ninfer, vLLM, OpenAI) can only
+/// reuse a KV prefix that is byte-identical from token 0. The system message
+/// sits at position 0, so ANY per-turn change to it shifts the whole
+/// conversation and forfeits the entire prompt cache every turn. The
+/// `system_cache_prefix_bytes` boundary only helps providers with mid-message
+/// cache breakpoints (Anthropic, OpenRouter→Claude/Gemini); everything else
+/// needs the system message itself to be byte-stable.
+///
+/// Ordering invariant: the notice is inserted **before a trailing user
+/// (input) message** (or appended when history doesn't end with one), so the
+/// turn input stays the final message — adapter wrappers' pre-process hooks
+/// parse the last message as the task payload. On the next turn the previous
+/// notice has frozen in place, so every prior send remains a byte-exact
+/// prefix of the new one: only the fresh notice + new input are uncached.
+/// Gateway-authored kicks already arrive as user-role messages (router.rs
+/// `Gateway event type: ...` envelope), so this introduces no new
+/// message-shape risk.
+fn append_volatile_state_message(history: &mut Vec<Message>, tails: Vec<String>) {
+    let body: Vec<String> = tails
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if body.is_empty() {
+        return;
+    }
+    let mut notice = String::from(
+        "[gateway state notice — informational context appended by the gateway; \
+         do not reply to this block directly]\n\n",
+    );
+    notice.push_str(&body.join("\n\n"));
+    let notice = Message::user(notice);
+    if matches!(history.last().map(|m| &m.role), Some(crate::llm::Role::User)) {
+        let at = history.len() - 1;
+        history.insert(at, notice);
+    } else {
+        history.push(notice);
+    }
 }
 
 /// Mint a stable `msg_<id>` on an assistant message being committed to history
@@ -2111,17 +2154,12 @@ impl AgentExecutor {
             if let Ok(Some(summary)) =
                 crate::scheduler::compact_workflow_summary(cfg, None, session_id)
             {
-                if let Some(first) = history.get_mut(0) {
-                    if matches!(first.role, crate::llm::Role::System) {
-                        first.content.push_str("\n\n[workflow status] ");
-                        first.content.push_str(&summary);
-                    } else {
-                        history.insert(
-                            0,
-                            Message::system(format!("[workflow status] {}", summary)),
-                        );
-                    }
-                }
+                // Trailing gateway state notice — never mutate position 0
+                // (cache-prefix stability; see `append_volatile_state_message`).
+                append_volatile_state_message(
+                    history,
+                    vec![format!("[workflow status] {summary}")],
+                );
                 if !has_declared_output_contract {
                     let planner_empty = response.text.trim().is_empty();
                     let note = workflow_status_user_message_for_chat(&summary, planner_empty);
@@ -2374,7 +2412,7 @@ impl AgentExecutor {
         // This pre-loop system message is replaced by the per-turn compose before
         // the model sees it, so ToolPresent gating (empty here) doesn't matter.
         let guidance_rendered = self.render_tool_guidance(&self.compute_tier_filter(), &[]);
-        let mut system_instructions = compose_system_instructions_full(
+        let system_instructions = compose_system_instructions_full(
             &inlined_instructions,
             &self.manifest,
             self.manifest
@@ -2386,18 +2424,20 @@ impl AgentExecutor {
             Some(guidance_rendered.standing.as_str()),
             Some(guidance_rendered.phase_tail.as_str()),
         );
+        // Volatile tails go into a trailing gateway state notice, not the
+        // system message — keeps position 0 byte-stable for prefix caches.
+        let mut volatile_tails: Vec<String> = Vec::new();
         if let Some(ref snippet) = memory_context {
-            system_instructions.push_str("\n\n");
-            system_instructions.push_str(snippet);
+            volatile_tails.push(snippet.clone());
         }
         if let Some(tail) = self.build_state_attestation_tail()? {
-            system_instructions.push_str("\n\n");
-            system_instructions.push_str(&tail);
+            volatile_tails.push(tail);
         }
         let mut history: Vec<Message> = vec![
             Message::system(system_instructions),
             Message::user(self.initial_user_message.clone()),
         ];
+        append_volatile_state_message(&mut history, volatile_tails);
         let outcome = self.execute_with_history(&mut history).await;
         self.finalize_execute_loop_result(outcome)
     }
@@ -3313,7 +3353,7 @@ impl AgentExecutor {
                 &guidance_rendered.phase_tail,
                 &earned_sections,
             );
-            let mut system_instructions = compose_system_instructions_full(
+            let system_instructions = compose_system_instructions_full(
                 &inlined_instructions,
                 &self.manifest,
                 self.manifest
@@ -3327,10 +3367,9 @@ impl AgentExecutor {
             );
             // Prompt-cache boundary (#): everything composed so far — foundation
             // doctrine, SKILL instructions, tool/builtin guidance, output
-            // contract, persona, user context — is safe to mark as a provider
-            // cache prefix. The volatile tails appended below (memory context,
-            // degradation notice, per-turn re-signed state attestation) must NOT
-            // be cached.
+            // contract, persona, user context — is stable and, with the volatile
+            // tails moved to a trailing notice below, the system message is now
+            // byte-stable across turns for raw-prefix cache providers too.
             //
             // The prefix is **stable between session milestones, not byte-identical
             // for the whole session**. Four monotonic flags can shift it, each at
@@ -3360,34 +3399,36 @@ impl AgentExecutor {
             } else {
                 None
             };
+            // Volatile per-turn tails: appended as a trailing gateway state
+            // notice (see `append_volatile_state_message`) rather than into the
+            // system message — mutating position 0 forfeits the whole prompt
+            // cache on raw-prefix providers every turn.
+            let mut volatile_tails: Vec<String> = Vec::new();
             if let Some(ref snippet) = memory_context {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(snippet);
+                volatile_tails.push(snippet.clone());
             }
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(&notice);
+                volatile_tails.push(notice);
             }
-            // Constitution drift notice (#821): a one-shot system-instruction
-            // tail, injected the wake it is detected and then `.take()`n so
-            // it does not repeat on every subsequent turn (unlike the
-            // degradation notice above, which re-queries persisted state
-            // every turn because degraded-mode is an ongoing condition —
-            // drift is a single fact to acknowledge, not a standing state).
+            // Constitution drift notice (#821): a one-shot tail, injected the
+            // wake it is detected and then `.take()`n so it does not repeat on
+            // every subsequent turn (unlike the degradation notice above, which
+            // re-queries persisted state every turn because degraded-mode is an
+            // ongoing condition — drift is a single fact to acknowledge, not a
+            // standing state).
             if let Some(notice) = self.constitution_drift_notice.take() {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(&notice);
+                volatile_tails.push(notice);
             }
             // P-6.23: re-sign the state-attestation tail every turn so the
             // facts in the block (turn counter, pending approvals, budget)
             // reflect the current state, not last-turn's snapshot.
             if let Some(tail) = self.build_state_attestation_tail()? {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(&tail);
+                volatile_tails.push(tail);
             }
             // Exactly one system message, at the front (stale ones removed).
             history.retain(|m| !matches!(m.role, crate::llm::Role::System));
             history.insert(0, Message::system(&system_instructions));
+            append_volatile_state_message(history, volatile_tails);
 
             // --- Prompt Budget Transparency + Enforcement ---
             let budget_breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown::compute(
@@ -4802,19 +4843,14 @@ impl AgentExecutor {
                         if let Ok(Some(summary)) =
                             crate::scheduler::compact_workflow_summary(cfg, None, &session_id)
                         {
-                            // Append to the first system message rather than creating a second one
-                            // (some Jinja templates like Qwen reject multiple system messages)
-                            if let Some(first) = history.get_mut(0) {
-                                if matches!(first.role, crate::llm::Role::System) {
-                                    first.content.push_str("\n\n[workflow status] ");
-                                    first.content.push_str(&summary);
-                                } else {
-                                    history.insert(
-                                        0,
-                                        Message::system(format!("[workflow status] {}", summary)),
-                                    );
-                                }
-                            }
+                            // Trailing gateway state notice — never mutate
+                            // position 0 (cache-prefix stability; Qwen-class
+                            // templates also reject multiple system messages).
+                            // See `append_volatile_state_message`.
+                            append_volatile_state_message(
+                                history,
+                                vec![format!("[workflow status] {summary}")],
+                            );
                             tracing::info!(
                                 target: "workflow",
                                 session_id = %session_id,
