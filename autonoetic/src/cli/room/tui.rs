@@ -39,8 +39,9 @@ const FRAME_MS: u64 = 50;
 /// Idle frame budget when no turns are open and no async work is happening.
 /// This dramatically lowers CPU by letting the process sleep longer.
 const IDLE_FRAME_MS: u64 = 250;
-/// How often to pull new timeline events from the gateway when idle (no open
-/// turns, no async processing). Keeps CPU low on long completed sessions.
+/// How often to pull new timeline events from the gateway when idle (no
+/// in-flight work — see [`TURN_STALE_SECS`]). Keeps CPU low on long completed
+/// sessions.
 const IDLE_TIMELINE_POLL_MS: u64 = 2000;
 /// Timeline poll rate when the session may be active.
 const TIMELINE_POLL_MS: u64 = 400;
@@ -50,6 +51,15 @@ const SESSION_STATUS_POLL_MS: u64 = 2000;
 /// the elapsed/since-last-chunk clocks in the activity strip ticking without
 /// hammering the gateway (the read is an in-process counter clone).
 const LLM_ACTIVITY_POLL_MS: u64 = 1000;
+/// An open turn stops counting as visually in-flight after this much timeline
+/// silence. Live turns emit events continuously (`llm.round` / `tool.*` /
+/// `agent.*`), so only a dangling `turn.start` — left by a crashed or
+/// gateway-restarted turn, with no `turn.end` ever arriving — hits this bound.
+/// Without it such a turn spins the TUI at the active frame rate (20 fps full
+/// redraws, ~85% of a core measured) forever on an otherwise idle session.
+/// Quiet gaps *inside* a live turn are still covered by `llm_activity` +
+/// `session_async_processing`, which don't decay.
+const TURN_STALE_SECS: u64 = 30;
 
 /// Hard cap on plumbing/tool rows — keeps the list scannable.
 const MAX_ROW_LINES: usize = 8;
@@ -4222,6 +4232,14 @@ pub fn run(
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
     let mut cached_open_turns_valid = false;
+    // Open turns only drive active-cadence behavior while the timeline
+    // recently grew (see TURN_STALE_SECS). Recomputed every iteration beside
+    // the spinner block; read earlier in the loop (timeline poll cadence)
+    // one iteration stale — same as `cached_open_turns` before it.
+    let mut open_turns_live = false;
+    // Instant of the last timeline growth (new entries or lineage). `None`
+    // until the first non-empty poll lands.
+    let mut last_timeline_growth: Option<Instant> = None;
     let mut cached_floor = floor;
     let mut cached_squash = squash;
     let mut cached_show_reasoning = show_reasoning;
@@ -7648,7 +7666,7 @@ pub fn run(
         }
 
         let mut entries_changed = false;
-        let timeline_poll_ms = if cached_open_turns.is_empty()
+        let timeline_poll_ms = if !open_turns_live
             && !session_async_processing
             && pending_gate.is_none()
         {
@@ -7689,6 +7707,7 @@ pub fn run(
                                 .map(|e| (e.child_session_id.clone(), e))
                                 .collect();
                             entries_changed = true;
+                            last_timeline_growth = Some(Instant::now());
                         }
                         if let Some(last) = page.entries.last() {
                             cursor = Some(last.event_id.clone());
@@ -7706,6 +7725,7 @@ pub fn run(
                         if !page.entries.is_empty() {
                             entries_changed = true;
                             entries.extend(page.entries);
+                            last_timeline_growth = Some(Instant::now());
                         }
                         if status.as_deref().map(|s| s.starts_with("✗ gateway")).unwrap_or(false)
                         {
@@ -7953,10 +7973,20 @@ pub fn run(
             needs_redraw = true;
         }
 
+        // Open turns decay to stale when the timeline goes quiet (no events
+        // for TURN_STALE_SECS) — recomputed every iteration because the bound
+        // is time-based, not event-based.
+        open_turns_live = !cached_open_turns.is_empty()
+            && last_timeline_growth.is_some_and(|t| {
+                t.elapsed() < Duration::from_secs(TURN_STALE_SECS)
+            });
+
         // Only animate the spinner when something is actually in flight. Idle
         // sessions therefore freeze the spinner and skip redraws entirely.
+        // Open turns alone do NOT qualify — a dangling `turn.start` (crashed /
+        // restarted turn) must not pin the animation, see TURN_STALE_SECS.
         // A live LLM stream counts as in flight — the strip's clocks tick.
-        let has_in_flight_visual = !cached_open_turns.is_empty()
+        let has_in_flight_visual = open_turns_live
             || session_async_processing
             || !llm_activity.is_empty()
             || pending_gate.is_some();
@@ -8396,7 +8426,7 @@ pub fn run(
     }
 
     let _ = event::poll(Duration::from_millis(
-        if cached_open_turns.is_empty()
+        if !open_turns_live
             && !session_async_processing
             && pending_gate.is_none()
         {
