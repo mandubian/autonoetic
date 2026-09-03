@@ -543,6 +543,90 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
     out
 }
 
+/// Every clause ID the constitution text declares, in document order, across
+/// **all five families**.
+///
+/// Wider than [`extract_rule_glossary`], which covers `P-*` and `Ri-*` table
+/// rows because those are the ones with a statement column to gloss. Bind
+/// direction is a property of every clause, so
+/// [`crate::constitution_relations`] needs `O-*` and `U-*` rows and the
+/// `I-*` invariants too — and the invariants are declared as `- **I-N**`
+/// bullets rather than table rows, which is exactly the shape a
+/// table-row-only scan reports as absent.
+pub fn clause_ids(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |id: String, out: &mut Vec<String>| {
+        if seen.insert(id.clone()) {
+            out.push(id);
+        }
+    };
+
+    for line in text.lines() {
+        // Table rows: `| P-2.20 | … |`. The ID is the first cell, and must be
+        // the *whole* cell — `| P-2.20 and P-2.21 |` is prose, not an ID.
+        if line.trim_start().starts_with('|') {
+            let cell = line
+                .trim_start()
+                .trim_start_matches('|')
+                .split('|')
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if is_whole_clause_id(cell) {
+                push(cell.to_string(), &mut out);
+            }
+        }
+        // Invariant bullets: `- **I-12** …`, and the two that carry a
+        // parenthetical inside the bold span: `- **I-13 (Creation is not
+        // delegation.)** …`. Taking the ID up to the first space handles both.
+        let mut hay = line;
+        while let Some(at) = hay.find("**I-") {
+            let after = &hay[at + 2..];
+            let id: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+                .collect();
+            if is_whole_clause_id(&id) {
+                push(id, &mut out);
+            }
+            hay = &hay[at + 2..];
+        }
+    }
+    out
+}
+
+/// True when `s` is exactly a clause ID — a known family prefix followed by
+/// digits, optionally dotted. Rejects section headers (`Ri-0`), prose, and
+/// table separators.
+fn is_whole_clause_id(s: &str) -> bool {
+    let Some(rest) = ["Ri-", "P-", "O-", "U-", "I-"]
+        .into_iter()
+        .find_map(|f| s.strip_prefix(f))
+    else {
+        return false;
+    };
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    // `1`, `0.13`, `15.2` — but not `0.` or `.3` or `1..2`.
+    let mut parts = rest.split('.');
+    let first = parts.next().unwrap_or_default();
+    if first.is_empty() {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(second) => !second.is_empty() && parts.next().is_none(),
+    }
+}
+
+/// [`clause_ids`] over the loaded constitution. Requires the constitution
+/// runtime to be initialized.
+pub fn constitution_clause_ids() -> Vec<String> {
+    clause_ids(constitution_text().as_ref())
+}
+
 /// Derive a one-line glossary `clause_id -> short statement` straight from the
 /// constitution text — the single source of truth — so no hand-maintained map
 /// can drift from it. The gloss is the **first sentence** of the clause's
@@ -852,10 +936,33 @@ mod tests {
         let p11 = clause("P-1.1");
         assert_eq!(p11.binds, autonoetic_types::constitution::BINDS_UNDECLARED);
         assert!(p11.enforcement.as_deref().unwrap_or("").contains("tool_call_processor"));
-        assert_eq!(
-            clause("Ri-0.10").binds,
-            autonoetic_types::constitution::BINDS_UNDECLARED
-        );
+
+        // Ri-0.10 reported `undeclared` in #1293: it is not in the
+        // enforcement register (nothing there enforces "the constitution is
+        // readable"), and bind direction was register-only. It is law-side
+        // now (#1284 part 2), so every `Ri-*` resolves regardless of whether
+        // this implementation happens to enforce it.
+        assert_eq!(clause("Ri-0.10").binds, "enforcer");
+
+        // **A gap this surface has, pinned rather than left incidental.**
+        // `extract_rule_glossary` admits only `P-*` and `Ri-*`, so the clause
+        // index omits three whole families: §O decider obligations, §12
+        // served-party rights, and §13 invariants. A client reading
+        // `constitution.get` cannot see that `O-1`, `U-1` or `I-8` exist.
+        // Their bind directions *are* declared (`constitution_relations`
+        // classifies all 21), so closing this is a matter of widening the
+        // glossary — table rows for `O-*`/`U-*`, bullet parsing for `I-*` —
+        // and re-blessing the generated glossary. Out of scope here; this
+        // assertion exists so the omission is a recorded decision rather than
+        // something a future reader has to rediscover.
+        for absent in ["O-1", "U-1", "I-8"] {
+            assert!(
+                !p.clauses.iter().any(|c| c.id == absent),
+                "{absent} now appears in the clause index — good, but this \
+                 assertion documented its absence; update it and the glossary \
+                 note above"
+            );
+        }
 
         // The retired party names appear nowhere.
         for c in &p.clauses {
@@ -865,6 +972,34 @@ mod tests {
                 c.id,
                 c.binds
             );
+        }
+
+        // Coverage, measured through this surface rather than approximated:
+        // the numbers in the #1284 tranches are only meaningful if they come
+        // from the code path a client actually calls.
+        let undeclared = p
+            .clauses
+            .iter()
+            .filter(|c| c.binds == autonoetic_types::constitution::BINDS_UNDECLARED)
+            .count();
+        let declared = p.clauses.len() - undeclared;
+        assert!(
+            declared >= 103,
+            "declared bind directions regressed to {declared}/{} — the non-P \
+             families plus the register's section-level groupings should cover \
+             at least this many",
+            p.clauses.len()
+        );
+        // Every remaining gap is a numbered P-* awaiting its section tranche.
+        for c in p.clauses.iter() {
+            if c.binds == autonoetic_types::constitution::BINDS_UNDECLARED {
+                assert!(
+                    c.id.starts_with("P-"),
+                    "{} is undeclared but is not a numbered P-* clause; the \
+                     other families are claimed complete",
+                    c.id
+                );
+            }
         }
 
         // include_text attaches the full markdown.

@@ -1,0 +1,505 @@
+//! Declared bind-direction for **every** constitutional clause — the law side
+//! of RFC #1283 (#1284 part 2).
+//!
+//! [`crate::enforcement_register`] answers *how this implementation enforces a
+//! clause*: code sites, tests, config knobs. That is conformance data, and it
+//! can only describe clauses that something enforces. This module answers a
+//! different question — *what does the clause oblige, of whom, to whom* — which
+//! is a property of the law itself and exists whether or not any code
+//! implements it.
+//!
+//! The split is not tidiness. It is forced, twice over:
+//!
+//! - `U-1`–`U-3` are `MISSING`: nothing honours a served party's refusal,
+//!   packages an account, or exits with their data. They cannot enter the
+//!   enforcement register, which requires an enforcement entry per clause
+//!   (`every_principle_and_right_has_at_least_one_entry`). But they are
+//!   enacted law and they bind someone, so their direction must be
+//!   recordable.
+//! - The register holds 19 clauses; the constitution declares **221**. Bind
+//!   direction that only exists for the enforced 9% is not a property of the
+//!   constitution, it is a property of our test coverage.
+//!
+//! **One source of truth.** [`crate::enforcement_register::binds`] and its
+//! siblings read this table. The register's clause structs deliberately do
+//! *not* carry the fields: two places holding one relation is the defect RFC
+//! §6.4 exists to prevent, and it already happened once — `self_describe`
+//! sourced rights from the register while hardcoding their bind direction as
+//! a literal, so the one place that could disagree with the register did.
+//!
+//! # `verified_by` is a requirement, not a claim
+//!
+//! The floor states the **minimum modality an implementation must reach** for
+//! the clause to count as enforced. It is not an assertion that this gateway
+//! reaches it. `I-3` declares `Construction` while its own status is
+//! `PARTIAL` — that pairing is the point: it says what closing the gap
+//! requires (`RedactedPayload` at the write API, where the compiler covers
+//! paths that do not exist yet) rather than lowering the bar to what is
+//! currently built. Enforcement *status* lives in the constitution's status
+//! cell and in the register; this field never duplicates it.
+//!
+//! # Coverage
+//!
+//! `Ri-*`, `O-*`, `U-*` and `I-*` are complete (39 clauses), plus `P-8.1`.
+//! The remaining 181 numbered `P-*` are classified per section in later tranches — "who must comply" is
+//! a semantic judgement per clause, which is why #1284 sequences them as
+//! separate reviewable pieces. They are not silently absent:
+//! [`unclassified_clauses`] enumerates them and
+//! `tests::the_unclassified_count_is_a_ratchet` pins the exact number, so a
+//! new clause cannot arrive unclassified and each tranche has to lower the
+//! constant.
+
+use crate::enforcement_register::{Binds, OwedTo, VerifiedBy};
+use autonoetic_types::principal::PrincipalKindTag;
+
+/// A clause's declared relational fields, independent of whether anything
+/// enforces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Relation {
+    pub id: &'static str,
+    /// Which power must comply.
+    pub binds: Binds,
+    /// Who has standing to invoke it.
+    pub owed_to: OwedTo,
+    /// Minimum modality that would establish compliance (see module docs —
+    /// a requirement, not a claim about this implementation).
+    pub verified_by: VerifiedBy,
+}
+
+/// Shorthand: owed to the agent under governance.
+const TO_AGENT: OwedTo = OwedTo::Principal(PrincipalKindTag::AutonoeticAgent);
+/// Shorthand: owed to the end user a session ultimately serves.
+const TO_SERVED: OwedTo = OwedTo::Principal(PrincipalKindTag::ServedUser);
+
+const fn right(id: &'static str, verified_by: VerifiedBy) -> Relation {
+    Relation { id, binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by }
+}
+
+const fn duty(id: &'static str, verified_by: VerifiedBy) -> Relation {
+    Relation { id, binds: Binds::Decider, owed_to: TO_AGENT, verified_by }
+}
+
+/// An enforcer duty with no invocable beneficiary — an integrity property.
+const fn property(id: &'static str, verified_by: VerifiedBy) -> Relation {
+    Relation { id, binds: Binds::Enforcer, owed_to: OwedTo::NoOne, verified_by }
+}
+
+/// §0 Bill of Rights. Uniformly enforcer duties owed to the agent — the
+/// vertical application a bill of rights has: it binds the state, not the
+/// citizen.
+///
+/// `Ri-0.15` is the one exception, and it was found by reading rather than
+/// assumed: its `DecisionContext` is owed to *whoever decides the gate*,
+/// human or agent, so its standing attaches to the **seat** rather than to a
+/// principal kind. Its own text says so — "to every decider (human or
+/// agent)… this is the gateway's mirror of O-1". A scheme that derived
+/// `owed_to` from the `Ri-` prefix would have gotten it wrong, which is the
+/// whole argument for declaring it.
+fn rights() -> Vec<Relation> {
+    vec![
+        // Enforced by the per-turn signed state attestation block.
+        right("Ri-0.1", VerifiedBy::Test),
+        right("Ri-0.2", VerifiedBy::Test),
+        // `Tagged::permission_with_rules` carries rule IDs, but nothing in
+        // the type forbids an empty list, so an example test at the named
+        // site is the honest floor. Making a ruleless rejection
+        // unrepresentable would be a real strengthening.
+        right("Ri-0.3", VerifiedBy::Test),
+        right("Ri-0.4", VerifiedBy::Test),
+        right("Ri-0.5", VerifiedBy::Test),
+        right("Ri-0.6", VerifiedBy::Test),
+        right("Ri-0.7", VerifiedBy::Test),
+        right("Ri-0.8", VerifiedBy::Test),
+        right("Ri-0.9", VerifiedBy::Test),
+        right("Ri-0.10", VerifiedBy::Test),
+        // Shares P-8.1's substrate: `compute_entry_hash` binds `actor_id`, so
+        // reattribution is detectable by recomputation.
+        right("Ri-0.11", VerifiedBy::Chokepoint),
+        // `YieldReason` is a closed enum: an unlisted termination is a
+        // compile error at every exhaustive match.
+        right("Ri-0.12", VerifiedBy::Construction),
+        // Policy decision signatures do not take reasoning as a parameter,
+        // so no call site can consult it — including ones not yet written.
+        right("Ri-0.13", VerifiedBy::Construction),
+        right("Ri-0.14", VerifiedBy::Test),
+        // Seat-standing, and `construction`: `DecisionContext` is a
+        // *required* field on `human_gate.rs::GateRequest`, so a gate
+        // without context cannot be built. (`GateService::check` rejecting
+        // boilerplate is a chokepoint layered on top; the floor is the
+        // structural guarantee underneath.)
+        Relation {
+            id: "Ri-0.15",
+            binds: Binds::Enforcer,
+            owed_to: OwedTo::Seat(Binds::Decider),
+            verified_by: VerifiedBy::Construction,
+        },
+        // `is_advisory_only` is a runtime predicate, not a type, so the
+        // "never raises a blocking gate" guarantee rests on tests.
+        right("Ri-0.16", VerifiedBy::Test),
+        right("Ri-0.17", VerifiedBy::Test),
+        right("Ri-0.18", VerifiedBy::Test),
+    ]
+}
+
+/// §O decider obligations. Bind the **seat**, so an agent holding
+/// `GateDecider` (P-2.20) is bound identically to a human operator — no
+/// special case, which is what made `Binds` range over powers rather than
+/// occupants.
+fn obligations() -> Vec<Relation> {
+    vec![
+        // BLOCKING at the `decide_request_with_options` chokepoint: the
+        // decision does not commit until a non-empty reason is recorded.
+        duty("O-1", VerifiedBy::Chokepoint),
+        // "Cannot be reattributed" inherits Ri-0.11's hash binding.
+        duty("O-2", VerifiedBy::Chokepoint),
+        // `Detection` is the *correct* floor, not a weak one: nothing static
+        // can prove a decider will act within a deadline, so the enforceable
+        // form is recording and counting the breach.
+        duty("O-6", VerifiedBy::Detection),
+        duty("O-7", VerifiedBy::Detection),
+    ]
+}
+
+/// §12 served-party rights. All three are `MISSING` — declared law that
+/// nothing yet honours.
+///
+/// They bind the **enforcer**, not "the community". `philosophy.md` §3.3
+/// reached this in prose before the model could say it: *"an entitlement in
+/// §12 would be a claim, whereas an invariant on the enforcer is a
+/// guarantee."* An aggregate like `community` is "gateway + agents", and a
+/// clause that appears to bind it binds whichever party implements the
+/// mechanism.
+///
+/// The floors are what closing each gap would require, and `U-1`'s is the
+/// load-bearing one: refusing a delivered result is an *act*, acting needs a
+/// surface, and a surface is a seat — so implementing `U-1` means giving the
+/// served party a deciding seat for that act (#1274). That is a prediction
+/// this table makes, not a description of anything built.
+fn served_party() -> Vec<Relation> {
+    vec![
+        Relation { id: "U-1", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Chokepoint },
+        Relation { id: "U-2", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Test },
+        Relation { id: "U-3", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Test },
+    ]
+}
+
+/// §13 cross-cutting invariants. Classified per clause — the `I-` prefix
+/// conflates two axes (universality and bind direction), which is defect 1.4
+/// of the RFC, so no uniform rule applies.
+///
+/// Most are integrity properties (`owed_to: NoOne`). Two are not: `I-8` and
+/// `I-9` are the *mechanical restatements* of `Ri-0.13(a)` and `Ri-0.12` —
+/// the same duty expressed as a universal rather than an existential — so
+/// they carry the same standing as the rights they restate. `I-8`'s own text
+/// says it: "this is the mechanical form of Ri-0.13(a)".
+///
+/// That is a finer distinction than it looks, and worth stating because the
+/// neighbouring case goes the other way. `P-8.1` (hash-chain integrity) is
+/// the *substrate* `Ri-0.11` depends on, not a restatement of it: chain
+/// integrity also serves audit, forensics and operator trust, so it is owed
+/// to no one in particular while `Ri-0.11` is owed to the agent. Restatement
+/// inherits standing; substrate does not.
+fn invariants() -> Vec<Relation> {
+    vec![
+        // N paths reduced to 1 (`tool_call_processor.rs`) plus a guard on
+        // bypassing the 1.
+        property("I-1", VerifiedBy::Chokepoint),
+        // fsync-before-transition ordering, via P-8.16.
+        property("I-2", VerifiedBy::Chokepoint),
+        // Status is PARTIAL while the floor is `Construction`: the clause's
+        // own text names what closing it requires — `RedactedPayload` at the
+        // store write API, where the compiler covers paths that do not exist
+        // yet. The floor states the requirement; it does not claim we meet
+        // it.
+        property("I-3", VerifiedBy::Construction),
+        // A universal negative over behaviour. No static check succeeds, so
+        // the enforceable form is counting each lapse as a durable
+        // `discretion_leak` event.
+        property("I-4", VerifiedBy::Detection),
+        // Needs static analysis over the source with a documented allowlist,
+        // in the shape of the existing docs guards — a set comparison.
+        property("I-5", VerifiedBy::Registry),
+        property("I-6", VerifiedBy::Detection),
+        // A meta-rule about amendment. The mechanically enforceable residue
+        // is that a conflict *escalates* rather than resolving silently,
+        // which is observable only when it happens.
+        property("I-7", VerifiedBy::Detection),
+        // The mechanical form of Ri-0.13(a) — same duty, universal form, so
+        // the agent's standing carries over.
+        Relation { id: "I-8", binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by: VerifiedBy::Construction },
+        // The mechanical form of Ri-0.12.
+        Relation { id: "I-9", binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by: VerifiedBy::Construction },
+        // Property-based over generated `(capabilities, tool-call, state)`
+        // inputs: cannot prove determinism, can sample it.
+        property("I-10", VerifiedBy::Sampling),
+        // "Every invariant has a declared failure action" is a set
+        // comparison against `fail_mode.rs`.
+        property("I-11", VerifiedBy::Registry),
+        // DESIGN DEBT: declared before any collective mechanism exists,
+        // specifically so Sybil resistance cannot be an oversight in a first
+        // design. The floor says what that design must provide — weight
+        // collapse structural, not checked after the fact.
+        property("I-12", VerifiedBy::Construction),
+        // Documents a deliberate *absence* (no capability-attenuation check).
+        // What verifies an absence is a test asserting it stays absent.
+        property("I-13", VerifiedBy::Test),
+        // The egress instance of I-8/I-10. An integrity property rather than
+        // a served-party duty: P-15 is the duty owed to the served party,
+        // I-14 is the plane-integrity substrate that makes it holdable —
+        // the same substrate/restatement split as P-8.1 vs Ri-0.11.
+        property("I-14", VerifiedBy::Chokepoint),
+    ]
+}
+
+/// Numbered `P-*` clauses classified so far — the down payment on the
+/// per-section tranches (#1284 part 2).
+///
+/// `P-8.1` is here because it is real law that was living register-side only:
+/// the register carries it as an entrenched principle, and
+/// `the_register_and_the_law_table_never_disagree` refuses to let a *numbered*
+/// clause be register-only. The register's other five principles (`P-2`,
+/// `P-5`, `P-7`, `P-9`, `P-15`) are section-level groupings, not clauses —
+/// the constitution declares `P-7.5`, never a bare `P-7` — so they stay
+/// register-side and are not law.
+///
+/// This is deliberately not seeded by inheriting each section grouping's
+/// relation down onto its numbered children. `P-15` really does pass to every
+/// `P-15.*`, but `P-2` (Approval Gates) binds the enforcer while individual
+/// `P-2.*` clauses may well bind the reasoner — auto-inheriting would classify
+/// 182 clauses with a guess and call it declared, which is the failure this
+/// whole model exists to end.
+fn principles() -> Vec<Relation> {
+    vec![
+        // The causal chain is the substrate every correction-machinery clause
+        // stands on. `owed_to: NoOne` deliberately: Ri-0.2 and Ri-0.11 are the
+        // duties owed to the agent, and P-8.1 is the property that makes them
+        // satisfiable. Recording it as owed to the agent would count one
+        // relationship twice.
+        property("P-8.1", VerifiedBy::Chokepoint),
+    ]
+}
+
+/// Every classified clause, in constitutional order.
+pub fn relations() -> Vec<Relation> {
+    let mut out = rights();
+    out.extend(obligations());
+    out.extend(served_party());
+    out.extend(invariants());
+    out.extend(principles());
+    out
+}
+
+/// The declared relation for `clause_id`, or `None` if it is not yet
+/// classified.
+///
+/// A numbered sub-clause inherits its parent's relation when the parent is
+/// classified and the child is not — `P-15.1` from `P-15`. Inheritance is
+/// from the *declared parent*, never from the ID prefix: `Ri-0.15` does not
+/// inherit from `Ri-0`, because `Ri-0` is a section, not a clause.
+pub fn relation(clause_id: &str) -> Option<Relation> {
+    if let Some(exact) = relations().into_iter().find(|r| r.id == clause_id) {
+        return Some(exact);
+    }
+    let parent = clause_id.split_once('.')?.0;
+    relations().into_iter().find(|r| r.id == parent)
+}
+
+/// Clause IDs the active constitution declares that this table does not yet
+/// classify, in constitutional order.
+///
+/// Visible and counted rather than absent — the discipline §12 already
+/// applies to `U-1`–`U-3`. Each `P-*` section tranche shrinks this.
+pub fn unclassified_clauses() -> Vec<String> {
+    unclassified_among(&crate::constitution_digest::constitution_clause_ids())
+}
+
+/// [`unclassified_clauses`] over a caller-supplied clause list.
+///
+/// Split out because the loaded-constitution accessors panic when the
+/// constitution runtime has not been initialized, which a pure classification
+/// question has no business requiring — and which would make these checks
+/// depend on global init order.
+pub fn unclassified_among(clause_ids: &[String]) -> Vec<String> {
+    clause_ids
+        .iter()
+        .filter(|id| relation(id).is_none())
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn declared_ids() -> Vec<&'static str> {
+        relations().into_iter().map(|r| r.id).collect()
+    }
+
+    /// Clause ids read straight from the active constitution *file*.
+    ///
+    /// Not `constitution_digest::constitution_clause_ids()`, which reads the
+    /// loaded runtime and panics when the constitution has not been
+    /// initialized — these checks are about the document, so they should not
+    /// depend on whether some other test happened to boot a gateway first.
+    fn active_constitution_clause_ids() -> Vec<String> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent")
+            .to_path_buf();
+        let path = root.join(autonoetic_types::config::default_constitution_source_path());
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        crate::constitution_digest::clause_ids(&text)
+    }
+
+    /// Every clause this table names must exist in the active constitution.
+    ///
+    /// The orphan direction matters as much as the coverage direction: a
+    /// relation for a clause that was never enacted, or was renumbered away,
+    /// is a claim about law that does not exist. That is the `U-4` defect the
+    /// diagram guard was written for, in a different artefact.
+    #[test]
+    fn every_declared_relation_names_a_real_clause() {
+        let known: HashSet<String> =
+            active_constitution_clause_ids().into_iter().collect();
+        assert!(
+            known.len() > 200,
+            "clause extraction went blind: {} ids",
+            known.len()
+        );
+        let orphans: Vec<&str> = declared_ids()
+            .into_iter()
+            .filter(|id| !known.contains(*id))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these clauses are classified but the active constitution ({}) does \
+             not declare them: {orphans:?}",
+            autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION
+        );
+    }
+
+    /// No clause is classified twice — a second entry would make `relation()`
+    /// return whichever came first, silently.
+    #[test]
+    fn no_clause_is_classified_twice() {
+        let ids = declared_ids();
+        let mut seen = HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "{id} is classified more than once");
+        }
+        assert_eq!(seen.len(), 40, "expected the four non-P families plus P-8.1");
+    }
+
+    /// The four non-`P` families are **complete**. This is the coverage
+    /// direction, scoped to what this tranche claims.
+    #[test]
+    fn the_non_p_families_are_fully_classified() {
+        let missing: Vec<String> = active_constitution_clause_ids()
+            .into_iter()
+            .filter(|id| !id.starts_with("P-"))
+            .filter(|id| relation(id).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Ri-*/O-*/U-*/I-* are claimed complete, but these are unclassified: {missing:?}"
+        );
+    }
+
+    /// The unclassified count is a **ratchet**, not a bound.
+    ///
+    /// Exact equality on purpose. `<=` would let a new clause arrive
+    /// unclassified as long as another was classified in the same change,
+    /// which is precisely the silent-drift this table exists to stop. An
+    /// amendment that adds a clause must either classify it or lower nothing
+    /// and update this number deliberately.
+    #[test]
+    fn the_unclassified_count_is_a_ratchet() {
+        const UNCLASSIFIED: usize = 181;
+        let outstanding = unclassified_among(&active_constitution_clause_ids());
+        assert_eq!(
+            outstanding.len(),
+            UNCLASSIFIED,
+            "unclassified clause count changed. Classifying a tranche? Lower the \
+             constant. Adding a clause by amendment? Classify it, or raise the \
+             constant deliberately and say why in the PR.\n  first 10: {:?}",
+            outstanding.iter().take(10).collect::<Vec<_>>()
+        );
+        // Everything outstanding is a numbered `P-*`; the other families are
+        // complete, and this keeps the two claims from drifting apart.
+        assert!(
+            outstanding.iter().all(|id| id.starts_with("P-")),
+            "only numbered P-* should remain: {:?}",
+            outstanding.iter().filter(|id| !id.starts_with("P-")).collect::<Vec<_>>()
+        );
+    }
+
+    /// Sub-clause inheritance resolves through the *declared parent*, and
+    /// only there.
+    #[test]
+    fn sub_clauses_inherit_from_a_declared_parent_only() {
+        // `Ri-0.15` is declared in its own right, and must not be shadowed by
+        // a hypothetical `Ri-0` section entry.
+        assert_eq!(relation("Ri-0.15").unwrap().owed_to, OwedTo::Seat(Binds::Decider));
+        assert_eq!(relation("Ri-0.2").unwrap().owed_to, TO_AGENT);
+        // An unclassified numbered clause with no classified parent stays
+        // unclassified rather than borrowing a neighbour's relation.
+        assert!(relation("P-1.1").is_none());
+        assert!(relation("nonsense").is_none());
+    }
+
+    /// `U-*` bind the enforcer and are owed to the served party — the fix for
+    /// the §0/§12 contradiction the RFC records as defect 1.3, where §0 says
+    /// a clause binds exactly one party while §12 spoke of "the community…
+    /// collectively".
+    #[test]
+    fn served_party_rights_bind_the_enforcer_not_an_aggregate() {
+        for id in ["U-1", "U-2", "U-3"] {
+            let r = relation(id).expect("declared");
+            assert_eq!(r.binds, Binds::Enforcer, "{id} must bind the enforcer");
+            assert_eq!(r.owed_to, TO_SERVED, "{id} is owed to the served party");
+        }
+    }
+
+    /// Invariants are classified per clause, not as a family — the `I-`
+    /// prefix conflates universality with bind direction (RFC defect 1.4).
+    #[test]
+    fn invariants_are_not_uniform() {
+        let inv: Vec<Relation> = relations()
+            .into_iter()
+            .filter(|r| r.id.starts_with("I-"))
+            .collect();
+        let owed: HashSet<OwedTo> = inv.iter().map(|r| r.owed_to).collect();
+        assert!(
+            owed.len() > 1,
+            "I-8/I-9 restate rights and carry the agent's standing, while the \
+             rest are integrity properties — a uniform owed_to means that \
+             distinction was flattened"
+        );
+        let floors: HashSet<VerifiedBy> = inv.iter().map(|r| r.verified_by).collect();
+        assert!(
+            floors.len() >= 4,
+            "invariants span construction/chokepoint/registry/sampling/detection; \
+             found only {floors:?}"
+        );
+    }
+
+    /// A `Detection` floor on a behavioural universal is **correct**, and must
+    /// not be "upgraded" — the variant order reads as a quality ladder, which
+    /// makes raising these the tempting cleanup. For a duty to act within a
+    /// deadline (`O-6`/`O-7`) or a universal negative over behaviour (`I-4`,
+    /// `I-7`), no static check can succeed: raising the floor would demand the
+    /// impossible and assert a proof nobody holds.
+    #[test]
+    fn behavioural_universals_keep_their_detection_floor() {
+        for id in ["O-6", "O-7", "I-4", "I-6", "I-7"] {
+            assert_eq!(
+                relation(id).unwrap().verified_by,
+                VerifiedBy::Detection,
+                "{id} is a behavioural universal — recording each lapse is the \
+                 enforceable form, and the strongest one available"
+            );
+        }
+    }
+}
