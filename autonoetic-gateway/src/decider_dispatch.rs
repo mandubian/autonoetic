@@ -219,9 +219,18 @@ pub fn install_dispatch_worker(svc: Arc<crate::execution::GatewayExecutionServic
 
     tokio::spawn(async move {
         while let Some(routing_id) = rx.recv().await {
+            // Resolve the seat *before* taking the lock. The lock is per
+            // **seat** — the decider session — not per routing: two gates
+            // opening in the same run must not interleave two turns in one
+            // decider session, which is exactly what a routing-keyed lock
+            // would allow. Falls back to the routing id when the row cannot
+            // be read (the dispatch itself will park it); the map holds one
+            // entry per seat, not one per referral.
+            let seat_key = seat_key_for_routing(&svc, &routing_id)
+                .unwrap_or_else(|| routing_id.clone());
             let seat_lock = {
                 let mut map = seats.lock().unwrap();
-                map.entry(routing_id.clone()).or_default().clone()
+                map.entry(seat_key).or_default().clone()
             };
             let svc = svc.clone();
             tokio::spawn(async move {
@@ -242,6 +251,25 @@ pub fn install_dispatch_worker(svc: Arc<crate::execution::GatewayExecutionServic
             });
         }
     });
+}
+
+/// The lock key for a routing's dispatch: the seat's decider session, falling
+/// back to the appointment's record when the routing row predates the
+/// session binding. `None` only when neither can be read. Exposed for the
+/// dispatch-lock contract test; not an operator surface.
+pub fn seat_key_for_routing(
+    svc: &crate::execution::GatewayExecutionService,
+    routing_id: &str,
+) -> Option<String> {
+    let store = svc.gateway_store()?;
+    let routing = store.get_decider_gate_routing(routing_id).ok()??;
+    if let Some(session) = routing.decider_session.filter(|s| !s.trim().is_empty()) {
+        return Some(session);
+    }
+    let appointment = store
+        .get_decider_appointment(&routing.appointment_id)
+        .ok()??;
+    appointment.decider_session.filter(|s| !s.trim().is_empty())
 }
 
 /// Startup sweep: re-wake seats for routings that are still unanswered and

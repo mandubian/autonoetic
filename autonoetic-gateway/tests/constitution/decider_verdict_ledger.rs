@@ -593,6 +593,54 @@ async fn the_verdict_follows_the_action_not_the_prose() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Per-seat dispatch serialization ────────────────────────────────────────
+
+/// The dispatch lock is keyed by the **seat** (the decider session), not by
+/// routing: two referrals under one appointment must queue behind one lock,
+/// or two turns could interleave in one decider session. The routing row
+/// written at gate time carries no session binding yet, so the key falls back
+/// through the appointment's record.
+#[tokio::test]
+async fn the_dispatch_lock_resolves_to_the_seat_not_the_routing() -> anyhow::Result<()> {
+    let f = fx()?;
+    let apt = seat(&f, "root-1")?;
+    let appointment = f.store.get_decider_appointment(&apt)?.unwrap();
+    let seat_session = appointment.decider_session.clone().expect("peer-root session");
+
+    // A freshly-routed row has no session of its own — the fallback carries it.
+    seed_gate(&f, "apr-1", high_risk_exec("curl https://stooq.com", &["stooq.com"]), None)?;
+    let fresh = seed_routing(&f, "apr-1", &apt)?;
+    assert_eq!(
+        autonoetic_gateway::decider_dispatch::seat_key_for_routing(&f.svc, &fresh).as_deref(),
+        Some(seat_session.as_str()),
+        "a session-less routing locks on the appointment's seat session"
+    );
+
+    // A row that names the session explicitly locks on exactly that.
+    seed_gate(&f, "apr-2", high_risk_exec("curl https://example.com", &["example.com"]), None)?;
+    let bound = DeciderGateRouting {
+        routing_id: format!("rtg_{}", "apr-2"),
+        gate_id: "apr-2".to_string(),
+        appointment_id: apt.clone(),
+        decider_agent: "nightwatch.default".to_string(),
+        decider_session: Some("decider-explicit".to_string()),
+        gate_kind: "approval".to_string(),
+        gate_risk: "high".to_string(),
+        advice_only: true,
+        routed_at: chrono::Utc::now().to_rfc3339(),
+        verdict: None,
+        verdict_reason: None,
+        verdict_at: None,
+    };
+    f.store.insert_decider_gate_routing(&bound)?;
+    assert_eq!(
+        autonoetic_gateway::decider_dispatch::seat_key_for_routing(&f.svc, &bound.routing_id)
+            .as_deref(),
+        Some("decider-explicit")
+    );
+    Ok(())
+}
+
 // ── The startup sweep ──────────────────────────────────────────────────────
 
 #[tokio::test]

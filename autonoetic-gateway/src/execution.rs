@@ -5502,7 +5502,6 @@ impl GatewayExecutionService {
             .with_session_budget(Some(self.session_budget.clone()))
             .with_root_session_budget(Some(self.root_session_budget.clone()))
             .with_middleware(middleware)
-            .with_initial_user_message(card.clone())
             .with_session_id(decider_session.clone())
             .with_active_executions(Some(self.active_executions.clone()))
             .with_http_client(self.http_client.clone())
@@ -5521,7 +5520,10 @@ impl GatewayExecutionService {
         // the system prompt and volatile tails but never injects
         // `initial_user_message` (that is `execute_loop`'s job for spawned
         // sessions). A seat woken with an empty history would deliberate on
-        // nothing.
+        // nothing. The card therefore lives *only* in the history: setting
+        // `initial_user_message` too would double it if this path ever
+        // switched to `execute_loop`, or if the continuation primitive grew a
+        // seed of its own.
         let mut history: Vec<crate::llm::Message> = vec![crate::llm::Message::user(card)];
         let turn = tokio::time::timeout(dwell, runtime.execute_with_history(&mut history)).await;
         let reply = match turn {
