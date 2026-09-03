@@ -1490,6 +1490,14 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub decider_obligations: DeciderObligationsConfig,
 
+    /// Upper bound on a decider seat's advisory deliberation (#1198): a
+    /// routed gate wakes the seat for one bounded turn; when the bound is
+    /// exceeded the routing keeps its null verdict and the gate parks for the
+    /// operator — a timed-out night watch degrades to the status quo, never
+    /// to auto-approval. Default: 120.
+    #[serde(default = "default_decider_dispatch_timeout_secs")]
+    pub decider_dispatch_timeout_secs: u64,
+
     /// Mechanical amendment invitations from denial telemetry (#771 D.2).
     #[serde(default)]
     pub amendment_invitations: AmendmentInvitationConfig,
@@ -2014,6 +2022,10 @@ impl Default for DeciderObligationsConfig {
 
 fn default_decider_obligations_enabled() -> bool {
     true
+}
+
+fn default_decider_dispatch_timeout_secs() -> u64 {
+    120
 }
 
 fn default_adjudication_sla_secs() -> u64 {
@@ -3810,6 +3822,7 @@ impl Default for GatewayConfig {
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),
             decider_obligations: DeciderObligationsConfig::default(),
+            decider_dispatch_timeout_secs: default_decider_dispatch_timeout_secs(),
             amendment_invitations: AmendmentInvitationConfig::default(),
             civic_eval_binding: CivicEvalBindingConfig::default(),
             anomaly_adjudication: AnomalyAdjudicationConfig::default(),

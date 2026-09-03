@@ -248,6 +248,12 @@ impl GatewayServer {
             .warm_local_model_context()
             .await;
 
+        // #1198: the decider dispatch worker — routed gates wake their seat
+        // from here on. Installed at daemon startup only; the in-process
+        // channel means no polling, and the startup sweep re-wakes anything
+        // whose dispatch a previous run lost.
+        crate::decider_dispatch::install_dispatch_worker(jsonrpc_router.execution_service());
+
         // Warn at startup if any LLM preset has no context_window_tokens and
         // the provider cannot resolve one from env, static table, catalog, or probe.
         let env_override = std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW").ok();

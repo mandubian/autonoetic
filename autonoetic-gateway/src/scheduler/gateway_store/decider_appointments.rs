@@ -213,6 +213,19 @@ pub(crate) fn insert_gate_routing(conn: &Connection, r: &DeciderGateRouting) -> 
     Ok(n > 0)
 }
 
+pub(crate) fn get_gate_routing(
+    conn: &Connection,
+    routing_id: &str,
+) -> Result<Option<DeciderGateRouting>> {
+    let mut stmt =
+        conn.prepare(&format!("{ROUTING_COLS} WHERE routing_id = ?1"))?;
+    let mut rows = stmt.query_map(params![routing_id], |row| row_to_routing(row))?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn list_gate_routings(conn: &Connection, gate_id: &str) -> Result<Vec<DeciderGateRouting>> {
     let mut stmt = conn.prepare(&format!("{ROUTING_COLS} WHERE gate_id = ?1 ORDER BY routed_at"))?;
     let rows = stmt.query_map(params![gate_id], |row| row_to_routing(row))?;
@@ -234,6 +247,41 @@ pub(crate) fn list_routings_awaiting_verdict(
     let mut out = Vec::new();
     for r in rows { out.push(r?); }
     Ok(out)
+}
+
+/// Every routing ever made under one appointment, oldest first — the
+/// agreement-rate tally's input (#1198).
+pub(crate) fn list_routings_for_appointment(
+    conn: &Connection,
+    appointment_id: &str,
+) -> Result<Vec<DeciderGateRouting>> {
+    let mut stmt = conn.prepare(&format!(
+        "{ROUTING_COLS} WHERE appointment_id = ?1 ORDER BY routed_at"
+    ))?;
+    let rows = stmt.query_map(params![appointment_id], |row| row_to_routing(row))?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
+/// Fill a routing row's verdict. First verdict wins: the `verdict IS NULL`
+/// predicate makes a duplicate dispatch (a retried wake, a racing worker) a
+/// no-op rather than a rewrite of the recorded motivation — the same
+/// attribution rule as the appointment's own revoke.
+pub(crate) fn record_routing_verdict(
+    conn: &Connection,
+    routing_id: &str,
+    verdict: &str,
+    reason: &str,
+    verdict_at: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE decider_gate_routings
+            SET verdict = ?1, verdict_reason = ?2, verdict_at = ?3
+          WHERE routing_id = ?4 AND verdict IS NULL",
+        params![verdict, reason, verdict_at, routing_id],
+    )?;
+    Ok(n > 0)
 }
 
 const ROUTING_COLS: &str = "SELECT routing_id, gate_id, appointment_id, decider_agent, \

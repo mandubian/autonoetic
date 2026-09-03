@@ -4074,6 +4074,86 @@ impl JsonRpcRouter {
                     ),
                 }
             }
+            "deciders.agreement" => {
+                #[derive(Deserialize)]
+                struct AgreementParams {
+                    appointment_id: String,
+                    #[serde(default)]
+                    include_routings: bool,
+                }
+                let params: AgreementParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for deciders.agreement: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                // Computed on read, never stored: the rate is a derivation
+                // over the ledger (agent verdicts × eventual human decisions),
+                // so there is no stored aggregate to go stale (#1198).
+                match crate::decider_appointment::agreement_tally_for_appointment(
+                    store.as_ref(),
+                    &params.appointment_id,
+                ) {
+                    Ok(tally) => {
+                        let mut result = serde_json::json!({
+                            "appointment_id": params.appointment_id,
+                            "with_agent_verdict": tally.with_agent_verdict,
+                            "comparable": tally.comparable,
+                            "agreed": tally.agreed,
+                            "disagreed": tally.disagreed,
+                            "unanswered": tally.unanswered,
+                            "rate": tally.rate(),
+                        });
+                        if params.include_routings {
+                            if let Ok(routings) =
+                                store.list_decider_routings_for_appointment(&params.appointment_id)
+                            {
+                                // Each row carries the human decision beside
+                                // the agent's — the pair an agreement rate is
+                                // computed from.
+                                let rows: Vec<serde_json::Value> = routings
+                                    .iter()
+                                    .map(|r| {
+                                        let mut row = serde_json::to_value(r)
+                                            .unwrap_or(serde_json::Value::Null);
+                                        let human = store
+                                            .get_approval(&r.gate_id)
+                                            .ok()
+                                            .flatten()
+                                            .and_then(|a| a.status)
+                                            .map(|s| s.as_str().to_string())
+                                            .unwrap_or_else(|| "pending".to_string());
+                                        row["human_decision"] =
+                                            serde_json::Value::String(human);
+                                        row
+                                    })
+                                    .collect();
+                                result["routings"] = serde_json::Value::Array(rows);
+                            }
+                        }
+                        JsonRpcResponse::success(req.id, result)
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("deciders.agreement failed: {}", e),
+                    ),
+                }
+            }
             "grants.list" => {
                 #[derive(Deserialize)]
                 struct GrantsListParams {
