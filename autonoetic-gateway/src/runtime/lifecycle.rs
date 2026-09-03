@@ -493,10 +493,41 @@ pub(crate) fn detect_constitution_drift(
 /// Gateway-authored kicks already arrive as user-role messages (router.rs
 /// `Gateway event type: ...` envelope), so this introduces no new
 /// message-shape risk.
-/// Opening bytes of the trailing gateway state notice. Load-bearing: it is how
-/// [`append_volatile_state_message`] recognises and evicts the previous turn's
-/// notice, so it must stay a stable prefix of the rendered block.
+/// Stable [`Message::id`] carried by the trailing gateway state notice.
+///
+/// Identity, not a heuristic. Two things depend on the notice being
+/// *identifiable* rather than merely recognisable:
+///
+/// 1. [`append_volatile_state_message`] evicts the previous turn's notice by
+///    this id. Keying on the content prefix alone would delete a genuine
+///    operator turn that happened to open with the same bracket text.
+/// 2. It makes the notice **ineligible** for the "first `User` message with no
+///    `id`" selection used to apply an OFP peer's inbound egress label. The
+///    notice is inserted *before* the trailing user input, so an id-less
+///    notice sitting in restored or carried-over history could absorb a
+///    peer-supplied label meant for the peer's actual content — leaving that
+///    content unlabelled, i.e. unrestricted, which is the opposite of the
+///    fail-closed default the wire handler applies (P-15).
+///
+/// Not a `msg_` id: those are minted per message and join to an egress label
+/// in the session sidecar. This one is a fixed sentinel because there is only
+/// ever one live notice.
+pub(crate) const VOLATILE_STATE_NOTICE_ID: &str = "gateway_state_notice";
+
+/// Opening bytes of the rendered notice. Retained only to evict notices
+/// written into history *before* [`VOLATILE_STATE_NOTICE_ID`] existed; new
+/// notices are matched by id.
 pub(crate) const VOLATILE_STATE_NOTICE_PREFIX: &str = "[gateway state notice";
+
+/// True for a gateway-authored state notice — by id, or by content prefix for
+/// history that predates the id.
+fn is_volatile_state_notice(m: &Message) -> bool {
+    if !matches!(m.role, crate::llm::Role::User) {
+        return false;
+    }
+    m.id.as_deref() == Some(VOLATILE_STATE_NOTICE_ID)
+        || (m.id.is_none() && m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX))
+}
 
 fn append_volatile_state_message(history: &mut Vec<Message>, tails: Vec<String>) {
     // Drop any notice left by an earlier turn *before* deciding whether to
@@ -512,10 +543,7 @@ fn append_volatile_state_message(history: &mut Vec<Message>, tails: Vec<String>)
     // that the attestation is authoritative and its own memory is not
     // (Ri-0.1). It also made the one-shot drift notice permanent in effect:
     // consumed correctly on detection, then visible in history forever.
-    history.retain(|m| {
-        !(matches!(m.role, crate::llm::Role::User)
-            && m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX))
-    });
+    history.retain(|m| !is_volatile_state_notice(m));
 
     let body: Vec<String> = tails
         .into_iter()
@@ -529,7 +557,10 @@ fn append_volatile_state_message(history: &mut Vec<Message>, tails: Vec<String>)
          do not reply to this block directly]\n\n",
     );
     notice.push_str(&body.join("\n\n"));
-    let notice = Message::user(notice);
+    let notice = Message {
+        id: Some(VOLATILE_STATE_NOTICE_ID.to_string()),
+        ..Message::user(notice)
+    };
     if matches!(history.last().map(|m| &m.role), Some(crate::llm::Role::User)) {
         let at = history.len() - 1;
         history.insert(at, notice);
@@ -6584,12 +6615,65 @@ mod tests {
     fn notice_blocks(history: &[Message]) -> Vec<&str> {
         history
             .iter()
-            .filter(|m| {
-                matches!(m.role, crate::llm::Role::User)
-                    && m.content.starts_with(VOLATILE_STATE_NOTICE_PREFIX)
-            })
+            .filter(|m| is_volatile_state_notice(m))
             .map(|m| m.content.as_str())
             .collect()
+    }
+
+    /// The notice must never be the "first `User` message with no `id`".
+    ///
+    /// That predicate applies an OFP peer's inbound egress label to the
+    /// peer's first user turn. The notice is inserted *before* the trailing
+    /// user input, so an id-less notice carried over in history would absorb
+    /// the label — leaving the peer's actual content unlabelled, i.e.
+    /// unrestricted, inverting the wire handler's fail-closed default (P-15).
+    ///
+    /// Carrying a fixed id closes this by construction rather than by
+    /// ordering luck, which matters because the append and the labelling run
+    /// at different points of `execute_with_history` and on different paths
+    /// (fresh turn vs restored checkpoint).
+    #[test]
+    fn the_state_notice_is_never_the_first_unlabelled_user_message() {
+        let mut history = vec![
+            Message::system("stable prefix".to_string()),
+            Message::user("peer-supplied content".to_string()),
+        ];
+        append_volatile_state_message(&mut history, vec!["attestation".to_string()]);
+
+        // The notice physically precedes the real user turn …
+        let notice_at = history.iter().position(|m| is_volatile_state_notice(m));
+        let input_at = history
+            .iter()
+            .position(|m| m.content == "peer-supplied content");
+        assert!(notice_at < input_at, "notice sits before the user input");
+
+        // … yet the id-less-user-message selector still picks the input.
+        let selected = history
+            .iter()
+            .find(|m| matches!(m.role, crate::llm::Role::User) && m.id.is_none())
+            .expect("an id-less user message must remain selectable");
+        assert_eq!(
+            selected.content, "peer-supplied content",
+            "the egress label must land on the peer's content, not the gateway's notice"
+        );
+    }
+
+    /// Eviction keys on identity, so a genuine operator turn that happens to
+    /// open with the notice's bracket text is not silently deleted.
+    #[test]
+    fn eviction_does_not_swallow_a_user_turn_that_mimics_the_notice() {
+        let mimic = format!("{VOLATILE_STATE_NOTICE_PREFIX} — quoting the block you sent me");
+        let mut history = vec![Message {
+            id: Some("msg_real".to_string()),
+            ..Message::user(mimic.clone())
+        }];
+
+        append_volatile_state_message(&mut history, vec!["attestation".to_string()]);
+        assert!(
+            history.iter().any(|m| m.content == mimic),
+            "an operator turn carrying its own id must survive eviction"
+        );
+        assert_eq!(notice_blocks(&history).len(), 1);
     }
 
     /// A volatile tail is *volatile*: exactly one notice survives, carrying
