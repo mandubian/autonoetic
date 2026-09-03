@@ -672,7 +672,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn default_rules() -> Vec<String> {
-        vec!["R+++3".to_string()]
+        vec!["I-6".to_string()]
     }
 
     #[test]

@@ -1456,7 +1456,7 @@ impl GateService {
     /// gate referencing the original gate ID. The original gate remains pending.
     ///
     /// The caller must hold the `GateDecider` capability and must not be in the
-    /// spawn tree of the gate it is escalating (R-10.7).
+    /// spawn tree of the gate it is escalating (P-10.7).
     pub fn escalate_to_human(
         &self,
         gate_id: &str,
@@ -1478,7 +1478,7 @@ impl GateService {
             );
         }
 
-        // R-10.7: authenticate the caller-supplied decider session against the
+        // P-10.7: authenticate the caller-supplied decider session against the
         // recorded owner, then ensure it is not in the spawn tree of the gate.
         let decider_sid = decider_session_id.unwrap_or("");
         verify_decider_session_binding(
@@ -1523,7 +1523,7 @@ impl GateService {
         self.check(req)
     }
 
-    /// P-2.20 / R-10.7: verify an agent-decider is allowed to resolve a gate.
+    /// P-2.20 / P-10.7: verify an agent-decider is allowed to resolve a gate.
     /// Returns the gate kind label ("approval" or "escalation") on success.
     pub fn verify_agent_decider(
         &self,
@@ -1551,7 +1551,7 @@ impl GateService {
             );
         }
 
-        // R-10.7: authenticate the caller-supplied decider session against the
+        // P-10.7: authenticate the caller-supplied decider session against the
         // recorded owner, then ensure it is not in the spawn tree of the gate.
         let decider_sid = decider_session_id.unwrap_or("");
         verify_decider_session_binding(
@@ -1612,7 +1612,7 @@ fn extract_host_from_target(target: &str) -> String {
 }
 
 /// True when `gate_session_id` is the same session as, or a descendant of,
-/// `decider_session_id` in the spawn tree. Used to enforce R-10.7: an agent
+/// `decider_session_id` in the spawn tree. Used to enforce P-10.7: an agent
 /// may not decide a gate created by itself or a descendant.
 ///
 /// Session IDs are hierarchical (`root/child/grandchild`), so the prefix check
@@ -1655,11 +1655,11 @@ pub fn is_session_in_spawn_tree(
     false
 }
 
-/// R-10.7 trust-boundary verification for an agent-decider.
+/// P-10.7 trust-boundary verification for an agent-decider.
 ///
 /// `decider_session_id` is caller-supplied (ultimately from a JSON-RPC
 /// request), so it must be authenticated against recorded session ownership
-/// *before* the spawn-tree check — otherwise an agent could evade R-10.7 by
+/// *before* the spawn-tree check — otherwise an agent could evade P-10.7 by
 /// supplying an unrelated session ID, or by omitting it entirely (which would
 /// disable the descendant check). Three conditions are enforced:
 ///
@@ -1683,7 +1683,7 @@ pub fn is_session_in_spawn_tree(
 /// interest read the other way round: a decider *spawned by* the agent whose
 /// gate it decides (`R/lead/nightwatch` ruling on a gate raised in `R/lead`)
 /// has its prompt, model, context and lifetime controlled by the party it is
-/// judging. R-10.7's "itself or a descendant" is about the trust boundary, not
+/// judging. P-10.7's "itself or a descendant" is about the trust boundary, not
 /// about which way the edge points, so both directions are refused.
 pub fn verify_decider_session_binding(
     decider_session_id: &str,
@@ -1693,7 +1693,7 @@ pub fn verify_decider_session_binding(
 ) -> Result<()> {
     if decider_session_id.is_empty() {
         anyhow::bail!(
-            "Agent-decider '{}' did not supply a decider_session_id (R-10.7)",
+            "Agent-decider '{}' did not supply a decider_session_id (P-10.7)",
             agent_id
         );
     }
@@ -1701,7 +1701,7 @@ pub fn verify_decider_session_binding(
         Some(owner) if owner == agent_id => {}
         Some(owner) => {
             anyhow::bail!(
-                "decider_session_id '{}' is bound to agent '{}', not '{}' (R-10.7)",
+                "decider_session_id '{}' is bound to agent '{}', not '{}' (P-10.7)",
                 decider_session_id,
                 owner,
                 agent_id
@@ -1709,7 +1709,7 @@ pub fn verify_decider_session_binding(
         }
         None => {
             anyhow::bail!(
-                "decider_session_id '{}' is not a recorded session bound to agent '{}' (R-10.7)",
+                "decider_session_id '{}' is not a recorded session bound to agent '{}' (P-10.7)",
                 decider_session_id,
                 agent_id
             );
@@ -1719,7 +1719,7 @@ pub fn verify_decider_session_binding(
     // itself or on something it spawned.
     if is_session_in_spawn_tree(decider_session_id, gate_session_id, store) {
         anyhow::bail!(
-            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (P-10.7)",
             decider_session_id,
             gate_session_id
         );
@@ -1729,7 +1729,7 @@ pub fn verify_decider_session_binding(
     if is_session_in_spawn_tree(gate_session_id, decider_session_id, store) {
         anyhow::bail!(
             "Agent-decider session '{}' was spawned inside gate session '{}'; a decider may not \
-             rule on a gate raised by its own ancestor (R-10.7)",
+             rule on a gate raised by its own ancestor (P-10.7)",
             decider_session_id,
             gate_session_id
         );

@@ -36,7 +36,7 @@ pub(crate) enum TriggerIncoherence {
     WaitingForApproval { request_id: String },
     /// The checkpoint's yield reason is not one this trigger can resume.
     WrongYieldReason { got: String },
-    /// Emergency-stopped sessions are never auto-resumed (R-6.14).
+    /// Emergency-stopped sessions are never auto-resumed (P-6.14).
     EmergencyStop,
 }
 

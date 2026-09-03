@@ -122,7 +122,7 @@ impl NativeTool for ApprovalListTool {
         );
         // A seated decider is listing the gates it was appointed to rule on,
         // which are by definition *other agents'* gates — so the own-gates
-        // filter would show it nothing. R-10.7 and the appointment-provenance
+        // filter would show it nothing. P-10.7 and the appointment-provenance
         // condition still gate deciding; this only widens what it can read.
         let seated = viewer == autonoetic_types::disclosure::ViewerClass::Decider;
         let mine: Vec<_> = pending

@@ -6,7 +6,7 @@
 //!   resumes) survives the #741 refactor verbatim;
 //! - an `ApprovalResolved` trigger cannot resume a session parked on a
 //!   *different* approval;
-//! - emergency-stopped checkpoints refuse every trigger (R-6.14).
+//! - emergency-stopped checkpoints refuse every trigger (P-6.14).
 
 use autonoetic_gateway::execution::{GatewayExecutionService, ResumeTrigger};
 use autonoetic_gateway::llm::Message;
@@ -216,7 +216,7 @@ async fn approval_trigger_rejects_mismatched_checkpoint() {
 }
 
 /// Emergency-stopped checkpoints refuse every trigger, including Manual
-/// (R-6.14: no auto-resume after an emergency stop).
+/// (P-6.14: no auto-resume after an emergency stop).
 #[tokio::test]
 async fn manual_resume_refuses_emergency_stopped_checkpoint() {
     let (_t, config, store) = setup();
@@ -245,7 +245,7 @@ async fn manual_resume_refuses_emergency_stopped_checkpoint() {
         .expect_err("must refuse: emergency-stopped sessions are never auto-resumed");
     assert!(
         err.to_string().contains("never auto-resumed"),
-        "error should state the R-6.14 rule: {}",
+        "error should state the P-6.14 rule: {}",
         err
     );
 }

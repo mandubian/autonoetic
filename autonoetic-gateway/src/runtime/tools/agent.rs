@@ -1821,7 +1821,7 @@ important signals (progress reports, divergence findings, status updates from sp
             }
         }
 
-        // Receiver-side consent (P-11.5, R-10.7 analogue).
+        // Receiver-side consent (P-11.5, P-10.7 analogue).
         //
         // The sender-side ACL cannot express "this role may not be addressed by
         // you" — the boundary that matters for an evaluator, sentinel, auditor

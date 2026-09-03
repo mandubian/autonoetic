@@ -1344,7 +1344,7 @@ impl GatewayStore {
 
     /// Resolve the agent identity that owns a session. Used to authenticate a
     /// caller-supplied `decider_session_id` against the recorded owner before
-    /// applying R-10.7 trust-boundary checks. Consults `session_transcripts`
+    /// applying P-10.7 trust-boundary checks. Consults `session_transcripts`
     /// first (covers root and child sessions), then falls back to
     /// `session_spawn_lineage.target_agent_id` for child sessions whose
     /// transcript has not yet been written. Returns `None` when the session is

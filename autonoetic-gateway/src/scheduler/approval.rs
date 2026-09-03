@@ -145,7 +145,7 @@ pub struct ApproveOptions {
     /// the `confirm_phrase` stored on the approval request exactly (case-insensitive).
     pub confirm_phrase: Option<String>,
     /// Session ID of the agent-decider, when the decider is an agent. Used for
-    /// R-10.7 spawn-tree trust-boundary enforcement.
+    /// P-10.7 spawn-tree trust-boundary enforcement.
     pub decider_session_id: Option<String>,
 }
 
@@ -2098,7 +2098,7 @@ fn decide_request_with_options(
     // `ensure_decidable`.
     ensure_decidable(&request)?;
 
-    // P-2.20 / R-10.7: agent-decider capability and spawn-tree boundary check.
+    // P-2.20 / P-10.7: agent-decider capability and spawn-tree boundary check.
     // Only a `decided_by` that never claimed to be an agent takes the human
     // path — `parse_agent_decider_id` returning `None`. Once the caller has
     // claimed `agent:<id>`, the claim is load-bearing and must be verified or
@@ -2124,7 +2124,7 @@ fn decide_request_with_options(
                         );
                     }
 
-                    // R-10.7: authenticate the caller-supplied decider session
+                    // P-10.7: authenticate the caller-supplied decider session
                     // against the recorded owner, then ensure it is not in the
                     // spawn tree of the gate's session.
                     let decider_sid = options.decider_session_id.as_deref().unwrap_or("");
@@ -2165,7 +2165,7 @@ fn decide_request_with_options(
                 }
                 Err(e) => {
                     // #1192: previously this logged at debug and fell through,
-                    // committing the decision with P-2.20, R-10.7 and the
+                    // committing the decision with P-2.20, P-10.7 and the
                     // `agent_decider.*_gate` causal event all skipped — so the
                     // ruling did not even surface as an agent decision in
                     // contract health. Enforcement must not be conditional on a
