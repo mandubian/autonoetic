@@ -192,7 +192,11 @@ impl OpenAiDriver {
         Self { client, provider }
     }
 
-    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_auth(
+        &self,
+        builder: reqwest::RequestBuilder,
+        req: &CompletionRequest,
+    ) -> reqwest::RequestBuilder {
         let mut b = builder;
         match &self.provider.auth {
             AuthStrategy::BearerToken(key) => {
@@ -204,7 +208,30 @@ impl OpenAiDriver {
         for (k, v) in &self.provider.extra_headers {
             b = b.header(k, v);
         }
+        // OpenCode Go session affinity: pin every turn of a session to the same
+        // upstream so its prompt cache stays warm, and attribute the traffic
+        // (header-less requests are flagged/errored by the service —
+        // https://opencode.ai/docs/go/). Mirrors the body-level
+        // `prompt_cache_key` routing in `build_body`.
+        if let Some(sid) = self.opencode_session_header(req) {
+            b = b.header("x-opencode-session", sid);
+        }
         b
+    }
+
+    /// `x-opencode-session` value for OpenCode Go requests: the per-session
+    /// routing key (same value as the body `prompt_cache_key`), clamped to 256
+    /// chars. `None` for other providers or when the caller supplied no key.
+    fn opencode_session_header(&self, req: &CompletionRequest) -> Option<String> {
+        if !matches!(
+            self.provider.capabilities.reasoning,
+            crate::llm::provider::ReasoningStyle::OpenCodeGo
+        ) {
+            return None;
+        }
+        req.prompt_cache_key
+            .as_ref()
+            .map(|k| k.chars().take(256).collect())
     }
 
     fn build_body(&self, req: &CompletionRequest, stream: bool) -> serde_json::Value {
@@ -520,6 +547,7 @@ impl LlmDriver for OpenAiDriver {
                     .timeout(complete_timeout)
                     .header("Content-Type", "application/json")
                     .json(&body),
+                req,
             );
 
             let response = match builder.send().await {
@@ -679,6 +707,7 @@ impl LlmDriver for OpenAiDriver {
                     .header("Content-Type", "application/json")
                     .header("Accept", "text/event-stream")
                     .json(&body),
+                req,
             );
 
             let response = match builder.send().await {
@@ -1847,6 +1876,45 @@ mod tests {
         assert!(body.get("prompt_cache_key").is_none());
         assert!(body.get("prompt_cache_retention").is_none());
         assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn opencode_session_header_follows_prompt_cache_key() {
+        // OpenCode Go requires `x-opencode-session` on every request so it can
+        // pin a session to one upstream (prompt-cache affinity); the value is
+        // the same per-session key as the body `prompt_cache_key`.
+        let driver = driver_with("deepseek-v4-flash", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("deepseek-v4-flash", "system", None);
+        assert!(driver.opencode_session_header(&req).is_none(), "no key → no header");
+        req.prompt_cache_key = Some("session-abc".to_string());
+        assert_eq!(
+            driver.opencode_session_header(&req).as_deref(),
+            Some("session-abc")
+        );
+    }
+
+    #[test]
+    fn opencode_session_header_clamped_to_256_chars() {
+        let driver = driver_with("deepseek-v4-flash", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("deepseek-v4-flash", "system", None);
+        req.prompt_cache_key = Some("x".repeat(1000));
+        assert_eq!(
+            driver.opencode_session_header(&req).unwrap().chars().count(),
+            256
+        );
+    }
+
+    #[test]
+    fn session_header_not_emitted_for_non_opencode_providers() {
+        // OpenAI and OpenRouter carry the session key in the body
+        // (`prompt_cache_key` / `session_id`); the x-opencode-session header is
+        // OpenCode-specific.
+        for style in [ReasoningStyle::OpenAiEffort, ReasoningStyle::OpenRouterUnified] {
+            let driver = driver_with("any-model", style);
+            let mut req = req_with_system("any-model", "system", None);
+            req.prompt_cache_key = Some("session-abc".to_string());
+            assert!(driver.opencode_session_header(&req).is_none());
+        }
     }
 
     #[test]

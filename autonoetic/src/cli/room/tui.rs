@@ -39,8 +39,9 @@ const FRAME_MS: u64 = 50;
 /// Idle frame budget when no turns are open and no async work is happening.
 /// This dramatically lowers CPU by letting the process sleep longer.
 const IDLE_FRAME_MS: u64 = 250;
-/// How often to pull new timeline events from the gateway when idle (no open
-/// turns, no async processing). Keeps CPU low on long completed sessions.
+/// How often to pull new timeline events from the gateway when idle (no
+/// in-flight work — see [`TURN_STALE_SECS`]). Keeps CPU low on long completed
+/// sessions.
 const IDLE_TIMELINE_POLL_MS: u64 = 2000;
 /// Timeline poll rate when the session may be active.
 const TIMELINE_POLL_MS: u64 = 400;
@@ -50,6 +51,15 @@ const SESSION_STATUS_POLL_MS: u64 = 2000;
 /// the elapsed/since-last-chunk clocks in the activity strip ticking without
 /// hammering the gateway (the read is an in-process counter clone).
 const LLM_ACTIVITY_POLL_MS: u64 = 1000;
+/// An open turn stops counting as visually in-flight after this much timeline
+/// silence. Live turns emit events continuously (`llm.round` / `tool.*` /
+/// `agent.*`), so only a dangling `turn.start` — left by a crashed or
+/// gateway-restarted turn, with no `turn.end` ever arriving — hits this bound.
+/// Without it such a turn spins the TUI at the active frame rate (20 fps full
+/// redraws, ~85% of a core measured) forever on an otherwise idle session.
+/// Quiet gaps *inside* a live turn are still covered by `llm_activity` +
+/// `session_async_processing`, which don't decay.
+const TURN_STALE_SECS: u64 = 30;
 
 /// Hard cap on plumbing/tool rows — keeps the list scannable.
 const MAX_ROW_LINES: usize = 8;
@@ -4222,6 +4232,14 @@ pub fn run(
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
     let mut cached_open_turns_valid = false;
+    // Open turns only drive active-cadence behavior while the timeline
+    // recently grew (see TURN_STALE_SECS). Recomputed every iteration beside
+    // the spinner block; read earlier in the loop (timeline poll cadence)
+    // one iteration stale — same as `cached_open_turns` before it.
+    let mut open_turns_live = false;
+    // Instant of the last timeline growth (new entries or lineage). `None`
+    // until the first non-empty poll lands.
+    let mut last_timeline_growth: Option<Instant> = None;
     let mut cached_floor = floor;
     let mut cached_squash = squash;
     let mut cached_show_reasoning = show_reasoning;
@@ -7502,13 +7520,23 @@ pub fn run(
         // next full refresh (empty boundaries change row layout; spinner advances
         // skip frames in double-draw).
         if repaint_after_input {
+            // Mirror the full refresh's follow snap (`selected = last row`
+            // below) so the early frame highlights the same row the full
+            // frame will. Without this, arriving at the bottom via End/G
+            // paints the highlight at the stale position for a frame and
+            // then jumps — the "displayed twice, cursor moved" flicker.
+            let early_selected = if follow {
+                view_rows.len().saturating_sub(1)
+            } else {
+                selected
+            };
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             let early_stats = compute_session_stats(&entries);
             let early_gate_count = count_active_gates(&entries, &resolved, &acted);
             let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
             let early_pending_plans =
                 unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
-            let early_safe_selected = selected.min(view_rows.len().saturating_sub(1));
+            let early_safe_selected = early_selected.min(view_rows.len().saturating_sub(1));
             let early_spawn = view_indexed
                 .get(early_safe_selected)
                 .and_then(|(_, src)| spawn_agent_for_row_source(&view_visible, *src));
@@ -7547,7 +7575,7 @@ pub fn run(
                     follow,
                     if follow { None } else { Some(view_viewport_offset) },
                     &view_rows,
-                    selected,
+                    early_selected,
                     detail.as_ref(),
                     detail_scroll,
                     detail_h_scroll,
@@ -7638,7 +7666,7 @@ pub fn run(
         }
 
         let mut entries_changed = false;
-        let timeline_poll_ms = if cached_open_turns.is_empty()
+        let timeline_poll_ms = if !open_turns_live
             && !session_async_processing
             && pending_gate.is_none()
         {
@@ -7679,6 +7707,7 @@ pub fn run(
                                 .map(|e| (e.child_session_id.clone(), e))
                                 .collect();
                             entries_changed = true;
+                            last_timeline_growth = Some(Instant::now());
                         }
                         if let Some(last) = page.entries.last() {
                             cursor = Some(last.event_id.clone());
@@ -7696,6 +7725,7 @@ pub fn run(
                         if !page.entries.is_empty() {
                             entries_changed = true;
                             entries.extend(page.entries);
+                            last_timeline_growth = Some(Instant::now());
                         }
                         if status.as_deref().map(|s| s.starts_with("✗ gateway")).unwrap_or(false)
                         {
@@ -7943,10 +7973,20 @@ pub fn run(
             needs_redraw = true;
         }
 
+        // Open turns decay to stale when the timeline goes quiet (no events
+        // for TURN_STALE_SECS) — recomputed every iteration because the bound
+        // is time-based, not event-based.
+        open_turns_live = !cached_open_turns.is_empty()
+            && last_timeline_growth.is_some_and(|t| {
+                t.elapsed() < Duration::from_secs(TURN_STALE_SECS)
+            });
+
         // Only animate the spinner when something is actually in flight. Idle
         // sessions therefore freeze the spinner and skip redraws entirely.
+        // Open turns alone do NOT qualify — a dangling `turn.start` (crashed /
+        // restarted turn) must not pin the animation, see TURN_STALE_SECS.
         // A live LLM stream counts as in flight — the strip's clocks tick.
-        let has_in_flight_visual = !cached_open_turns.is_empty()
+        let has_in_flight_visual = open_turns_live
             || session_async_processing
             || !llm_activity.is_empty()
             || pending_gate.is_some();
@@ -8256,11 +8296,23 @@ pub fn run(
 
         let term_size = terminal.size()?;
         let compose_open = compose.is_some() && detail.is_none();
-        let list_area_height = if compose_open {
-            term_size.height.saturating_sub(1 + FOOTER_HEIGHT + COMPOSE_PANEL_HEIGHT)
-        } else {
-            term_size.height.saturating_sub(1 + FOOTER_HEIGHT)
-        };
+        // Mirror draw()'s layout exactly: the live LLM activity strip reserves
+        // one line under the header only while a stream is in flight. If the
+        // loop's list height ignores it, the viewport offset computed here
+        // disagrees with the painted frame by one line and the next keypress
+        // re-anchors from the wrong offset (visible double-jump arriving at
+        // the bottom of a live timeline; also skews mouse-click row mapping).
+        let has_activity_strip =
+            !build_llm_activity_strip(&llm_activity, term_size.width).is_empty();
+        let list_area_height = term_size.height.saturating_sub(
+            1 + u16::from(has_activity_strip)
+                + FOOTER_HEIGHT
+                + if compose_open {
+                    COMPOSE_PANEL_HEIGHT
+                } else {
+                    0
+                },
+        );
         let list_height = list_area_height as usize;
         let width = term_size.width as usize;
         let rail_w = 2usize;
@@ -8374,7 +8426,7 @@ pub fn run(
     }
 
     let _ = event::poll(Duration::from_millis(
-        if cached_open_turns.is_empty()
+        if !open_turns_live
             && !session_async_processing
             && pending_gate.is_none()
         {

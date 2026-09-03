@@ -511,9 +511,12 @@ pub fn resolve(
         }
     };
 
-    // Attach OpenRouter attribution headers
-    let extra_headers = if provider == "openrouter" {
-        vec![
+    // Attribution headers: OpenRouter wants referer/title; OpenCode Go wants a
+    // client identity (https://opencode.ai/docs/go/ — "properly identifies
+    // itself"). The per-session `x-opencode-session` is attached per-request in
+    // `OpenAiDriver::apply_auth` (it needs the request's session key).
+    let extra_headers = match provider {
+        "openrouter" => vec![
             (
                 "HTTP-Referer".to_string(),
                 "https://autonoetic.local".to_string(),
@@ -522,9 +525,9 @@ pub fn resolve(
                 "X-OpenRouter-Title".to_string(),
                 "Autonoetic Gateway".to_string(),
             ),
-        ]
-    } else {
-        vec![]
+        ],
+        "opencode" => vec![("x-opencode-client".to_string(), "autonoetic".to_string())],
+        _ => vec![],
     };
 
     Ok(ResolvedProvider {

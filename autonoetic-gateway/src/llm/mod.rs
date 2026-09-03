@@ -28,6 +28,8 @@ pub mod xml_tool_calls;
 /// - `pool_max_idle_per_host`: 4 — cap idle connection accumulation when many
 ///   concurrent sessions share the same client.
 /// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
+/// - `user_agent`: `autonoetic-gateway/<version>` — providers (OpenCode Go)
+///   flag UA-less traffic as "Unknown client" and may reject it.
 /// - **No global request timeout** — LLM streams can run for minutes; a blanket
 ///   `timeout()` would kill legitimate long-running responses. Instead, each
 ///   non-streaming `complete()` call applies a per-request timeout resolved at
@@ -40,6 +42,7 @@ pub fn build_llm_client() -> reqwest::Client {
         .pool_idle_timeout(std::time::Duration::from_secs(30))
         .pool_max_idle_per_host(4)
         .tcp_keepalive(std::time::Duration::from_secs(30))
+        .user_agent(concat!("autonoetic-gateway/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

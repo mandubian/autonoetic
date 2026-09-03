@@ -489,7 +489,7 @@ impl LlmClassifierRouter {
         config: &LlmConfig,
         req: &CompletionRequest,
     ) -> anyhow::Result<crate::llm::CompletionResponse> {
-        let driver = crate::llm::build_driver(config.clone(), reqwest::Client::new())?;
+        let driver = crate::llm::build_driver(config.clone(), crate::llm::build_llm_client())?;
         driver.complete(req).await
     }
 }

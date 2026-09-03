@@ -2362,7 +2362,7 @@ async fn ask_approval_question_llm(
         })?;
 
     let model = llm_config.model.clone();
-    let client = reqwest::Client::new();
+    let client = autonoetic_gateway::llm::build_llm_client();
     let driver = build_driver(llm_config, client)?;
 
     let approval_json = serde_json::to_string_pretty(req)?;

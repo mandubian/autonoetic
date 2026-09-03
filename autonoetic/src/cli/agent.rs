@@ -1647,8 +1647,10 @@ pub async fn run_agent_with_runtime(
         &gateway_config,
         None,
     )?;
-    let driver =
-        autonoetic_gateway::llm::build_driver(profile.llm_config, reqwest::Client::new())?;
+    let driver = autonoetic_gateway::llm::build_driver(
+        profile.llm_config,
+        autonoetic_gateway::llm::build_llm_client(),
+    )?;
     run_agent_with_runtime_with_driver(
         manifest,
         instructions,
@@ -1731,7 +1733,7 @@ pub async fn run_agent_with_runtime_with_driver(
         runtime = runtime.with_session_budget(Some(b));
     }
     let or_catalog = Arc::new(autonoetic_gateway::OpenRouterCatalog::new(
-        reqwest::Client::new(),
+        autonoetic_gateway::llm::build_llm_client(),
     ));
     runtime = runtime.with_openrouter_catalog(Some(or_catalog));
     if let Some(message) = kickoff_message {

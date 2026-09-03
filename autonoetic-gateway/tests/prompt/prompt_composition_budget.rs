@@ -321,12 +321,19 @@ impl Report {
 /// roster-drift doctrine (+336 ch) — plus accumulated tool-schema weight (31
 /// tools, 34 tool commits since the 74000 ratchet was set at #1089). Measured
 /// headroom is ~1%, matching the tight-ratchet style of the other agents.
-const PLANNER_CEILINGS: (usize, usize, usize) = (75_500, 92_000, 104_000);
-const CODER_CEILINGS: (usize, usize, usize) = (60_000, 70_000, 70_000);
+///
+/// ALL agents raised 2026-09-03 (+400 ch per ceiling) with cause: new
+/// universal doctrine `turn.yield_without_placeholder_tools` (guidance.rs
+/// builtin block) — session-0aba5c63 logged 11 explicit "no-op to end turn
+/// cleanly" tool calls that each burned a full model round (~35k tokens);
+/// the doctrine is cheaper than the behavior it prevents by ~4 orders of
+/// magnitude per session.
+const PLANNER_CEILINGS: (usize, usize, usize) = (75_900, 92_400, 104_400);
+const CODER_CEILINGS: (usize, usize, usize) = (60_400, 70_400, 70_400);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_500, 103_000, 103_000);
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_900, 103_400, 103_400);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -340,12 +347,12 @@ const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_500, 103_000, 103_000
 ///
 /// Both are measured so the phase-gating of each procedure is observable
 /// somewhere. The lead and coder agents see neither tool.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (49_500, 50_500, 50_500);
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_000, 86_000, 86_000);
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (49_900, 50_900, 50_900);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_400, 86_400, 86_400);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.
-const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (56_500, 56_500, 56_500);
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (56_900, 56_900, 56_900);
 
 #[test]
 fn prompt_composition_report() {
