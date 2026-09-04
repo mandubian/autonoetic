@@ -60,13 +60,24 @@ credential isolation, egress gating.
 
 ## 4. Bind-direction discipline
 
-Every clause binds exactly one party: rules (`P-*`) bind the agent, rights
-(`Ri-*`) bind the gateway, obligations (`O-*`) bind the decider, `U-*` binds
-the community toward the served party.
+Every clause binds exactly one **power** — `reasoner`, `enforcer` or
+`decider` — and says which, per clause, in its `Relation`. It is declared
+data, never inferred from the ID prefix.
 
-**Mechanical form:** the constitution's clause taxonomy; the register's
-bind-direction summary; denials that carry lawful next moves (the gateway's
-debt made visible at the point of refusal).
+That distinction is not pedantry: the prefix rule it replaced was **false**.
+Measured across all 221 clauses, **180 of the 182 `P-*` bind the enforcer**,
+not the agent — the exceptions are `P-2.9` (reasoner) and `P-2.21` (decider).
+The document is almost entirely a constraint on the party with power.
+
+A `Relation` also records **who may invoke** a clause and **what it requires**
+of any implementation. So a right is a *relation*, not a prefix: an enforcer
+duty owed to the agent is an agent right whatever its ID says, and 21 of the
+38 are numbered as rules.
+
+**Mechanical form:** the `Relation` column in the signed text, checked against
+`constitution_relations` by `relation_column.rs`; the generated
+[law table](../constitution/law-table.md); denials that carry lawful next
+moves (the enforcer's debt made visible at the point of refusal).
 
 **Rests on it:** the social-contract framing — the enforcer is a bound party,
 which is what separates a compliance regime from a constitution (philosophy

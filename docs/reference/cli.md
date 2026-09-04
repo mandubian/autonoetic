@@ -123,9 +123,10 @@ autonoetic gateway preflight [--json]
 ### `autonoetic gateway constitution show`
 
 Show the active constitution: version, canonical digest, signer, enforcement
-counts, and a one-line gloss for every clause (`P-*` rules bind the agent,
-`Ri-*` rights bind the gateway). A `✓` marks clauses the gateway mechanically
-enforces. This is the same lightweight view clients get from the
+counts, and a one-line gloss for every clause. Each carries its declared
+`binds` (which power must comply) and `requires` — read from the constitution's
+`Relation`, never inferred from the ID prefix, so a `P-*` clause that binds the
+enforcer says so. A `✓` marks clauses the gateway mechanically enforces. This is the same lightweight view clients get from the
 `constitution.get` JSON-RPC method; pass `--include-text` for the full markdown.
 
 ```bash
