@@ -92,7 +92,11 @@ const TO_AGENT: OwedTo = OwedTo::Principal(PrincipalKindTag::AutonoeticAgent);
 /// what makes an aggregate like `community` unrepresentable: it is
 /// "gateway + agents", and a clause that appears to bind it binds the
 /// [`Binds::Enforcer`], because the enforcer is what implements the mechanism.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// **Not `Ord`.** The three powers are co-equal under the separation of
+/// powers; an ordering would assert that one outranks another, which is the
+/// opposite of what the separation means. Nothing used it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Binds {
     /// Proposes and acts, subject to gating. Occupied by agents, script-mode
     /// agents, federated foreign agents (`SessionRole::Planner`, `Specialist`,
@@ -134,7 +138,11 @@ impl Binds {
 ///
 /// Single-valued: two standings means two clauses, which is what keeps
 /// [`tests::no_two_clauses_share_a_relation_and_statement`] well-formed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// **Not `Ord`.** Standing is not ranked: an agent's claim does not outrank a
+/// served party's, and neither outranks `NoOne` — which is not a lesser
+/// standing but the absence of one. Nothing used it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OwedTo {
     /// Standing by identity — e.g. `Ri-0.2` → `AutonoeticAgent`,
     /// `U-1` → `ServedUser`.
@@ -192,7 +200,13 @@ impl OwedTo {
 /// SLA breaches) no static check can succeed, so `Detection` is the *correct*
 /// answer, not a weaker one. Never "upgrade" such a floor: doing so demands
 /// the impossible and produces a false claim of proof.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// **Deliberately not `Ord`.** An earlier version derived it, which asserted
+/// a total order this doc comment spends its last paragraph denying, and
+/// invited `verified_by >= VerifiedBy::Chokepoint` — a comparison with no
+/// meaning. Nothing ever used it. See
+/// `docs/proposals/constitution-bind-direction-model.md` §2.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerifiedBy {
     /// The bad state is unrepresentable — type, signature, or closed enum.
     /// Covers paths that do not exist yet.

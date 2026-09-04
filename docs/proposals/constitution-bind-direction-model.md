@@ -1,7 +1,12 @@
 # RFC: Bind-direction as data — making the constitution re-implementable
 
+> **rev 3** — §2.4 revised after implementing parts 1–2. The `verified_by`
+> "floor" model is superseded by `requires` (constitutional) + `achieved`
+> (register); §2.4.2 records that the classification has no reader-facing
+> surface yet.
+
 Status: **Open** (proposal — no code, no amendment)
-Date: 2026-09-02 — **revision 2**, same day, after maintainer review
+Date: 2026-09-02 — **revision 3** (2026-09-04), after implementing parts 1–2
 Scope: the family structure of constitutional clause IDs, and the `binds` model in
 `enforcement_register.rs`. Supersedes nothing; blocks nothing.
 
@@ -14,11 +19,28 @@ Scope: the family structure of constitutional clause IDs, and the `binds` model 
 > - `owed_to` generalized from a bespoke 3-value enum to `PrincipalKind` tags —
 >   the principal census evolves — plus one discovered case of **seat-standing**
 >   (§2.2).
-> - `verified_by` split: **modality floor in the law, site in the register** (§2.4).
+> - `verified_by` split: **modality floor in the law, site in the register** (§2.4)
+>   — *superseded by revision 3, §2.4.1.*
 > - New: the **law/conformance split** this RFC enables (§2.7), the
 >   **semantic-foundations** vocabulary proposal (§2.8), and the
 >   **democratic-ratification stress test** (§4).
 > - All revision-1 open questions resolved (§7).
+
+> **Revision 3 changes** (2026-09-04, after #1293/#1298/#1302 implemented
+> parts 1–2 across 73 clauses):
+>
+> - `verified_by`'s **floor model is superseded** (§2.4.1). A floor needs a
+>   total order the RFC itself denies, and in practice the field recorded this
+>   implementation's Rust for enforced clauses while stating a requirement for
+>   unenforced ones. Replaced by `requires: preventive | detective`
+>   (constitutional) + `achieved: modality @ site` (register).
+> - The modality taxonomy is reclassified as **statute material** — it tracks
+>   verification practice, not law, so signing it would put an amendment
+>   ceremony in front of every advance in technique.
+> - `Binds`, `OwedTo` and `VerifiedBy` **lose their `Ord` derives** — each
+>   asserted an ordering that is either meaningless or actively wrong.
+> - New §2.4.2: the classification **has no reader-facing surface**; 54 of 73
+>   classified clauses appear in no document.
 
 ---
 
@@ -343,6 +365,108 @@ Revision 1 asked whether `verified_by` is law or commentary. Review's answer:
 - **Site in the register.** `policy.rs:679` is per-implementation conformance
   data; it lives in the enforcement register, never in the signed text.
 
+#### 2.4.1 Revision 3: the "floor" model does not survive implementation
+
+Everything above is **superseded** for the `verified_by` field specifically.
+Implementing it (#1284 parts 1–2, 73 clauses classified) produced three
+findings that the design as written cannot absorb.
+
+**(a) A "floor" presumes a total order that §2.4 itself denies.** The bullet
+above says "`construction` remains strictly strongest" and, two sentences
+later, "not a total order imposed across modalities". Both cannot hold. The
+counterexample is in the document already: `I-4` ("the gateway does not make
+recovery decisions on the agent's behalf") is a universal negative over
+behaviour, for which `detection` is not a weak approximation of `construction`
+— it is the *only* modality that applies. There is no lattice in which
+`construction ≥ detection` and also `detection` is the correct answer for
+`I-4`. So "at least X" is not a well-formed requirement.
+
+The implementation reproduced the confusion faithfully: `VerifiedBy` was
+derived `Ord`, which asserts exactly the total order the prose denies, and
+invited `verified_by >= Chokepoint`. Nothing used it. Removed alongside this
+revision — as were the same unused derives on `Binds` (an ordering there would
+assert one power outranks another, which inverts the separation of powers) and
+`OwedTo` (`NoOne` is not a lesser standing but the absence of one).
+
+**(b) The field silently means two different things.** Classification derived
+the value from the clause's *enforcement citation* — i.e. from this
+implementation's Rust — for every ENFORCED clause, while stating a
+*requirement* for the clauses no code meets:
+
+| clause | value | status | what the value means |
+|---|---|---|---|
+| `I-3` | `construction` | PARTIAL | **requirement** — the code does not meet it |
+| `I-12`, `P-9.14`, `U-1`–`U-3` | various | DESIGN DEBT / MISSING | **requirement** |
+| `Ri-0.3` | `test` | ENFORCED | **description** of our Rust |
+
+`Ri-0.3` is the clean illustration. It reads `test` because
+`Tagged::permission_with_rules` does not forbid an empty rule list — a fact
+about our types, not about what "no agent is ever told denied without being
+told why" demands. The law's requirement is plausibly `construction`; the
+field records what we happen to have achieved and calls it the floor. That
+inverts §2.4's own instruction, and a re-implementer reading `test` learns
+"write a test" rather than what the clause obliges.
+
+**(c) The modality taxonomy is statute material, not constitutional.** The set
+of modalities tracks the state of verification practice: adding
+model-checking, refinement types, or proof-carrying code is a change in
+technique, not in law. Signing a closed six-value enum into a digest-locked
+document means every advance in verification needs an amendment ceremony —
+the precise tier mismatch §4 names as a prerequisite ("the amendment cadence
+is already statute-frequency").
+
+**The proposed shape: two fields at two tiers.**
+
+| field | tier | domain | answers |
+|---|---|---|---|
+| `requires` | **constitutional** | `preventive` \| `detective` | must non-compliance be made impossible, or is recording each occurrence sufficient? |
+| `achieved` | **register** (per implementation) | a modality + its site | what this gateway actually does, e.g. `construction @ policy.rs:679` |
+
+`requires` is binary because that is the distinction which is genuinely
+normative and survives re-implementation. "`P-3.1` must be preventive" is law
+in any language. "`P-3.1` is preventive via `--unshare-all` at one chokepoint"
+is not. And it dissolves defect (a): `I-4` is `requires: detective`, which is
+a positive statement about the clause's nature rather than a low rung on a
+ladder — nothing to be tempted to "upgrade".
+
+It also makes (b) legible instead of inferable. `I-3` becomes
+`requires: preventive` / `achieved: detective` — a stated gap, rather than a
+`construction` floor whose mismatch with a PARTIAL status the reader has to
+notice and interpret.
+
+The six-value taxonomy survives as the domain of `achieved`, maintained at
+statute pace and never signed.
+
+**Sequencing.** This lands *before* the part-3 amendment. Adopting the
+`verified_by` column as designed would sign a taxonomy at the wrong tier and
+freeze descriptions of today's Rust into constitutional text — both
+significantly harder to undo than to avoid, since a signed column can only be
+changed by amendment.
+
+#### 2.4.2 The register has no reader-facing surface
+
+A gap surfaced by the same implementation work, recorded here because it is
+the deliverable that makes any of this legible.
+
+`docs/constitution/enforcement-register.md` is generated, and covers the **19
+clauses in the enforcement register**. The classification now spans **73**.
+The 54 that are law-side only — `Ri-0.1`, `Ri-0.4`–`0.7`, `0.9`, `0.10`,
+`0.15`, `0.16`, all of `U-*` and `I-*`, and §5/§9/§15's `P-*` — appear in no
+document. Separately, `constitution.get` omits `O-*`, `U-*` and `I-*` entirely
+(`extract_rule_glossary` admits only `P-*`/`Ri-*` table rows), so a client
+cannot see that `O-1`, `U-1` or `I-8` exist.
+
+Net: bind direction is readable by code and invisible to a reader, which
+inverts the point of declaring it. Two generated surfaces close it —
+
+- **the law table**: every clause, its `binds` / `owed_to` / `requires`, and
+  whether it is classified or outstanding;
+- **the conformance register**: per clause, `achieved` plus site, tests, config
+  — this implementation's answer, replaceable by another's.
+
+That pair *is* §2.7's law/conformance split, arrived at from the reader's side
+rather than the federation side.
+
 ### 2.5 Rights and obligations are duals, not duplicates
 
 Under this model a **right is a view, not a family**: an obligation with
@@ -520,7 +644,10 @@ RFC's work):
 - **`Binds` keeps its arity, changes its names** — `Reasoner | Enforcer |
   Decider` (§2.1; the names were the bug, not the count). Add
   `OwedTo` (`PrincipalKind` tag | power | `None`) and a `VerifiedBy` modality
-  enum per §2.4.
+  enum per §2.4. **None of the three is `Ord`** — see §2.4.1(a): an ordering
+  over powers inverts the separation of powers, an ordering over standing makes
+  `NoOne` a lesser claim rather than the absence of one, and an ordering over
+  modalities asserts the total order §2.4 denies.
 - **`binds()` stops deriving from the prefix** and reads the clause's declared
   field. The test `principles_bind_agent_rights_bind_gateway` **inverts**: it
   currently asserts the falsehood, and should assert that every clause declares
@@ -562,8 +689,12 @@ RFC's work):
   a fourth field would pretend it is the same kind of thing as `binds` /
   `owed_to`, and a named correction-core list with a dedicated structural test
   is harder to erode by accident than a per-clause flag.
-- ~~**Is `verified_by` law or commentary?**~~ — **resolved (rev 2): both, split.**
-  Modality floor in the signed text, site in the register (§2.4).
+- ~~**Is `verified_by` law or commentary?**~~ — **rev 2 said "both, split";
+  rev 3 revises the split itself** (§2.4.1). The floor/site division was right
+  in spirit and wrong in shape: a "floor" needs a total order the model denies,
+  and in practice the field recorded our Rust for enforced clauses while stating
+  a requirement for unenforced ones. Now `requires: preventive | detective`
+  (constitutional) and `achieved: modality @ site` (register).
 
 ## 8. What this RFC does not propose
 
