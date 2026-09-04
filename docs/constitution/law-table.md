@@ -8,24 +8,24 @@ This is the **law** side: what a clause obliges, of whom, to whom — identical 
 
 ## Coverage
 
-**73 of 221** clauses classified. The remainder are numbered `P-*` awaiting their section tranche; they are counted, not hidden — a ratchet test pins the exact number so a new clause cannot arrive unclassified.
+**124 of 221** clauses classified. The remainder are numbered `P-*` awaiting their section tranche; they are counted, not hidden — a ratchet test pins the exact number so a new clause cannot arrive unclassified.
 
 | binds | clauses |
 |---|---|
-| `reasoner` | 0 |
-| `enforcer` | 69 |
-| `decider` | 4 |
+| `reasoner` | 1 |
+| `enforcer` | 118 |
+| `decider` | 5 |
 
 | owed to | clauses | means |
 |---|---|---|
-| `autonoetic_agent` | 27 | a duty the agent can invoke — an agent **right**, whatever the ID prefix says |
+| `autonoetic_agent` | 32 | a duty the agent can invoke — an agent **right**, whatever the ID prefix says |
 | `served_user` | 6 | owed to the end user a session serves |
-| `decider` *(seat)* | 1 | owed to whoever occupies the deciding seat, human or agent |
-| `none` | 39 | an **integrity property**: no invocable beneficiary. Not a lesser clause — nobody can *claim* their own sandbox confinement |
+| `decider` *(seat)* | 5 | owed to whoever occupies the deciding seat, human or agent |
+| `none` | 81 | an **integrity property**: no invocable beneficiary. Not a lesser clause — nobody can *claim* their own sandbox confinement |
 
-**Agent rights by relation** (23): `I-8`, `I-9`, `P-5.11`, `P-5.3`, `P-5.8`, `P-9.12`, `Ri-0.1`, `Ri-0.10`, `Ri-0.11`, `Ri-0.12`, `Ri-0.13`, `Ri-0.14`, `Ri-0.16`, `Ri-0.17`, `Ri-0.18`, `Ri-0.2`, `Ri-0.3`, `Ri-0.4`, `Ri-0.5`, `Ri-0.6`, `Ri-0.7`, `Ri-0.8`, `Ri-0.9`
+**Agent rights by relation** (27): `I-8`, `I-9`, `P-2.10`, `P-2.12`, `P-2.15`, `P-5.11`, `P-5.3`, `P-5.8`, `P-7.18`, `P-9.12`, `Ri-0.1`, `Ri-0.10`, `Ri-0.11`, `Ri-0.12`, `Ri-0.13`, `Ri-0.14`, `Ri-0.16`, `Ri-0.17`, `Ri-0.18`, `Ri-0.2`, `Ri-0.3`, `Ri-0.4`, `Ri-0.5`, `Ri-0.6`, `Ri-0.7`, `Ri-0.8`, `Ri-0.9`
 
-A right is a *view*, not a family: an enforcer duty owed to the agent is an agent right regardless of prefix. This list is therefore not the `Ri-*` set — `P-5.3`, `P-5.8`, `P-5.11` and `P-9.12` are here on their relation, and §0's rights/rules ratio would be computed from this rather than from prefixes.
+A right is a *view*, not a family: an enforcer duty owed to the agent is an agent right regardless of prefix. So this list is not the `Ri-*` set — 10 of its members carry another prefix (`I-8`, `I-9`, `P-2.10`, `P-2.12`, `P-2.15`, `P-5.11`, `P-5.3`, `P-5.8`, `P-7.18`, `P-9.12`), and §0's rights/rules ratio would be computed from this rather than from prefixes.
 
 ## Clauses
 
@@ -60,35 +60,35 @@ A right is a *view*, not a family: an enforcer duty owed to the agent is an agen
 | `P-1.9` | — | — | — | *unclassified.* `CodeExecution` patterns match against command strings. |
 | `P-1.10` | — | — | — | *unclassified.* Missing capability returns permission error, never advisory. |
 | `P-1.11` | — | — | — | *unclassified.* Unknown tool names deny by default (not silent-allow). |
-| `P-2.1` | — | — | — | *unclassified.* Remote network access across all networked tools (`sandbox_exec`, `credential.*`, `web.*`) is statically detected and blocks pending approval via the unified `GateService` (`GateKind::Approval`) rather than hard-denying. |
-| `P-2.2` | — | — | — | *unclassified.* Approval requests are persisted with unique IDs. |
-| `P-2.3` | — | — | — | *unclassified.* Identical operations within a session deduplicate. |
-| `P-2.4` | — | — | — | *unclassified.* Approved hosts auto-approve subsequent calls within the root session, scoped to the approving agent |
-| `P-2.5` | — | — | — | *unclassified.* Approval response surfaces `detected_hosts` for operator visibility. |
-| `P-2.6` | — | — | — | *unclassified.* Fingerprint-identical approved executions skip re-approval until the cache entry expires |
-| `P-2.7` | — | — | — | *unclassified.* Only concrete targets (URLs, IPs) cache |
-| `P-2.8` | — | — | — | *unclassified.* High-risk promotion requires evaluator AND auditor pass. |
-| `P-2.9` | — | — | — | *unclassified.* `promotion_record` evidence is trace-based for execution roles (`unit_test_runner`, `sealed_evaluator`, legacy `evaluator`) |
-| `P-2.10` | — | — | — | *unclassified.* Gate-suspended turns (approval, user interaction, escalation) checkpoint via `YieldReason` and resume through `resume_from_checkpoint`. |
-| `P-2.11` | — | — | — | *unclassified.* Suspended turns exceeding timeout mark the task failed while preserving continuation for explicit operator-driven resume. |
-| `P-2.12` | — | — | — | *unclassified.* Deciders (human operators, autonomous reviewer agents, or policy engines) approve/reject gates via the approval resolution API. |
-| `P-2.13` | — | — | — | *unclassified.* `user_ask` creates a gate via `GateService` with `GateKind::UserInput` and checkpoints the session as `YieldReason::UserInputRequired`. |
-| `P-2.14` | — | — | — | *unclassified.* `user_ask` is refused if the workflow has active children or pending gates (approvals, escalations, or other `user_ask` interactions). |
-| `P-2.15` | — | — | — | *unclassified.* Spawn payload is preserved verbatim across approval resume. |
-| `P-2.16` | — | — | — | *unclassified.* Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. |
-| `P-2.17` | — | — | — | *unclassified.* The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). |
-| `P-2.18` | — | — | — | *unclassified.* All execution suspension points awaiting external input (approvals, user interactions, escalations) use the unified `GateService`. |
-| `P-2.19` | — | — | — | *unclassified.* Gate enrichment messages (`gate_messages`) are append-only and recorded on the causal chain. |
-| `P-2.20` | — | — | — | *unclassified.* Agents acting as gate deciders require the `GateDecider` capability. |
-| `P-2.21` | — | — | — | *unclassified.* When an agent-decider cannot determine whether to approve or reject a gate (insufficient context, policy ambiguity, or high-risk action beyond its scope), it must escalate to a human operator rather than reject. |
-| `P-2.22` | — | — | — | *unclassified.* When a revision carries federation-role verdicts, promotion runs the **FullJury** gate |
-| `P-2.23` | — | — | — | *unclassified.* Session approval grants expire after a configured TTL |
-| `P-2.24` | — | — | — | *unclassified.* Operator approval hardening on high-risk gates |
-| `P-2.25` | — | — | — | *unclassified.* **Promotion is fail-closed.** Whether a revision may be promoted, and what it must satisfy, is determined **mechanically by the gateway** from the revision's declared capabilities and artifact — never inferred from orchestrator-supplied signals (recorded verdicts, an attached synthesis, or the presence/absence of a field). |
-| `P-2.26` | — | — | — | *unclassified.* **All executed gate roles must pass.** When a federation gate role (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`) has recorded a verdict for a revision's artifact, the promotion gate mechanically checks that **every** such role recorded `pass=true`. |
-| `P-2.27` | — | — | — | *unclassified.* A **session capability envelope**, locked by operator decision, pre-authorizes tool calls within its scope. |
-| `P-2.28` | — | — | — | *unclassified.* **Smoke-test gate for new agents.** New agents declaring `NetworkAccess` or `CodeExecution` require a successful execution trace before promotion to `Ready`. |
-| `P-2.29` | — | — | — | *unclassified.* **Promotion attempt exhaustion gate.** Too many rejected promotion attempts for the same `(alias, content_digest)` across sessions blocks further attempts until an operator acknowledges the revision. |
+| `P-2.1` | `enforcer` | none *(integrity property)* | `chokepoint` | Remote network access across all networked tools (`sandbox_exec`, `credential.*`, `web.*`) is statically detected and blocks pending approval via the unified `GateService` (`GateKind::Approval`) rather than hard-denying. |
+| `P-2.2` | `enforcer` | none *(integrity property)* | `test` | Approval requests are persisted with unique IDs. |
+| `P-2.3` | `enforcer` | none *(integrity property)* | `chokepoint` | Identical operations within a session deduplicate. |
+| `P-2.4` | `enforcer` | none *(integrity property)* | `test` | Approved hosts auto-approve subsequent calls within the root session, scoped to the approving agent |
+| `P-2.5` | `enforcer` | `decider` *(seat)* | `test` | Approval response surfaces `detected_hosts` for operator visibility. |
+| `P-2.6` | `enforcer` | none *(integrity property)* | `test` | Fingerprint-identical approved executions skip re-approval until the cache entry expires |
+| `P-2.7` | `enforcer` | none *(integrity property)* | `test` | Only concrete targets (URLs, IPs) cache |
+| `P-2.8` | `enforcer` | none *(integrity property)* | `chokepoint` | High-risk promotion requires evaluator AND auditor pass. |
+| `P-2.9` | `reasoner` | none *(integrity property)* | `chokepoint` | `promotion_record` evidence is trace-based for execution roles (`unit_test_runner`, `sealed_evaluator`, legacy `evaluator`) |
+| `P-2.10` | `enforcer` | `autonoetic_agent` | `test` | Gate-suspended turns (approval, user interaction, escalation) checkpoint via `YieldReason` and resume through `resume_from_checkpoint`. |
+| `P-2.11` | `enforcer` | none *(integrity property)* | `test` | Suspended turns exceeding timeout mark the task failed while preserving continuation for explicit operator-driven resume. |
+| `P-2.12` | `enforcer` | `autonoetic_agent` | `test` | Deciders (human operators, autonomous reviewer agents, or policy engines) approve/reject gates via the approval resolution API. |
+| `P-2.13` | `enforcer` | none *(integrity property)* | `test` | `user_ask` creates a gate via `GateService` with `GateKind::UserInput` and checkpoints the session as `YieldReason::UserInputRequired`. |
+| `P-2.14` | `enforcer` | none *(integrity property)* | `test` | `user_ask` is refused if the workflow has active children or pending gates (approvals, escalations, or other `user_ask` interactions). |
+| `P-2.15` | `enforcer` | `autonoetic_agent` | `test` | Spawn payload is preserved verbatim across approval resume. |
+| `P-2.16` | `enforcer` | `decider` *(seat)* | `chokepoint` | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. |
+| `P-2.17` | `enforcer` | none *(integrity property)* | `chokepoint` | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). |
+| `P-2.18` | `enforcer` | none *(integrity property)* | `chokepoint` | All execution suspension points awaiting external input (approvals, user interactions, escalations) use the unified `GateService`. |
+| `P-2.19` | `enforcer` | none *(integrity property)* | `test` | Gate enrichment messages (`gate_messages`) are append-only and recorded on the causal chain. |
+| `P-2.20` | `enforcer` | none *(integrity property)* | `chokepoint` | Agents acting as gate deciders require the `GateDecider` capability. |
+| `P-2.21` | `decider` | `autonoetic_agent` | `test` | When an agent-decider cannot determine whether to approve or reject a gate (insufficient context, policy ambiguity, or high-risk action beyond its scope), it must escalate to a human operator rather than reject. |
+| `P-2.22` | `enforcer` | none *(integrity property)* | `chokepoint` | When a revision carries federation-role verdicts, promotion runs the **FullJury** gate |
+| `P-2.23` | `enforcer` | none *(integrity property)* | `test` | Session approval grants expire after a configured TTL |
+| `P-2.24` | `enforcer` | `decider` *(seat)* | `test` | Operator approval hardening on high-risk gates |
+| `P-2.25` | `enforcer` | none *(integrity property)* | `chokepoint` | **Promotion is fail-closed.** Whether a revision may be promoted, and what it must satisfy, is determined **mechanically by the gateway** from the revision's declared capabilities and artifact — never inferred from orchestrator-supplied signals (recorded verdicts, an attached synthesis, or the presence/absence of a field). |
+| `P-2.26` | `enforcer` | none *(integrity property)* | `chokepoint` | **All executed gate roles must pass.** When a federation gate role (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`) has recorded a verdict for a revision's artifact, the promotion gate mechanically checks that **every** such role recorded `pass=true`. |
+| `P-2.27` | `enforcer` | `decider` *(seat)* | `test` | A **session capability envelope**, locked by operator decision, pre-authorizes tool calls within its scope. |
+| `P-2.28` | `enforcer` | none *(integrity property)* | `chokepoint` | **Smoke-test gate for new agents.** New agents declaring `NetworkAccess` or `CodeExecution` require a successful execution trace before promotion to `Ready`. |
+| `P-2.29` | `enforcer` | none *(integrity property)* | `chokepoint` | **Promotion attempt exhaustion gate.** Too many rejected promotion attempts for the same `(alias, content_digest)` across sessions blocks further attempts until an operator acknowledges the revision. |
 | `P-3.1` | — | — | — | *unclassified.* Sandboxes default to `--unshare-all` — no network, no PID namespace. |
 | `P-3.2` | — | — | — | *unclassified.* `--share-net` for `sandbox_exec` follows the per-exec operator network grant |
 | `P-3.3` | — | — | — | *unclassified.* Script-mode sandbox execution uses identical isolation policy. |
@@ -154,28 +154,28 @@ A right is a *view*, not a family: an enforcer duty owed to the agent is an agen
 | `P-6.24` | — | — | — | *unclassified.* Duplicate durable operations (install, promote, rollback, artifact-backed build stages) are detected by a single-flight dedupe key — `(workflow_id, stage_kind, agent_id, artifact_ref)`, with a normalized intent digest substituted for `artifact_ref` on reasoning-only installs. |
 | `P-6.25` | — | — | — | *unclassified.* Stage-local retry is opt-in and bounded. |
 | `P-6.26` | — | — | — | *unclassified.* Durable operations report `side_effect_state` from a closed enum (`none`, `committed`, `unknown`). |
-| `P-7.1` | — | — | — | *unclassified.* Emergency stop is reachable by operators, gateway security policy, or agents with `EmergencyStop`. |
-| `P-7.2` | — | — | — | *unclassified.* Emergency stop kills child processes (SIGKILL), aborts tokio tasks, cancels pending approvals, revokes session envelopes (P-2.27), marks session `EmergencyStopped`. |
-| `P-7.3` | — | — | — | *unclassified.* Emergency stop deletes session grants and revokes session envelopes for the root session. |
-| `P-7.4` | — | — | — | *unclassified.* Emergency stops are recorded in the `emergency_stops` table. |
-| `P-7.5` | — | — | — | *unclassified.* Loop guard trips on `max_tool_failures` per tool (configurable; current default in `docs/reference/config.md`) |
-| `P-7.6` | — | — | — | *unclassified.* Fatal errors (`error_type: fatal`) abort the session regardless of loop-guard budget. |
-| `P-7.7` | — | — | — | *unclassified.* Consecutive LLM steps without a successful tool result trip the loop guard. |
-| `P-7.8` | — | — | — | *unclassified.* Concurrent spawns beyond capability limit return `quota_exceeded`. |
-| `P-7.9` | — | — | — | *unclassified.* `AgentSpawn.max_children` is enforced per agent. |
-| `P-7.10` | — | — | — | *unclassified.* Scheduler rejects sub-threshold intervals (`min_interval_secs`) |
-| `P-7.11` | — | — | — | *unclassified.* Approval timeout fails the task while preserving the continuation for operator-driven resume. |
-| `P-7.12` | — | — | — | *unclassified.* Promotion gate has no escape hatch |
-| `P-7.13` | — | — | — | *unclassified.* Unresolved dependencies block promotion for high-risk agents. |
-| `P-7.14` | — | — | — | *unclassified.* `force_complete` refuses `Succeeded` without real child-session evidence. |
-| `P-7.15` | — | — | — | *unclassified.* Spawn-chain depth is bounded system-wide |
-| `P-7.16` | — | — | — | *unclassified.* Orphan children are reaped when the parent session terminates |
-| `P-7.17` | — | — | — | *unclassified.* Approval flood cap — pending approvals per root session bounded. |
-| `P-7.18` | — | — | — | *unclassified.* A **degraded** session state exists between healthy and emergency-stopped. |
-| `P-7.19` | — | — | — | *unclassified.* The loop guard also trips when successful tool calls make no *semantic* progress. |
-| `P-7.20` | — | — | — | *unclassified.* The loop guard trips when child-task failures in a session reach `loop_guard.max_child_failures` (configurable; current default in `docs/reference/config.md`). |
-| `P-7.21` | — | — | — | *unclassified.* The sandbox→gateway SDK bridge enforces request-rate and payload-size limits. |
-| `P-7.22` | — | — | — | *unclassified.* Sandbox-escape attempts are counted per session — kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and driver-equivalents on docker/microvm/wasm increment a per-session counter. |
+| `P-7.1` | `enforcer` | none *(integrity property)* | `test` | Emergency stop is reachable by operators, gateway security policy, or agents with `EmergencyStop`. |
+| `P-7.2` | `enforcer` | none *(integrity property)* | `test` | Emergency stop kills child processes (SIGKILL), aborts tokio tasks, cancels pending approvals, revokes session envelopes (P-2.27), marks session `EmergencyStopped`. |
+| `P-7.3` | `enforcer` | none *(integrity property)* | `test` | Emergency stop deletes session grants and revokes session envelopes for the root session. |
+| `P-7.4` | `enforcer` | none *(integrity property)* | `test` | Emergency stops are recorded in the `emergency_stops` table. |
+| `P-7.5` | `enforcer` | none *(integrity property)* | `test` | Loop guard trips on `max_tool_failures` per tool (configurable; current default in `docs/reference/config.md`) |
+| `P-7.6` | `enforcer` | none *(integrity property)* | `test` | Fatal errors (`error_type: fatal`) abort the session regardless of loop-guard budget. |
+| `P-7.7` | `enforcer` | none *(integrity property)* | `test` | Consecutive LLM steps without a successful tool result trip the loop guard. |
+| `P-7.8` | `enforcer` | none *(integrity property)* | `test` | Concurrent spawns beyond capability limit return `quota_exceeded`. |
+| `P-7.9` | `enforcer` | none *(integrity property)* | `test` | `AgentSpawn.max_children` is enforced per agent. |
+| `P-7.10` | `enforcer` | none *(integrity property)* | `test` | Scheduler rejects sub-threshold intervals (`min_interval_secs`) |
+| `P-7.11` | `enforcer` | none *(integrity property)* | `test` | Approval timeout fails the task while preserving the continuation for operator-driven resume. |
+| `P-7.12` | `enforcer` | none *(integrity property)* | `chokepoint` | Promotion gate has no escape hatch |
+| `P-7.13` | `enforcer` | none *(integrity property)* | `chokepoint` | Unresolved dependencies block promotion for high-risk agents. |
+| `P-7.14` | `enforcer` | none *(integrity property)* | `test` | `force_complete` refuses `Succeeded` without real child-session evidence. |
+| `P-7.15` | `enforcer` | none *(integrity property)* | `test` | Spawn-chain depth is bounded system-wide |
+| `P-7.16` | `enforcer` | none *(integrity property)* | `test` | Orphan children are reaped when the parent session terminates |
+| `P-7.17` | `enforcer` | none *(integrity property)* | `test` | Approval flood cap — pending approvals per root session bounded. |
+| `P-7.18` | `enforcer` | `autonoetic_agent` | `test` | A **degraded** session state exists between healthy and emergency-stopped. |
+| `P-7.19` | `enforcer` | none *(integrity property)* | `test` | The loop guard also trips when successful tool calls make no *semantic* progress. |
+| `P-7.20` | `enforcer` | none *(integrity property)* | `test` | The loop guard trips when child-task failures in a session reach `loop_guard.max_child_failures` (configurable; current default in `docs/reference/config.md`). |
+| `P-7.21` | `enforcer` | none *(integrity property)* | `test` | The sandbox→gateway SDK bridge enforces request-rate and payload-size limits. |
+| `P-7.22` | `enforcer` | none *(integrity property)* | `detection` | Sandbox-escape attempts are counted per session — kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and driver-equivalents on docker/microvm/wasm increment a per-session counter. |
 | `P-8.1` | `enforcer` | none *(integrity property)* | `chokepoint` | Causal chain is append-only JSONL with hash-chain integrity (`entry_hash`, `prev_hash`). |
 | `P-8.2` | — | — | — | *unclassified.* Every session, LLM, tool, script, gateway, and memory event is logged with a unique `event_id`. |
 | `P-8.3` | — | — | — | *unclassified.* `event_id` is the universal correlation key across traces, reports, and observability. |
