@@ -53,7 +53,7 @@ pub fn load_manifest_remote_access_declaration(
             return None;
         }
     };
-    let Some(frontmatter) = skill.split("---").nth(1) else {
+    let Some(frontmatter) = crate::runtime::extract_yaml_frontmatter(&skill) else {
         tracing::warn!(
             target: "network_policy",
             skill_path = %skill_path.display(),

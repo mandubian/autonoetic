@@ -14,7 +14,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::network_policy::DeclarationRequirement;
-use crate::runtime::tools::{NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{block_on_http, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
 use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
@@ -118,23 +118,15 @@ pub(crate) fn store_collected_secret_values(
     }
 }
 
-/// Execute a blocking HTTP request inside `block_in_place` to avoid deadlocking
-/// the tokio runtime. `reqwest::blocking::Client` creates its own internal runtime,
-/// which can deadlock when called directly from an async context.
-fn blocking_http_request<F, R>(f: F) -> anyhow::Result<R>
-where
-    F: FnOnce() -> anyhow::Result<R> + Send + 'static,
-    R: Send + 'static,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| {
-            handle.block_on(async { tokio::task::spawn_blocking(f).await })
-        })
-        .map_err(|_| anyhow::anyhow!("blocking HTTP request panicked"))?
-    } else {
-        f()
-    }
-}
+/// All HTTP in credential tools goes through `block_on_http` + the async
+/// `reqwest::Client` (same pattern as the skill and web tools). The previous
+/// `reqwest::blocking` + `spawn_blocking` wrapper was removed after a
+/// production incident where a `reqwest::blocking::Client` built inside the
+/// runtime failed its startup handshake ("Failed to communicate successful
+/// startup") and silently hung the child turn: the workflow claim heartbeat
+/// kept the task looking alive and no recovery path would touch it.
+/// `reqwest::blocking` creates its own internal tokio runtime per client and
+/// must never be entered from a runtime thread — see `block_on_http`.
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
@@ -841,8 +833,8 @@ impl NativeTool for CredentialRequestTool {
             let eff = effective_inject.clone();
 
             let (status, body) =
-                blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                    let client = reqwest::blocking::Client::builder()
+                block_on_http(async move {
+                    let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(30))
                         .build()?;
 
@@ -914,9 +906,9 @@ impl NativeTool for CredentialRequestTool {
                             query_param
                         ))
                     };
-                    let resp = req.send().map_err(redact_err)?;
+                    let resp = req.send().await.map_err(redact_err)?;
                     let status = resp.status().as_u16();
-                    let body = resp.text().map_err(redact_err)?;
+                    let body = resp.text().await.map_err(redact_err)?;
                     Ok((status, body))
                 })?;
 
@@ -1271,8 +1263,8 @@ impl NativeTool for CredentialRefreshTool {
         let ru = refresh_url.clone();
         let rm = refresh_method.clone();
         let rh = refresh_headers.clone();
-        let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-            let client = reqwest::blocking::Client::builder()
+        let (status, body) = block_on_http(async move {
+            let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?;
             let mut req = client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
@@ -1285,9 +1277,9 @@ impl NativeTool for CredentialRefreshTool {
                 "grant_type": "refresh_token",
                 "refresh_token": rt,
             }));
-            let resp = req.send()?;
+            let resp = req.send().await?;
             let status = resp.status().as_u16();
-            let body = resp.text()?;
+            let body = resp.text().await?;
             Ok((status, body))
         })?;
 
@@ -1422,8 +1414,8 @@ fn try_auto_refresh(
     let ru = refresh_url.clone();
     let rm = refresh_method.clone();
     let rh = refresh_headers.clone();
-    let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-        let client = reqwest::blocking::Client::builder()
+    let (status, body) = block_on_http(async move {
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let mut req = client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
@@ -1436,8 +1428,8 @@ fn try_auto_refresh(
             "grant_type": "refresh_token",
             "refresh_token": rt,
         }));
-        let resp = req.send()?;
-        Ok((resp.status().as_u16(), resp.text()?))
+        let resp = req.send().await?;
+        Ok((resp.status().as_u16(), resp.text().await?))
     })?;
 
     if status >= 400 {
@@ -2151,17 +2143,17 @@ impl NativeTool for CredentialSetupTool {
 
                     let url_clone = url.clone();
                     let (http_status, content) =
-                        blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                            let client = reqwest::blocking::Client::builder()
+                        block_on_http(async move {
+                            let client = reqwest::Client::builder()
                                 .timeout(std::time::Duration::from_secs(15))
                                 .build()?;
-                            let resp = client.get(url_clone.as_str()).send()?;
+                            let resp = client.get(url_clone.as_str()).send().await?;
                             let status = resp.status().as_u16();
-                            if !resp.status().is_success() {
-                                let _ = resp.text()?;
+                            if !(200..300).contains(&status) {
+                                let _ = resp.text().await?;
                                 return Ok((status, String::new()));
                             }
-                            let content = resp.text()?;
+                            let content = resp.text().await?;
                             Ok((status, content))
                         })?;
 
@@ -2661,8 +2653,8 @@ fn execute_steps(
                 let resolved_body_clone = resolved_body.clone();
 
                 let (status, resp_body) =
-                    blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                        let client = reqwest::blocking::Client::builder()
+                    block_on_http(async move {
+                        let client = reqwest::Client::builder()
                             .timeout(std::time::Duration::from_secs(30))
                             .build()?;
 
@@ -2677,9 +2669,9 @@ fn execute_steps(
                             req = req.json(b);
                         }
 
-                        let resp = req.send()?;
+                        let resp = req.send().await?;
                         let status = resp.status().as_u16();
-                        let resp_body = resp.text()?;
+                        let resp_body = resp.text().await?;
                         Ok((status, resp_body))
                     })?;
                 let resp_value: serde_json::Value =

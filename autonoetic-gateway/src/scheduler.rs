@@ -1551,6 +1551,20 @@ fn task_claim_stale_after_secs(config: &autonoetic_types::config::GatewayConfig)
         .max(30)
 }
 
+/// WARN interval for a workflow task executor whose turn has not completed while
+/// its claim heartbeat is being refreshed (process alive ≠ turn progressing).
+fn task_claim_stuck_warn_secs(config: &autonoetic_types::config::GatewayConfig) -> u64 {
+    config.stuck_task_warn_secs.unwrap_or(600)
+}
+
+/// Hard cap on a workflow task executor's turn lifetime. Past this the heartbeat
+/// loop adjudicates the task (Failed + `task.stuck` event) even though the claim
+/// heartbeat is fresh, because every claim-staleness recovery path is exempted
+/// by that same heartbeat.
+fn task_claim_stuck_hard_timeout_secs(config: &autonoetic_types::config::GatewayConfig) -> u64 {
+    config.stuck_task_hard_timeout_secs.unwrap_or(1800)
+}
+
 /// Process queued workflow tasks: dequeue, create TaskRun records, and spawn child agents.
 ///
 async fn resume_answered_standalone_interactions(
@@ -2294,14 +2308,128 @@ async fn spawn_task_execution(
     let heartbeat_cfg = cfg.clone();
     let heartbeat_wf_id = wf_id.clone();
     let heartbeat_task_id = t_id.clone();
+    let heartbeat_session_id = session_id.clone();
+    let heartbeat_agent_id = agent_id.clone();
     let heartbeat_exec_id = execution_id.clone();
     let heartbeat_gs = exec.gateway_store();
     let heartbeat_interval_secs = task_claim_heartbeat_interval_secs(cfg.as_ref());
+    let warn_after_secs = task_claim_stuck_warn_secs(cfg.as_ref());
+    let hard_timeout_secs = task_claim_stuck_hard_timeout_secs(cfg.as_ref());
     let heartbeat = tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval_secs));
+        let started = std::time::Instant::now();
+        let mut next_warn_secs = warn_after_secs;
         loop {
             interval.tick().await;
+            // The claim heartbeat proves the gateway process is alive, not that
+            // the turn is progressing. A turn hung inside a single tool call
+            // (e.g. a blocking HTTP client entered on the async runtime) keeps
+            // every liveness signal fresh forever, which exempts it from the
+            // recovery poller ("claim freshness decides recovery") and the
+            // stuck-task sweeper ("skipping task with fresh claim heartbeat")
+            // indefinitely. Escalate on turn age: WARN at each multiple of
+            // `stuck_task_warn_secs`, and past `stuck_task_hard_timeout_secs`
+            // adjudicate the task directly — the executor is alive but its turn
+            // never completed, and every recovery path that re-spawns would
+            // block on the agent execution lock this very turn still holds.
+            let elapsed_secs = started.elapsed().as_secs();
+            if hard_timeout_secs > 0 && elapsed_secs >= hard_timeout_secs {
+                let last_checkpoint =
+                    workflow_store::load_task_checkpoint(&heartbeat_cfg, None, &heartbeat_wf_id, &heartbeat_task_id)
+                        .ok()
+                        .flatten();
+                let checkpoint_label = last_checkpoint.as_ref().map_or_else(
+                    || "none".to_string(),
+                    |cp| format!("step: {}, version: {}", cp.step, cp.version),
+                );
+                tracing::error!(
+                    target: "workflow",
+                    task_id = %heartbeat_task_id,
+                    workflow_id = %heartbeat_wf_id,
+                    session_id = %heartbeat_session_id,
+                    agent_id = %heartbeat_agent_id,
+                    elapsed_secs,
+                    last_checkpoint = %checkpoint_label,
+                    "Workflow task executor exceeded stuck_task_hard_timeout_secs with a fresh claim: the turn is alive but has not completed — marking the task Failed so the workflow is not silently blocked. If the underlying turn later finishes its result replaces this verdict; investigate the executor for a hung tool call."
+                );
+                let summary = format!(
+                    "stuck_executor: turn alive but uncompleted for {}s (last task checkpoint: {}); claim heartbeat was fresh, so sweeper/poller were exempting it — hard timeout adjudicated the task as Failed",
+                    elapsed_secs, checkpoint_label
+                );
+                let _ = workflow_store::update_task_run_status(
+                    &heartbeat_cfg,
+                    None,
+                    &heartbeat_wf_id,
+                    &heartbeat_task_id,
+                    autonoetic_types::workflow::TaskRunStatus::Failed,
+                    Some(summary),
+                    None,
+                    None,
+                );
+                let _ = workflow_store::checkpoint_task(
+                    &heartbeat_cfg,
+                    None,
+                    &heartbeat_wf_id,
+                    &heartbeat_task_id,
+                    "stuck_failed".to_string(),
+                    serde_json::json!({
+                        "status": "failed",
+                        "reason": "stuck_executor_hard_timeout",
+                        "elapsed_secs": elapsed_secs,
+                        "last_checkpoint": checkpoint_label,
+                        "completed_by": "claim_heartbeat_loop",
+                    }),
+                );
+                let _ = workflow_store::dequeue_task(
+                    &heartbeat_cfg,
+                    None,
+                    &heartbeat_wf_id,
+                    &heartbeat_task_id,
+                );
+                let _ = workflow_store::append_workflow_event(
+                    &heartbeat_cfg,
+                    None,
+                    &autonoetic_types::workflow::WorkflowEventRecord {
+                        event_id: format!("wevt-stuck-exec-{}", &heartbeat_task_id),
+                        workflow_id: heartbeat_wf_id.clone(),
+                        event_type: "task.stuck".to_string(),
+                        task_id: Some(heartbeat_task_id.clone()),
+                        agent_id: Some(heartbeat_agent_id.clone()),
+                        payload: serde_json::json!({
+                            "reason": "stuck_executor_hard_timeout",
+                            "session_id": heartbeat_session_id,
+                            "elapsed_secs": elapsed_secs,
+                            "last_checkpoint": checkpoint_label,
+                            "resolved_status": "failed",
+                        }),
+                        occurred_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                if let Some(ref g) = heartbeat_gs {
+                    let _ = g.complete_active_execution(&heartbeat_exec_id, "failed", None);
+                }
+                let _ = workflow_store::release_task_claim(
+                    &heartbeat_cfg,
+                    None,
+                    &heartbeat_wf_id,
+                    &heartbeat_task_id,
+                );
+                break;
+            }
+            if warn_after_secs > 0 && elapsed_secs >= next_warn_secs {
+                tracing::warn!(
+                    target: "workflow",
+                    task_id = %heartbeat_task_id,
+                    workflow_id = %heartbeat_wf_id,
+                    session_id = %heartbeat_session_id,
+                    elapsed_secs,
+                    warn_after_secs = next_warn_secs,
+                    hard_timeout_secs,
+                    "Workflow task executor running longer than stuck_task_warn_secs with a fresh claim heartbeat — the turn may be stuck inside a tool call. Will hard-fail at stuck_task_hard_timeout_secs if it does not complete."
+                );
+                next_warn_secs += warn_after_secs;
+            }
             let _ = workflow_store::refresh_task_claim_heartbeat(
                 &heartbeat_cfg,
                 None,

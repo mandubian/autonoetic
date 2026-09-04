@@ -64,6 +64,8 @@ drifted from the code and must be updated.
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
 | `stuck_task_timeout_secs` | u64 \| null | `600` | Max seconds a `Running` workflow task can go without progress before the stuck-task sweeper resolves it. Tasks with a fresh claim heartbeat are never swept. When the child session has completion evidence (manifest, digest, checkpoint, or implicit artifact), the sweeper force-completes it as `Succeeded`. With no evidence, `stuck_task_no_evidence_action` controls the outcome. `null` uses the default (600). Set to `0` to disable. |
 | `stuck_task_no_evidence_action` | string | `"fail"` | Action the stuck-task sweeper takes when a `Running` task has no completion evidence and a stale claim heartbeat. `"fail"` (default) resolves the task as `Failed`, finalizes its session transcript as failed, and emits a `task.stuck` anomaly event. `"succeed"` preserves legacy behavior and force-completes it as `Succeeded`. |
+| `stuck_task_warn_secs` | u64 \| null | `600` | WARN interval for a workflow task executor that keeps refreshing its claim heartbeat without completing its turn. A fresh heartbeat proves the gateway process is alive, not that the turn progresses — a turn hung inside a single tool call stays exempt from stuck-task recovery (`stuck_task_timeout_secs`) forever. At each multiple of this threshold the executor's heartbeat loop emits a WARN. `null` uses the default (600). Set to `0` to disable. |
+| `stuck_task_hard_timeout_secs` | u64 \| null | `1800` | Hard cap on a workflow task executor's turn lifetime. Past this the heartbeat loop adjudicates the task itself — `Failed` with `stuck_executor` semantics, `stuck_failed` checkpoint, dequeue, and a `task.stuck` workflow event — even though the claim heartbeat is fresh, because a live-but-hung executor would otherwise block its workflow silently (every re-spawn path also blocks on the execution lock the hung turn still holds). `null` uses the default (1800). Set to `0` to disable (not recommended). |
 | `approval_dwell_multiplier` | f64 | `1.0` | Multiplier applied to approval dwell times (P-2.24). Values above `1.0` slow down approval resolution. Set to `0` to disable dwell enforcement (tests). |
 | `signal_delivery_timeout_secs` | u64 | `60` | Timeout in seconds for signal delivery responses (approval resolution, workflow join). The signal sender waits this long for the planner to finish processing the triggered `event.ingest` turn. |
 | `default_workflow_wait_secs` | u64 | `30` | Default per-chunk blocking timeout for `workflow.wait` when the caller omits `timeout_secs`. The tool blocks (signal-driven, via the per-session notify registry) until all watched task IDs reach a terminal state or this deadline elapses; it does **not** poll. Set to `0` to restore the legacy immediate-return ("probe") behaviour. See Ri-0.14 — orchestration should prefer the `WaitingForChild` wake-up over blocking here. |
@@ -1633,6 +1635,8 @@ max_pending_anomaly_flags_per_reporter: 50
 workflow_task_heartbeat_secs: 2
 stuck_task_timeout_secs: 600
 stuck_task_no_evidence_action: fail
+stuck_task_warn_secs: 600
+stuck_task_hard_timeout_secs: 1800
 approval_dwell_multiplier: 1.0
 signal_delivery_timeout_secs: 60
 evidence_mode: full

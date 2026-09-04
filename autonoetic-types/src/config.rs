@@ -1354,6 +1354,29 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub stuck_task_no_evidence_action: StuckTaskNoEvidenceAction,
 
+    /// Warn threshold (seconds) for a workflow task whose executor has been alive
+    /// (heartbeat refreshing) without completing its turn. The executor's claim
+    /// heartbeat proves the process is alive, not that the turn is making progress —
+    /// a hung tool call (e.g. a blocking HTTP client inside the async runtime) keeps
+    /// the heartbeat fresh forever while the task silently never finishes. At each
+    /// multiple of this threshold the heartbeat loop emits a WARN so a stall is
+    /// visible long before any recovery path fires. Set to 0 to disable.
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_stuck_task_warn_secs_val")]
+    pub stuck_task_warn_secs: Option<u64>,
+
+    /// Hard cap (seconds) on a workflow task executor's turn lifetime. A live
+    /// executor holding a fresh claim is normally exempt from stuck-task recovery
+    /// ("claim freshness decides recovery"), so a turn hung inside a single tool
+    /// call would otherwise block its workflow forever with no signal. When the
+    /// executor has run longer than this without completing its turn, the
+    /// heartbeat loop adjudicates the task itself: Failed (`stuck_no_evidence`
+    /// semantics), `stuck_failed` checkpoint, dequeue, `task.stuck` event, claim
+    /// released. Set to 0 to disable (not recommended).
+    /// Default: 1800 (30 minutes).
+    #[serde(default = "default_stuck_task_hard_timeout_secs_val")]
+    pub stuck_task_hard_timeout_secs: Option<u64>,
+
     /// Evidence mode configuration.
     /// Controls how much tool/LLM execution data is saved to evidence files for debugging.
     /// "full": all tool results and LLM completions (default for development)
@@ -3159,6 +3182,14 @@ fn default_stuck_task_timeout_secs_val() -> Option<u64> {
     Some(600)
 }
 
+fn default_stuck_task_warn_secs_val() -> Option<u64> {
+    Some(600)
+}
+
+fn default_stuck_task_hard_timeout_secs_val() -> Option<u64> {
+    Some(1800)
+}
+
 fn default_max_session_turns() -> u32 {
     25
 }
@@ -3800,6 +3831,8 @@ impl Default for GatewayConfig {
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             stuck_task_no_evidence_action: StuckTaskNoEvidenceAction::default(),
+            stuck_task_warn_secs: default_stuck_task_warn_secs_val(),
+            stuck_task_hard_timeout_secs: default_stuck_task_hard_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
             session_report: SessionReportConfig::default(),
             digest_agent: DigestAgentConfig::default(),

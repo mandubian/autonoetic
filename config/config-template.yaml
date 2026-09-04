@@ -186,6 +186,21 @@ approval_timeout_secs: 600
 # `succeed` preserves legacy behavior. Default: 600. Set to 0 to disable.
 # stuck_task_timeout_secs: 600
 # stuck_task_no_evidence_action: fail
+# Optional: WARN interval (seconds) for a workflow task whose executor keeps
+# refreshing its claim heartbeat without ever completing its turn. A fresh
+# heartbeat proves the gateway process is alive, not that the turn progresses —
+# a turn hung inside a single tool call stays exempt from stuck-task recovery
+# forever. At each multiple of this threshold the executor's heartbeat loop
+# emits a WARN. 0 disables. Default: 600.
+# stuck_task_warn_secs: 600
+# Optional: hard cap (seconds) on a workflow task executor's turn lifetime.
+# Past this the heartbeat loop adjudicates the task itself — Failed with
+# `stuck_executor` semantics, `stuck_failed` checkpoint, dequeue, and a
+# `task.stuck` workflow event — even though the claim heartbeat is fresh,
+# because a live-but-hung executor would otherwise block its workflow
+# silently (every re-spawn path also blocks on the execution lock the hung
+# turn still holds). 0 disables (not recommended). Default: 1800.
+# stuck_task_hard_timeout_secs: 1800
 # Multiplier applied to approval dwell times (R++4). Default: 1.0. Set to 0 to disable (tests).
 # approval_dwell_multiplier: 1.0
 

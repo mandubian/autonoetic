@@ -114,9 +114,36 @@ pub fn is_test_file(name: &str) -> bool {
         || lower.ends_with(".spec.js")
 }
 
+/// Extract the YAML frontmatter segment from a Markdown document (`---` … `---`).
+///
+/// The opening delimiter must be the first line of the document; the closing
+/// delimiter must be a line consisting solely of `---` (or `...`). Splitting on
+/// the raw substring `"---"` is wrong: frontmatter routinely contains longer
+/// dash runs (`- "-----BEGIN"` in `prohibited_text_patterns`), and a substring
+/// split truncates the segment mid-line — the parser then sees an unterminated
+/// quoted scalar and the declaration silently degrades to "absent".
+pub fn extract_yaml_frontmatter(doc: &str) -> Option<&str> {
+    let rest = doc.strip_prefix("---")?;
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))?;
+    let mut end = None;
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if trimmed.eq("---") || trimmed.eq("...") {
+            end = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+    Some(&rest[..end?])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_test_file;
+    use super::{extract_yaml_frontmatter, is_test_file};
 
     #[test]
     fn is_test_file_detects_tests_directory_prefix() {
@@ -159,5 +186,56 @@ mod tests {
         assert!(!is_test_file("main.py"));
         assert!(!is_test_file("requirements.txt"));
         assert!(!is_test_file("README.md"));
+    }
+
+    #[test]
+    fn frontmatter_extracts_basic_segment() {
+        let doc = "---\nname: x\n---\nbody";
+        assert_eq!(extract_yaml_frontmatter(doc), Some("name: x\n"));
+    }
+
+    #[test]
+    fn frontmatter_extracts_with_dots_terminator_and_crlf() {
+        let doc = "---\r\nname: x\r\n...\r\nbody";
+        assert_eq!(extract_yaml_frontmatter(doc), Some("name: x\r\n"));
+    }
+
+    #[test]
+    fn frontmatter_requires_opening_delimiter_on_first_line() {
+        assert_eq!(extract_yaml_frontmatter("body\n---\nx\n---\n"), None);
+        assert_eq!(extract_yaml_frontmatter(""), None);
+    }
+
+    #[test]
+    fn frontmatter_without_closing_delimiter_is_none() {
+        assert_eq!(extract_yaml_frontmatter("---\nname: x\nbody"), None);
+    }
+
+    /// Regression: a `-----BEGIN` dash-run inside frontmatter must not
+    /// terminate the segment. A substring split on `"---"` truncated the
+    /// segment at the dash run, leaving an unterminated quoted scalar — the
+    /// exact "unexpected end of stream while scanning a quoted scalar" that
+    /// silenced the credential_onboarding.default remote_access declaration.
+    #[test]
+    fn frontmatter_survives_dash_run_in_quoted_scalar() {
+        let doc = "---\nprohibited_text_patterns:\n  - \"BEGIN RSA PRIVATE KEY\"\n  - \"-----BEGIN\"\nloop_guard:\n  max_tool_failures: 8\n---\nbody";
+        let fm = extract_yaml_frontmatter(doc).expect("frontmatter must extract");
+        assert!(fm.contains("-----BEGIN"));
+        assert!(fm.contains("max_tool_failures"));
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(fm).expect("extracted frontmatter must parse as YAML");
+        assert_eq!(
+            value["prohibited_text_patterns"][1].as_str(),
+            Some("-----BEGIN")
+        );
+    }
+
+    /// Same shape without quotes: an unquoted `-----BEGIN` scalar is still
+    /// frontmatter content, not a delimiter.
+    #[test]
+    fn frontmatter_survives_unquoted_dash_run() {
+        let doc = "---\nblock: |-\n  -----BEGIN CERTIFICATE-----\nname: x\n---\n";
+        let fm = extract_yaml_frontmatter(doc).expect("frontmatter must extract");
+        assert!(fm.contains("BEGIN CERTIFICATE"));
     }
 }

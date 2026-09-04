@@ -196,7 +196,7 @@ pub(crate) fn is_resolve_content_read(tool_name: &str, arguments_json: &str) -> 
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
     let skill = std::fs::read_to_string(skill_path).ok()?;
-    let frontmatter = skill.split("---").nth(1)?;
+    let frontmatter = crate::runtime::extract_yaml_frontmatter(&skill)?;
     let root = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
 
     let direct = root.get("loop_guard").cloned();

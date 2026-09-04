@@ -300,7 +300,9 @@ the single join already does that."
 
             if target_agent_path.exists() {
                 if let Ok(manifest_content) = std::fs::read_to_string(&target_agent_path) {
-                    if let Some(frontmatter) = manifest_content.split("---").nth(1) {
+                    if let Some(frontmatter) =
+                        crate::runtime::extract_yaml_frontmatter(&manifest_content)
+                    {
                         if let Ok(target_manifest) =
                             serde_yaml::from_str::<AgentManifest>(frontmatter)
                         {

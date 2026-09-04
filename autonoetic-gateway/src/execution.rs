@@ -552,7 +552,7 @@ fn parse_skill_md_artifact(
     }
 
     let (name, description, script_entry, io) =
-        match content.split("---").collect::<Vec<&str>>().get(1) {
+        match crate::runtime::extract_yaml_frontmatter(content) {
             Some(frontmatter) => {
                 // Attempt to parse YAML - if it fails, use defaults
                 match serde_yaml::from_str::<SkillFrontmatter>(frontmatter) {

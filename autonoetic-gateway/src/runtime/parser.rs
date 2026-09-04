@@ -375,9 +375,10 @@ fn anomalies_property_schema() -> serde_json::Value {
 }
 
 fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
-    let mut parts = content.splitn(3, "---");
-    let _ = parts.next();
-    let Some(frontmatter) = parts.next() else {
+    // Line-aware extraction (`splitn(3, "---")` truncates the segment at any
+    // dash run inside the frontmatter, e.g. `- "-----BEGIN"` in
+    // prohibited_text_patterns, letting a later legacy field escape the ban).
+    let Some(frontmatter) = super::extract_yaml_frontmatter(content) else {
         return Ok(());
     };
 
