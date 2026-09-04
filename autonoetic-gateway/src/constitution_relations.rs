@@ -69,17 +69,24 @@
 //!
 //! # What the completed classification says
 //!
-//! **One clause in 221 binds the reasoner.** 215 bind the enforcer, 5 bind
-//! the decider, and `P-2.9` alone binds the agent — "they must attach
-//! `execution_trace_id` from a completed run".
+//! **One clause in 221 binds the reasoner** — `P-2.9`, "they must attach
+//! `execution_trace_id` from a completed run". 215 bind the enforcer, 5 the
+//! decider.
 //!
-//! That is worth sitting with, because the old `binds()` reported *every*
-//! `P-*` as binding the agent. The document is almost entirely a constraint
-//! on the party with power, not on the party under governance: agents are
-//! told what will be prevented, not what they must do. `docs/concepts/philosophy.md`
-//! §2 argues bind direction is the structural novelty here; the measured
-//! ratio is 215:1 in the direction that claim predicts, which is a stronger
-//! result than the prose ever asserted.
+//! (Deliberately "reasoner", not "agent". `agent` is the retired vocabulary
+//! this model replaced — it named a principal kind where a *power* belongs,
+//! which is defect 1.2. Using it here would be the same slip in the doc that
+//! reports the fix. It appears below only when describing what the old
+//! `binds()` said.)
+//!
+//! That ratio is worth sitting with, because the derivation this replaced
+//! reported *every* `P-*` as binding the agent. Measured, the document is
+//! almost entirely a constraint on the party with power rather than on the
+//! party under governance: agents are told what will be prevented, not what
+//! they must do. `docs/concepts/philosophy.md` §2 argues bind direction is the
+//! structural novelty here, and 215:1 in the direction that claim predicts is
+//! a stronger result than the prose ever asserted — and one that was
+//! unmeasurable before, because the old model could not express it.
 //!
 //! **38 clauses are agent rights by relation** — enforcer duties owed to the
 //! agent. Only **17** of them carry an `Ri-` prefix; the other **21** are

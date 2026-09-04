@@ -8167,13 +8167,14 @@ mod tests {
         // Bind direction is read from the register's declared field, never
         // derived from the ID prefix (#1284). Two consequences visible here:
         //
-        // 1. A registered clause reports its declared power. `P-15.1` is an
+        // 1. Every clause reports its declared power. `P-15.1` is an
         //    *enforcer* duty — `I-14` forbids an agent from setting, stripping
         //    or reading an egress label, so the pre-#1284 answer ("agent")
         //    named a party that cannot comply even in principle.
-        // 2. An unclassified clause says so. `P-1.1` is not in the register,
-        //    and reports `undeclared` rather than the prefix's guess. The
-        //    remaining ~163 numbered clauses are tracked in #1284 part 2.
+        // 2. `undeclared` appears nowhere. It was the honest answer while the
+        //    section tranches were outstanding; all 221 clauses are classified
+        //    now, so its presence would mean one slipped back — asserted at the
+        //    end of this block.
         let clause = |id: &str| {
             clauses
                 .iter()
@@ -8182,9 +8183,10 @@ mod tests {
         };
         assert_eq!(clause("P-15.1")["binds"], "enforcer");
         assert_eq!(clause("Ri-0.2")["binds"], "enforcer");
-        // `P-1.1` reported `undeclared` until §1 was classified (#1284). Every
-        // clause the constitution declares now resolves a bind direction, so
-        // the sentinel should appear nowhere — asserted below.
+        // `P-1.1` is the useful case: it belongs to no enforcement-register
+        // entry, so before the law/conformance split it had nowhere to record
+        // a direction. It resolves one now while keeping its enforcement
+        // citation, which is the split working.
         assert_eq!(clause("P-1.1")["binds"], "enforcer");
         // No clause reports the retired party names, and none is undeclared.
         assert!(
