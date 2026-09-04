@@ -254,4 +254,19 @@ fn amendment_2026_09_04_adds_the_relation_column() {
         text.contains("## Semantic Foundations"),
         "the vocabulary section (RFC §2.8) is part of this amendment"
     );
+
+    // The Vision section carried the same false claim in different words, and
+    // a targeted fix of §0 and §12 left it standing. Swept and pinned, because
+    // "correct the claim where I noticed it" is how it survived the first
+    // pass.
+    assert!(
+        !text.contains("Rules bind the\n  agent") && !text.contains("Rights bind the gateway"),
+        "the Vision section must not restate the uniform-by-section claim"
+    );
+    // A stale cross-reference inherited from before §15 existed. An amendment
+    // is the right vehicle for fixing a pointer in signed text.
+    assert!(
+        !text.contains("below, after §14"),
+        "the amendment-process cross-reference must name §15"
+    );
 }

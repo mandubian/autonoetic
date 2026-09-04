@@ -46,13 +46,16 @@ into chaos or tyranny.
 
 This framing has consequences that run throughout the document:
 
-- Rules (§1–§11, `P-*`) describe what agents **must not do**, with the
-  understanding that anything not forbidden is permitted. Rules bind the
-  agent.
-- Rights (§0 Bill of Rights, `Ri-*`) describe what the gateway **must do
-  for every agent**, unconditionally. A right is not a favour; it is an
-  entitlement. Rights bind the gateway.
-- The amendment process (below, after §14) is how the law itself
+- Rules (§1–§11, `P-*`) describe what **must not happen**, with the
+  understanding that anything not forbidden is permitted. Most of them bind
+  the *enforcer* — they are limits on the party with power, not on the party
+  under governance — and each says which power it binds in its `Relation`.
+- Rights (§0 Bill of Rights, `Ri-*`) describe what the enforcer **must do for
+  every agent**, unconditionally. A right is not a favour; it is an
+  entitlement, and it runs against the party holding power over you.
+- A right is a *relation*, not a prefix: an enforcer duty owed to the agent is
+  an agent right whatever its ID says, and 21 of them are numbered as rules.
+- The amendment process (below, after §15) is how the law itself
   evolves. Constitutional change is a first-class operation, not a
   quarterly-review afterthought.
 

@@ -115,8 +115,24 @@ because the same test that reads the document reads the register. It is RFC
 
 ## Deliberately unchanged
 
-- **No clause statement is edited.** Only the two bind-direction *descriptions*
-  above, which described the clauses rather than being clauses.
+- **No clause statement is edited.** Only bind-direction *descriptions*, which
+  describe the clauses rather than being clauses: §0's, §12's, and the Vision
+  bullets. The Vision carried the same false claim in different words — "Rules
+  bind the agent. Rights bind the gateway" — and a first pass that corrected
+  §0 and §12 left it standing, which is worth recording as the failure mode:
+  a claim stated in three places is not corrected by fixing the two you were
+  looking at. It also carried a cross-reference to the amendment process
+  "after §14", stale since §15 was added; an amendment is the right vehicle
+  for fixing a pointer in signed text.
+
+- **`Ri-0.15`'s statement still reads "this binds the gateway to give the
+  context", and that is correct, not an oversight.** Under the Semantic
+  Foundations section added here, "the gateway" is this constitution's name
+  for whatever provides the **enforcer** power. A clause may name the occupant
+  where that reads better; what may not be inferred from a prefix is *which
+  power* is bound, and `Ri-0.15`'s `Relation` states it. Grepping the document
+  for "binds the gateway" will find this line — it is licensed by the
+  vocabulary section rather than missed by the sweep.
 - **No clause ID changes.** IDs are names, not claims — the `R+`/`R++`/`R+++`
   wreckage is what renaming for meaning produces.
 - **`verified_by` does not enter the signed text.** The modality a given
