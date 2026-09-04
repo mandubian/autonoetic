@@ -329,6 +329,16 @@ impl NativeTool for AnomalyAdjudicateTool {
             "status": args.status,
             "decided_by": manifest.agent.id,
             "terminal": is_terminal,
+            // The decided-upon content: the office's decision record must
+            // show what was actually adjudicated (a blind decision is not
+            // an adjudication, O-7).
+            "subject_ref": flag.subject_ref,
+            "reporter_agent_id": flag.reporter_agent_id,
+            "reporter_session_id": flag.reporter_session_id,
+            "severity": flag.severity,
+            "observation": flag.observation,
+            "evidence": flag.evidence_json,
+            "filed_at": flag.created_at,
             "message": if is_terminal {
                 format!("Anomaly flag '{}' recorded as '{}' (terminal). Decision is durable and non-repudiable.", args.flag_id, args.status)
             } else {

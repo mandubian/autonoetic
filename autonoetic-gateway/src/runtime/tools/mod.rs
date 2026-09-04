@@ -1266,6 +1266,7 @@ pub mod admin_proposal;
 
 pub mod agent;
 pub mod anomaly_flag;
+pub mod anomaly_status;
 pub mod anomaly_adjudicate;
 pub mod agent_revision;
 pub mod approval;
@@ -1359,6 +1360,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::self_describe::register_tools(&mut registry);
     crate::runtime::tools::constitution::register_tools(&mut registry);
     crate::runtime::tools::anomaly_flag::register_tools(&mut registry);
+    crate::runtime::tools::anomaly_status::register_tools(&mut registry);
     crate::runtime::tools::anomaly_adjudicate::register_tools(&mut registry);
     crate::runtime::tools::security_redteam::register_tools(&mut registry);
     crate::runtime::tools::sentinel::register_tools(&mut registry);

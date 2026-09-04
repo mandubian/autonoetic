@@ -114,6 +114,29 @@ impl NativeTool for ResolveTool {
         };
         let sid = session_id.unwrap_or(&manifest.agent.id);
 
+        // Anomaly flags are ledger rows, not content-store blobs — even for
+        // their reporter, the read door is `anomaly_status` (the
+        // capability-free self-read, Ri-0.18 symmetry). Constant response,
+        // no store lookup, so resolve stays a non-oracle for the flag
+        // ledger.
+        if reference.starts_with("aflag-") {
+            let mut value = json!({
+                "ok": false,
+                "error_type": "resource",
+                "error": "use_anomaly_status",
+                "message": format!(
+                    "'{reference}' is an anomaly flag id, not an artifact or content handle."
+                ),
+                "repair_hint": "Anomaly flags are read with anomaly_status: pass flag_id for \
+                     the full record, or no arguments to list your own filings.",
+            });
+            if let Some(object) = value.as_object_mut() {
+                crate::runtime::failure_classification::WorkflowFailureMetadata::bad_reference()
+                    .apply_to_json_map(object);
+            }
+            return Ok(value.to_string());
+        }
+
         // Artifact-shaped refs (`art_` / `ar.`) take the artifact path. The
         // file selector is the `file` parameter — it is NOT packed into the
         // ref. Reject the legacy `ar.<ref>:<file>` packing with a nudge.

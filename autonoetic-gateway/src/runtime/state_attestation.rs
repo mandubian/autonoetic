@@ -48,8 +48,9 @@ pub struct AttestationInputs<'a> {
     /// A.2 — "voice with amnesia is no voice"). Lets the agent see, every
     /// turn, that its own proposals are still awaiting a decision.
     pub pending_proposal_ids: Vec<String>,
-    /// Non-terminal anomaly flag IDs filed by this agent (#772 A.2).
-    pub pending_flag_ids: Vec<String>,
+    /// Non-terminal anomaly flags filed by this agent (#772 A.2), carried
+    /// as provenance summaries — see [`FlagSummary`].
+    pub pending_flags: Vec<FlagSummary>,
     /// Open amendment invitations addressed to this agent (#771 D.2):
     /// repeated denials of the same rule crossed the pre-committed
     /// threshold, so the gateway invites the agent to draft an amendment
@@ -104,6 +105,28 @@ pub struct InvitationSummary {
     pub invitation_id: String,
     pub rule_id: String,
     pub denial_count: u64,
+}
+
+/// One pending anomaly flag in the signed attestation (#772 A.2
+/// refinement).
+///
+/// Provenance by design: a resumed model instance sees its pending flag
+/// ids every turn but has no memory of filing them (the filing may predate
+/// the instance entirely, or live in another session). The summary carries
+/// what such an instance needs to reason without a ledger read — what the
+/// flag is about (`subject_ref`), where it was filed
+/// (`reporter_session_id`), how severe the reporter judged it, and when.
+/// The observation text itself is NOT carried (attestations stay small);
+/// the reporter re-reads it with `anomaly_status`, the capability-free
+/// self-read path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FlagSummary {
+    pub flag_id: String,
+    pub severity: String,
+    pub subject_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reporter_session_id: Option<String>,
+    pub filed_at: String,
 }
 
 impl BudgetMeter {
@@ -168,8 +191,18 @@ pub struct StateAttestationPayload {
     /// Non-terminal anomaly flags filed by this agent (#772 A.2).
     #[serde(default)]
     pub pending_flag_count: usize,
+    /// Deprecated: bare flag ids from pre-summary attestations. Kept — and
+    /// still always serialized, in this exact position — so persisted
+    /// payloads re-canonicalize byte-identically through
+    /// [`canonical_payload_bytes`] and their signatures still verify.
+    /// Always empty in newly composed payloads.
     #[serde(default)]
     pub pending_flag_ids: Vec<String>,
+    /// Provenance-carrying flag summaries (#772 A.2 refinement). Skipped
+    /// when empty so pre-summary payloads (which lack the key) round-trip
+    /// byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_flags: Vec<FlagSummary>,
     /// Open amendment invitations addressed to this agent (#771 D.2).
     #[serde(default)]
     pub pending_invitation_count: usize,
@@ -253,9 +286,9 @@ pub fn compose_and_sign(
         .take(MAX_CIVIC_ITEMS_INLINE)
         .collect();
 
-    let pending_flag_count = inputs.pending_flag_ids.len();
-    let pending_flag_ids: Vec<String> = inputs
-        .pending_flag_ids
+    let pending_flag_count = inputs.pending_flags.len();
+    let pending_flags: Vec<FlagSummary> = inputs
+        .pending_flags
         .into_iter()
         .take(MAX_CIVIC_ITEMS_INLINE)
         .collect();
@@ -294,7 +327,8 @@ pub fn compose_and_sign(
         pending_proposal_count,
         pending_proposal_ids,
         pending_flag_count,
-        pending_flag_ids,
+        pending_flag_ids: Vec::new(),
+        pending_flags,
         pending_invitation_count,
         pending_invitations,
         spawn_depth,
@@ -492,7 +526,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_rounds".to_string(),
@@ -540,7 +574,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -578,7 +612,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -618,7 +652,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -644,7 +678,15 @@ mod tests {
         let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
         let manifest = manifest_with_caps(vec![]);
         let lots_proposals: Vec<String> = (0..40).map(|i| format!("prop-{:03}", i)).collect();
-        let lots_flags: Vec<String> = (0..40).map(|i| format!("flag-{:03}", i)).collect();
+        let lots_flags: Vec<FlagSummary> = (0..40)
+            .map(|i| FlagSummary {
+                flag_id: format!("aflag-{:03}", i),
+                severity: "low".to_string(),
+                subject_ref: format!("sess-{:03}", i),
+                reporter_session_id: Some(format!("sess-{:03}", i)),
+                filed_at: "2026-09-04T00:00:00Z".to_string(),
+            })
+            .collect();
         let att = compose_and_sign(
             AttestationInputs {
                 agent_id: "a",
@@ -657,7 +699,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: lots_proposals,
-                pending_flag_ids: lots_flags,
+                pending_flags: lots_flags,
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -674,7 +716,11 @@ mod tests {
             MAX_CIVIC_ITEMS_INLINE
         );
         assert_eq!(att.payload.pending_flag_count, 40);
-        assert_eq!(att.payload.pending_flag_ids.len(), MAX_CIVIC_ITEMS_INLINE);
+        assert_eq!(att.payload.pending_flags.len(), MAX_CIVIC_ITEMS_INLINE);
+        assert!(
+            att.payload.pending_flag_ids.is_empty(),
+            "new attestations carry summaries, not deprecated bare ids"
+        );
     }
 
     /// Civic ids are part of the signed payload — verify roundtrips them
@@ -697,7 +743,13 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec!["prop-aaa".to_string()],
-                pending_flag_ids: vec!["flag-bbb".to_string()],
+                pending_flags: vec![FlagSummary {
+                    flag_id: "aflag-bbb".to_string(),
+                    severity: "low".to_string(),
+                    subject_ref: "sess-bbb".to_string(),
+                    reporter_session_id: Some("sess-old".to_string()),
+                    filed_at: "2026-09-04T00:00:00Z".to_string(),
+                }],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -713,8 +765,47 @@ mod tests {
         let payload = verify(&pub_bytes, &att).expect("verify");
         assert_eq!(payload.pending_proposal_ids, vec!["prop-aaa"]);
         assert_eq!(payload.pending_proposal_count, 1);
-        assert_eq!(payload.pending_flag_ids, vec!["flag-bbb"]);
         assert_eq!(payload.pending_flag_count, 1);
+        assert_eq!(payload.pending_flags.len(), 1);
+        assert_eq!(payload.pending_flags[0].flag_id, "aflag-bbb");
+        assert_eq!(payload.pending_flags[0].subject_ref, "sess-bbb");
+        assert_eq!(
+            payload.pending_flags[0].reporter_session_id.as_deref(),
+            Some("sess-old")
+        );
+        assert_eq!(payload.pending_flags[0].severity, "low");
+        assert!(payload.pending_flag_ids.is_empty());
+    }
+
+    /// Pre-summary payload compat (#772 A.2 refinement): attestations
+    /// persisted before flags carried provenance (`pending_flag_ids` only,
+    /// no `pending_flags` key) must re-canonicalize byte-identically so
+    /// their signatures still verify after this change.
+    #[test]
+    fn pre_summary_payload_roundtrips_byte_identically() {
+        let old_payload_json = r#"{"agent_id":"a","session_id":"s","root_session_id":"s","turn_counter":3,"active_capabilities":[],"pending_approval_count":0,"pending_approval_ids":[],"pending_user_interaction_count":0,"pending_user_interaction_ids":[],"pending_escalation_count":0,"pending_escalation_ids":[],"pending_proposal_count":0,"pending_proposal_ids":[],"pending_flag_count":1,"pending_flag_ids":["aflag-old"],"pending_invitation_count":0,"pending_invitations":[],"spawn_depth":0,"budget":[],"gateway_node_id":"node","constitution_version":"2026.07.02","constitution_digest":"deadbeef","model_id":"claude-test-1","attested_at":"2026-09-04T00:00:00Z"}"#;
+
+        let payload: StateAttestationPayload =
+            serde_json::from_str(old_payload_json).expect("old payload deserializes");
+        assert_eq!(payload.pending_flag_ids, vec!["aflag-old".to_string()]);
+        assert!(payload.pending_flags.is_empty(), "missing key defaults to empty");
+
+        let canonical = canonical_payload_bytes(&payload).expect("canonicalize");
+        assert_eq!(
+            String::from_utf8(canonical).unwrap(),
+            old_payload_json,
+            "re-canonicalized bytes must match what the pre-summary code signed"
+        );
+
+        // And a signature made over the old canonical bytes verifies with
+        // the current struct — persisted attestations stay verifiable.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let sig = key.sign(old_payload_json.as_bytes());
+        let pub_bytes = key.public_key_bytes();
+        assert!(
+            verify_attestation_signature(&pub_bytes, old_payload_json.as_bytes(), &sig).unwrap()
+        );
     }
 
     /// #771 D.2 — open amendment invitations ride the same signed civic
@@ -744,7 +835,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: lots,
                 budget_meters: vec![],
                 burn_rate: None,
@@ -785,7 +876,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -821,7 +912,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
@@ -860,7 +951,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
-                pending_flag_ids: vec![],
+                pending_flags: vec![],
                 pending_invitations: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_tokens".to_string(),

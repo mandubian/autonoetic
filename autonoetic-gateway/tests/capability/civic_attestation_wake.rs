@@ -93,15 +93,28 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
         .into_iter()
         .map(|p| p.proposal_id)
         .collect();
-    let pending_flag_ids: Vec<String> = store
-        .list_pending_anomaly_flags(Some(agent_id), 64)
-        .expect("list flags")
-        .into_iter()
-        .map(|f| f.flag_id)
-        .collect();
+    let pending_flags: Vec<autonoetic_gateway::runtime::state_attestation::FlagSummary> =
+        store
+            .list_pending_anomaly_flags(Some(agent_id), 64)
+            .expect("list flags")
+            .into_iter()
+            .map(|f| autonoetic_gateway::runtime::state_attestation::FlagSummary {
+                flag_id: f.flag_id,
+                severity: f.severity,
+                subject_ref: f.subject_ref,
+                reporter_session_id: f.reporter_session_id,
+                filed_at: f.created_at,
+            })
+            .collect();
 
     assert_eq!(pending_proposal_ids, vec!["prop-wake-1".to_string()]);
-    assert_eq!(pending_flag_ids, vec!["flag-wake-1".to_string()]);
+    assert_eq!(
+        pending_flags
+            .iter()
+            .map(|f| f.flag_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["flag-wake-1"]
+    );
 
     let key_dir = tempdir().expect("key dir");
     let key = GatewayIdentityKey::load_or_generate(key_dir.path()).expect("key");
@@ -119,7 +132,7 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
             pending_proposal_ids,
-            pending_flag_ids,
+            pending_flags,
             pending_invitations: vec![],
             budget_meters: vec![BudgetMeter {
                 name: "llm_rounds".to_string(),
@@ -137,8 +150,16 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
 
     assert_eq!(att.payload.pending_proposal_ids, vec!["prop-wake-1"]);
     assert_eq!(att.payload.pending_proposal_count, 1);
-    assert_eq!(att.payload.pending_flag_ids, vec!["flag-wake-1"]);
+    assert_eq!(att.payload.pending_flags.len(), 1);
+    assert_eq!(att.payload.pending_flags[0].flag_id, "flag-wake-1");
+    assert_eq!(att.payload.pending_flags[0].subject_ref, "sess-target");
+    assert_eq!(att.payload.pending_flags[0].severity, "high");
+    assert_eq!(
+        att.payload.pending_flags[0].reporter_session_id.as_deref(),
+        Some("root")
+    );
     assert_eq!(att.payload.pending_flag_count, 1);
+    assert!(att.payload.pending_flag_ids.is_empty());
 
     let tail = render_tail(&att).expect("render");
     assert!(
@@ -243,7 +264,7 @@ fn attestation_tail_surfaces_open_amendment_invitations() {
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
             pending_proposal_ids: vec![],
-            pending_flag_ids: vec![],
+            pending_flags: vec![],
             pending_invitations,
             budget_meters: vec![],
             burn_rate: None,

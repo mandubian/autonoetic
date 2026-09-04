@@ -217,6 +217,7 @@ impl NativeTool for AnomalyFlagTool {
             "status": "pending",
             "severity": severity,
             "message": "Anomaly flag recorded durably; it cannot be silently dropped and is owed an adjudication decision.",
+            "read_path": "Re-read it anytime with anomaly_status: pass flag_id for the full record, or no arguments to list your filings.",
         })
         .to_string())
     }
