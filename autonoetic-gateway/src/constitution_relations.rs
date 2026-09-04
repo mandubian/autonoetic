@@ -61,32 +61,38 @@
 //!
 //! # Coverage
 //!
-//! Complete: `Ri-*` (18), `O-*` (4), `U-*` (3), `I-*` (14), and §5, §9, §15
-//! of the numbered `P-*` — 73 clauses.
+//! Complete: `Ri-*` (18), `O-*` (4), `U-*` (3), `I-*` (14), and §2, §5, §7,
+//! §9, §15 of the numbered `P-*` — **124 clauses**.
 //!
-//! **148 numbered `P-*` remain**, across §1, §2, §3, §4, §6, §7, §8, §10 and
-//! §11. They are classified per section because "who must comply" is a
-//! semantic judgement per clause, which is why #1284 sequences them as
-//! separate reviewable tranches. They are not silently absent:
-//! [`unclassified_clauses`] enumerates them and
-//! `tests::the_unclassified_count_is_a_ratchet` pins the exact number, so a
-//! new clause cannot arrive unclassified and each tranche has to lower the
-//! constant.
+//! **97 numbered `P-*` remain**, across §1, §3, §4, §6, §8, §10 and §11.
+//! Classified per section because "who must comply" is a semantic judgement
+//! per clause, which is why #1284 sequences them as separate reviewable
+//! tranches. They are not silently absent: [`unclassified_clauses`]
+//! enumerates them and `tests::the_unclassified_count_is_a_ratchet` pins the
+//! exact number, so a new clause cannot arrive unclassified and each tranche
+//! has to lower the constant.
 //!
-//! # Why §5, §9 and §15 came first
+//! # Section-grouping inference is now **zero**
 //!
-//! Not size — **inference debt**. Before this tranche, `binds("P-5.2")`
-//! answered from the *enforcement register's section grouping* `P-5`, reached
-//! by parent lookup. That is precisely the inheritance this module warns
-//! against below: it assumes every clause in a section binds what the section
-//! binds. 84 clauses across §2, §5, §7, §9 and §15 were resolving that way, so
-//! the coverage figure part 2 reported was mostly answered by a guess.
+//! Bind direction for a numbered clause used to be answerable two ways: from
+//! this table, or by inheriting the *enforcement register's section grouping*
+//! (`binds("P-5.2")` reaching `P-5` through parent lookup). The second is the
+//! inheritance this module warns against below — it assumes every clause in a
+//! section binds what the section binds — and it covered 84 clauses across
+//! §2, §5, §7, §9 and §15.
 //!
-//! Classifying a section converts its clauses from inherited to declared and
-//! the guess stops being load-bearing for them. §2 and §7 are the remaining
-//! 51; once they land, the register's section groupings can be deleted
-//! outright.
-
+//! All five sections are classified, so no clause resolves by inheritance any
+//! more; `tests::section_grouping_inference_is_a_ratchet` pins it at 0. The
+//! register's section groupings survive only to answer `binds("P-7")` for
+//! contract-health, which aggregates *by section* — a summary of a group, not
+//! a claim about any clause.
+//!
+//! Ordering note, since it was not obvious: these five went first not for
+//! size but because they were the ones already answering with a guess.
+//! Classifying a section converts its clauses from inherited to declared, so
+//! the tranches did not raise coverage — they removed inference. The two
+//! ratchets are separate for that reason.
+//!
 use crate::enforcement_register::{Binds, OwedTo, VerifiedBy};
 use autonoetic_types::principal::PrincipalKindTag;
 
@@ -321,10 +327,171 @@ fn principles() -> Vec<Relation> {
         // relationship twice.
         property("P-8.1", VerifiedBy::Chokepoint),
     ];
+    out.extend(section_2());
     out.extend(section_5());
+    out.extend(section_7());
     out.extend(section_9());
     out.extend(section_15());
     out
+}
+
+/// A duty owed to whoever occupies the **deciding seat** — kind-agnostic, so
+/// a `GateDecider`-holding agent has the same standing as a human operator.
+const fn to_decider(id: &'static str, verified_by: VerifiedBy) -> Relation {
+    Relation {
+        id,
+        binds: Binds::Enforcer,
+        owed_to: OwedTo::Seat(Binds::Decider),
+        verified_by,
+    }
+}
+
+/// §2 — Approval Gates. The section that finally exercises the whole model:
+/// it is the first to contain a `reasoner` clause, the first to put a
+/// **decider** obligation under a `P-` prefix, and the first where duties run
+/// to the **deciding seat** rather than to the agent or to no one.
+///
+/// Three findings, each a shape the prefix scheme could not express:
+///
+/// - **`P-2.9` binds the reasoner** — "they *must attach* `execution_trace_id`
+///   from a completed run". The obligation falls on the recording agent; the
+///   gateway's part is refusing to take its word (`pass` is derived from
+///   `exit_code`, not set by the caller). Every clause classified before this
+///   tranche bound the enforcer, which made `reasoner` look vestigial. It is
+///   not — §2 is simply the first section where agents are told to do
+///   something rather than prevented from doing it.
+/// - **`P-2.21` binds the decider** — "it *must escalate* to a human operator
+///   rather than reject". An agent-decider that cannot decide owes escalation.
+///   That is an `O-*` obligation wearing a `P-` prefix, which is RFC defect
+///   1.4(2) in the flesh, and it binds the *seat*: a human operator in the
+///   same position owes the same thing.
+/// - **Four clauses are owed to the `decider` seat** — `P-2.5`
+///   (`detected_hosts` surfaced for operator visibility), `P-2.16` (the
+///   capability delta names each added capability explicitly), `P-2.24`
+///   (dwell time and typed confirmation on high-risk gates), `P-2.27` (the
+///   envelope is locked by operator decision). Each is information or
+///   protection the decider needs in order to decide, which is exactly
+///   `Ri-0.15`'s relation — and before `OwedTo::Seat` existed there was
+///   nowhere to record it.
+fn section_2() -> Vec<Relation> {
+    vec![
+        // `GateService` is the unified gate chokepoint; "blocks pending
+        // approval rather than hard-denying" is machinery, not a claim any
+        // party can invoke.
+        property("P-2.1", VerifiedBy::Chokepoint),
+        property("P-2.2", VerifiedBy::Test),
+        // "The `GateService` centralizes dedup … Tools do not implement their
+        // own dedup logic" — N paths reduced to one, stated in the clause.
+        property("P-2.3", VerifiedBy::Chokepoint),
+        property("P-2.4", VerifiedBy::Test),
+        // Surfaced *for operator visibility* — the decider cannot decide well
+        // without it.
+        to_decider("P-2.5", VerifiedBy::Test),
+        property("P-2.6", VerifiedBy::Test),
+        property("P-2.7", VerifiedBy::Test),
+        property("P-2.8", VerifiedBy::Chokepoint),
+        // **Reasoner.** "They must attach `execution_trace_id` from a
+        // completed run" obliges the recording agent; the gateway's half is
+        // declining to trust the claim.
+        Relation {
+            id: "P-2.9",
+            binds: Binds::Reasoner,
+            owed_to: OwedTo::NoOne,
+            verified_by: VerifiedBy::Chokepoint,
+        },
+        // Owed to the agent: a gate-suspended turn resumes with real tool
+        // results and an auto-injected `approval_ref` rather than a synthetic
+        // retry prompt. The agent is the party that would otherwise be handed
+        // a fabricated history.
+        right("P-2.10", VerifiedBy::Test),
+        property("P-2.11", VerifiedBy::Test),
+        // The gateway-side mechanism of O-2: `decided_by` is persisted so the
+        // agent under decision can tell who decided.
+        right("P-2.12", VerifiedBy::Test),
+        property("P-2.13", VerifiedBy::Test),
+        property("P-2.14", VerifiedBy::Test),
+        // "Spawn payload is preserved verbatim" — owed to the agent whose
+        // payload it is.
+        right("P-2.15", VerifiedBy::Test),
+        // The delta approval "names each added capability explicitly" so the
+        // operator sees what they are granting.
+        to_decider("P-2.16", VerifiedBy::Chokepoint),
+        property("P-2.17", VerifiedBy::Chokepoint),
+        // "All execution suspension points … use the unified `GateService`."
+        property("P-2.18", VerifiedBy::Chokepoint),
+        property("P-2.19", VerifiedBy::Test),
+        property("P-2.20", VerifiedBy::Chokepoint),
+        // **Decider**, and owed to the agent. "It must escalate to a human
+        // operator rather than reject" is a duty on whoever holds the gate,
+        // owed to the agent whose gate is pending — an `O-*` obligation under
+        // a `P-` prefix.
+        Relation {
+            id: "P-2.21",
+            binds: Binds::Decider,
+            owed_to: TO_AGENT,
+            verified_by: VerifiedBy::Test,
+        },
+        property("P-2.22", VerifiedBy::Chokepoint),
+        property("P-2.23", VerifiedBy::Test),
+        // Dwell time and typed confirmation protect the *decider* from their
+        // own mis-click. Nobody else can invoke it.
+        to_decider("P-2.24", VerifiedBy::Test),
+        // Fail-closed, "determined mechanically by the gateway … never
+        // inferred from orchestrator-supplied claims" — the §2 instance of
+        // I-8.
+        property("P-2.25", VerifiedBy::Chokepoint),
+        property("P-2.26", VerifiedBy::Chokepoint),
+        // The envelope is "locked by operator decision" — its scope is the
+        // decider's instrument.
+        to_decider("P-2.27", VerifiedBy::Test),
+        property("P-2.28", VerifiedBy::Chokepoint),
+        property("P-2.29", VerifiedBy::Chokepoint),
+    ]
+}
+
+/// §7 — Abuse, hard stops, circuit breakers. Enforcer throughout and almost
+/// entirely integrity properties: these are the limits that hold *against* the
+/// agent, and an agent cannot demand its own halting.
+///
+/// `P-7.18` is the exception, and it is one of the six right/mechanism pairs
+/// the RFC identifies (§1.4(2)): degraded mode "loses non-Core tools, network
+/// access, and spawn capability **but retains reasoning**" — a guarantee to
+/// the agent, and the mechanism `Ri-0.5` is the entitlement for.
+///
+/// `P-7.22` is the section's only `Detection` floor, and correctly so:
+/// sandbox-escape attempts are *counted per session*, which is what you do
+/// with a behaviour no static check can rule out.
+fn section_7() -> Vec<Relation> {
+    vec![
+        property("P-7.1", VerifiedBy::Test),
+        property("P-7.2", VerifiedBy::Test),
+        property("P-7.3", VerifiedBy::Test),
+        property("P-7.4", VerifiedBy::Test),
+        property("P-7.5", VerifiedBy::Test),
+        property("P-7.6", VerifiedBy::Test),
+        property("P-7.7", VerifiedBy::Test),
+        property("P-7.8", VerifiedBy::Test),
+        property("P-7.9", VerifiedBy::Test),
+        property("P-7.10", VerifiedBy::Test),
+        property("P-7.11", VerifiedBy::Test),
+        // "No escape hatch; passes require real evaluator + auditor records."
+        property("P-7.12", VerifiedBy::Chokepoint),
+        property("P-7.13", VerifiedBy::Chokepoint),
+        property("P-7.14", VerifiedBy::Test),
+        property("P-7.15", VerifiedBy::Test),
+        property("P-7.16", VerifiedBy::Test),
+        property("P-7.17", VerifiedBy::Test),
+        // Owed to the agent: degraded mode is bounded *for the agent's
+        // benefit* — it retains reasoning rather than being stopped. Ri-0.5
+        // is the entitlement; this is the mechanism.
+        right("P-7.18", VerifiedBy::Test),
+        property("P-7.19", VerifiedBy::Test),
+        property("P-7.20", VerifiedBy::Test),
+        property("P-7.21", VerifiedBy::Test),
+        // Counted per session — the enforceable form for an attempt you
+        // cannot statically preclude.
+        property("P-7.22", VerifiedBy::Detection),
+    ]
 }
 
 /// §5 — I/O Schema Validation. Every clause binds the **enforcer**: §5 is
@@ -617,14 +784,23 @@ pub fn render_law_table_markdown(clause_index: &[(String, String)]) -> String {
         .map(|(id, _)| id.as_str())
         .collect();
     agent_rights.sort_unstable();
+    // Derived, not written: the interesting members of this list are whichever
+    // clauses carry a non-`Ri-` prefix, and hardcoding examples went stale the
+    // first time a tranche added one.
+    let unprefixed: Vec<&str> = agent_rights
+        .iter()
+        .copied()
+        .filter(|id| !id.starts_with("Ri-"))
+        .collect();
     out.push_str(&format!(
         "**Agent rights by relation** ({}): `{}`\n\nA right is a *view*, not a family: an \
-         enforcer duty owed to the agent is an agent right regardless of prefix. This list is \
-         therefore not the `Ri-*` set — `P-5.3`, `P-5.8`, `P-5.11` and `P-9.12` are here on \
-         their relation, and §0's rights/rules ratio would be computed from this rather than \
-         from prefixes.\n\n",
+         enforcer duty owed to the agent is an agent right regardless of prefix. So this list \
+         is not the `Ri-*` set — {} of its members carry another prefix (`{}`), and §0's \
+         rights/rules ratio would be computed from this rather than from prefixes.\n\n",
         agent_rights.len(),
         agent_rights.join("`, `"),
+        unprefixed.len(),
+        unprefixed.join("`, `"),
     ));
 
     out.push_str("## Clauses\n\n");
@@ -727,7 +903,7 @@ mod tests {
         for id in &ids {
             assert!(seen.insert(*id), "{id} is classified more than once");
         }
-        assert_eq!(seen.len(), 73, "39 non-P clauses + P-8.1 + §5 (14) + §9 (16) + §15 (3)");
+        assert_eq!(seen.len(), 124, "39 non-P + P-8.1 + §2 (29) + §5 (14) + §7 (22) + §9 (16) + §15 (3)");
     }
 
     /// The four non-`P` families are **complete**. This is the coverage
@@ -754,7 +930,7 @@ mod tests {
     /// and update this number deliberately.
     #[test]
     fn the_unclassified_count_is_a_ratchet() {
-        const UNCLASSIFIED: usize = 148;
+        const UNCLASSIFIED: usize = 97;
         let outstanding = unclassified_among(&active_constitution_clause_ids());
         assert_eq!(
             outstanding.len(),
@@ -832,7 +1008,7 @@ mod tests {
     #[test]
     fn a_classified_section_is_classified_completely_and_law_side() {
         let all = active_constitution_clause_ids();
-        for sec in ["P-5.", "P-9.", "P-15."] {
+        for sec in ["P-2.", "P-5.", "P-7.", "P-9.", "P-15."] {
             let clauses: Vec<&String> =
                 all.iter().filter(|id| id.starts_with(sec)).collect();
             assert!(
@@ -854,7 +1030,8 @@ mod tests {
         }
         // And the sections still awaiting a tranche are untouched, so this
         // test cannot pass by the table having swallowed everything.
-        assert!(relation("P-2.20").is_none() || declared_at("P-2.20") != Some("P-2.20"));
+        assert!(relation("P-1.1").is_none(), "§1 is not part of any tranche yet");
+        assert!(relation("P-6.1").is_none(), "§6 is not part of any tranche yet");
     }
 
     fn active_constitution_clause_index() -> Vec<(String, String)> {
@@ -942,7 +1119,7 @@ mod tests {
     /// that no such inheritance exists at all.
     #[test]
     fn section_grouping_inference_is_a_ratchet() {
-        const INHERITED_FROM_A_SECTION_GROUPING: usize = 51;
+        const INHERITED_FROM_A_SECTION_GROUPING: usize = 0;
 
         let inherited: Vec<String> = active_constitution_clause_ids()
             .into_iter()
@@ -969,10 +1146,11 @@ mod tests {
              the constant. It must never rise: a clause moving from declared \
              back to inherited is a regression.\n  still inferring: {sections:?}"
         );
-        assert_eq!(
-            sections,
-            vec!["P-2", "P-7"],
-            "only §2 and §7 should still infer; §5/§9/§15 are classified"
+        assert!(
+            sections.is_empty(),
+            "section-grouping inference must be **zero**: every numbered clause \
+             in a section the register groups is now classified in its own \
+             right. Still inferring: {sections:?}"
         );
     }
 
@@ -986,6 +1164,51 @@ mod tests {
             let r = relation(id).expect("declared");
             assert_eq!(r.binds, Binds::Enforcer, "{id} must bind the enforcer");
             assert_eq!(r.owed_to, TO_SERVED, "{id} is owed to the served party");
+        }
+    }
+
+    /// §2 carries the three shapes the prefix scheme could not express, and
+    /// each is pinned **by name**.
+    ///
+    /// Without this, flattening any of them failed only the law-table drift
+    /// guard — which catches the change, but incidentally: because the
+    /// rendered document differs, not because anything asserts the claim. A
+    /// reviewer re-blessing the doc would sail straight past it. The same gap
+    /// existed for §15 one tranche ago and is worth closing the same way.
+    #[test]
+    fn section_2_carries_the_shapes_the_prefix_scheme_could_not_express() {
+        // **A reasoner clause.** "They *must attach* `execution_trace_id`" —
+        // the obligation is the recording agent's. Everything classified
+        // before §2 bound the enforcer, which made `reasoner` look vestigial;
+        // it is not, and a table where the count returns to zero has lost
+        // this.
+        assert_eq!(relation("P-2.9").unwrap().binds, Binds::Reasoner);
+        let reasoner_clauses = relations()
+            .iter()
+            .filter(|r| r.binds == Binds::Reasoner)
+            .count();
+        assert!(
+            reasoner_clauses >= 1,
+            "no clause binds the reasoner — the power the old binds() reported \
+             for every clause now has no members, which cannot be right"
+        );
+
+        // **A decider obligation under a `P-` prefix.** "It must escalate to
+        // a human operator rather than reject" binds whoever holds the gate
+        // and is owed to the agent whose gate is pending. RFC defect 1.4(2).
+        let p221 = relation("P-2.21").expect("classified");
+        assert_eq!(p221.binds, Binds::Decider, "P-2.21 obliges the deciding seat");
+        assert_eq!(p221.owed_to, TO_AGENT, "owed to the agent whose gate it is");
+
+        // **Duties owed to the deciding seat.** Information or protection the
+        // decider needs in order to decide — `Ri-0.15`'s relation, and
+        // unrecordable before `OwedTo::Seat` existed.
+        for id in ["P-2.5", "P-2.16", "P-2.24", "P-2.27"] {
+            assert_eq!(
+                relation(id).unwrap().owed_to,
+                OwedTo::Seat(Binds::Decider),
+                "{id} is owed to whoever decides, not to the agent and not to no one"
+            );
         }
     }
 
