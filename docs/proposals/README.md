@@ -25,8 +25,8 @@ de-facto reference.
 
 ## Promote first (shipped, undescribed)
 
-**Empty — the debt is cleared.** All four shipped-but-undescribed proposals have
-been promoted into live docs and archived:
+**Empty — the debt is cleared.** Every shipped-but-undescribed proposal has been
+promoted into a live doc and archived:
 
 | Was | Now described in |
 |---|---|
@@ -34,11 +34,14 @@ been promoted into live docs and archived:
 | `unit-test-runner-divergence-loop` | [`../internals/divergence-detection.md`](../internals/divergence-detection.md) |
 | `task-robustness` | [`../internals/task-survival.md`](../internals/task-survival.md) + delegation kinds in [`../reference/tool-errors.md`](../reference/tool-errors.md) |
 | `content-patch-tool` | [`../reference/content-patch.md`](../reference/content-patch.md) |
+| `readme-presentation` | `README.md` itself, plus [`../archived/readme-presentation.md`](../archived/readme-presentation.md) for the reasoning |
 
 The **PROMOTE** status stays in the vocabulary above: it is what a shipped
 proposal gets when no live doc describes it, and the rule that produced these
-four — archiving such a doc would delete the only description — applies to
-whatever ships next.
+rows — archiving such a doc would delete the only description — applies to
+whatever ships next. `readme-presentation` is the one whose live doc is not
+under `docs/`: the front page *is* the description, so what was archived is only
+the reasoning behind its shape.
 
 ## Open and partial
 
@@ -72,7 +75,6 @@ whatever ships next.
 | [`remote-access-declarative-patterns.md`](remote-access-declarative-patterns.md) | Open | Phase 4.3/4.4 — move detection policy into agent-declared manifest patterns |
 | [`launch-readiness-priorities.md`](launch-readiness-priorities.md) | Open | Triage view over the above |
 | [`launch-presentation.md`](launch-presentation.md) | Open | Launch pitch/demo/rollout plan (#489) — messaging, not architecture; follows the `../start/concepts.md` framing |
-| [`readme-presentation.md`](readme-presentation.md) | Partial | Front-page rewrite: the README explained the constitution with the prefix model #1284 retired. Applied (#1311): truth pass, the declared bind-direction model in one screen, three generated plates replacing the mermaid diagram, and the four visual maps resynced. Open: extending the clause-ID guard to markdown — the plates are guarded, the prose is not — and linking the clause catalogue from the Pages hub |
 | [`run-scoped-decider-appointment.md`](run-scoped-decider-appointment.md) | Open | "Name the night watch": appointing an agent-decider for a run as a peer principal (P-2.20 seat exists; appointment record, routing, read parity and four blocking defects) |
 | [`classic-harness-usecase-validation.md`](classic-harness-usecase-validation.md) | Validation pending | Study in progress; becomes a [`../reports/`](../reports/) entry when it closes |
 | [`implicit-artifacts-agent-evolution.md`](implicit-artifacts-agent-evolution.md) | Partial | Part 1 shipped; Part 2 (closed-loop evolution automation) open |

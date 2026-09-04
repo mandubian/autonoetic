@@ -58,8 +58,11 @@ Apply the first test that answers:
 - **A cited path is a promise that it resolves.** `docs_link_guard`
   (`autonoetic-gateway/src/docs_link_guard.rs`) fails the build on a dangling
   `docs/…` citation or broken relative link, in Markdown, agent bundles, and
-  production Rust alike. Intentional exceptions go in `.link-guard-allow` with
-  a reason.
+  production Rust alike. It also checks that **every clause ID you print
+  resolves** — in Markdown and in the rendered diagrams — because a clause ID is
+  a promise a reader can look it up. Intentional exceptions go in
+  `.link-guard-allow`, `.symbol-guard-allow` or `.clause-guard-allow` with a
+  reason.
 
 Two directories have paths the runtime depends on and must not be moved:
 `constitution/versions/**` and `constitution/CURRENT` (loaded at startup,

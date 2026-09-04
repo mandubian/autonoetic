@@ -686,6 +686,102 @@ fn load_allowlist(root: &Path) -> (BTreeSet<String>, Vec<String>) {
     (exact, globs)
 }
 
+/// The family-group IDs a *section* of the constitution licenses: `P-7` for
+/// §7, `Ri-0` for §0's Bill of Rights.
+///
+/// These are not clauses, and in a diagram they are a bug — a badge reading
+/// `P-3` is read as a clause citation, which is why
+/// `every_clause_id_in_a_diagram_resolves` rejects them. In prose they are
+/// ordinary: the enforcement register *groups* by section and names the group
+/// (`binds("P-7")` answers for the group, not for any clause in it), and a
+/// sentence carries the context a badge cannot.
+///
+/// Resolving them against the declared section numbers rather than skipping
+/// undotted IDs outright keeps the guard honest in the direction that matters:
+/// `P-7` passes because §7 exists, and a mistyped `P-99` still fails.
+fn declared_family_group_ids(root: &Path) -> BTreeSet<String> {
+    let path = root.join(autonoetic_types::config::default_constitution_source_path());
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read active constitution at {}: {e}", path.display()));
+
+    let mut ids = BTreeSet::new();
+    for line in text.lines() {
+        // `## 7. Abuse / Hard-Stop / Circuit Breakers` — numbered sections only;
+        // `## O. Decider Obligations` is a clause family whose IDs are undotted
+        // by design (`O-1`), so it needs no group form.
+        let Some(rest) = line.strip_prefix("## ") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() || !rest[digits.len()..].starts_with('.') {
+            continue;
+        }
+        // §0 is the Bill of Rights and holds no `P-` clauses, so its group form
+        // carries the `Ri-` family and `P-0` stays unresolvable. §1–§15 are the
+        // rule sections.
+        if digits == "0" {
+            ids.insert("Ri-0".to_string());
+        } else {
+            ids.insert(format!("P-{digits}"));
+        }
+    }
+    ids
+}
+
+/// Clause IDs a document deliberately names although the active constitution
+/// does not declare them: `docs/.clause-guard-allow`, one `ID — reason` per
+/// line, `#` comments allowed.
+///
+/// A separate file from `.link-guard-allow` because the entries answer a
+/// different question and expire on a different schedule. A path exception is
+/// permanent-ish ("this plan describes a tree it proposes to create"); a clause
+/// exception is a *counterexample being discussed* — a retired ID, a fabricated
+/// one used to illustrate a defect — and it should be removed when the prose
+/// that needs it is archived.
+fn load_clause_allowlist(root: &Path) -> BTreeSet<String> {
+    let mut exact = BTreeSet::new();
+    let path = root.join("docs/.clause-guard-allow");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return exact;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let entry = line.split('—').next().unwrap_or(line).trim();
+        if !entry.is_empty() {
+            exact.insert(entry.to_string());
+        }
+    }
+    exact
+}
+
+/// Every clause ID a line cites, with its column, skipping the two shapes that
+/// are prose rather than citation: a family wildcard (`P-15.*`) and a match
+/// starting mid-identifier (`SHA-256`, `-apple-system`).
+///
+/// Shared by the diagram and prose guards so the two cannot disagree about what
+/// counts as a citation — which is the failure mode that let a fabricated `U-4`
+/// live in a diagram while the markdown guard would have caught it.
+fn cited_clause_ids(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (col, _) in line.char_indices() {
+        if col > 0 && line.as_bytes()[col - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let tail = &line[col..];
+        let Some(len) = parse_clause_id(tail) else {
+            continue;
+        };
+        if tail[len..].starts_with(".*") {
+            continue;
+        }
+        out.push(&tail[..len]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,21 +1146,7 @@ mod tests {
                 continue;
             };
             for (lineno, line) in text.lines().enumerate() {
-                for (col, _) in line.char_indices() {
-                    // Only start a match at a boundary, so `SHA-256` and
-                    // `-apple-system` cannot masquerade as clause IDs.
-                    if col > 0 && line.as_bytes()[col - 1].is_ascii_alphanumeric() {
-                        continue;
-                    }
-                    let tail = &line[col..];
-                    let Some(len) = parse_clause_id(tail) else {
-                        continue;
-                    };
-                    // `P-15.*` — a family reference, not a clause citation.
-                    if tail[len..].starts_with(".*") {
-                        continue;
-                    }
-                    let id = &tail[..len];
+                for id in cited_clause_ids(line) {
                     if known.contains(id) {
                         continue;
                     }
@@ -1090,6 +1172,146 @@ mod tests {
             failures.len(),
             failures.join("\n  ")
         );
+    }
+
+    /// Every clause ID printed in **prose** exists in the active constitution.
+    ///
+    /// The sibling `every_clause_id_in_a_diagram_resolves` covered `.svg`/`.html`
+    /// only, which left the largest surface unguarded: the README and the
+    /// concept docs cite clauses constantly, and a front page whose whole
+    /// argument is that every denial names a real rule cannot be the one
+    /// document allowed to name a rule that does not exist (#1311, PR 4).
+    ///
+    /// Scope is every Markdown file [`collect_sources`] walks — so
+    /// `docs/archived/**` and `docs/constitution/versions/**` stay out, being a
+    /// historical record and digest-signed bytes respectively.
+    ///
+    /// Deliberate counterexamples go in `docs/.clause-guard-allow` with a
+    /// reason. Prefer rewording: a clause ID in prose is a promise a reader can
+    /// look it up, and "this ID is fabricated, that is the point" is a claim
+    /// worth writing out rather than leaving to an allowlist entry.
+    #[test]
+    fn every_clause_id_in_prose_resolves() {
+        let root = workspace_root();
+        let known = active_constitution_clause_ids(&root);
+        let groups = declared_family_group_ids(&root);
+        let allowed = load_clause_allowlist(&root);
+        assert!(
+            known.len() > 100,
+            "clause-ID extraction produced only {} ids — the constitution's table \
+             format probably changed and this guard has gone blind",
+            known.len()
+        );
+        assert!(
+            groups.len() > 10,
+            "section extraction produced only {} family groups — the section \
+             heading format probably changed",
+            groups.len()
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+        for rel in collect_sources(&root) {
+            if rel.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&rel)) else {
+                continue;
+            };
+            for (lineno, line) in text.lines().enumerate() {
+                for id in cited_clause_ids(line) {
+                    if known.contains(id) || groups.contains(id) || allowed.contains(id) {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "{}:{} cites clause `{}`, which the active constitution \
+                         ({}) does not declare\n      {}",
+                        rel.display(),
+                        lineno + 1,
+                        id,
+                        autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} prose citation(s) name a clause ID that does not exist. Fix the \
+             ID, reword to a section (`§3`) or family (`P-*`) reference if no \
+             single clause is meant, or add it to docs/.clause-guard-allow with \
+             a reason if the document is deliberately discussing a clause that \
+             is not in force.\n\n  {}\n",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// The prose guard resolves a bare `P-7` against §7, rather than skipping
+    /// undotted IDs. Pinning the difference, because "skip anything undotted"
+    /// is the cheap version and it silently accepts a mistyped `P-99`.
+    #[test]
+    fn family_groups_resolve_by_section_not_by_being_undotted() {
+        let groups = declared_family_group_ids(&workspace_root());
+
+        // Sections the constitution declares.
+        for id in ["P-1", "P-7", "P-15"] {
+            assert!(groups.contains(id), "{id} names a declared section");
+        }
+        // §0 is the Bill of Rights, so its group form carries the `Ri-` family.
+        assert!(groups.contains("Ri-0"), "Ri-0 is §0's group form");
+
+        // Not sections — a typo must still fail rather than ride the relaxation.
+        for id in ["P-99", "P-0", "Ri-7"] {
+            assert!(
+                !groups.contains(id),
+                "{id} names no section and must not resolve"
+            );
+        }
+    }
+
+    /// The two clause guards share one extractor so they cannot disagree about
+    /// what counts as a citation, and it skips the two shapes that are prose.
+    #[test]
+    fn clause_citation_extraction_skips_wildcards_and_mid_identifier_matches() {
+        assert_eq!(
+            cited_clause_ids("Ri-0.3 and P-2.20 both apply"),
+            ["Ri-0.3", "P-2.20"]
+        );
+
+        // A family wildcard is prose about a family, not a citation.
+        assert!(cited_clause_ids("every `P-15.*` clause").is_empty());
+
+        // Mid-identifier matches: the reason the scan is boundary-anchored.
+        assert!(cited_clause_ids("content-addressed by SHA-256").is_empty());
+        assert!(cited_clause_ids("font-family: -apple-system, BlinkMacSystemFont").is_empty());
+
+        // A bare family group is still *extracted*; whether it resolves is the
+        // guard's decision, and the two guards decide it differently.
+        assert_eq!(cited_clause_ids("the P-7 grouping"), ["P-7"]);
+    }
+
+    /// An allowlist entry is `ID — reason`; the reason is required by convention
+    /// and ignored by the parser, and comments and blanks are skipped.
+    #[test]
+    fn clause_allowlist_parses_ids_and_ignores_reasons() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("mkdir");
+        std::fs::write(
+            docs.join(".clause-guard-allow"),
+            "# comment\n\nO-3 — reserved, not yet enacted\nU-4\n",
+        )
+        .expect("write");
+
+        let allowed = load_clause_allowlist(dir.path());
+        assert!(
+            allowed.contains("O-3"),
+            "id parsed ahead of its em-dash reason"
+        );
+        assert!(allowed.contains("U-4"), "a bare id is accepted");
+        assert!(!allowed.contains("# comment"), "comments are skipped");
+        assert_eq!(allowed.len(), 2);
     }
 
     #[test]

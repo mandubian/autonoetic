@@ -112,6 +112,26 @@
   .m2 { --stripe: var(--accent); }
   .m3 { --stripe: var(--oblig); }
   .m4 { --stripe: var(--right); }
+  .companion {
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    padding: 1.15rem 1.35rem 1.25rem;
+    margin: 0 0 2rem;
+  }
+  .companion .tag {
+    font-family: var(--font-mono);
+    font-size: .72rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .companion h2 {
+    font-family: var(--font-display);
+    font-size: 1.12rem;
+    font-weight: 600;
+    margin: .35rem 0 .45rem;
+  }
+  .companion p { margin: 0; font-size: .93rem; color: var(--ink-soft); }
   footer {
     border-top: 1px solid var(--line);
     padding-top: 1.4rem;
@@ -163,6 +183,15 @@
           columns, the core ER diagram, the load-bearing tables incl. the egress label plane — and
           federation carry-forward: the three-digest model behind reusing a gate verdict across a rebuild.</p>
       </a>
+    </div>
+
+    <div class="companion">
+      <span class="tag">Companion · exploratory</span>
+      <h2><a href="proposals/diagrams/community-and-constitution.html">The community &amp; the constitution</a></h2>
+      <p>An interactive page rather than a map: a clickable bind-direction diagram, three lifecycle
+        walkthroughs, and a searchable catalogue of every clause with its status. It lives under
+        <code>docs/proposals/</code> because the framing is still being worked out — the four maps
+        above are the reference; this one is the place to poke at the law itself.</p>
     </div>
 
     <footer>

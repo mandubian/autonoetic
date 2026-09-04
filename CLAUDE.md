@@ -171,13 +171,21 @@ What they enforce: a cited `docs/…` path or relative link resolves; a `#anchor
 matches a real heading; a link label that names a file names *the* file linked; a
 backticked type name exists in Rust or SDK sources; every proposal is listed in
 `docs/proposals/README.md`; **every clause ID printed on a `.svg`/`.html` under
-`docs/` is declared by the active constitution** (so `§3` for a section, `P-*`
-for a family — a bare `P-3` reads as a clause and fails); every wiki page names a
-`canonical` doc and stays under 200 lines; every `autonoetic` subcommand appears
-in `docs/reference/cli.md`.
+`docs/`, or in any scanned Markdown, is declared by the active constitution**;
+every wiki page names a `canonical` doc and stays under 200 lines; every
+`autonoetic` subcommand appears in `docs/reference/cli.md`.
+
+The two clause checks differ on purpose. On a diagram a bare `P-3` **fails**: a
+badge reading `P-3` is read as a clause citation, so write `§3` for a section or
+`P-*` for a family. In prose it **resolves against the declared sections** — the
+enforcement register genuinely groups by section and names the group — while a
+family ID naming no real section still fails.
 
 Intentional exceptions go in `docs/.link-guard-allow` / `docs/.symbol-guard-allow`
-with a reason each — prefer rewording over an entry. `docs/archived/**` and
+/ `docs/.clause-guard-allow` with a reason each — prefer rewording over an entry.
+A clause entry is for a document whose *subject* is a clause not in force (a
+reserved `O-4`, a fabricated `U-4` shown as a counterexample), and it is expected
+to expire. `docs/archived/**` and
 `docs/constitution/versions/**` are deliberately unscanned (historical records;
 digest-signed bytes). These live in the **lib/bin** targets because PR CI runs
 `--lib --bins` only.
