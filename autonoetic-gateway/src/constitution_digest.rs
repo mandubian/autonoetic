@@ -266,8 +266,12 @@ pub fn constitution_profile(
     use autonoetic_types::constitution::{ConstitutionClause, ConstitutionGetResult};
     let rt = runtime_arc();
     let lock = rt.lock.as_ref();
-    let glossary = extract_rule_glossary(&rt.text);
-    let clauses = glossary
+    // `clause_index`, not `extract_rule_glossary`: the latter admits only
+    // `P-*`/`Ri-*` rows, so this surface used to omit every `O-*`, `U-*` and
+    // `I-*` clause — 21 of 221 — and a client had no way to learn they exist
+    // (RFC #1283 §2.4.2). The narrow function stays as-is where it is used, to
+    // generate the agent-facing glossary without changing prompt content.
+    let clauses = clause_index(rt.text.as_ref())
         .into_iter()
         .map(|(id, gloss)| {
             // Which *enforcement table* holds the citation is legitimately
@@ -553,6 +557,59 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
 /// `I-*` invariants too — and the invariants are declared as `- **I-N**`
 /// bullets rather than table rows, which is exactly the shape a
 /// table-row-only scan reports as absent.
+/// Every clause the constitution declares, in document order, as
+/// `(id, one-line gloss)` — across **all five families**.
+///
+/// The wide counterpart to [`extract_rule_glossary`], which covers `P-*` and
+/// `Ri-*` only. That narrowness is correct where it is used — the blessed
+/// `constitution_glossary_generated.rs` feeds agent-facing "Governed by:"
+/// lines, and widening it would change prompt content — but it also meant
+/// `constitution.get` reported 200 of 221 clauses, silently omitting every
+/// `O-*` decider obligation, every `U-*` served-party right, and every `I-*`
+/// invariant. A client could not learn that `O-1`, `U-1` or `I-8` exist.
+///
+/// `I-*` are declared as `- **I-N** …` bullets rather than table rows, which
+/// is exactly the shape a table-row-only scan reports as absent.
+pub fn clause_index(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in text.lines() {
+        if line.trim_start().starts_with('|') {
+            let cells: Vec<&str> = line.trim_start().trim_start_matches('|').split('|').collect();
+            let id = cells.first().map(|c| c.trim()).unwrap_or_default();
+            if is_whole_clause_id(id) && seen.insert(id.to_string()) {
+                let gloss = cells.get(1).map(|c| first_sentence(c.trim())).unwrap_or_default();
+                out.push((id.to_string(), gloss));
+            }
+            continue;
+        }
+        // `- **I-12** Any collective decision mechanism …` and the two whose
+        // bold span carries a parenthetical: `- **I-13 (Creation is not
+        // delegation.)** A newborn agent's …`.
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- **I-") {
+            let id: String = std::iter::once('I')
+                .chain("-".chars())
+                .chain(
+                    rest.chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.'),
+                )
+                .collect();
+            if !is_whole_clause_id(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            // The statement is whatever follows the closing `**`.
+            let gloss = rest
+                .split_once("**")
+                .map(|(_, tail)| first_sentence(tail.trim()))
+                .unwrap_or_default();
+            out.push((id, gloss));
+        }
+    }
+    out
+}
+
 pub fn clause_ids(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -999,25 +1056,38 @@ mod tests {
         // this implementation happens to enforce it.
         assert_eq!(clause("Ri-0.10").binds, "enforcer");
 
-        // **A gap this surface has, pinned rather than left incidental.**
-        // `extract_rule_glossary` admits only `P-*` and `Ri-*`, so the clause
-        // index omits three whole families: §O decider obligations, §12
-        // served-party rights, and §13 invariants. A client reading
-        // `constitution.get` cannot see that `O-1`, `U-1` or `I-8` exist.
-        // Their bind directions *are* declared (`constitution_relations`
-        // classifies all 21), so closing this is a matter of widening the
-        // glossary — table rows for `O-*`/`U-*`, bullet parsing for `I-*` —
-        // and re-blessing the generated glossary. Out of scope here; this
-        // assertion exists so the omission is a recorded decision rather than
-        // something a future reader has to rediscover.
-        for absent in ["O-1", "U-1", "I-8"] {
+        // **The gap this surface used to have, now closed.** The clause index
+        // came from `extract_rule_glossary`, which admits only `P-*`/`Ri-*`
+        // rows, so three whole families were missing — §O decider
+        // obligations, §12 served-party rights, §13 invariants — and a client
+        // could not learn that `O-1`, `U-1` or `I-8` exist. It now comes from
+        // `clause_index`, which covers all five (RFC #1283 §2.4.2).
+        //
+        // `U-1` is the case that mattered most: it is `MISSING`, so it can
+        // never appear in the enforcement register either. Between the two
+        // omissions, the served party's entire charter was invisible on every
+        // machine-readable surface.
+        for present in ["O-1", "O-7", "U-1", "U-3", "I-8", "I-14"] {
+            let c = p
+                .clauses
+                .iter()
+                .find(|c| c.id == present)
+                .unwrap_or_else(|| panic!("{present} missing from the clause index"));
             assert!(
-                !p.clauses.iter().any(|c| c.id == absent),
-                "{absent} now appears in the clause index — good, but this \
-                 assertion documented its absence; update it and the glossary \
-                 note above"
+                !c.gloss.trim().is_empty(),
+                "{present} is listed but carries no gloss, which is half a listing"
             );
         }
+        // `I-*` are declared as bullets, not table rows — the shape a
+        // table-row-only scan reports as absent. Pinned because that is how
+        // the family went missing in the first place.
+        assert_eq!(
+            p.clauses.iter().filter(|c| c.id.starts_with("I-")).count(),
+            14,
+            "all 14 invariants must be indexed, including the two whose bold \
+             span carries a parenthetical (I-13, I-14)"
+        );
+        assert_eq!(p.clauses.len(), 221, "every declared clause is indexed");
 
         // The retired party names appear nowhere.
         for c in &p.clauses {
@@ -1039,7 +1109,7 @@ mod tests {
             .count();
         let declared = p.clauses.len() - undeclared;
         assert!(
-            declared >= 103,
+            declared >= 124,
             "declared bind directions regressed to {declared}/{} — the non-P \
              families plus the register's section-level groupings should cover \
              at least this many",

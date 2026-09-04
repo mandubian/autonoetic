@@ -9,6 +9,20 @@ releases.
 - `versions/<version>/constitution.md` - human snapshot entry for that version.
 - `versions/<version>/gateway-constitution.lock.json` - canonical digest lock for that version.
 
+Two **generated** views over the active version, answering different questions.
+Both carry a drift guard, so neither can quietly disagree with its generator:
+
+- [`law-table.md`](law-table.md) — **the law.** One row per clause: which power
+  it **binds**, who has standing to **invoke** it, and its verification field.
+  Identical for any implementation, so this is what a re-implementer reads.
+  Covers every declared clause, including the ones no code enforces
+  (`U-1`–`U-3` are `MISSING` and appear nowhere else).
+  Regenerate: `BLESS_LAW_TABLE=1 cargo test -p autonoetic-gateway --lib bless_law_table`
+- [`enforcement-register.md`](enforcement-register.md) — **the conformance
+  record.** Per clause, *this gateway's* code sites, tests and config knobs.
+  A different implementation replaces this and inherits the law table.
+  Regenerate: `BLESS_REGISTER=1 cargo test -p autonoetic-gateway --lib bless_register_doc`
+
 ## Active Canonical Source
 
 The active canonical markdown text is:
