@@ -207,13 +207,14 @@
         every one writes a checkpoint. As enforced, they sort into <strong>seven resumable</strong>
         (the session suspends and continues) and <strong>five terminal</strong> (it closes). What the
         constitution's <span class="mono">Ri-0.12</span> contributes is that the list is
-        <em>closed</em> — any exit outside it is a gateway bug, not an accepted behaviour. Its clause
-        text still enumerates an earlier 11-variant split; see the note below.</p>
+        <em>closed</em> — any exit outside it is a gateway bug, not an accepted behaviour. Since
+        <span class="mono">2026.09.02</span> the clause text enumerates the same twelve and the same
+        split, so the document and the enum no longer disagree.</p>
     </div>
 
     <div class="gwrap">
       <svg class="diagram" viewBox="0 0 1180 366" role="img"
-           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of twelve checkpointed states. As enforced they group into seven resumable (Hibernation, Idle, WaitingForChild and ManualStop auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and five terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, Error, ParentTerminated). Ri-0.12 makes this list closed rather than supplying these counts; its clause text still enumerates an earlier 11-variant split.">
+           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of twelve checkpointed states. As enforced they group into seven resumable (Hibernation, Idle, WaitingForChild and ManualStop auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and five terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, Error, ParentTerminated). Ri-0.12 makes this list closed, and since 2026.09.02 its clause text enumerates the same twelve.">
         <defs>
           <marker id="rd-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
@@ -561,7 +562,7 @@
       <li><code>autonoetic-gateway/tests/constitution/rights_mid_bucket.rs</code> (terminal/resumable split)</li>
       <li><code>autonoetic-gateway/src/runtime/state_attestation.rs</code> (P-6.23 payload)</li>
       <li><code>docs/ARCHITECTURE.md</code> (checkpoints, approvals, escalation, operator.pending)</li>
-      <li>constitution 2026.07.30 — Ri-0.5, Ri-0.10, Ri-0.12, Ri-0.14, Ri-0.15, O-1, O-2, P-6.23, P-15.1–P-15.3</li>
+      <li>constitution 2026.09.02 — Ri-0.5, Ri-0.10, Ri-0.12, Ri-0.14, Ri-0.15, O-1, O-2, P-6.23, P-15.1–P-15.3</li>
     </ul>
   </footer>
 

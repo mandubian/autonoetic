@@ -135,7 +135,12 @@ build, evaluate and promote each other behind audited gates.
 Every clause binds exactly one party and is owed to at most one. Bind direction
 is **declared data**, never derived from the ID prefix — which is what makes
 the law re-implementable, and what makes "a right" a *relation* rather than a
-family of IDs.
+family of IDs. One caveat worth stating up front: the *signed text* has not
+caught up. §0 still says the bind-direction is "uniform by section", the rule
+the classification disproved, and adopting the fields as constitutional columns
+is a pending amendment — so where a prefix lied, the law table and §0 currently
+disagree, on purpose, because a signed column can only be changed by another
+amendment.
 
 | | binds | owed to | clauses |
 |---|---|---|---|
