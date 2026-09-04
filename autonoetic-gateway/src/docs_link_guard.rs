@@ -686,8 +686,8 @@ fn load_allowlist(root: &Path) -> (BTreeSet<String>, Vec<String>) {
     (exact, globs)
 }
 
-/// The family-group IDs a *section* of the constitution licenses: `P-7` for
-/// §7, `Ri-0` for §0's Bill of Rights.
+/// The family-group IDs the constitution actually licenses: `P-7` for §7's
+/// rules, `Ri-0` for §0's Bill of Rights.
 ///
 /// These are not clauses, and in a diagram they are a bug — a badge reading
 /// `P-3` is read as a clause citation, which is why
@@ -696,36 +696,18 @@ fn load_allowlist(root: &Path) -> (BTreeSet<String>, Vec<String>) {
 /// (`binds("P-7")` answers for the group, not for any clause in it), and a
 /// sentence carries the context a badge cannot.
 ///
-/// Resolving them against the declared section numbers rather than skipping
-/// undotted IDs outright keeps the guard honest in the direction that matters:
-/// `P-7` passes because §7 exists, and a mistyped `P-99` still fails.
+/// Derived from the clause IDs rather than from section headings, so a group
+/// exists exactly when a clause populates it. Deriving from headings instead
+/// invents groups for the numbered sections that hold *other* families — §12 is
+/// `U-*` and §§13–14 are `I-*`, so `P-12`, `P-13` and `P-14` would resolve while
+/// naming nothing (a Copilot review on #1312 caught precisely that). Undotted
+/// families produce no group, which is right: `O-1` and `U-3` are clauses, not
+/// groups, so there is nothing for a bare `O-` or `U-` to mean.
 fn declared_family_group_ids(root: &Path) -> BTreeSet<String> {
-    let path = root.join(autonoetic_types::config::default_constitution_source_path());
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read active constitution at {}: {e}", path.display()));
-
-    let mut ids = BTreeSet::new();
-    for line in text.lines() {
-        // `## 7. Abuse / Hard-Stop / Circuit Breakers` — numbered sections only;
-        // `## O. Decider Obligations` is a clause family whose IDs are undotted
-        // by design (`O-1`), so it needs no group form.
-        let Some(rest) = line.strip_prefix("## ") else {
-            continue;
-        };
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if digits.is_empty() || !rest[digits.len()..].starts_with('.') {
-            continue;
-        }
-        // §0 is the Bill of Rights and holds no `P-` clauses, so its group form
-        // carries the `Ri-` family and `P-0` stays unresolvable. §1–§15 are the
-        // rule sections.
-        if digits == "0" {
-            ids.insert("Ri-0".to_string());
-        } else {
-            ids.insert(format!("P-{digits}"));
-        }
-    }
-    ids
+    active_constitution_clause_ids(root)
+        .iter()
+        .filter_map(|id| id.rsplit_once('.').map(|(group, _)| group.to_string()))
+        .collect()
 }
 
 /// Clause IDs a document deliberately names although the active constitution
@@ -1204,8 +1186,8 @@ mod tests {
         );
         assert!(
             groups.len() > 10,
-            "section extraction produced only {} family groups — the section \
-             heading format probably changed",
+            "clause IDs yielded only {} family groups — the clause set is \
+             probably not being read",
             groups.len()
         );
 
@@ -1247,11 +1229,13 @@ mod tests {
         );
     }
 
-    /// The prose guard resolves a bare `P-7` against §7, rather than skipping
-    /// undotted IDs. Pinning the difference, because "skip anything undotted"
-    /// is the cheap version and it silently accepts a mistyped `P-99`.
+    /// The prose guard resolves a bare `P-7` against the group its clauses
+    /// populate, rather than skipping undotted IDs. Both halves need pinning:
+    /// "skip anything undotted" is the cheap version and accepts any typo, and
+    /// deriving from section numbers invents groups for the sections that hold
+    /// another family.
     #[test]
-    fn family_groups_resolve_by_section_not_by_being_undotted() {
+    fn family_groups_come_from_clause_ids_not_from_section_numbers() {
         let groups = declared_family_group_ids(&workspace_root());
 
         // Sections the constitution declares.
@@ -1261,11 +1245,24 @@ mod tests {
         // §0 is the Bill of Rights, so its group form carries the `Ri-` family.
         assert!(groups.contains("Ri-0"), "Ri-0 is §0's group form");
 
-        // Not sections — a typo must still fail rather than ride the relaxation.
-        for id in ["P-99", "P-0", "Ri-7"] {
+        // A typo must still fail rather than ride the relaxation.
+        for id in ["P-99", "Ri-7"] {
             assert!(
                 !groups.contains(id),
-                "{id} names no section and must not resolve"
+                "{id} populates no group and must not resolve"
+            );
+        }
+
+        // §0 is the Bill of Rights and holds no `P-` clauses.
+        assert!(!groups.contains("P-0"), "§0 holds rights, not rules");
+
+        // The sections that hold another family license no `P-` group: §12 is
+        // `U-*` and §§13–14 are `I-*`. Deriving groups from section *numbers*
+        // resolved all three, which is the hole this pins shut (#1312 review).
+        for id in ["P-12", "P-13", "P-14"] {
+            assert!(
+                !groups.contains(id),
+                "{id} names a section that holds no P- clause"
             );
         }
     }

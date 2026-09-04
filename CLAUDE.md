@@ -177,9 +177,11 @@ every wiki page names a `canonical` doc and stays under 200 lines; every
 
 The two clause checks differ on purpose. On a diagram a bare `P-3` **fails**: a
 badge reading `P-3` is read as a clause citation, so write `§3` for a section or
-`P-*` for a family. In prose it **resolves against the declared sections** — the
-enforcement register genuinely groups by section and names the group — while a
-family ID naming no real section still fails.
+`P-*` for a family. In prose it **resolves against the family groups the clauses
+populate** — the enforcement register genuinely groups by section and names the
+group — while a family ID nothing populates still fails, including one whose
+section number exists but holds another family (`U-*` or `I-*`) rather than
+rules.
 
 Intentional exceptions go in `docs/.link-guard-allow` / `docs/.symbol-guard-allow`
 / `docs/.clause-guard-allow` with a reason each — prefer rewording over an entry.
