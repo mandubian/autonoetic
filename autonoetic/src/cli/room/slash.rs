@@ -185,6 +185,8 @@ pub fn help_lines() -> Vec<String> {
         "  /help  /?    this guide".to_string(),
         "  /quit  /q    exit (press q twice to confirm)".to_string(),
         "  /session <id>              switch to a root session".to_string(),
+        "  /session ⟨Tab⟩             Tab twice for a random friendly name".to_string(),
+        "                             (the room is created by your first message)".to_string(),
         "  /agent <id> [reason...]    hand this session to another agent (root sessions)".to_string(),
         "  /session list|ls [agent]   list recent sessions (1–9 to pick)".to_string(),
         "  /session resume|latest|last [agent]  jump to most recent session".to_string(),
@@ -518,6 +520,97 @@ fn parse_taint(tail: &str) -> SlashCommand {
         label,
     }
 }
+
+/// Static catalog of top-level slash verbs with a one-line description —
+/// drives the room TUI's type-ahead suggestion popup while the operator is
+/// still typing the verb (before the first space). Order is display order
+/// (roughly day-to-day usage first). Aliases (`q`, `exit`, `?`,
+/// `emergency-stop`, `ls`) still parse but are intentionally not listed —
+/// the popup teaches the canonical spelling.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("help", "full command reference in the detail pane"),
+    ("session", "switch session · Tab: random name · `list` / `resume`"),
+    ("agent", "hand this session to another agent"),
+    ("return", "return the active workbench to the orchestrator"),
+    ("fork", "branch this session and switch to the fork"),
+    ("plan", "list pending PlanFrames · `approve [id]`"),
+    ("curate", "run memory curation on this session now"),
+    ("crystallize", "make what worked here reusable"),
+    ("skills", "proposed skill work: verdicts, decisions, candidates"),
+    ("wiki", "list pending wiki proposals"),
+    ("cron", "scheduled jobs for this session"),
+    ("audit", "per-turn egress audit: what left, what was withheld"),
+    ("model", "show / override the inference preset"),
+    ("private", "toggle room privacy · or send one local_only message"),
+    ("taint", "declare a session egress rule"),
+    ("local", "describe intent → gateway proposes concrete rules"),
+    ("estop", "emergency-stop session · optionally redirect"),
+    ("test", "inject synthetic events (dev)"),
+    ("quit", "exit the TUI"),
+];
+
+/// Prefix-matched command suggestions for the in-flight slash buffer (the
+/// buffer without the leading `/`). Pure so the TUI and its renderer agree
+/// without sharing state:
+///
+/// - empty buffer → every command (the full menu)
+/// - no whitespace yet → case-insensitive prefix match on the verb
+/// - any whitespace → empty: the operator is typing arguments, so the menu
+///   closes and Enter/Tab fall through to the ordinary command path
+///   (including `/taint` argument completion)
+pub fn command_suggestions(buffer: &str) -> Vec<(&'static str, &'static str)> {
+    let verb = buffer.trim_start();
+    if verb.is_empty() {
+        return COMMANDS.to_vec();
+    }
+    if verb.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let lower = verb.to_ascii_lowercase();
+    COMMANDS
+        .iter()
+        .copied()
+        .filter(|(name, _)| name.starts_with(&lower))
+        .collect()
+}
+
+/// Random friendly session name for the `/session` Tab flow —
+/// `adjective-noun-number` (e.g. `quiet-otter-4173`). Std-only randomness:
+/// wall-clock nanos mixed with a process-wide counter through xorshift64*.
+/// This names a room, it is not a security boundary — the id only has to be
+/// memorable and not collide with an existing session in practice.
+pub fn random_session_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    const GOLDEN: u64 = 0x9E3779B97F4A7C15;
+    let mut s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(GOLDEN)
+        ^ COUNTER
+            .fetch_add(GOLDEN, Ordering::Relaxed)
+            .wrapping_mul(0xBF58476D1CE4E5B9);
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    let r = s.wrapping_mul(0x2545F4914F6CDD1D);
+    let adjective = NAME_ADJECTIVES[((r >> 32) as usize) % NAME_ADJECTIVES.len()];
+    let noun = NAME_NOUNS[(r as usize) % NAME_NOUNS.len()];
+    let number = ((r >> 16) % 10_000) as u16;
+    format!("{adjective}-{noun}-{number:04}")
+}
+
+const NAME_ADJECTIVES: &[&str] = &[
+    "amber", "bold", "brisk", "calm", "clever", "dawn", "eager", "fond", "gentle", "hazel",
+    "keen", "lucid", "mellow", "noble", "quiet", "rapid", "sage", "steady", "tidal", "urban",
+    "vivid", "warm", "witty", "zesty",
+];
+
+const NAME_NOUNS: &[&str] = &[
+    "otter", "falcon", "maple", "harbor", "cinder", "willow", "sparrow", "basalt", "comet",
+    "dune", "ember", "fern", "geyser", "heron", "island", "juniper", "kelp", "lantern",
+    "meadow", "nimbus", "orchid", "pine", "quartz", "reef",
+];
 
 /// Live source catalog for `/taint` Tab-completion (#977) — the room fills it
 /// from the `egress.sources` RPC (tool registry + MCP server list + path
@@ -1335,4 +1428,80 @@ fn taint_tab_completion_refuses_tainted_lookalike_verbs() {
     // verb, and the pure function must agree.
     assert_eq!(taint_tab_complete("tainted sand", &cat, 0), None);
     assert_eq!(taint_tab_complete("taintx mcp.gmail.* local_", &cat, 0), None);
+}
+
+#[test]
+fn command_suggestions_empty_buffer_lists_the_full_menu() {
+    let all = command_suggestions("");
+    assert_eq!(all.len(), COMMANDS.len());
+    // Every parse verb has a catalog entry, so the menu never suggests
+    // something the parser would call unknown. `taint` is the one exception:
+    // it requires arguments, so the bare verb is a usage error — it stays
+    // listed because Tab completes it into the argument slot.
+    for (name, _) in COMMANDS {
+        if *name == "taint" {
+            continue;
+        }
+        assert!(
+            !matches!(parse(&format!("/{name}")), SlashCommand::Unknown(_)),
+            "/{name} is listed in COMMANDS but parses as unknown"
+        );
+    }
+}
+
+#[test]
+fn command_suggestions_prefix_filter_is_case_insensitive() {
+    let names: Vec<&str> = command_suggestions("CR").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, vec!["crystallize", "cron"]);
+    let names: Vec<&str> = command_suggestions("Se").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, vec!["session"]);
+    // No match → empty menu (popup hidden).
+    assert!(command_suggestions("zzz").is_empty());
+}
+
+#[test]
+fn command_suggestions_close_once_arguments_begin() {
+    // Whitespace means the verb is chosen and the operator is typing
+    // arguments — the menu must close so Tab falls through to `/taint`
+    // argument completion and Enter runs the buffer as typed.
+    assert!(command_suggestions("taint ").is_empty());
+    assert!(command_suggestions("taint fs.read local_").is_empty());
+    assert!(command_suggestions("session list ").is_empty());
+}
+
+#[test]
+fn random_session_name_is_well_formed() {
+    let name = random_session_name();
+    let parts: Vec<&str> = name.split('-').collect();
+    assert_eq!(parts.len(), 3, "adjective-noun-number, got {name}");
+    assert!(
+        NAME_ADJECTIVES.contains(&parts[0]),
+        "'{}' not from the adjective list",
+        parts[0]
+    );
+    assert!(
+        NAME_NOUNS.contains(&parts[1]),
+        "'{}' not from the noun list",
+        parts[1]
+    );
+    assert!(
+        parts[2].len() == 4 && parts[2].bytes().all(|b| b.is_ascii_digit()),
+        "number part must be zero-padded digits, got '{}'",
+        parts[2]
+    );
+    // The generated name must round-trip the parser as a SwitchSession id.
+    assert_eq!(
+        parse(&format!("/session {name}")),
+        SlashCommand::SwitchSession(name)
+    );
+}
+
+#[test]
+fn random_session_name_varies_across_calls() {
+    let names: std::collections::HashSet<String> =
+        (0..64).map(|_| random_session_name()).collect();
+    assert!(
+        names.len() > 1,
+        "64 draws produced only {names:?} — the name is effectively constant"
+    );
 }

@@ -68,8 +68,9 @@ const MAX_NARRATIVE_ROW_LINES: usize = 24;
 
 /// Expanded footer height while composing a multi-line message.
 const COMPOSE_PANEL_HEIGHT: u16 = 7;
-/// Height of the attention footer: mode hint, pending strip, selected detail.
-const FOOTER_HEIGHT: u16 = 3;
+/// Height of the attention footer: mode hint, pending strip, selected detail,
+/// and the persistent run indicator (`⟳ running …` / `· idle`).
+const FOOTER_HEIGHT: u16 = 4;
 
 /// Width of the egress-label marker column (#971). One cell, always present so
 /// labeled rows stay aligned with unlabeled ones; a `■` glyph renders only when
@@ -944,6 +945,48 @@ fn build_llm_activity_strip(rows: &[LlmActivityRow], width: u16) -> String {
     }
 }
 
+/// Content of the persistent run-indicator footer line — the bottom-of-screen
+/// answer to "is anything still running?". `Some` while work is in flight (the
+/// turning `glyph` plus what is running and for how long; a `⚠` prefix when
+/// any LLM stream is nearing its stall budget), `None` when idle (the footer
+/// renders a dim `· idle` marker so a silent footer always means tracked-idle,
+/// never lost-track). `open_turns` must already be gated by the staleness
+/// bound — a dangling `turn.start` must not claim the session is running.
+fn build_run_line(
+    open_turns: usize,
+    session_async_processing: bool,
+    llm_streams: usize,
+    gate_pending: bool,
+    elapsed_ms: u64,
+    warn: bool,
+    glyph: &str,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if open_turns > 0 {
+        let plural = if open_turns == 1 { "" } else { "s" };
+        parts.push(format!("{open_turns} turn{plural} open"));
+    }
+    if session_async_processing {
+        parts.push("session processing".to_string());
+    }
+    if llm_streams > 0 {
+        let plural = if llm_streams == 1 { "" } else { "s" };
+        parts.push(format!("{llm_streams} llm stream{plural}"));
+    }
+    if gate_pending {
+        parts.push("gate awaiting you".to_string());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let marker = if warn { "⚠ " } else { "" };
+    Some(format!(
+        "{marker}{glyph} running · {} · {}",
+        parts.join(" · "),
+        fmt_secs(elapsed_ms)
+    ))
+}
+
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
 /// Delegates to `gate_for_entry` so plan gates honour version-keyed resolution
 /// (a superseded `plan.pending` vN is no longer counted).
@@ -1195,11 +1238,19 @@ fn build_footer(
     footer_w: usize,
     info_panel: Option<&InfoPanel>,
     turn_hint: Option<String>,
+    run_line: Option<&str>,
 ) -> Paragraph<'static> {
     // Line 1: mode-specific content (preserves the old one-line footer behaviour).
     let line1 = if let Some(buf) = slash {
+        // While the verb is still being typed the suggestion menu is open —
+        // point at it instead of the wall-of-commands hint.
+        let hint = if super::slash::command_suggestions(buf).is_empty() {
+            format!("[Enter run · Esc cancel]   {}", super::slash::HELP_TEXT)
+        } else {
+            "[↑↓ select · Tab complete · Enter run · Esc cancel]".to_string()
+        };
         Line::from(Span::styled(
-            format!(" : /{buf}▏   [Enter run · Esc cancel]   {}", super::slash::HELP_TEXT),
+            format!(" : /{buf}▏   {hint}"),
             Style::default().fg(Color::Magenta),
         ))
     } else if compose.is_some() {
@@ -1278,8 +1329,24 @@ fn build_footer(
 
     let line2 = build_attention_strip_line(approval_rows, footer_w);
     let line3 = build_attention_detail_line(gate, approval_rows, footer_w);
+    // Persistent bottom indicator: turning `⟳ running …` while anything is in
+    // flight, a dim `· idle` otherwise — silence always means tracked-idle.
+    let line4 = match run_line {
+        Some(text) => {
+            let color = if text.starts_with('⚠') {
+                Color::Yellow
+            } else {
+                Color::Cyan
+            };
+            Line::from(Span::styled(format!(" {text}"), Style::default().fg(color)))
+        }
+        None => Line::from(Span::styled(
+            " · idle",
+            Style::default().fg(Color::DarkGray),
+        )),
+    };
 
-    Paragraph::new(Text::from(vec![line1, line2, line3]))
+    Paragraph::new(Text::from(vec![line1, line2, line3, line4]))
 }
 
 fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<ApprovalRow> {
@@ -4179,6 +4246,14 @@ pub fn run(
     let mut clipboard =
         std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None);
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
+    // Persistent run indicator (bottom footer line): `Some` text while any
+    // work is in flight, `None` → `· idle`. `run_started` anchors the elapsed
+    // clock at the idle → running transition so the age survives frame ticks.
+    let mut run_started: Option<Instant> = None;
+    let mut run_line: Option<String> = None;
+    // Highlighted row in the slash-command suggestion popup (menu open while
+    // the verb is still being typed — see `slash::command_suggestions`).
+    let mut slash_sel: usize = 0;
     // `/taint` Tab-completion state (#977): the source catalog fetched from
     // `egress.sources` once per session, and the cycling cursor over prefix
     // matches for repeated Tab presses.
@@ -4342,11 +4417,61 @@ pub fn run(
                     // before the other key handlers so `:` and `?` can also
                     // enter it (matching vim/Discord conventions). The parser
                     // classifies the buffer; we never execute a raw string.
+                    // While the verb is still being typed (no whitespace yet)
+                    // a suggestion menu is open above the footer: ↑/↓ move the
+                    // highlight, Tab accepts the highlighted verb into the
+                    // buffer, Enter runs it directly.
                     if let Some(buf) = slash.as_mut() {
+                        let suggestions = super::slash::command_suggestions(buf);
+                        let menu_sel = if suggestions.is_empty() {
+                            0
+                        } else {
+                            slash_sel.min(suggestions.len() - 1)
+                        };
                         match key.code {
                             KeyCode::Esc => slash = None,
+                            KeyCode::Up => {
+                                if !suggestions.is_empty() {
+                                    slash_sel = if menu_sel == 0 {
+                                        suggestions.len() - 1
+                                    } else {
+                                        menu_sel - 1
+                                    };
+                                }
+                            }
+                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if !suggestions.is_empty() {
+                                    slash_sel = if menu_sel == 0 {
+                                        suggestions.len() - 1
+                                    } else {
+                                        menu_sel - 1
+                                    };
+                                }
+                            }
+                            KeyCode::Down => {
+                                if !suggestions.is_empty() {
+                                    slash_sel = (menu_sel + 1) % suggestions.len();
+                                }
+                            }
+                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if !suggestions.is_empty() {
+                                    slash_sel = (menu_sel + 1) % suggestions.len();
+                                }
+                            }
                             KeyCode::Enter => {
-                                let cmdline = buf.trim().to_string();
+                                // Menu open + a partially typed verb: run the
+                                // highlighted suggestion directly (Discord-
+                                // style pick). Empty buffer keeps the old
+                                // behaviour (a bare Enter reports "unknown"),
+                                // so leaning on Enter can't fire a surprise
+                                // command. Once a space is typed the menu is
+                                // closed and the buffer runs verbatim.
+                                let cmdline = if !suggestions.is_empty() && !buf.trim().is_empty() {
+                                    suggestions[menu_sel].0.to_string()
+                                } else {
+                                    buf.trim().to_string()
+                                };
+                                slash_sel = 0;
                                 slash = None;
                                 match super::slash::parse(&cmdline) {
                                     SlashCommand::Quit => {
@@ -4994,9 +5119,47 @@ pub fn run(
                             }
                             KeyCode::Backspace => {
                                 buf.pop();
+                                slash_sel = 0;
                             }
-                            KeyCode::Char(c) => buf.push(c),
+                            KeyCode::Char(c) => {
+                                buf.push(c);
+                                slash_sel = 0;
+                            }
+                            // Menu open: Tab accepts the highlighted verb with
+                            // a trailing space so the operator lands straight
+                            // in the argument slot (and `/taint` argument
+                            // completion picks up on the next Tab).
+                            KeyCode::Tab if !suggestions.is_empty() => {
+                                *buf = format!("{} ", suggestions[menu_sel].0);
+                                slash_sel = 0;
+                            }
                             KeyCode::Tab => {
+                                // `/session` argument aid: Tab with an empty
+                                // argument slot generates a random friendly
+                                // session name (`/session` → Tab → `session `
+                                // → Tab → `session quiet-otter-4173`). The
+                                // first message sent to that id creates the
+                                // room. A partially typed id or sub-verb
+                                // (`list`, `resume`) is never clobbered;
+                                // backspace the name and Tab again to reroll.
+                                let trimmed = buf.trim_start();
+                                let session_empty_arg =
+                                    trimmed.strip_prefix("session").is_some_and(|rest| {
+                                        !rest.is_empty() && rest.trim().is_empty()
+                                    });
+                                if session_empty_arg {
+                                    // Preserve any leading whitespace the way
+                                    // the taint completion does.
+                                    let head = &buf[..buf.len() - trimmed.len()];
+                                    *buf = format!(
+                                        "{head}session {}",
+                                        super::slash::random_session_name()
+                                    );
+                                    status = Some(
+                                        "✓ session name generated — Enter switches · backspace to reroll".to_string(),
+                                    );
+                                    continue;
+                                }
                                 // RFC §5.4 rung-2 authoring aid (#977): complete
                                 // `/taint` sources from the live tool catalog +
                                 // MCP server list (fetched once per session via
@@ -6832,6 +6995,7 @@ pub fn run(
                             artifact_viewer = None;
                             artifact_file_view = None;
                             slash = Some(String::new());
+                            slash_sel = 0;
                             status = None;
                         }
                         KeyCode::Char('?') => {
@@ -7629,6 +7793,7 @@ pub fn run(
                     input.as_ref(),
                     compose.as_ref(),
                     slash.as_deref(),
+                    slash_sel,
                     status.as_deref(),
                     early_gate.as_ref(),
                     early_spinner,
@@ -7656,6 +7821,7 @@ pub fn run(
                     current_taint.as_deref(),
                     current_pinned,
                     &llm_activity,
+                    run_line.as_deref(),
                 )
             })?;
         }
@@ -7681,6 +7847,7 @@ pub fn run(
                     input.as_ref(),
                     compose.as_ref(),
                     slash.as_deref(),
+                    slash_sel,
                     status.as_deref(),
                     view_gate.as_ref(),
                     SPINNER_FRAMES[spinner_frame],
@@ -7708,6 +7875,7 @@ pub fn run(
                     current_taint.as_deref(),
                     current_pinned,
                     &llm_activity,
+                    run_line.as_deref(),
                 )
             })?;
         }
@@ -8038,10 +8206,33 @@ pub fn run(
             || !llm_activity.is_empty()
             || pending_gate.is_some();
         if has_in_flight_visual {
+            if run_started.is_none() {
+                run_started = Some(Instant::now());
+            }
             spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
             needs_redraw = true;
+        } else {
+            run_started = None;
         }
         let spinner_glyph = SPINNER_FRAMES[spinner_frame];
+        // The footer's "still running?" line: turns with the spinner while
+        // anything is in flight, and collapses to `· idle` (run_line = None)
+        // the moment nothing is — see build_run_line.
+        run_line = build_run_line(
+            if open_turns_live {
+                cached_open_turns.len()
+            } else {
+                0
+            },
+            session_async_processing,
+            llm_activity.len(),
+            pending_gate.is_some(),
+            run_started
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+            llm_activity.iter().any(llm_activity_near_stall),
+            spinner_glyph,
+        );
 
         let should_render = needs_redraw
             || entries_changed
@@ -8430,6 +8621,7 @@ pub fn run(
                 input.as_ref(),
                 compose.as_ref(),
                 slash.as_deref(),
+                slash_sel,
                 status.as_deref(),
                 gate.as_ref(),
                 spinner_glyph,
@@ -8457,6 +8649,7 @@ pub fn run(
                 current_taint.as_deref(),
                 current_pinned,
                 &llm_activity,
+                run_line.as_deref(),
             )
         })?;
 
@@ -10896,6 +11089,7 @@ fn draw(
     input: Option<&GateInput>,
     compose: Option<&ComposeInput>,
     slash: Option<&str>,
+    slash_sel: usize,
     status: Option<&str>,
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
@@ -10921,6 +11115,7 @@ fn draw(
     taint: Option<&str>,
     pinned: bool,
     llm_activity: &[LlmActivityRow],
+    run_line: Option<&str>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     // Live LLM activity strip (#1081): one line under the header while any
@@ -11011,6 +11206,7 @@ fn draw(
                 chunks[footer_idx].width as usize,
                 info_panel,
                 turn_hint,
+                run_line,
             );
             f.render_widget(footer, chunks[footer_idx]);
             return;
@@ -11128,8 +11324,11 @@ fn draw(
         i += 1;
     }
 
+    // Compose sits directly above the footer in every layout variant (with or
+    // without the live LLM activity strip), so derive the index from the end
+    // instead of hardcoding — chunks[2] is the timeline list when streaming.
     if let Some(c) = compose {
-        draw_compose_input(f, c, chunks[2], taint);
+        draw_compose_input(f, c, chunks[chunks.len() - 2], taint);
     }
 
     let turn_hint = rows.get(safe_selected).and_then(|r| match r {
@@ -11150,8 +11349,67 @@ fn draw(
         chunks[footer_idx].width as usize,
         info_panel,
         turn_hint,
+        run_line,
     );
     f.render_widget(footer, chunks[footer_idx]);
+
+    // Slash-command suggestion menu: a bordered list docked directly above
+    // the footer while the verb is still being typed. Derived purely from the
+    // slash buffer (+ the loop-owned `slash_sel` highlight), so it can never
+    // desync from what Enter will actually run.
+    if let Some(buf) = slash {
+        let suggestions = super::slash::command_suggestions(buf);
+        if !suggestions.is_empty() {
+            let sel = slash_sel.min(suggestions.len() - 1);
+            let max_rows = 10usize;
+            let shown = suggestions.len().min(max_rows);
+            // Keep the highlighted row inside the visible window.
+            let start = if sel >= shown { sel - shown + 1 } else { 0 };
+            let width = 62.min(f.area().width as usize) as u16;
+            let height = (shown as u16 + 2).min(f.area().height);
+            let y = chunks[footer_idx].y.saturating_sub(height);
+            let area = Rect {
+                x: f.area().x,
+                y,
+                width,
+                height,
+            };
+            f.render_widget(Clear, area);
+            let title = if suggestions.len() > shown {
+                format!(" slash commands ({}/{}) ", sel + 1, suggestions.len())
+            } else {
+                " slash commands ".to_string()
+            };
+            let rows: Vec<Line> = suggestions[start..start + shown]
+                .iter()
+                .enumerate()
+                .map(|(i, (name, desc))| {
+                    let idx = start + i;
+                    let marker = if idx == sel { "▸" } else { " " };
+                    let text = format!(" {marker}/{name} — {desc}");
+                    let style = if idx == sel {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().bg(Color::Black)
+                    };
+                    Line::from(Span::styled(text, style))
+                })
+                .collect();
+            f.render_widget(
+                Paragraph::new(rows).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Magenta))
+                        .style(Style::default().bg(Color::Black)),
+                ),
+                area,
+            );
+        }
+    }
 
     // Overlays render last (on top of everything) so they are never painted over.
     if let Some(panel) = info_panel {
@@ -13196,8 +13454,9 @@ mod tests {
 
     #[test]
     fn main_list_page_step_accounts_for_chrome() {
-        assert_eq!(main_list_page_step(24, false), 20);
-        assert_eq!(main_list_page_step(24, true), 13);
+        // header (1) + footer (4); compose adds its panel when open.
+        assert_eq!(main_list_page_step(24, false), 19);
+        assert_eq!(main_list_page_step(24, true), 12);
         assert_eq!(main_list_page_step(1, false), 1);
     }
 
@@ -13267,6 +13526,40 @@ mod tests {
         let line = build_attention_detail_line(None, &[], 120);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("Press A for approvals list"), "{text}");
+    }
+
+    #[test]
+    fn run_line_lists_every_in_flight_source_and_pluralizes() {
+        let line = build_run_line(2, true, 1, true, 61_000, false, "⟳").unwrap();
+        assert!(line.contains("⟳ running"), "{line}");
+        assert!(line.contains("2 turns open"), "{line}");
+        assert!(line.contains("session processing"), "{line}");
+        assert!(line.contains("1 llm stream"), "{line}");
+        assert!(line.contains("gate awaiting you"), "{line}");
+        assert!(line.ends_with("1m1s"), "{line}");
+        assert!(!line.starts_with('⚠'), "{line}");
+    }
+
+    #[test]
+    fn run_line_singularizes_single_sources() {
+        let line = build_run_line(1, false, 0, false, 500, false, "⠹").unwrap();
+        assert!(line.contains("1 turn open"), "{line}");
+        assert!(!line.contains("turns"), "{line}");
+        assert!(!line.contains("session processing"), "{line}");
+    }
+
+    #[test]
+    fn run_line_is_none_when_nothing_is_in_flight() {
+        // The footer renders `· idle` for None — silence must always mean
+        // tracked-idle, never lost-track.
+        assert_eq!(build_run_line(0, false, 0, false, 0, false, "⟳"), None);
+    }
+
+    #[test]
+    fn run_line_warns_when_a_stream_nears_stall() {
+        let line = build_run_line(0, false, 1, false, 5_000, true, "⠸").unwrap();
+        assert!(line.starts_with("⚠ "), "{line}");
+        assert!(line.contains("⠸ running"), "{line}");
     }
 
     #[test]
