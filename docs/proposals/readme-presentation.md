@@ -6,9 +6,10 @@ clause-ID guard) and the Pages-hub link in §4.3 are open. Rebased onto #1307,
 which shipped `requires`; the numbers below were re-verified against it and did
 not move, and the field is now carried on the front page.
 Date: 2026-09-04
-Scope: `README.md`, the two diagram assets it leads with, the bind-direction
-paragraph in [`../concepts/philosophy.md`](../concepts/philosophy.md), and one
-guard extension. No code behaviour, no clause statement, no amendment.
+Scope: `README.md`, the three generated plates it leads with and the four
+published HTML maps, the bind-direction section in
+[`../concepts/philosophy.md`](../concepts/philosophy.md), and one guard
+extension. No code behaviour, no clause statement, no amendment.
 
 > **Why now.** Four PRs (#1293, #1298, #1302, #1304, #1306) retired the model
 > the README uses to explain the constitution. The front page now states, as
@@ -224,7 +225,7 @@ pictures at once — a dataflow diagram and the social contract. Specifically:
 
 The result is neither picture. A front-page diagram gets one claim.
 
-### 4.2 Two pictures, one job each
+### 4.2 Three pictures, one job each
 
 **The hero: the peer plate.**
 [`diagrams/human-ai-peers.svg`](diagrams/human-ai-peers.svg) is the right
@@ -257,6 +258,14 @@ Do **not** use `human-ai-peers.jpg` on the front page: its seal text is garbled
 ("SYMME TRIC DUTIES", "BREUME DUTIES"), which is exactly what a reader zooms in
 on. The hand-authored SVG is the asset.
 
+**The second picture: the loop, and only the loop.** Keep one mechanism diagram,
+reduced to what it actually claims: actor → typed intent → validate → sandbox →
+chain → signed attestation → actor, with the law as a **frame** around the whole
+rather than a node with dashed edges to everything else. Five nodes, six edges,
+no subgraphs, no sentence labels. Authoring it as an SVG rather than
+mermaid gives the plates a shared visual language and puts the clause IDs inside
+the guard that already checks them.
+
 **The third picture: the bet.** Added after review — the hero states *what the
 arrangement is*, the loop states *how it runs*, and neither states *why anyone
 should expect it to work*. `the-bet.svg` carries the thesis, and it is drawn as
@@ -270,14 +279,6 @@ health and the discretion-leak ledger named as the instruments that would show
 it. A plate that stated only the upside would be marketing, and this project's
 front page cannot afford that: its whole argument is that the gap between text
 and enforcement is a measured quantity.
-
-**The second picture: the loop, and only the loop.** Keep one mechanism diagram,
-reduced to what it actually claims: actor → typed intent → validate → sandbox →
-chain → signed attestation → actor, with the law as a **frame** around the whole
-rather than a node with dashed edges to everything else. Five nodes, six edges,
-no subgraphs, no sentence labels. Authoring it as a second SVG rather than
-mermaid gives the two plates a shared visual language and puts the clause IDs
-inside the guard that already checks them.
 
 ### 4.3 Asset placement
 

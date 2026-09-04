@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Generate the two README plates, dark + light, from one token palette.
+"""Generate the three README plates, dark + light, from one token palette.
 
 Run from the workspace root:
 
     python3 docs/diagrams/generate.py
 
-Writes `peers-under-one-law{,-light}.svg` and `correction-loop{,-light}.svg`
-into this directory. The light variants are generated rather than
-hand-maintained, so a colour only ever has one definition per theme.
+Writes `peers-under-one-law{,-light}.svg`, `correction-loop{,-light}.svg` and
+`the-bet{,-light}.svg` into this directory — six files. The light variants are
+generated rather than hand-maintained, so a colour only ever has one definition
+per theme. Adding a plate means adding its template and one row in the loop at
+the bottom; keep this list in step with that loop.
 """
 import pathlib
 
