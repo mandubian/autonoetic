@@ -1731,7 +1731,21 @@ impl JsonRpcRouter {
                 let event_type = params.event_type.clone();
                 let mut ingest_rerouted_from_child = false;
                 let mut reroute_lead: Option<String> = None;
-                if params.event_type.trim() == "chat" {
+                // A pump-delivered `agent_message` wake notice is machine-addressed
+                // to its recipient session and must not be attracted by the
+                // user-chat reroute below: rerouting it to the workflow root
+                // hijacks the DM — the wake never reaches the parked recipient, so
+                // its `agent_message_deliveries` row stays `delivered_at = NULL`
+                // and the message is never answered (observed 2026-09-04: DM to a
+                // spawned workflow child swallowed while its bootstrap task was
+                // still Running). Only human/agent-authored chat is rerouted;
+                // child-state notifications keep their existing planner-reroute
+                // behavior, which downstream wakes already compensate for.
+                let is_agent_message_wake = params.metadata.as_ref().is_some_and(|m| {
+                    m.get("signal_delivered") == Some(&serde_json::Value::Bool(true))
+                        && m.get("signal_type").and_then(|v| v.as_str()) == Some("agent_message")
+                });
+                if params.event_type.trim() == "chat" && !is_agent_message_wake {
                     match crate::scheduler::workflow_store::reroute_chat_ingest_for_active_workflow_child_session(
                         self.config.as_ref(),
                         None,
