@@ -144,8 +144,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: "runtime/constitution/versions/2026.09.02/constitution.md"
-  lock_path: "runtime/constitution/versions/2026.09.02/gateway-constitution.lock.json"
+  source_path: "runtime/constitution/versions/2026.09.04/constitution.md"
+  lock_path: "runtime/constitution/versions/2026.09.04/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
