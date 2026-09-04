@@ -1195,9 +1195,13 @@ mod tests {
         assert_eq!(clause("I-4").requires.as_deref(), Some("detective"));
         assert_eq!(clause("Ri-0.12").requires.as_deref(), Some("preventive"));
         // Absent, not guessed, while a clause awaits its tranche — the same
-        // discipline `binds` follows with `BINDS_UNDECLARED`.
-        assert!(clause("P-2.20").requires.is_none());
+        // discipline `binds` follows with `BINDS_UNDECLARED`. §2 is fully
+        // declared now, so the examples come from the sections that have had
+        // no tranche at all.
         assert!(clause("P-1.1").requires.is_none());
+        assert!(clause("P-6.1").requires.is_none());
+        // A declared `P-*`, so this is not vacuous.
+        assert_eq!(clause("P-2.20").requires.as_deref(), Some("preventive"));
 
         // The retired party names appear nowhere.
         for c in &p.clauses {
