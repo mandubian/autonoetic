@@ -446,21 +446,42 @@ freeze descriptions of today's Rust into constitutional text — both
 significantly harder to undo than to avoid, since a signed column can only be
 changed by amendment.
 
-**Status:** `requires` is implemented and declared for the 39 non-`P` clauses
-plus `P-8.1` (`enforcement_register::Requires`,
-`constitution_relations::requires`). The 84 numbered `P-*` classified in the
-section tranches await it — deliberately not back-filled from `verified_by`,
-because the mapping does not exist: `construction` and `chokepoint` do imply
-`preventive`, but `test`, `registry` and `sampling` say nothing either way, so
-deriving would have manufactured judgements nobody made.
+**Status:** `requires` is implemented and declared for **all 124 classified
+clauses** (`enforcement_register::Requires`,
+`constitution_relations::requires`). Not back-filled from `verified_by` — the
+mapping does not exist: `construction` and `chokepoint` do imply `preventive`,
+but `test`, `registry` and `sampling` are neutral, so deriving would have
+manufactured judgements nobody made. `I-10` is the proof: `sampling` is how
+determinism is *checked*, while the clause requires prevention.
 
-The first 40 came out **25 preventive / 6 detective / 9 both**. Nine mixed
-clauses in forty is high enough to matter: `Ri-0.4`, `Ri-0.6`, `Ri-0.8`,
-`Ri-0.11`, `Ri-0.13`, `Ri-0.18`, `U-3`, `P-8.1` and `Ri-0.3` each pair a
-representable core with a judgment-shaped penumbra. Under §2.4.3 they are all
-split candidates, which suggests the drafting consequence is not a corner case
-but the common one — worth knowing before part 3 decides how the column is
-written.
+Coverage is now a **type property** rather than a ratchet. Completing the
+`P-*` sections left every `requires`-less constructor unused, so they were
+removed and the field made mandatory on the clause record: a clause cannot
+enter the table without a requirement, and it does not compile if it tries.
+That is the model's own make-the-gap-unrepresentable move applied to the
+model's data.
+
+**Distribution: 99 preventive / 10 detective / 15 both.** The 15 mixed clauses
+are §2.4.3 split candidates, and their concentration is the finding part 3
+needs:
+
+| family | clauses | `Both` | rate |
+|---|---|---|---|
+| §0 rights, §O, §12, §13 | 39 | 8 | **20%** |
+| §2, §5, §7, §9, §15 rules | 85 | 7 | 8% |
+
+Mixed clauses cluster in the **rights and invariants**, not the operational
+rules — and the reason is legible once seen. A right makes a claim about
+conduct over time ("never silently", "never grounds for sanction", "cannot be
+retroactively reattributed"), which pairs a representable core with a
+judgment-shaped penumbra. An operational rule gates a concrete action, which is
+either blocked or not.
+
+So the drafting consequence is real but **bounded and localised**: part 3 faces
+~15 split candidates, mostly in §0 and §13, not a document-wide restructure.
+Splitting them is a statement change requiring its own amendment (§8), so the
+practical order is: adopt the columns with `Both` recorded where it holds, then
+split those clauses in a later amendment if the marking proves load-bearing.
 
 `achieved` is **not** yet moved. `verified_by` still sits on the clause record
 and is rendered in the law table under a header saying it is conformance data
