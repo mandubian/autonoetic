@@ -1,11 +1,27 @@
 # Proposal: the README as a presentation of the constitutional model
 
-Status: **Partial** — PRs 1–3 below are applied (the rewritten `README.md`,
-three generated plates, the `philosophy.md` §2 correction). PR 4 (the markdown
-clause-ID guard) and the Pages-hub link in §4.3 are open. Rebased onto #1307,
-which shipped `requires`; the numbers below were re-verified against it and did
-not move, and the field is now carried on the front page.
-Date: 2026-09-04
+> **Archived — complete.** All four PRs shipped: the truth pass, the diagram
+> pass and the structure pass in #1311, and the guard pass plus §4.3's Pages-hub
+> link in the follow-up. The front page it proposed is live: `README.md` is the
+> source of truth for what the page says, and
+> `autonoetic-gateway/src/docs_link_guard.rs` for what keeps it true.
+>
+> Retired rather than left open because its whole subject was a document that had
+> drifted, and a proposal about drift that outlives its own delivery is the same
+> defect one level up. The lasting content is not the sequencing table but §1
+> (what the bind-direction robustification actually changed), §2's defect table
+> (how a front page goes wrong: a stale "current version" pointer, a prefix count
+> presented as a ratio, and a claim the code had already disproved), §3's framing
+> of one job per section, and §4.1's diagnosis of why the mermaid plate read as
+> noise. Those are the parts worth reading before rewriting a front page again.
+>
+> Two things it got wrong in flight, recorded rather than smoothed over: the
+> "~180 lines" target (the result is 428, and §3 says why that was the wrong
+> constraint to hold), and the "features you may not find elsewhere" framing,
+> which was untrue — almost every item exists elsewhere; what is peculiar is
+> *how* it is held.
+
+Shipped: 2026-09-04, via #1311 and its follow-up.
 Scope: `README.md`, the three generated plates it leads with and the four
 published HTML maps, the bind-direction section in
 [`../concepts/philosophy.md`](../concepts/philosophy.md), and one guard
@@ -28,7 +44,7 @@ from a clause's ID prefix and became declared data in
 prefix — `P-*` → agent, `Ri-*` → gateway, `O-*` → decider — and a test pinned
 that inference, so the falsehood was asserted rather than drifted into. Three
 examples from the RFC's own evidence table
-([`constitution-bind-direction-model.md`](constitution-bind-direction-model.md) §1.1):
+([`constitution-bind-direction-model.md`](../proposals/constitution-bind-direction-model.md) §1.1):
 `binds("P-8.1")` reported that the *agent* keeps the causal chain append-only;
 `binds("P-3.1")` that the agent passes `--unshare-all`; `binds("P-15.1")` that
 the agent withholds labelled envelopes — which `I-14` forbids the agent from so
@@ -228,7 +244,7 @@ The result is neither picture. A front-page diagram gets one claim.
 ### 4.2 Three pictures, one job each
 
 **The hero: the peer plate.**
-[`diagrams/human-ai-peers.svg`](diagrams/human-ai-peers.svg) is the right
+[`diagrams/human-ai-peers.svg`](../proposals/diagrams/human-ai-peers.svg) is the right
 composition — one law over both parties, both figures dimensioned to the same
 height, the four one-way bindings as arrows, the correction cycle as a footer
 strip. It commits to a single claim and drops mechanism entirely, which is
@@ -285,7 +301,7 @@ and enforcement is a measured quantity.
 If these plates become README-load-bearing they should not live under
 `proposals/` — a hero sourced from a proposals folder reads as provisional. Move
 the two into [`../diagrams`](../diagrams) alongside the four published maps, and
-add [`diagrams/community-and-constitution.html`](diagrams/community-and-constitution.html)
+add [`diagrams/community-and-constitution.html`](../proposals/diagrams/community-and-constitution.html)
 to the Pages hub ([`../index.html`](../index.html)): it is an interactive clause
 catalogue with a searchable bind-direction map, and nothing links to it from the
 front door.
@@ -322,11 +338,11 @@ file, line and offending ID.
 ## 6. What this proposal does not propose
 
 - No clause statement, no amendment, no change to the signed text. The §2.4.1
-  reshaping of the verification field ([`constitution-bind-direction-model.md`](constitution-bind-direction-model.md))
+  reshaping of the verification field ([`constitution-bind-direction-model.md`](../proposals/constitution-bind-direction-model.md))
   is the amendment-adjacent work, and it is not this.
 - No new diagram *concepts* — the compositions exist; this corrects and promotes
   them.
-- Not the launch messaging. [`launch-presentation.md`](launch-presentation.md)
+- Not the launch messaging. [`launch-presentation.md`](../proposals/launch-presentation.md)
   owns the pitch, the demo and the rollout; this owns the front page's accuracy
   and shape. Where they overlap, the one-liner should be the same sentence in
   both, and this proposal defers to that one.

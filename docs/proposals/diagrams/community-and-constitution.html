@@ -449,7 +449,7 @@
     <div class="sheet">
       <img src="human-ai-peers.svg" alt="Humans and AI agents as constitutional peers: one law over both parties, equal standing, and the co-evolution cycle" style="width:100%; border-radius:6px; border:1px solid var(--line);" />
       <p class="dek" style="margin-top:12px;">
-        <b>Equal standing, not identical rights.</b> Both figures are dimensioned to the same height because authority attaches to the <i>seat</i>, not the species (P-2.20, I-12) — but each party is bound by a <i>different</i> clause family. That asymmetry is the design: rules (<code>P-*</code>) bind the agent, rights (<code>Ri-*</code>) bind the gateway, obligations (<code>O-*</code>) bind whoever decides, and the §12 charter (<code>U-*</code>, declared only) binds the community toward the party it serves. Four one-way bindings are what produce symmetry of standing; "shared rights" would not.
+        <b>Equal standing, not identical rights.</b> Both figures are dimensioned to the same height because authority attaches to the <i>seat</i>, not the species (P-2.20, I-12) — but each party is bound by a <i>different</i> clause family. That asymmetry is the design, and since #1284 it is <i>declared data</i> rather than a rule read off the ID: which power a clause binds — reasoner, enforcer or decider — is recorded per clause in <code>docs/constitution/law-table.md</code>. The families below group by prefix because that is how the signed text is organised, not because the prefix decides: of 124 classified clauses <b>118 bind the enforcer</b>, and the §12 charter (<code>U-*</code>, declared only) binds the enforcer <i>toward</i> the served party rather than "the community", which is an aggregate and so breaks §0's own one-clause-one-party rule. Four one-way bindings are what produce symmetry of standing; "shared rights" would not.
       </p>
     </div>
 
@@ -786,7 +786,7 @@
         document.getElementById('panelKicker').style.color = data.color;
         document.getElementById('panelTitle').textContent = data.title;
         document.getElementById('panelDescription').innerHTML = data.desc;
-        document.getElementById('panelMeta').textContent = `Inspecting: ${data.title} · Active Constitution v2026.07.30`;
+        document.getElementById('panelMeta').textContent = `Inspecting: ${data.title} · Active Constitution v2026.09.02`;
       }
     }
 
@@ -845,7 +845,7 @@
 
     // Comprehensive Constitutional Clauses Catalog
     const clauses = [
-      // --- RIGHTS (Ri-*, bind: gateway) ---
+      // --- RIGHTS (Ri-* · binds: enforcer · owed to: the agent) ---
       { id: "Ri-0.1", type: "right", name: "State & Budget Inspection", status: "enforced", desc: "Every agent may inspect its own active capabilities, budget state, pending gates, and session lineage at any turn boundary (P-6.23 attestation)." },
       { id: "Ri-0.2", type: "right", name: "Truthful History (Entrenched)", status: "enforced", desc: "Unconditional right of every agent to read its own causal chain and execution trace. Audit is a right of the subject, not an operator privilege." },
       { id: "Ri-0.3", type: "right", name: "Named Rejection (Entrenched)", status: "enforced", desc: "Every rejection mechanically cites the rule ID that caused it. Rejection without explanation is indistinguishable from arbitrary authority." },
@@ -865,13 +865,13 @@
       { id: "Ri-0.17", type: "right", name: "Cognitive Capsule Export (Emigration)", status: "enforced", desc: "An agent may export its own portable cognitive capsule to migrate and continue running on another gateway." },
       { id: "Ri-0.18", type: "right", name: "Capability-Free Anomaly Reporting", status: "enforced", desc: "Any agent may file an anomaly report without holding any special capability; filing is non-repudiable and cannot be sanctioned." },
 
-      // --- OBLIGATIONS (O-*, bind: decider) ---
+      // --- OBLIGATIONS (O-* · binds: decider · owed to: the agent) ---
       { id: "O-1", type: "oblig", name: "Motivated Decisions (Entrenched)", status: "enforced", desc: "A decider owes a non-empty recorded justification for any gate rejection or irreversible action. Silent denial is illegitimate." },
       { id: "O-2", type: "oblig", name: "Attributed Decision", status: "enforced", desc: "Every decision is attributed to the deciding principal (ID + kind) on the causal chain; agents always know who decided." },
       { id: "O-6", type: "oblig", name: "Duty to Adjudicate Proposals on Time", status: "enforced", desc: "Review authorities must record a motivated decision on Ri-0.8 amendment proposals within a bounded SLA window." },
       { id: "O-7", type: "oblig", name: "Duty to Adjudicate Anomaly Flags on Time", status: "enforced", desc: "Review authorities must record a resolution on Ri-0.18 anomaly reports within a bounded SLA window." },
 
-      // --- SERVED USER CHARTER (§U, bind: community toward user) ---
+      // --- SERVED USER CHARTER (§U · binds: enforcer · owed to: served user) ---
       { id: "U-1", type: "served", name: "Right of Absolute Refusal", status: "declared", desc: "The served human/entity has absolute sovereignty to reject any result produced by an agent or multi-agent panel." },
       { id: "U-2", type: "served", name: "Full Auditability", status: "declared", desc: "The served party has the unconditional right to inspect all actions, tool logs, egress destinations, and spent budgets." },
       { id: "U-3", type: "served", name: "Zero Lock-In & Portability", status: "declared", desc: "The served party holds the unconditional right to export all data, capsules, and causal history without penalty." },
@@ -879,7 +879,7 @@
       // as §15 (P-15.1–P-15.3) plus the gateway-only invariant I-14, which bind the
       // gateway rather than the community-toward-served. See the P-15.* rows below.
 
-      // --- PRINCIPLES & RULES (P-*, bind: agent) ---
+      // --- PRINCIPLES & RULES (P-* · binds: declared per clause, mostly enforcer) ---
       { id: "P-2.11", type: "rule", name: "Approval SLA & Timeout", status: "enforced", desc: "Pending gate requests have bounded lifespans and auto-cancel on timeout to prevent zombie waiting states." },
       { id: "P-2.20", type: "rule", name: "GateDecider Seat Capability", status: "enforced", desc: "Authorizes a principal (human operator or qualified agent panel) to resolve approval gates under symmetric obligations." },
       { id: "P-2.29", type: "rule", name: "Promotion Attempt Exhaustion", status: "enforced", desc: "Repeated mechanical rejections across sessions trip an exhaustion ceiling requiring operator acknowledgement." },

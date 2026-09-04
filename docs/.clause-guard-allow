@@ -1,0 +1,19 @@
+# Clause IDs a document deliberately names although the active constitution does
+# not declare them. One `ID — reason` per line; `#` comments allowed.
+#
+# Read by `docs_link_guard::tests::every_clause_id_in_prose_resolves`. Prefer
+# rewording over an entry: a clause ID in prose is a promise a reader can look it
+# up. An entry belongs here only when the document's *subject* is a clause that
+# is not in force — a reserved ID, or a fabricated one shown as a counterexample.
+#
+# Unlike `.link-guard-allow`, entries here are expected to expire: when a
+# reserved ID is enacted it leaves this file, and when the prose discussing a
+# counterexample is archived the entry goes with it.
+
+O-3 — reserved decider obligation (anti-fatigue / rate discipline). Named as not-yet-enacted by §O's own closing note, which numbers O-6 past the reserved block so it cannot collide. Discussed in principal-model-and-symmetric-obligations.md
+O-4 — reserved decider obligation (scope honesty). Same reservation as O-3
+O-5 — reserved decider obligation (duty to escalate rather than reject). Same reservation as O-3
+
+U-4 — fabricated on purpose. constitution-bind-direction-model.md §2.3 uses it as the example of inventing a pseudo-party to fill an `owed_to` slot, which is the error the model exists to prevent; readme-presentation.md quotes the same case
+
+Ri-0.99 — fabricated on purpose. readme-presentation.md records it as the ID planted to negative-test the diagram clause guard, so a reader can reproduce the check
