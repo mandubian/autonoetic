@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720" width="100%" height="100%" role="img" aria-label="One law over humans and AI agents: the constitution above, three bound powers inside the frame, and the served party outside it, owed but never bound.">
+  <!--
+    Autonoetic - One law over humans and AI agents.
+
+    GENERATED. Edit the generator, not this file:
+      docs/diagrams/generate.py  (writes both the dark and light variants)
+
+    The claims this plate makes, and does not overstate:
+      - ONE law over every party (the seal, Rule Zero).
+      - EQUAL STANDING, not identical rights: the two figures are dimensioned
+        to the same height because a clause binds a *seat*, not a species
+        (P-2.20). Each party is bound by a different clause family - that
+        asymmetry is the design, and it is what produces symmetry of standing.
+      - INSIDE the frame are the parties that can be BOUND, because a seat
+        exists through which to oblige them. The served party sits OUTSIDE it:
+        owed, never bound, because no seat is theirs yet.
+      - A community that CORRECTS ITSELF (the footer cycle).
+
+    Every clause ID printed here is checked against the active constitution by
+    docs_link_guard::tests::every_clause_id_in_a_diagram_resolves.
+  -->
+  <defs>
+    <style>
+      .bg       { fill: #ffffff; }
+      .frame    { fill: none; stroke: #d8dee4; stroke-width: 1; }
+      .card     { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+      .card-law { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.6; }
+      .frame-law{ fill: none; stroke: #9a6700; stroke-width: 1.6; }
+      .card-gw  { fill: #f6f8fa; stroke: #59636e; stroke-width: 1.6; }
+      .card-evo { fill: #f7f0ff; stroke: #6639ba; stroke-width: 1.5; }
+      .card-srv { fill: #eefbf8; stroke: #0f6e5e; stroke-width: 1.5; stroke-dasharray: 7 4; }
+      .chip     { fill: #faf5ff; stroke: #d8c0f5; stroke-width: 1; }
+
+      .h1  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #1f2328; }
+      .h2  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #1f2328; }
+      .h3  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #1f2328; }
+      .dek { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #59636e; }
+      .mono{ font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #24292f; }
+      .tag { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.10em; }
+      .dim { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 8.5px; letter-spacing: 0.06em; fill: #6e7781; }
+
+      .fig-hum { fill: none; stroke: #a40e26; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .fig-ai  { fill: none; stroke: #0969da; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+      .dimline { stroke: #8c959f; stroke-width: 0.9; }
+      .guide   { fill: none; stroke: #d0d7de; stroke-width: 1; stroke-dasharray: 6 4; }
+
+      .e-hum { fill: none; stroke: #a40e26; stroke-width: 1.5; }
+      .e-ai  { fill: none; stroke: #0969da; stroke-width: 1.5; }
+      .e-law { fill: none; stroke: #9a6700; stroke-width: 1.5; }
+      .e-evo { fill: none; stroke: #6639ba; stroke-width: 1.4; }
+      .e-srv { fill: none; stroke: #0f6e5e; stroke-width: 1.4; stroke-dasharray: 6 4; }
+      .e-run { fill: none; stroke: #59636e; stroke-width: 1.5; }
+</style>
+    <marker id="m-hum" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#a40e26" /></marker>
+    <marker id="m-ai"  viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0969da" /></marker>
+    <marker id="m-law" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#9a6700" /></marker>
+    <marker id="m-evo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#6639ba" /></marker>
+    <marker id="m-srv" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0f6e5e" /></marker>
+    <marker id="m-run" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#59636e" /></marker>
+
+  </defs>
+
+  <rect width="100%" height="100%" class="bg" />
+
+  <rect x="14" y="14" width="972" height="692" class="frame" />
+  <path d="M 14 44 L 44 44 M 44 14 L 44 44" class="frame" />
+  <path d="M 986 44 L 956 44 M 956 14 L 956 44" class="frame" />
+  <path d="M 14 676 L 44 676 M 44 706 L 44 676" class="frame" />
+  <path d="M 986 676 L 956 676 M 956 706 L 956 676" class="frame" />
+
+  <text x="500" y="48" text-anchor="middle" class="h1">One law over humans and AI agents</text>
+  <text x="500" y="70" text-anchor="middle" class="dek">Every clause binds exactly one party &#183; equal standing, not identical rights &#183; a community that corrects itself</text>
+
+  <circle cx="500" cy="150" r="64" fill="#fff8c5" stroke="#9a6700" stroke-width="2" />
+  <circle cx="500" cy="150" r="55" fill="none" stroke="#9a6700" stroke-width="0.8" opacity="0.5" />
+  <text x="500" y="138" text-anchor="middle" class="tag" fill="#9a6700">THE CONSTITUTION</text>
+  <line x1="470" y1="145" x2="530" y2="145" stroke="#9a6700" stroke-width="0.7" opacity="0.5" />
+  <text x="500" y="163" text-anchor="middle" class="h3">RULE ZERO</text>
+  <text x="500" y="182" text-anchor="middle" class="dim">SIGNED &#183; P-10.9</text>
+
+  <rect x="306" y="224" width="388" height="24" rx="4" class="card-law" />
+  <text x="500" y="240" text-anchor="middle" class="tag" fill="#9a6700">EQUAL STANDING&#160;&#160;&#183;&#160;&#160;SYMMETRIC DUTIES&#160;&#160;&#183;&#160;&#160;ONE LAW</text>
+
+  <path d="M 452 192 L 300 226 L 240 288" class="e-law" marker-end="url(#m-law)" />
+  <path d="M 548 192 L 700 226 L 760 288" class="e-law" marker-end="url(#m-law)" />
+  <path d="M 500 212 L 500 224" class="e-law" />
+  <path d="M 500 248 L 500 324" class="e-law" marker-end="url(#m-law)" />
+
+  <rect x="52" y="268" width="896" height="252" rx="8" class="guide" />
+  <text x="68" y="288" class="tag" fill="#59636e">BOUND PARTIES</text>
+
+  <path d="M 76 322 L 76 468 M 68 322 L 84 322 M 68 468 L 84 468" class="dimline" />
+  <path d="M 76 322 L 73 330 M 76 322 L 79 330 M 76 468 L 73 460 M 76 468 L 79 460" class="dimline" />
+  <text x="64" y="395" text-anchor="middle" class="dim" transform="rotate(-90 64 395)">PEER LEVEL</text>
+  <path d="M 924 322 L 924 468 M 916 322 L 932 322 M 916 468 L 932 468" class="dimline" />
+  <path d="M 924 322 L 921 330 M 924 322 L 927 330 M 924 468 L 921 460 M 924 468 L 927 460" class="dimline" />
+  <text x="936" y="395" text-anchor="middle" class="dim" transform="rotate(-90 936 395)">PEER LEVEL</text>
+
+  <text x="190" y="312" text-anchor="middle" class="tag" fill="#a40e26">HUMAN</text>
+  <g class="fig-hum">
+    <circle cx="190" cy="336" r="13" />
+    <path d="M 190 349 L 190 358" />
+    <path d="M 172 358 L 208 358 L 206 412 L 174 412 Z" />
+    <path d="M 172 361 L 156 400" />
+    <path d="M 208 361 L 224 400" />
+    <path d="M 181 412 L 178 466" />
+    <path d="M 199 412 L 202 466" />
+    <path d="M 170 467 L 185 467" />
+    <path d="M 195 467 L 210 467" />
+  </g>
+  <text x="200" y="488" text-anchor="middle" class="mono">seats: operator &#183; decider &#183; auditor</text>
+  <text x="200" y="503" text-anchor="middle" class="dim">O-1 &#183; O-2 BIND WHOEVER DECIDES</text>
+
+  <text x="810" y="312" text-anchor="middle" class="tag" fill="#0969da">AI AGENT</text>
+  <g class="fig-ai">
+    <rect x="794" y="322" width="32" height="32" rx="6" />
+    <circle cx="803" cy="338" r="2.5" />
+    <circle cx="817" cy="338" r="2.5" />
+    <path d="M 810 354 L 810 361" />
+    <rect x="782" y="361" width="56" height="57" rx="3" />
+    <path d="M 789 381 L 831 381" opacity="0.5" />
+    <path d="M 789 399 L 831 399" opacity="0.5" />
+    <path d="M 782 369 L 765 404" />
+    <path d="M 838 369 L 855 404" />
+    <path d="M 795 418 L 792 466" />
+    <path d="M 825 418 L 828 466" />
+    <path d="M 784 467 L 799 467" />
+    <path d="M 821 467 L 836 467" />
+  </g>
+  <text x="800" y="488" text-anchor="middle" class="mono">seats: reasoner &#183; decider &#183; auditor</text>
+  <text x="800" y="503" text-anchor="middle" class="dim">27 RIGHTS OWED BY RELATION</text>
+
+  <rect x="398" y="330" width="204" height="138" rx="6" class="card-gw" />
+  <text x="500" y="352" text-anchor="middle" class="h3">Gateway</text>
+  <text x="500" y="368" text-anchor="middle" class="tag" fill="#59636e">LAWFUL EXECUTOR</text>
+  <line x1="412" y1="378" x2="588" y2="378" stroke="#d0d7de" stroke-width="1" />
+  <text x="500" y="398" text-anchor="middle" class="mono" fill="#59636e">Deterministic enforcement,</text>
+  <text x="500" y="412" text-anchor="middle" class="mono" fill="#59636e">no improvised judgment.</text>
+  <text x="500" y="436" text-anchor="middle" class="mono">118 of 124 classified</text>
+  <text x="500" y="450" text-anchor="middle" class="mono">clauses bind it.</text>
+
+  <text x="312" y="368" text-anchor="middle" class="tag" fill="#a40e26">DECIDES</text>
+  <text x="312" y="379" text-anchor="middle" class="dim">AND OWES A MOTIVATION</text>
+  <path d="M 233 386 L 392 386" class="e-hum" marker-end="url(#m-hum)" />
+  <path d="M 392 430 L 233 430" class="e-hum" marker-end="url(#m-hum)" />
+  <text x="312" y="446" text-anchor="middle" class="tag" fill="#a40e26">GIVES CONTEXT</text>
+  <text x="312" y="457" text-anchor="middle" class="dim">Ri-0.15 &#183; OWED TO THE SEAT</text>
+
+  <text x="688" y="368" text-anchor="middle" class="tag" fill="#0969da">PROPOSES</text>
+  <text x="688" y="379" text-anchor="middle" class="dim">A TYPED INTENT, NEVER AN ACT</text>
+  <path d="M 767 386 L 608 386" class="e-ai" marker-end="url(#m-ai)" />
+  <path d="M 608 430 L 767 430" class="e-ai" marker-end="url(#m-ai)" />
+  <text x="688" y="446" text-anchor="middle" class="tag" fill="#0969da">ATTESTS</text>
+  <text x="688" y="457" text-anchor="middle" class="dim">Ri-0.1 &#183; Ri-0.11 &#183; EVERY TURN</text>
+
+  <path d="M 500 548 L 500 474" class="e-srv" marker-end="url(#m-srv)" />
+  <text x="512" y="536" class="tag" fill="#0f6e5e">ACCOUNTS&#160;&#183;&#160;U-2&#160;&#183;&#160;MISSING</text>
+  <rect x="52" y="548" width="896" height="76" rx="8" class="card-srv" />
+  <text x="70" y="570" class="tag" fill="#0f6e5e">OWED, NEVER BOUND</text>
+  <text x="70" y="590" class="mono">The served party &#8212; the end-user a session runs on behalf of.</text>
+  <text x="930" y="590" text-anchor="end" class="mono" fill="#59636e">P-15.1&#8211;P-15.3 enforced &#183; U-1 &#183; U-2 &#183; U-3 MISSING</text>
+  <text x="70" y="608" class="dim">NO SEAT IS THEIRS YET &#8212; WHICH IS WHY NOTHING CAN OBLIGE THEM, AND WHY ENFORCING U-1 MEANS CREATING ONE</text>
+
+  <rect x="52" y="644" width="896" height="58" rx="8" class="card-evo" />
+  <text x="68" y="682" class="h3" fill="#6639ba">The community corrects itself</text>
+  <rect x="290" y="664" width="110" height="28" rx="3" class="chip" />
+  <text x="345" y="682" text-anchor="middle" class="tag" fill="#6639ba">PROPOSE Ri-0.8</text>
+  <rect x="423" y="664" width="110" height="28" rx="3" class="chip" />
+  <text x="478" y="682" text-anchor="middle" class="tag" fill="#6639ba">ADJUDICATE O-1</text>
+  <rect x="556" y="664" width="110" height="28" rx="3" class="chip" />
+  <text x="611" y="682" text-anchor="middle" class="tag" fill="#6639ba">RECORD P-8.1</text>
+  <rect x="689" y="664" width="110" height="28" rx="3" class="chip" />
+  <text x="744" y="682" text-anchor="middle" class="tag" fill="#6639ba">PROMOTE P-9.15</text>
+  <rect x="822" y="664" width="110" height="28" rx="3" class="chip" />
+  <text x="877" y="682" text-anchor="middle" class="tag" fill="#6639ba">AMEND P-10.9</text>
+  <path d="M 402 678 L 419 678" class="e-evo" marker-end="url(#m-evo)" />
+  <path d="M 535 678 L 552 678" class="e-evo" marker-end="url(#m-evo)" />
+  <path d="M 668 678 L 685 678" class="e-evo" marker-end="url(#m-evo)" />
+  <path d="M 801 678 L 818 678" class="e-evo" marker-end="url(#m-evo)" />
+</svg>

@@ -294,13 +294,18 @@
     grid-template-columns: 1fr 1fr;
     gap: 14px;
   }
+  .grid3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
   .grid4 {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 14px;
   }
   @media (max-width: 760px) {
-    .grid2, .grid4 { grid-template-columns: 1fr; }
+    .grid2, .grid3, .grid4 { grid-template-columns: 1fr; }
     .flow { flex-direction: column; }
     .connector { min-width: 0; min-height: 34px; flex-direction: row; }
     .connector .glyph { transform: rotate(90deg); margin: 0 8px; }
@@ -499,9 +504,9 @@
     <p class="dek">How a constitution binds three parties instead of one, and the standing institutions —
       ombudsman, steward, curator, sentinels — that keep it correctable while nobody is watching.</p>
     <div class="meta-row">
-      <span><strong>Constitution</strong> 2026.08.30</span>
-      <span><strong>Rights</strong> 18 · all enforced</span>
-      <span><strong>Rules</strong> 182 · 179 enforced, 2 partial, 1 design debt</span>
+      <span><strong>Constitution</strong> 2026.09.02</span>
+      <span><strong>Clauses</strong> 221 · 201 enforced, 2 partial, 1 design debt, 3 missing</span>
+      <span><strong>Bind direction</strong> declared for 124 · 0 inferred</span>
       <span><strong>Entrenched core</strong> 6 clauses</span>
       <span><strong>Storage</strong> SQLite + content-addressed (SHA-256)</span>
     </div>
@@ -603,9 +608,12 @@
       · They stand on a COMMON DATUM (the ground line), and the whole assembly
         rests on the causal ledger (P-8.1) as its foundation.
       · Each party's governing clauses are listed in the SCHEDULE, where they
-        are visibly *different* — because rights bind the gateway, rules bind
-        the agent, obligations bind the decider. Symmetry of standing out of
-        asymmetric bindings is the design (bind-direction discipline).
+        are visibly *different* — the enforcer owes, the reasoner is bounded,
+        the decider must justify. Symmetry of standing out of asymmetric
+        bindings is the design (bind-direction discipline). Which party a clause
+        binds is declared data per clause (#1284), never read off its ID prefix:
+        the schedule groups by family because that is how the signed text is
+        organised, not because the prefix decides.
       · Item 10 is listed and marked MISSING rather than omitted, so the debt
         stays on the drawing.
 
@@ -697,7 +705,7 @@
     </g>
     <g class="bp-t" font-size="8.5">
       <text x="17" y="34" text-anchor="middle">02</text>
-      <text x="42" y="34">CLAUSE IDS VERIFIED vs 2026.08.30</text>
+      <text x="42" y="34">CLAUSE IDS VERIFIED vs 2026.09.02</text>
       <text x="273" y="34" text-anchor="middle">2026-09-01</text>
     </g>
   </g>
@@ -937,7 +945,7 @@
       <text x="10" y="70">SCALE  NONE</text>
       <text x="126" y="70">DWG  A-001</text>
       <text x="242" y="70">REV  02</text>
-      <text x="10" y="99">CONSTITUTION 2026.08.30</text>
+      <text x="10" y="99">CONSTITUTION 2026.09.02</text>
       <text x="200" y="99">SHEET 1 OF 1</text>
       <text x="10" y="108" font-size="7">CHK: docs_link_guard (CLAUSE IDS)</text>
     </g>
@@ -966,6 +974,12 @@
         <p>The operator holds most power today; that is a starting condition, not the design.
           Seats-before-occupants is what makes spreading it inward a parameter change rather than a
           revolution.</p>
+        <p class="fine">First measured step (#1198): an appointed agent-decider seat is woken with the
+          <code>Ri-0.15</code> card and its verdict is recorded as <em>advisory</em> — advice never
+          resolves a gate. Agreement with the eventual human decision is <strong>computed on read</strong>
+          by joining the ledger, with unanswered referrals counted rather than dropped; no stored
+          aggregate, and no rate quoted over zero comparable cases. Earned standing before delegated
+          authority, in that order.</p>
       </div>
       <div class="box tone-served">
         <span class="kicker-chip">Purpose</span>
@@ -1043,70 +1057,119 @@
   <section class="sheet" id="constitution">
     <div class="sheet-head">
       <div class="eyebrow">§ C — The Law</div>
-      <h2>Bind-direction: every clause binds exactly one party</h2>
+      <h2>Bind-direction: every clause binds exactly one party — and says which</h2>
       <p class="dek">Most agent-safety frameworks are rules-only — constraint with an enforcer that owes
-        nothing. Autonoetic tags each clause by <em>who it binds</em>, which is what turns constraint
-        into a social contract: a right is not a favour, it's what makes the rules legitimate.</p>
+        nothing. Autonoetic records, per clause, <em>who must comply</em>, <em>who may invoke it</em> and
+        <em>what compliance demands</em>. That is what turns constraint into a social contract: a right
+        is not a favour, it's what makes the rules legitimate. Since #1284 these are
+        <strong>declared fields</strong>, not conventions read off the ID — a prefix is a stable name,
+        never a claim.</p>
+      <p class="dek"><strong>The signed text has not caught up yet.</strong> §0 still states the
+        bind-direction is "uniform by section, so no per-row tag is needed", which is the rule the
+        classification disproved. The fields live in
+        <code>autonoetic-gateway/src/constitution_relations.rs</code> and render in
+        <code>docs/constitution/law-table.md</code>; adopting them as columns in the constitution is
+        part 3 of #1284, and until that amendment the two surfaces disagree wherever a prefix lied.
+        Reading this map against §0 will show the gap — deliberately, since a signed column can only
+        be changed by another amendment.</p>
     </div>
 
-    <div class="grid4">
+    <div class="grid3">
       <div class="box tone-rule">
-        <span class="kicker-chip">Binds the Agent</span>
-        <h3>§1–§11 · §15 Rules · P-*</h3>
-        <p>A finite, named list of forbidden actions. Everything not forbidden is permitted.</p>
+        <span class="kicker-chip">field 1 · binds</span>
+        <h3>One of three powers</h3>
+        <p>A clause binds a <em>function</em>, so authority attaches to the seat and not to the
+          species: <code>O-*</code> bind the decider whoever holds it, human or agent
+          (<code>P-2.20</code>).</p>
         <div class="badge-row">
-          <span class="badge">P-1.1 capability match</span>
-          <span class="badge">P-7.19 no polling</span>
-          <span class="badge">P-8.1 chain integrity</span>
-          <span class="badge">P-9.15 one door</span>
-          <span class="badge">P-15.1 egress locality</span>
+          <span class="badge">enforcer · 118</span>
+          <span class="badge">decider · 5</span>
+          <span class="badge">reasoner · 1</span>
         </div>
+        <p class="fine">Of 124 classified clauses. The enforcer is by far the most-bound party — the
+          opposite of what a rules-only reading suggests.</p>
       </div>
       <div class="box tone-right">
-        <span class="kicker-chip">Binds the Gateway</span>
-        <h3>§0 Bill of Rights · Ri-*</h3>
-        <p>Unconditional entitlements the enforcer owes every agent — revocable only by amendment.</p>
+        <span class="kicker-chip">field 2 · owed to</span>
+        <h3>A principal, a seat, or nobody</h3>
+        <p>Standing to complain when the clause is broken. <code>Ri-0.15</code> is the one
+          case where standing attaches to a <em>seat</em> — decision context is owed to whoever
+          decides.</p>
         <div class="badge-row">
-          <span class="badge">Ri-0.2 read own chain</span>
-          <span class="badge">Ri-0.3 named rejection</span>
-          <span class="badge">Ri-0.8 propose</span>
-          <span class="badge">Ri-0.11 non-repudiation</span>
+          <span class="badge">the agent · 32</span>
+          <span class="badge">nobody · 81</span>
+          <span class="badge">served party · 6</span>
+          <span class="badge">decider seat · 5</span>
         </div>
+        <p class="fine"><strong>owed to nobody</strong> is what an integrity property <em>is</em>: an
+          agent cannot demand its own sandbox confinement, and would rather not have it.</p>
       </div>
       <div class="box tone-oblig">
-        <span class="kicker-chip">Binds the Decider</span>
-        <h3>§O Obligations · O-*</h3>
-        <p>Whoever exercises authority over an agent owes duties mirroring the agent's own.</p>
+        <span class="kicker-chip">field 3 · requires</span>
+        <h3>Prevention, detection, or both</h3>
+        <p>What compliance demands, distinct from how this implementation happens to achieve it.
+          <em>Detective</em> is the correct requirement where prevention is unavailable, not a
+          concession.</p>
         <div class="badge-row">
-          <span class="badge">O-1 motivated decision</span>
-          <span class="badge">O-2 attributed decision</span>
-          <span class="badge">O-6 adjudicate proposals</span>
-          <span class="badge">O-7 adjudicate flags</span>
+          <span class="badge">preventive · 25</span>
+          <span class="badge">detective · 6</span>
+          <span class="badge">both · 9</span>
         </div>
-      </div>
-      <div class="box tone-served">
-        <span class="kicker-chip">Binds the Community</span>
-        <h3>§12 Rights of the Served · U-*</h3>
-        <p>Toward the end-user a session runs on behalf of. Declared now, deliberately unenforced —
-          the debt is named, not hidden.</p>
-        <div class="badge-row">
-          <span class="badge">U-1 refuse a result</span>
-          <span class="badge">U-2 plain-language account</span>
-          <span class="badge">U-3 exit + delete data</span>
-        </div>
-        <p class="fine">Status: <span class="status-tag status-missing"><span class="dot"></span>missing</span> — the sequencing gate before decider power spreads to agents.</p>
+        <p class="fine">Declared for 40 clauses so far. The nine that demand <strong>both</strong> are
+          split candidates — one ID carrying two obligations.</p>
       </div>
     </div>
 
-    <div class="subhead">Rights vs. rules — the design ratio</div>
-    <div class="box">
-      <div class="rr-ratio">
-        <div class="rr-bar rights" style="width:9%"></div><div class="rr-bar rules" style="width:91%"></div>
+    <div class="subhead">A right is a view, not a family</div>
+    <div class="box tone-accent">
+      <p>An enforcer duty owed to the agent <em>is</em> an agent right, whatever prefix its ID carries.
+        So the rights set is <strong>27 clauses</strong>, not the 18 that read <code>Ri-</code>: ten more
+        wear <code>P-</code> or <code>I-</code> — <span class="badge">P-5.3</span>
+        <span class="badge">P-5.8</span> <span class="badge">P-5.11</span>
+        <span class="badge">P-2.10</span> <span class="badge">P-2.12</span>
+        <span class="badge">P-2.15</span> <span class="badge">P-7.18</span>
+        <span class="badge">P-9.12</span> <span class="badge">I-8</span>
+        <span class="badge">I-9</span> — and one <code>Ri-</code> clause is owed to the decider seat
+        rather than to the agent.</p>
+      <p class="fine">This is why the ratio §0 tracks as a design signal is now <em>derived</em> from
+        <code>owed_to</code> rather than counted off prefixes: refiling ~15 enforcer
+        duties into §0 would have moved 18:182 to 33:167 without changing one guarantee owed to any
+        agent — gaming the metric that exists to catch exactly that.</p>
+    </div>
+
+    <div class="subhead">What the prefix got wrong — the evidence</div>
+    <div class="box tone-served">
+      <p>Bind direction used to be inferred from the ID, and a test pinned the inference, so the
+        falsehood was asserted rather than drifted into. Three cases decided the redesign:</p>
+      <div class="badge-row">
+        <span class="badge">P-8.1 — chain integrity is the <em>enforcer</em>'s</span>
+        <span class="badge">P-3.1 — the <em>enforcer</em> passes <code>--unshare-all</code></span>
+        <span class="badge">P-15.1 — the <em>enforcer</em> withholds labelled envelopes</span>
       </div>
-      <p class="rr-label">18 rights against 182 rules. A constitution heavy on rules and light on
-        rights is one to watch — amendments that widen this gap deserve scrutiny by design.
-        When a rule appears to conflict with a right, <strong>the right wins</strong>: never a silent
-        override, always an operator escalation.</p>
+      <p class="fine">All three read "binds the agent" under the prefix rule. <code>P-15.1</code>
+        is the sharpest: <code>I-14</code> forbids an agent from setting, stripping or even
+        reading an egress label, so the agent could not comply <em>even in principle</em>. Today
+        <code>§15</code> is declared as binding the enforcer, owed to the served party.</p>
+    </div>
+
+    <div class="subhead">§12 · Rights of the Served — <code>U-*</code></div>
+    <div class="box tone-served">
+      <p>Owed toward the end-user a session runs on behalf of. The classification records these as
+        binding the <strong>enforcer</strong>; §12's own text still says they bind "the community —
+        the gateway and the agents acting within it, collectively", which is an aggregate of parties
+        and therefore breaks §0's rule that every clause binds exactly one. The resolution is the
+        enforcer: an entitlement held against "everyone" is a claim, whereas an invariant on the
+        enforcer is a guarantee. The text is reconciled by part 3's amendment, not by this map.</p>
+      <div class="badge-row">
+        <span class="badge">U-1 refuse a result</span>
+        <span class="badge">U-2 plain-language account</span>
+        <span class="badge">U-3 exit + delete data</span>
+      </div>
+      <p class="fine">Status: <span class="status-tag status-missing"><span class="dot"></span>missing</span> —
+        the sequencing gate before decider power spreads to agents. The served party has
+        <em>no seat</em>, which is precisely why nothing can oblige them and why enforcing
+        <code>U-1</code> means creating one: refusing a result is an act, and acting needs
+        a surface.</p>
     </div>
 
     <div class="subhead">The entrenched correction core</div>
@@ -1626,7 +1689,8 @@
       <li><code>docs/concepts/philosophy.md</code></li>
       <li><code>docs/ARCHITECTURE.md</code></li>
       <li><code>docs/concepts/separation-of-powers.md</code></li>
-      <li><code>docs/constitution/versions/2026.07.30/constitution.md</code></li>
+      <li><code>docs/constitution/CURRENT</code> &rarr; <code>docs/constitution/versions/2026.09.02/constitution.md</code></li>
+      <li><code>docs/constitution/law-table.md</code> (generated: binds / owed to / requires, per clause)</li>
       <li><code>docs/constitution/enforcement-register.md</code></li>
       <li><code>docs/proposals/citizenship-as-a-runtime-service.md</code> (Parts B, D, F)</li>
       <li><code>agents/governance/ombudsman.default/SKILL.md</code></li>

@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" width="100%" height="100%" role="img" aria-label="The correction loop: an actor proposes a typed intent, the gateway validates it, executes it in a sandbox, records it, and attests a verified self-model back - with the constitution as the frame both sides sit inside.">
+  <!--
+    Autonoetic - the correction loop, once.
+
+    GENERATED. Edit the generator, not this file:
+      docs/diagrams/generate.py  (writes both the dark and light variants)
+
+    Deliberately five nodes and six edges. The law is the FRAME rather than a
+    node with dashed edges to everything, because "both parties are inside it"
+    is the claim - not "the law is connected to things".
+
+    Every clause ID printed here is checked against the active constitution by
+    docs_link_guard::tests::every_clause_id_in_a_diagram_resolves.
+  -->
+  <defs>
+    <style>
+      .bg       { fill: #ffffff; }
+      .frame    { fill: none; stroke: #d8dee4; stroke-width: 1; }
+      .card     { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+      .card-law { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.6; }
+      .frame-law{ fill: none; stroke: #9a6700; stroke-width: 1.6; }
+      .card-gw  { fill: #f6f8fa; stroke: #59636e; stroke-width: 1.6; }
+      .card-evo { fill: #f7f0ff; stroke: #6639ba; stroke-width: 1.5; }
+      .card-srv { fill: #eefbf8; stroke: #0f6e5e; stroke-width: 1.5; stroke-dasharray: 7 4; }
+      .chip     { fill: #faf5ff; stroke: #d8c0f5; stroke-width: 1; }
+
+      .h1  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #1f2328; }
+      .h2  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #1f2328; }
+      .h3  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #1f2328; }
+      .dek { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #59636e; }
+      .mono{ font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #24292f; }
+      .tag { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.10em; }
+      .dim { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 8.5px; letter-spacing: 0.06em; fill: #6e7781; }
+
+      .fig-hum { fill: none; stroke: #a40e26; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .fig-ai  { fill: none; stroke: #0969da; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+      .dimline { stroke: #8c959f; stroke-width: 0.9; }
+      .guide   { fill: none; stroke: #d0d7de; stroke-width: 1; stroke-dasharray: 6 4; }
+
+      .e-hum { fill: none; stroke: #a40e26; stroke-width: 1.5; }
+      .e-ai  { fill: none; stroke: #0969da; stroke-width: 1.5; }
+      .e-law { fill: none; stroke: #9a6700; stroke-width: 1.5; }
+      .e-evo { fill: none; stroke: #6639ba; stroke-width: 1.4; }
+      .e-srv { fill: none; stroke: #0f6e5e; stroke-width: 1.4; stroke-dasharray: 6 4; }
+      .e-run { fill: none; stroke: #59636e; stroke-width: 1.5; }
+</style>
+    <marker id="m-hum" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#a40e26" /></marker>
+    <marker id="m-ai"  viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0969da" /></marker>
+    <marker id="m-law" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#9a6700" /></marker>
+    <marker id="m-evo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#6639ba" /></marker>
+    <marker id="m-srv" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0f6e5e" /></marker>
+    <marker id="m-run" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#59636e" /></marker>
+
+  </defs>
+
+  <rect width="100%" height="100%" class="bg" />
+
+  <text x="500" y="36" text-anchor="middle" class="h2">One correction loop, under a law that binds both sides</text>
+
+  <rect x="24" y="56" width="952" height="300" rx="8" class="frame-law" />
+  <text x="44" y="80" class="tag" fill="#9a6700">THE CONSTITUTION&#160;&#160;&#183;&#160;&#160;SIGNED&#160;&#160;&#183;&#160;&#160;DIGEST-PINNED</text>
+  <text x="956" y="344" text-anchor="end" class="dim">THE ACTOR AND THE EXECUTOR ARE BOTH INSIDE THE FRAME</text>
+
+  <rect x="56" y="150" width="150" height="100" rx="6" class="card" />
+  <text x="131" y="178" text-anchor="middle" class="h3">Actor</text>
+  <text x="131" y="194" text-anchor="middle" class="tag" fill="#59636e">AI &#183; HUMAN &#183; SCRIPT</text>
+  <text x="131" y="216" text-anchor="middle" class="mono" fill="#59636e">a low-privilege</text>
+  <text x="131" y="231" text-anchor="middle" class="mono" fill="#59636e">reasoner</text>
+
+  <rect x="252" y="150" width="150" height="100" rx="6" class="card" />
+  <text x="327" y="178" text-anchor="middle" class="h3">Validate</text>
+  <text x="327" y="194" text-anchor="middle" class="tag" fill="#59636e">POLICY &#183; CAPABILITIES</text>
+  <text x="327" y="216" text-anchor="middle" class="mono" fill="#59636e">the intent against</text>
+  <text x="327" y="231" text-anchor="middle" class="mono" fill="#59636e">what was declared</text>
+
+  <rect x="432" y="150" width="150" height="100" rx="6" class="card" />
+  <text x="507" y="178" text-anchor="middle" class="h3">Execute</text>
+  <text x="507" y="194" text-anchor="middle" class="tag" fill="#59636e">SANDBOX</text>
+  <text x="507" y="216" text-anchor="middle" class="mono" fill="#59636e">bubblewrap &#183; docker</text>
+  <text x="507" y="231" text-anchor="middle" class="mono" fill="#59636e">microvm &#183; wasm</text>
+
+  <rect x="612" y="150" width="150" height="100" rx="6" class="card" />
+  <text x="687" y="178" text-anchor="middle" class="h3">Record</text>
+  <text x="687" y="194" text-anchor="middle" class="tag" fill="#59636e">CAUSAL CHAIN</text>
+  <text x="687" y="216" text-anchor="middle" class="mono" fill="#59636e">hash-chained and</text>
+  <text x="687" y="231" text-anchor="middle" class="mono" fill="#59636e">append-only (P-8.1)</text>
+
+  <rect x="792" y="150" width="150" height="100" rx="6" class="card" />
+  <text x="867" y="178" text-anchor="middle" class="h3">Attest</text>
+  <text x="867" y="194" text-anchor="middle" class="tag" fill="#59636e">SIGNED, EVERY TURN</text>
+  <text x="867" y="216" text-anchor="middle" class="mono" fill="#59636e">budget &#183; caps &#183; gates</text>
+  <text x="867" y="231" text-anchor="middle" class="mono" fill="#59636e">law in force (P-6.23)</text>
+
+  <path d="M 210 200 L 246 200" class="e-run" marker-end="url(#m-run)" />
+  <path d="M 406 200 L 426 200" class="e-run" marker-end="url(#m-run)" />
+  <path d="M 586 200 L 606 200" class="e-run" marker-end="url(#m-run)" />
+  <path d="M 766 200 L 786 200" class="e-run" marker-end="url(#m-run)" />
+
+  <path d="M 867 250 L 867 314 L 131 314 L 131 254" class="e-run" marker-end="url(#m-run)" />
+  <text x="499" y="306" text-anchor="middle" class="mono">a verified self-model, every turn &#8212; past &#183; rights &#183; budget &#183; identity</text>
+
+  <path d="M 327 150 L 327 108 L 131 108 L 131 146" class="e-run" marker-end="url(#m-run)" />
+  <text x="229" y="100" text-anchor="middle" class="mono" fill="#59636e">rejected &#8212; and the denial names its rule (Ri-0.3)</text>
+</svg>

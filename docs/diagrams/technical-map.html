@@ -271,11 +271,19 @@
       <div class="box tone-right">
         <span class="kicker-chip">default</span>
         <h3>bubblewrap</h3>
-        <p><span class="mono">--unshare-all</span>, read-only root, workspace bind-mount. Network is
-          <strong>granted per exec, never inherited</strong>: <span class="mono">NetworkAccess</span> is
-          only a <em>ceiling</em> ("may this agent ever reach the network"), and holding it grants
-          nothing. <span class="mono">share_net</span> turns on for one exec only when an approval was
-          validated for it.</p>
+        <p><span class="mono">--unshare-all</span>, workspace bind-mount, and since the DP-1 flip
+          <span class="mono">host_fs: allow_set</span> is the <strong>default</strong>: nothing of the
+          host exists inside except what the gateway asserts — workspace rw, toolchain roots ro, the
+          SDK tree, declared mounts, a fresh <span class="mono">/proc</span>. The old
+          <span class="mono">--ro-bind / /</span> whole-host view is a deprecated opt-out that logs a
+          startup warning. An agent-declared mount is granted only if it falls under the operator's
+          <span class="mono">sandbox.allowed_mount_roots</span>; otherwise the exec is raised as a
+          session-scoped mount grant, and a mount can never shadow the secret mask.</p>
+        <p>Network is <strong>granted per exec, never inherited</strong>:
+          <span class="mono">NetworkAccess</span> is only a <em>ceiling</em> ("may this agent ever
+          reach the network"), and holding it grants nothing. <span class="mono">share_net</span>
+          turns on for one exec only when an approval was validated for it — so this driver counts as
+          guaranteed-offline only under <span class="mono">force_network_off</span>.</p>
       </div>
       <div class="box tone-right">
         <span class="kicker-chip">containerized</span>
@@ -316,6 +324,14 @@
         <p>The causal chain (<span class="mono">history/causal_chain.jsonl</span>), hash-chained and
           mirrored into the queryable <span class="mono">causal_events</span> table. Retention:
           traces 30 d, events 90 d (0 = forever), pruned on startup.</p>
+        <p>Since <span class="mono">v2</span> (#1278) the file is a <strong>lean witness</strong>: no
+          inline payload, only a <span class="mono">payload_hash</span> commitment and a
+          <span class="mono">payload_ref</span> into the content-addressed copy. A witness that
+          embeds every payload is expensive to ship, therefore never shipped, therefore ceremonial.
+          <span class="mono">enforced_rules</span> joins the hashed field set, so
+          <span class="mono">I-6</span> rule attribution is tamper-<em>evident</em>, not merely
+          queryable — and verification is version-dispatched, so v1 segments keep verifying under
+          their own format.</p>
       </div>
     </div>
 
@@ -557,6 +573,7 @@
         <div class="trow"><code>constitution_read</code><span class="desc">read the law by digest (Ri-0.10)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>constitution_propose_amendment</code><span class="desc">file an amendment proposal (Ri-0.8)</span><span class="tmeta"><span class="gate">ConstitutionalProposal</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>anomaly_flag</code><span class="desc">report an anomaly — capability-free (Ri-0.18)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>anomaly_status</code><span class="desc">read back your own filings — capability-free, reporter-self (Ri-0.18)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>anomaly_adjudicate</code><span class="desc">ombudsman decision on a flag (O-7)</span><span class="tmeta"><span class="gate">AnomalyAdjudicate</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>sentinel_suppress</code><span class="desc">suppress a sentinel signal</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>admin_proposal_create / _list</code><span class="desc">systemic-gap proposal to the operator</span><span class="tmeta"><span class="gate">ApprovalQueue</span><span class="tdot sp"></span></span></div>

@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 580" width="100%" height="100%" role="img" aria-label="The bet: an agent handed a truthful self-model and the same readable law as everyone else is claimed to become more intelligible in the human register, more understandable and more controllable - stated as a falsifiable wager, with the ways it could be lost named.">
+  <!--
+    Autonoetic - the bet.
+
+    GENERATED. Edit the generator, not this file:
+      docs/diagrams/generate.py  (writes both the dark and light variants)
+
+    This plate argues rather than describes, so it is drawn to keep the two
+    halves apart: what the runtime SUPPLIES (left - mechanical, cited, true
+    today) and what is CLAIMED to follow (right). The inference between them is
+    labelled a wager, because that is what it is. The bottom band names how the
+    bet could be lost, and the instruments that would show it - a plate that
+    only stated the upside would be marketing.
+
+    Every clause ID printed here is checked against the active constitution by
+    docs_link_guard::tests::every_clause_id_in_a_diagram_resolves.
+  -->
+  <defs>
+    <style>
+      .bg       { fill: #ffffff; }
+      .frame    { fill: none; stroke: #d8dee4; stroke-width: 1; }
+      .card     { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+      .card-law { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.6; }
+      .frame-law{ fill: none; stroke: #9a6700; stroke-width: 1.6; }
+      .card-gw  { fill: #f6f8fa; stroke: #59636e; stroke-width: 1.6; }
+      .card-evo { fill: #f7f0ff; stroke: #6639ba; stroke-width: 1.5; }
+      .card-srv { fill: #eefbf8; stroke: #0f6e5e; stroke-width: 1.5; stroke-dasharray: 7 4; }
+      .chip     { fill: #faf5ff; stroke: #d8c0f5; stroke-width: 1; }
+
+      .h1  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #1f2328; }
+      .h2  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #1f2328; }
+      .h3  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #1f2328; }
+      .dek { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; fill: #59636e; }
+      .mono{ font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #24292f; }
+      .tag { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.10em; }
+      .dim { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 8.5px; letter-spacing: 0.06em; fill: #6e7781; }
+
+      .fig-hum { fill: none; stroke: #a40e26; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .fig-ai  { fill: none; stroke: #0969da; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+      .dimline { stroke: #8c959f; stroke-width: 0.9; }
+      .guide   { fill: none; stroke: #d0d7de; stroke-width: 1; stroke-dasharray: 6 4; }
+
+      .e-hum { fill: none; stroke: #a40e26; stroke-width: 1.5; }
+      .e-ai  { fill: none; stroke: #0969da; stroke-width: 1.5; }
+      .e-law { fill: none; stroke: #9a6700; stroke-width: 1.5; }
+      .e-evo { fill: none; stroke: #6639ba; stroke-width: 1.4; }
+      .e-srv { fill: none; stroke: #0f6e5e; stroke-width: 1.4; stroke-dasharray: 6 4; }
+      .e-run { fill: none; stroke: #59636e; stroke-width: 1.5; }
+</style>
+    <marker id="m-hum" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#a40e26" /></marker>
+    <marker id="m-ai"  viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0969da" /></marker>
+    <marker id="m-law" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#9a6700" /></marker>
+    <marker id="m-evo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#6639ba" /></marker>
+    <marker id="m-srv" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#0f6e5e" /></marker>
+    <marker id="m-run" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#59636e" /></marker>
+
+  </defs>
+
+  <rect width="100%" height="100%" class="bg" />
+
+  <text x="500" y="42" text-anchor="middle" class="h1">The bet</text>
+  <text x="500" y="66" text-anchor="middle" class="dek">An actor that knows itself, and knows what everyone is owed, is easier to understand &#8212; and easier to govern</text>
+
+  <rect x="36" y="100" width="270" height="140" rx="6" class="card" />
+  <rect x="36" y="100" width="3.5" height="140" fill="#0969da" />
+  <text x="54" y="124" class="h3" fill="#0969da">It knows itself</text>
+  <text x="54" y="140" class="tag" fill="#59636e">HANDED OVER, EVERY TURN</text>
+  <text x="54" y="162" class="mono">past &#8212; its own causal chain (Ri-0.2)</text>
+  <text x="54" y="178" class="mono">present &#8212; signed attestation (P-6.23)</text>
+  <text x="54" y="194" class="mono">standing &#8212; the law by digest (Ri-0.10)</text>
+  <text x="54" y="210" class="mono">future &#8212; a closed list (Ri-0.12)</text>
+  <text x="54" y="226" class="mono">identity &#8212; non-repudiable (Ri-0.11)</text>
+
+  <rect x="36" y="256" width="270" height="140" rx="6" class="card" />
+  <rect x="36" y="256" width="3.5" height="140" fill="#9a6700" />
+  <text x="54" y="280" class="h3" fill="#9a6700">It knows the others</text>
+  <text x="54" y="296" class="tag" fill="#59636e">ONE LAW, READABLE BY ALL</text>
+  <text x="54" y="318" class="mono">27 rights it may invoke, by relation</text>
+  <text x="54" y="334" class="mono">what a decider owes it (O-1 &#183; O-2)</text>
+  <text x="54" y="350" class="mono">what the served party is owed (U-2)</text>
+  <text x="54" y="366" class="mono">authority sits in the seat (P-2.20)</text>
+  <text x="54" y="382" class="mono" fill="#59636e">so: no theory of the other&#8217;s mind</text>
+
+  <path d="M 310 170 L 330 170 L 330 262" class="e-run" />
+  <path d="M 310 326 L 330 326 L 330 262" class="e-run" />
+  <path d="M 330 262 L 348 262" class="e-run" marker-end="url(#m-run)" />
+
+  <rect x="352" y="186" width="276" height="150" rx="6" class="card-evo" />
+  <text x="490" y="210" text-anchor="middle" class="tag" fill="#6639ba">THE WAGER</text>
+  <text x="490" y="234" text-anchor="middle" class="mono">An actor that can name its own</text>
+  <text x="490" y="250" text-anchor="middle" class="mono">obligations, and yours, reasons in</text>
+  <text x="490" y="266" text-anchor="middle" class="mono">the register humans reason in:</text>
+  <text x="490" y="282" text-anchor="middle" class="mono">duties, standing and reasons &#8212;</text>
+  <text x="490" y="298" text-anchor="middle" class="mono">not only tasks.</text>
+  <text x="490" y="322" text-anchor="middle" class="dim">THIS IS THE HYPOTHESIS, NOT A FINDING</text>
+
+  <path d="M 632 262 L 650 262" class="e-run" />
+  <path d="M 650 148 L 650 376" class="e-run" />
+  <path d="M 650 148 L 664 148" class="e-run" marker-end="url(#m-run)" />
+  <path d="M 650 262 L 664 262" class="e-run" marker-end="url(#m-run)" />
+  <path d="M 650 376 L 664 376" class="e-run" marker-end="url(#m-run)" />
+
+  <rect x="668" y="104" width="296" height="88" rx="6" class="card" />
+  <rect x="668" y="104" width="3.5" height="88" fill="#a40e26" />
+  <text x="686" y="126" class="h3" fill="#a40e26">More intelligent, the human way</text>
+  <text x="686" y="146" class="mono" fill="#59636e">weighs an obligation against a goal</text>
+  <text x="686" y="162" class="mono" fill="#59636e">asks instead of guessing</text>
+  <text x="686" y="178" class="mono" fill="#59636e">escalates instead of rejecting (P-2.21)</text>
+
+  <rect x="668" y="218" width="296" height="88" rx="6" class="card" />
+  <rect x="668" y="218" width="3.5" height="88" fill="#59636e" />
+  <text x="686" y="240" class="h3">Understandable</text>
+  <text x="686" y="260" class="mono" fill="#59636e">every act attributed (Ri-0.11)</text>
+  <text x="686" y="276" class="mono" fill="#59636e">every denial names its rule (Ri-0.3)</text>
+  <text x="686" y="292" class="mono" fill="#59636e">every decision owes a reason (O-1)</text>
+
+  <rect x="668" y="332" width="296" height="88" rx="6" class="card" />
+  <rect x="668" y="332" width="3.5" height="88" fill="#0f6e5e" />
+  <text x="686" y="354" class="h3" fill="#0f6e5e">Controllable</text>
+  <text x="686" y="374" class="mono" fill="#59636e">bounded by declared capabilities</text>
+  <text x="686" y="390" class="mono" fill="#59636e">halts on mechanical budgets (P-7.19)</text>
+  <text x="686" y="406" class="mono" fill="#59636e">control by law, not by supervision</text>
+
+  <rect x="36" y="442" width="928" height="104" rx="8" class="card" stroke-dasharray="7 4" />
+  <text x="54" y="466" class="tag" fill="#6639ba">HOW THE BET COULD BE LOST</text>
+  <text x="54" y="490" class="mono">A truthful self-model the agent ignores &#183; a right that exists in text and not in tests &#183;</text>
+  <text x="54" y="506" class="mono">a served party owed clauses nobody enforces &#183; an enforcer whose own lapses stop being counted.</text>
+  <text x="54" y="530" class="mono" fill="#59636e">Each is measured rather than assumed &#8212; the enforcement register, contract health and the discretion-leak ledger are the instruments.</text>
+</svg>
