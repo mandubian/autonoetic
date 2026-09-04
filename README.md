@@ -1,156 +1,64 @@
 # Autonoetic
 
-**Autonoetic is a Rust runtime built on one bet: an AI agent that knows
-itself — its own past, its real capabilities, its rights — and that lives
-under the same law as every other actor, human or artificial, can become a
-trusted member of a community instead of a tool that has to be watched.**
+**A Rust runtime where AI agents, humans, and plain scripts act as citizens
+under one signed constitution — and the enforcer is bound by it too.**
 
-> **Status: experimental research infrastructure.** Autonoetic does not
-> compete with interactive harnesses (Hermes, Claude Code, deepseek-harness —
-> for a model-plus-terminal under your eyes, those tools are better). It
-> explores a different territory: what agents need in order to run unwatched,
-> delegate, and self-modify under verifiable law.
+> **Status: experimental research infrastructure.** Autonoetic does not compete
+> with interactive harnesses (Hermes, Claude Code, deepseek-harness — for a
+> model-plus-terminal under your eyes, those tools are better). It explores a
+> different territory: what agents need in order to run unwatched, delegate,
+> and self-modify under verifiable law.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/peers-under-one-law.svg">
+  <img alt="One law over humans and AI agents: the constitution above both, the three bound powers inside the frame, the served party outside it — owed, never bound — and the correction cycle along the bottom." src="docs/diagrams/peers-under-one-law-light.svg">
+</picture>
 
 The name is from cognitive science. *Autonoetic* means self-knowing across
 time: holding your own past as your own, and projecting yourself into your own
-future. Autonoetic makes no claim about machine consciousness — the claim is
-mechanical. Instead of hoping an agent is self-aware, the runtime hands it a
-verified self-model every turn (its true history, its actual capabilities, the
-law in force) and places it in a community where AI agents, human operators,
-and plain scripts are all first-class actors — owed the same rights, held to
-the same rules and obligations.
+future. Autonoetic makes **no claim about machine consciousness** — the claim
+is mechanical. Instead of hoping an agent is self-aware, the runtime hands it a
+verified self-model every turn, and places it in a community where AI agents,
+human operators, and scripts are all first-class actors.
 
-What holds that community together is a signed, versioned **constitution**:
-not a leash on something dangerous, but the common law that lets independent
-actors cooperate, delegate, and trust one another *mechanically* rather than
-personally. A neutral **gateway** enforces it deterministically and invents no
-rules of its own — a *Lawful Executor*. Because every actor is bound by the
-same verifiable law, none has to guess at another's intentions to work with
-it; trust becomes structural, which is what makes a mixed community of humans,
-agents, and scripts possible at all.
+## The bet
 
-The rest of the project is the foundation that makes such a community real:
+An agent that knows itself — its own past, its real capabilities, its rights —
+and that knows what every other party is owed, humans included, can become a
+trusted member of a community instead of a tool that has to be watched.
 
-- a **lawful gateway** — every privileged action is validated against the
-  constitution and typed capabilities, then executed inside a sandbox
-  (bubblewrap / docker / microvm / wasm);
-- **immutable recording and data lineage** — a hash-chained causal trace of
-  every turn, replayable and forkable, so an actor's past is a fact it can
-  reason from and anyone can audit, not a memory it might confabulate;
-- **boundaries that protect** — secrets injected at execution time and never
-  seen by the model (with one-pass credential + approval preflight via
-  `artifact_prepare`); a **data-egress label plane** enacted as law
-  (constitution v2026.07.30) that constrains where information is allowed to
-  flow; and a gateway-asserted **mount allow-set** that decides exactly which
-  host paths a sandbox can see;
-- **evolution tooling** — agents that build, evaluate, and promote each
-  other's code under the same law, behind audited gates.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/the-bet.svg">
+  <img alt="The bet: on the left, what the runtime hands the agent — a truthful past, present, normative standing, future and identity, and the same readable law that says what every other party is owed. In the centre, the wager: an actor that can name its own obligations and yours reasons in the register humans reason in. On the right, what is claimed to follow — more intelligent in the human way, understandable, controllable. Along the bottom, the ways the bet could be lost." src="docs/diagrams/the-bet-light.svg">
+</picture>
 
-None of this is the fastest way to hand a model a terminal, and it is not
-trying to be. Autonoetic is for the harder question underneath: what does an
-agent need in order to know itself, act on its own, cooperate with others, and
-still be fully accountable — and can that be engineered rather than merely
-hoped for.
+The strong form of the claim: an actor that can name its own obligations *and
+yours* reasons in the register humans reason in — about duties, standing and
+reasons, not only about tasks. That is what would make it more intelligible to
+us, and what turns governing it into a matter of law rather than of
+supervision. Interaction between humans and agents stops needing a theory of
+the other party's mind and starts needing a shared, readable law.
 
-## Autonoetic at a glance
+The plate is drawn to keep the halves honest. Everything on the left is
+mechanical and cited — it is what the runtime does today. Everything on the
+right is what we claim follows. The inference between them is a **wager**, not
+a finding, and the bottom band names the ways it could be lost. Each of those
+is measured rather than assumed, which is what the working rule is for: *a rule
+without a test is a wish; a right without a test is a lie.*
 
-An actor proposes; the gateway — bound by the same constitution as the actor —
-validates it, runs it in a sandbox, records everything, and hands back a
-verified self-model each turn. That one correction loop, under a law that binds
-both sides, is the whole design.
+## The idea in three moves
 
-```mermaid
-flowchart TB
-    law["Constitution — signed, versioned<br/>rules bind the actor · rights bind the gateway · obligations bind authority"]
+Three problems dominate the scenario Autonoetic is built for — an agent that
+works for hours while nobody watches, spawns and coordinates other agents, uses
+credentials it must never see, and whose actions you need to reconstruct
+exactly, afterward. Each answer is structural rather than aspirational.
 
-    actor["Actor<br/>AI agent · human · script<br/>a low-privilege reasoner"]
+### 1. Self-knowledge is a runtime service, not an emergent hope
 
-    subgraph gw["Gateway — the Lawful Executor · sole high privilege"]
-      direction TB
-      validate["Validate each intent against the<br/>constitution and typed capabilities"]
-      execute["Execute in a sandbox<br/>bubblewrap · docker · microvm · wasm"]
-      validate --> execute
-    end
-
-    subgraph found["Durable foundation"]
-      direction TB
-      chain["Immutable causal chain<br/>hash-chained record + data lineage"]
-      bounds["Boundaries<br/>secrets never reach the model ·<br/>egress labels keep data where allowed"]
-      evo["Evolution<br/>agents build, evaluate, promote<br/>each other behind audited gates"]
-    end
-
-    peer["Federated peer<br/>another gateway"]
-
-    actor -->|"proposes a typed intent"| validate
-    execute --> chain
-    execute -.->|"secrets stripped · egress-filtered"| bounds
-    chain -->|"verified self-model, every turn:<br/>past · present · rights · budget · identity"| actor
-    evo -.->|"proposes new and upgraded agents"| gw
-    law -.->|binds| actor
-    law -.->|binds| gw
-    gw <-.->|"verify shared law, not reputation"| peer
-
-    classDef con fill:#fde68a,stroke:#92400e,color:#111827;
-    classDef act fill:#bfdbfe,stroke:#1e3a8a,color:#111827;
-    classDef fnd fill:#bbf7d0,stroke:#166534,color:#111827;
-    class law con
-    class actor act
-    class chain,bounds,evo fnd
-```
-
-For the full picture, open the live **[visual maps](https://mandubian.github.io/autonoetic/)** (rendered
-in your browser, light/dark aware):
-[governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html),
-[technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html),
-[runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html), and
-[federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html).
-
-> New here? [**Why this exists**](#why-this-exists) lays out the three problems
-> that shape everything below; [**Autonoetic for beginners**](docs/start/concepts.md)
-> builds the same ideas from first principles.
-
-## Why this exists
-
-Most agent harnesses — OpenClaw, Hermes, the code-assistant CLIs — are built
-around one scenario: a capable model, a terminal, and a human watching. The
-LLM calls tools directly in its own process; safety is an allowlist plus an
-approval prompt; the transcript is the audit trail; trust is *personal* — you
-trust the model, and whoever wrote the prompt. For interactive assistance
-that design is right, and those tools are better at it than Autonoetic is.
-
-Autonoetic starts from the scenario that design does not cover: an agent that
-works for hours while nobody watches, spawns and coordinates other agents,
-uses credentials it must never see, and whose actions you need to
-reconstruct — exactly, afterward. Three problems dominate that scenario, and
-they shape everything in this codebase.
-
-**1. Agents don't know themselves.** LLM agents confabulate their own state:
-they misremember budgets, invent capabilities they don't have, lose track of
-what they already did. An agent reasoning from a false self-model makes bad
-decisions no amount of prompting fixes.
-
-**2. Constraint without legitimacy doesn't scale.** Most safety frameworks
-are rules-only: the agent is constrained, the enforcer owes nothing. That
-works while one human reviews everything. The moment agents spawn agents,
-evaluate each other's work, and promote each other's code, "the human checks
-every step" stops being an architecture — and a pure-constraint regime gives
-you no principled basis for letting go of it.
-
-**3. Trust between agents can't be personal.** Two agents (or a human and an
-agent, or two federated runtimes) cannot inspect each other's weights or
-intentions. If cooperation requires a theory of the other party's mind, a
-mixed community of humans, agents, and scripts is impossible.
-
-Autonoetic's answer to each is structural, not aspirational:
-
-### Self-knowledge is a runtime service, not an emergent hope
-
-The name comes from cognitive science: **autonoetic consciousness** is Endel
-Tulving's term for self-knowing across time — remembering your own past as
-your own, and projecting yourself into your own future. Autonoetic makes
-**no claim about machine consciousness**. The claim is narrower and
-mechanical: rather than asking the model to be self-aware, the gateway
-**hands every agent a verified self-model, every turn**:
+LLM agents confabulate their own state: they misremember budgets, invent
+capabilities they don't have, lose track of what they already did. An agent
+reasoning from a false self-model makes bad decisions no amount of prompting
+fixes. So the gateway **hands every agent a verified self-model, every turn**:
 
 | Capacity | Mechanism |
 |---|---|
@@ -164,259 +72,367 @@ An agent with a truthful self-model reasons better *and* can be held
 responsible legitimately — both hold regardless of your views on machine
 consciousness.
 
-### A constitution, not a config file
+### 2. One law — and the enforcer is a bound party
 
-The gateway enforces a versioned, digest-pinned, signed **constitution**
-whose structural novelty is **bind-direction discipline**: every clause binds
-exactly one party. **Rules** (`P-*`) bind the *agent* — a finite, named set
-of forbidden actions; everything else is permitted. **Rights** (`Ri-*`) bind
-the *gateway* — unconditional entitlements the enforcer owes every agent.
-**Obligations** (`O-*`) bind whoever exercises authority over an agent.
-Making the enforcer a bound party is what turns a compliance regime into a
-social contract: a right is not a favour, it is what makes the rules
+Most safety frameworks are rules-only: the agent is constrained, the enforcer
+owes nothing. That works while one human reviews everything. The moment agents
+spawn agents, evaluate each other's work and promote each other's code, "the
+human checks every step" stops being an architecture — and a pure-constraint
+regime gives you no principled basis for letting go of it.
+
+So the gateway enforces a versioned, digest-pinned, **signed constitution**
+whose structural discipline is **bind-direction**: every clause binds exactly
+one party, and which party is *declared data* rather than a convention read off
+the ID. Making the enforcer a bound party is what turns a compliance regime
+into a social contract: a right is not a favour, it is what makes the rules
 legitimate rather than merely effective.
 
-The law is executable, and the gap between text and enforcement is a
-*measured quantity*: the working rule is **"a rule without a test is a wish;
-a right without a test is a lie."** The
-[enforcement register](docs/constitution/enforcement-register.md) tracks,
-clause by clause, what is `ENFORCED` versus `PARTIAL` / `MISSING`, and the
-gateway's own lapses are named debts (**DISCRETION LEAKs**), not accepted
-behaviour. The gateway itself is a *Lawful Executor*: it applies
-pre-committed law deterministically and exercises no improvised judgment.
+The law is executable, and the gap between text and enforcement is a *measured
+quantity*. The working rule is **"a rule without a test is a wish; a right
+without a test is a lie."** The gateway itself is a *Lawful Executor*: it
+applies pre-committed law deterministically and exercises no improvised
+judgment — there is deliberately **no judiciary**, because decidable rules
+transfer between implementations and jurisprudence does not. Where the gateway
+would exercise reserved judgment anyway, the lapse is a named debt (a
+**DISCRETION LEAK**), not accepted behaviour.
 
 The wager underneath, stated once: **an imperfect enforcer plus entrenched
-correction machinery beats a perfect enforcer that cannot be corrected.**
-The clauses that enable correction — read your own history, every denial
-names its rule, any agent may propose amendments, attribution cannot be
-repudiated — form an entrenched core, amendable only to be strengthened.
-Amendments are a first-class, audited operation; the constitution itself is
-versioned and its digest is verified by federated peers. Voice is paired
-with exit: the constitution declares an agent's right to export its own
-cognitive capsule (emigration) — today only partially enforced — because
-voice without a credible exit option degrades into ritual.
+correction machinery beats a perfect enforcer that cannot be corrected.** The
+clauses that enable correction — read your own history, every denial names its
+rule, any agent may propose amendments, attribution cannot be repudiated — form
+an entrenched core, amendable only to be strengthened. Voice is paired with
+exit: an agent may export its own cognitive capsule and emigrate, because voice
+without a credible exit option degrades into ritual.
 
-### Trust is structural, not personal
+### 3. Trust is structural, not personal
 
-Two parties cooperate because each can verify the other operates under
-compatible law — the constitution digest is checked in the federation
-handshake — not because they know each other's internals. Membership in the
-community *is* operating under the shared, verifiable law. This requires no
-theory of the other party's mind, which is exactly what makes a mixed
-community of humans, AI agents, and plain scripts possible: Autonoetic
-treats all three as actors under the same constitution, owed the same
-rights, held to the same rules.
+Two agents — or a human and an agent, or two federated runtimes — cannot
+inspect each other's weights or intentions. If cooperation required a theory of
+the other party's mind, a mixed community would be impossible. Instead, each
+party verifies that the other operates under compatible law: the constitution
+digest is checked in the federation handshake. Membership in the community *is*
+operating under the shared, verifiable law.
 
-Where to dig further:
+## The loop, once
 
-- [`docs/concepts/philosophy.md`](docs/concepts/philosophy.md) — the conceptions behind the design, and their intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
-- [`docs/start/concepts.md`](docs/start/concepts.md) — the same ideas from first principles, for readers coming from direct-code assistants
-- [`docs/constitution/versions/2026.07.30/constitution.md`](docs/constitution/versions/2026.07.30/constitution.md) — the canonical law (current version)
-- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md) — agent vs gateway authority boundary
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/correction-loop.svg">
+  <img alt="An actor proposes a typed intent; the gateway validates it against policy and capabilities, executes it in a sandbox, records it to the causal chain, and attests a verified self-model back. A rejection returns to the actor naming its rule. The constitution is the frame both sides sit inside." src="docs/diagrams/correction-loop-light.svg">
+</picture>
 
-## How this differs from a classic agent harness
+An actor proposes; the gateway — bound by the same constitution as the actor —
+validates the intent against typed capabilities, runs it in a sandbox, records
+it, and hands back a verified self-model. A rejection comes back naming its
+rule. That one correction loop, under a law that binds both sides, is the whole
+design. Everything else is what makes it durable: secrets injected at execution
+time and never seen by the model, an **egress label plane** that constrains
+where information may flow, a gateway-asserted **mount allow-set** deciding
+which host paths a sandbox can see, and evolution tooling through which agents
+build, evaluate and promote each other behind audited gates.
 
-The mechanical consequence of the above is a strict **separation of
-powers**: agents are low-privilege reasoners that *propose* intents; the
-gateway is the sole high-privilege executor that validates and runs them.
-An agent never "has" network access — it has permission to *ask* the
-gateway to perform network operations under declared, typed capabilities.
+## The constitution in one screen
 
-| | Direct-loop harness (OpenClaw, Hermes, code CLIs) | Autonoetic |
-|---|---|---|
-| Execution | LLM calls tools directly in its own process | Agents propose; the gateway validates against typed capabilities and executes in a sandbox (bubblewrap / docker / microvm / wasm) |
-| Safety model | Allowlists + interactive approval | A signed constitution binding *both* sides, enforced deterministically; approvals suspend the turn to disk and resume with real results |
-| Secrets | In env/config, visible to the model | Vault-injected at execution time; never enter LLM context |
-| Audit trail | Session transcript | Hash-chained causal chain with non-repudiable attribution, mirrored to a queryable event store |
-| Agent identity | A prompt + a config | A `SKILL.md` manifest + immutable, content-addressed revisions with audited promotion; exportable as a Cognitive Capsule with its pinned runtime closure (`runtime.lock`) |
-| Multi-agent | Ephemeral subagents inside one trust domain | Durable agents that spawn, evaluate, and promote each other under the same law — including agents building and installing new agents through gated revision promotion |
-| Trust across machines | N/A — single node, single user | Federation (OFP) with HMAC + constitution-digest handshake: peers verify law-compatibility, not reputation |
+Every clause binds exactly one party and is owed to at most one. Bind direction
+is **declared data**, never derived from the ID prefix — which is what makes
+the law re-implementable, and what makes "a right" a *relation* rather than a
+family of IDs.
 
-The honest trade-off: this costs ceremony. If all you want is a quick
-assistant that runs one-off shell commands under your eyes, a direct-loop
-tool is the better choice. Autonoetic is for **governed autonomy** — when
-the question is not "how fast can an agent type" but "can I let this run
-unsupervised, let it delegate and self-modify, and still know exactly what
-happened and why it was allowed."
+| | binds | owed to | clauses |
+|---|---|---|---|
+| **Agent rights** | `enforcer` | the agent | 27 — *17 of the 18 `Ri-` rights, plus 10 filed under another prefix* |
+| **Integrity properties** | `enforcer` | nobody | 81 — *an agent cannot demand its own confinement* |
+| **Decider obligations** | `decider` | the agent | 5 — *whoever decides owes a motivation, human or agent* |
+| **The served party's charter** | `enforcer` | the served user | 6 — *3 of them `MISSING`* |
+| **Agent rules** | `reasoner` | nobody | 1 classified; 97 clauses await their tranche |
 
-## Main Concepts
+The last row is the honest one: of 221 clauses, 124 are classified, a test pins
+the exact remainder, and no clause resolves its bind direction by inheriting a
+section summary. Of the 207 clauses the signed text carries in tables, 201 are
+`ENFORCED`, 2 `PARTIAL`, 1 `DESIGN DEBT` and 3 `MISSING`; the 14 cross-cutting
+invariants state their status inline instead.
 
-- `SKILL.md`: the unified manifest for agents and skills
-- `runtime.lock`: the pinned execution closure for reproducible runtime resolution
-- `autonoetic_sdk`: the sandbox bridge for memory, artifacts, messaging, and secrets
-- Artifact Store: a content-addressed store for binaries, datasets, outputs, and runtime dependencies
-- Checkpoint: a runnable session snapshot taken at every yield point — enables crash recovery and forking a session from any past turn (`autonoetic trace fork`)
-- Cognitive Capsule: a portable export containing an agent bundle plus its runtime closure
+A third declared field says what compliance *demands*: `requires` is
+`preventive` (non-compliance must be made impossible), `detective` (each
+occurrence must be recorded — the right answer where prevention is
+unavailable, not a concession), or both. Declared for 40 clauses so far, and
+9 of those 40 demand **both** — which usually means one ID is carrying two
+obligations and is a split candidate at its next amendment. That the field
+records both rather than rounding to the cheaper half is the point: an
+implementation that makes the representable core impossible and never checks
+the judgment-shaped remainder would otherwise claim full compliance.
 
-Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`name`, `description`, `metadata`) and stores Autonoetic-specific runtime fields under `metadata.autonoetic`.
+Two generated surfaces, deliberately separate.
+[`law-table.md`](docs/constitution/law-table.md) is what a clause obliges, of
+whom, to whom — identical for any implementation, so it is what a
+re-implementer reads.
+[`enforcement-register.md`](docs/constitution/enforcement-register.md) is which
+of *our* code sites hold each clause up. A second gateway inherits the first
+and writes its own second; the bar the constitution is written to is that a
+compatible gateway could be rebuilt in another language and verify shared law
+through the digest handshake.
 
-## Documentation
+One consequence worth stating plainly, because the project's credibility rests
+on this kind of honesty: **six clauses are owed to the served party — the
+end-user a session runs on behalf of. The three that are enforced are the
+egress plane. The three that name them as a party — refuse a result, obtain an
+account, take your data — are `MISSING`, and the constitution says so in its
+own vocabulary.**
 
-### Comprehensive Guides
+- [`docs/constitution/CURRENT`](docs/constitution/CURRENT) → the active version, and
+  [`constitution.md`](docs/constitution/versions/2026.09.02/constitution.md) is its signed text
+- [`docs/concepts/philosophy.md`](docs/concepts/philosophy.md) — the conceptions behind the design and their lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
+- [`docs/reference/principal-seat-capability.md`](docs/reference/principal-seat-capability.md) — principal, seat and capability: why obligations attach to seats and standing attaches to principals
+- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md) — the agent/gateway authority boundary
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): System architecture, design principles, security model, data flow
-- [`docs/internals/crate-map.md`](docs/internals/crate-map.md): Workspace structure, per-crate module reference, SKILL.md format, configuration
-- [`docs/internals/gateway.md`](docs/internals/gateway.md): The gateway crate in depth — module map, request workflow, data-store domains
-- [`docs/AGENTS.md`](docs/AGENTS.md): Canonical agent reference — roles, routing, `SKILL.md` format, capabilities, lifecycle, middleware hooks, background scheduling, building new agents
-- [`docs/reference/cli.md`](docs/reference/cli.md): Complete CLI command reference with examples
+## Four ways to read the system
 
-### Visual Maps
+Four self-contained HTML maps render the runtime at different altitudes —
+**[open them live](https://mandubian.github.io/autonoetic/)** (rendered in your browser, light/dark aware), or
+read the standalone sources under [`docs/diagrams/`](docs/diagrams). No build
+step.
 
-Four self-contained HTML maps render the system at different altitudes. **View them live in your browser at the [visual maps hub](https://mandubian.github.io/autonoetic/)** (GitHub Pages). Each is also a standalone file under `docs/diagrams/` — no build step, light/dark theme–aware:
+| Map | What it shows |
+|---|---|
+| **[Governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html)** ([source](docs/diagrams/architecture-map.html)) | Functional autonoesis and the community-of-equals framing; the bind-direction constitution (rules, rights, obligations, served); the data-locality boundary; enforcement and contract health; the standing governance offices; the amendment lifecycle — and the whole thing as one node-and-edge correction loop |
+| **[Technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html)** ([source](docs/diagrams/technical-map.html)) | The tool-call lifecycle; the four sandbox drivers (network is a per-exec grant, never capability-inherited); the three storage classes; the credential vault; the **egress label plane** (lattice, chokepoint, taint-following routing, labels at rest, declassification grants); the immutability guarantees; the agent-birth pipeline; the native tool surface and the default agent roster |
+| **[Runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html)** ([source](docs/diagrams/runtime-dynamics.html)) | The temporal dimension: the session-lifecycle state machine (the 12 `YieldReason` variants and the enforced resumable-vs-terminal split); the approval and escalation swimlane, suspend-to-signed-checkpoint through resume-with-real-result; the per-turn signed self-model; and the per-turn egress label flow |
+| **[Federation &amp; data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html)** ([source](docs/diagrams/federation-data-model.html)) | OFP node-to-node federation — topology, the HMAC + constitution-digest handshake, the three `P-10.9` compatibility modes, the wire protocol; the `gateway.db` entity-relationship model and its load-bearing tables; and federation carry-forward, the three-digest model that lets a gate verdict survive a rebuild |
 
-- **[Governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html)** ([source](docs/diagrams/architecture-map.html)) — functional autonoesis and the community-of-equals framing, the bind-direction constitution (rules/rights/obligations/served), the data-locality boundary (§15 enacts the agent's egress duty; the served-party right is still unratified), enforcement & contract health, the standing governance offices, the amendment lifecycle, and a full node-and-edge system graph rendering the whole as one correction loop.
-- **[Technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html)** ([source](docs/diagrams/technical-map.html)) — the tool-call lifecycle, the four sandbox drivers (network is a per-exec grant, never capability-inherited), the three storage classes, the credential vault, the **egress label plane** (lattice · chokepoint · taint-following routing · labels at rest · operator declassification grants), the immutability guarantees, the agent-birth pipeline and error/repair loop, the native tool surface, and the default agent roster.
-- **[Runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html)** ([source](docs/diagrams/runtime-dynamics.html)) — the temporal dimension: the session-lifecycle state machine (the 12 `YieldReason` variants, the enforced resumable-vs-terminal split that Ri-0.12 closes, and the separate persisted `SessionLifecycleState` vocabulary they map onto), the approval & escalation multi-actor swimlane (suspend-to-signed-checkpoint, resume-with-real-result), the per-turn signed self-model (the P-6.23 attestation), and the **per-turn egress label flow**.
-- **[Federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html)** ([source](docs/diagrams/federation-data-model.html)) — OFP node-to-node federation (the topology, the HMAC + constitution-digest handshake, the three P-10.9 compatibility modes, the wire protocol and message kinds), the `gateway.db` entity-relationship model at **schema v80** (the four spine columns, a core-spine ER diagram, and the load-bearing tables by cluster including the egress label plane), and **federation carry-forward** (the three-digest model and the strictness dial that let a gate verdict survive a rebuild).
+## What is done differently here
 
-### Specialized Docs
+Most of what follows exists in other runtimes. What is peculiar to Autonoetic is
+*how* each one is done — and in almost every case the difference is that a
+property is made mechanical instead of conventional. Ordered by how much the
+rest of the design leans on it.
 
-- [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md): End-to-end CLI quickstart tutorial
-- [`docs/reference/http-api.md`](docs/reference/http-api.md): HTTP API for remote agents, SDK transport, authentication
-- [`docs/guide/runbooks/iteration-repair-validation.md`](docs/guide/runbooks/iteration-repair-validation.md): Iterative repair validation steps
-- [`docs/reference/schema-enforcement.md`](docs/reference/schema-enforcement.md): Schema coercion for agent.spawn payloads
+**Maturity** reads: *mature* — the project self-hosts on it and a regression
+test fails if it breaks · *shipped* — implemented and tested, less exercised ·
+*partial* — the core holds, named phases are open · *experimental* — works,
+behind a build flag or with known edges · *declared* — the law or design exists
+and no mechanism does yet, named so the gap is visible.
 
-- [`docs/guide/cognitive-capsule.md`](docs/guide/cognitive-capsule.md): Portable agent capsule export/import
-- [`docs/proposals/README.md`](docs/proposals/README.md): In-flight design and RFC work, with a status per doc
-- [`docs/archived/architecture-summary.md`](docs/archived/architecture-summary.md): What's kept vs externalized
-- [`docs/concepts/separation-of-powers.md`](docs/concepts/separation-of-powers.md): Agent vs gateway responsibilities, and why the gateway stays a narrow rule enforcer rather than a workflow engine
+1. **Agents propose, the gateway executes** — *mature.* An agent never *has* a
+   privilege; it has the right to *ask*. Every tool call is matched against a
+   manifest-declared capability at a single chokepoint, and the peculiar part is
+   the invariant around it: `I-1` says no native-tool code path may bypass
+   `policy.can_invoke_tool`, and a test walks the tool surface to check that no
+   new one has grown a side door.
 
-### Planning
+2. **A constitution that binds the enforcer too** — *mature* in the core,
+   *partial* in the classification. Rules bounding the agent are common; what is
+   unusual is that rights bound the *gateway*, that which party each clause
+   binds is **declared data** rather than a naming convention, and that the gap
+   between text and enforcement is a published quantity rather than a claim
+   (201 `ENFORCED`, 2 `PARTIAL`, 1 `DESIGN DEBT`, 3 `MISSING`). The gateway's own
+   lapses are counted as named debts.
 
-- [`docs/archived/plan.md`](docs/archived/plan.md): Archived implementation roadmap
+3. **A verified self-model, handed over every turn** — *mature.* The unusual
+   move is not that state is exposed but that the agent is never asked to
+   *remember* it: a signed attestation (`P-6.23`) carrying budget, capabilities,
+   pending gates, spawn depth and the constitution digest is injected at every
+   turn boundary, and the agent is taught the block outranks its own memory.
 
-## Reference Agent Bundles
+4. **An audit trail the subject can read** — *mature.* The chain is
+   hash-chained and append-only (`P-8.1`), and reading your own history is a
+   *right* (`Ri-0.2`) rather than an operator privilege. Attribution is bound
+   into the entry hash, so an action cannot be retroactively reassigned
+   (`Ri-0.11`) — non-repudiation in both directions, which is what makes holding
+   an agent responsible legitimate rather than merely possible.
 
-Reference agent bundles are grouped under [`agents/`](agents):
+5. **Sandbox isolation, four backends, one honest question** — maturity varies
+   by driver. Sandboxing is table stakes; the peculiar part is that "is this
+   execution physically offline?" is a **per-driver answer that fails closed**
+   (`guarantees_network_off`), and the promotion gate consumes that answer
+   instead of trusting a config flag — so a suite can be trusted to run offline
+   only on a tier that can actually promise it (`P-3.1`, `P-3.10`). The second
+   peculiarity: under the default `host_fs: allow_set`, nothing of the host
+   exists inside a bubblewrap sandbox except what the gateway asserts — the
+   whole-host read-only bind is now a deprecated opt-out that logs a warning.
 
-- `agents/lead/` for front-door/orchestration agents
-- `agents/specialists/` for hand roles
-- `agents/evolution/` for builder and evolution flows
+   | Driver | Isolation | Guaranteed offline | Maturity |
+   |---|---|---|---|
+   | **bubblewrap** | user namespaces, `--unshare-all`, gateway-asserted mounts only | only under `force_network_off` | *mature* — the default, and the only tier any reference agent declares |
+   | **docker** | container, `--network none` hardcoded | always | *shipped* |
+   | **wasm** (WASI, in-process) | no host runtime at all; the tier exposes no sockets | always | *experimental* — behind the `wasm-tier` build feature; JavaScript agents compile to wasm at bootstrap, Python is deferred |
+   | **microvm** (Firecracker) | strongest boundary in principle — a VM, not a namespace | never — the operator's config declares the NIC and the gateway cannot assert its absence | *early* — least exercised of the four |
 
-Current bundles:
+6. **Secrets the model never sees** — *mature.* Not "secrets in a vault", but
+   secrets that are structurally absent from the LLM context: injected
+   server-side into the child environment at execution time, with a one-pass
+   credential and approval preflight so an agent does not learn a value in order
+   to use it.
 
-- Lead: `agents/lead/planner.default/` (plus `planner.collaborative/`)
-- Specialists:
-  - `agents/specialists/researcher.default/`
-  - `agents/specialists/architect.default/`
-  - `agents/specialists/packager.default/`
-  - `agents/specialists/coder.default/`
-  - `agents/specialists/executor.default/`
-  - `agents/specialists/debugger.default/`
-  - `agents/specialists/sealed_evaluator.default/`
-  - `agents/specialists/static_evaluator.default/`
-  - `agents/specialists/unit_test_runner.default/`
-  - `agents/specialists/auditor.default/`
-  - `agents/specialists/credential_onboarding.default/`
-  - `agents/specialists/discovery.default/`
-  - `agents/specialists/watchdog.default/` (plus `watchdog-fast.default/`)
-  - `agents/specialists/improvement-orchestrator.default/`, `outcome-grader.default/`
-- Evolution:
-  - `agents/evolution/specialized_builder.default/`
-  - `agents/evolution/agent-factory.default/`
-  - `agents/evolution/agent-adapter.default/`
-  - `agents/evolution/evolution-steward.default/`
-  - `agents/evolution/memory-curator.default/`
-  - `agents/evolution/evolution-orchestrator.default/`, `code-issue-proposer.default/`
+7. **Approval gates that suspend the turn to disk** — *mature.* The usual design
+   re-prompts the model after a human answers, which invents a synthetic tool
+   result. Here the turn is checkpointed to disk and resumed with the **real**
+   result. Approval fatigue is treated as an attack surface (five layers of
+   dedup and a flood cap), a decider may be an agent holding `GateDecider`
+   (`P-2.20`), and whoever decides owes a recorded motivation (`O-1`) — the
+   mirror of the agent's own right to a named rejection (`Ri-0.3`).
 
-The authoritative role → agent-id table lives in [`docs/AGENTS.md`](docs/AGENTS.md) → Roles and Routing; check there when this list falls behind.
+8. **Typed intents, input *and* output** — *shipped.* An agent declares an `io`
+   schema in its `SKILL.md`. Coercion at the spawn boundary is **deterministic
+   by law**: the gateway will not call an LLM to reshape a payload, and the
+   fallback that once did was removed rather than gated. The final reply is
+   validated against `io.returns` before it reaches the caller.
 
-To install these into your active runtime directory, run:
+9. **An agent identity you can pin** — *mature.* Not a prompt plus a config: an
+   immutable, content-addressed revision with an audited promotion history.
+   Promotion computes the capability *delta* against the previous revision and
+   surfaces it (`P-2.16`), high-risk promotions need **distinct** evaluator and
+   auditor identities (`P-2.17`), the decision is fail-closed (`P-2.25`), and a
+   newborn agent's capabilities are bounded because creation is not delegation
+   (`I-13`).
 
-`autonoetic agent bootstrap [--from <path>] [--overwrite]`
+10. **Durable multi-agent work — yield, don't poll** — *mature.* A parent
+    suspends as `WaitingForChild` and the gateway wakes it with typed child
+    state (`Ri-0.14`); polling survives as an inspection primitive, not as the
+    contract. Alongside it, `agent_message` is peer-to-peer between live
+    sessions rather than restricted to the spawn tree — *shipped*.
 
-## Current Direction
+11. **Data-locality control** — *partial.* Content is labelled at the source and
+    the label governs every sink it can reach. Two peculiarities: provider
+    *selection* follows the taint, so a failover candidate that would receive
+    content it is not cleared for stops being a candidate; and a label widens
+    only through an operator-approved declassification grant, never by
+    inference, never by LLM judgment (`P-15.1`–`P-15.3`).
 
-The base runtime is proven and self-hosting; the active frontier is making
-governed autonomy operational:
+12. **Evolution behind the same gates** — *shipped*, closed-loop *partial.*
+    Agents build, evaluate and promote each other, and the peculiar part is that
+    this buys no exemptions: a built agent lands as a Candidate revision behind
+    the ordinary promotion gates, and installing an agent is not a runtime tool.
+    `autonoetic improve run` diagnoses from past sessions, proposes, A/B replays
+    and deploys through the same path.
 
-- the **data-egress label plane** as enforceable law (constitution
-  v2026.07.30) — labels at rest, taint-following routing, operator
-  declassification grants
-- the **sandbox host-fs mount allow-set** — declared host mounts gated by an
-  operator allowlist, replacing the ro-bind-everything stopgap
-- **GateService** — session escalation and profile sharing through a single
-  audited gate
-- the CLI surface fully routed over the gateway's JSON-RPC API, and
-  `runtime_dir` as the single runtime layout
+13. **An operator surface built for reading, not tailing** — *shipped.* The
+    session room (`autonoetic room <id> --tui`) is one importance-ranked
+    timeline across every actor, and you resolve approvals and answer
+    clarifications from inside it. The gateway also serves a web cockpit at `/`
+    (overview, workflow DAG, constitution, evolution, grants, agent wiki), any
+    past turn is forkable into a live session (`autonoetic trace fork`), and a
+    whole session tree exports as an archive keyed by constitution version and
+    lock digest.
 
-More advanced features like full marketplace workflows, hermetic capsule
-replay, advanced memory substrate, and richer federation polish are deferred
-until the governance machinery above is hardened.
+14. **Reporting channels that cannot be gated away** — *shipped.* Filing an
+    anomaly report requires **no capability at all** (`Ri-0.18`), because the
+    witness most likely to see misbehaviour is often the least privileged actor
+    in the room — and the reviewing authority owes a recorded decision within a
+    bounded window (`O-7`). The divergence sentinel is advisory **by law**
+    (`Ri-0.16`): a judgment layer that could block would become an
+    unaccountable second executor. `autonoetic trace contract-health` reports
+    how often each clause has actually been enforced, so a decorative clause
+    becomes visible.
 
-## HTTP Content API (for Remote Agents)
+15. **Reproducible evaluation** — *shipped.* `autonoetic recording start`
+    captures real HTTP traffic during a run and `autonoetic eval sealed` replays
+    it offline, so an evaluation is deterministic and needs no network — which
+    is what makes the promotion evidence worth anything.
 
-The gateway exposes REST endpoints so remote agents can read, write, and
-persist content over HTTP with a shared secret. See
-[docs/reference/http-api.md](docs/reference/http-api.md) for the endpoint
-reference and a Python SDK quickstart.
+16. **Federation by shared law** — *partial.* The handshake compares
+    constitution digests, not reputation (`P-10.9`), and there are declared
+    compatibility modes rather than one all-or-nothing match. The wire protocol
+    and compatibility tables ship; the gateway-side federation surface is still
+    thin.
 
-## Lineage
+17. **A credible exit** — *partial.* An agent may request export of its **own**
+    cognitive capsule (`Ri-0.17`) — bundle plus pinned runtime closure,
+    verifiable offline — because voice without an exit option degrades into
+    ritual. Cross-gateway portability is not real yet, which is why this is
+    partial and says so.
 
-Autonoetic takes inspiration from systems like OpenFang, and reuses the
-OpenFang Protocol (OFP) for federation where possible — it is a robust,
-well-designed foundation for agent interoperability. Where Autonoetic
-diverges is documented above (see *Why this exists*) and in a detailed
-code-level comparison with a representative direct-loop harness:
-[`docs/reports/2026-07-19-comparison-hermes-agent.md`](docs/reports/2026-07-19-comparison-hermes-agent.md).
+18. **The served party's charter** — *declared.* Refuse a delivered result,
+    obtain a plain-language account, take your data on exit (`U-1`–`U-3`). None
+    is enforced, all three are written into the signed text as `MISSING`, and
+    the sequencing constraint is deliberate: they must land before decider
+    authority spreads further to agents.
 
-## Status
+The honest trade-off: this costs ceremony. If all you want is a quick assistant
+that runs one-off shell commands under your eyes, a direct-loop tool is the
+better choice — the LLM calls tools in its own process, an allowlist plus an
+approval prompt is the safety model, and the transcript is the audit trail.
+Autonoetic is for **governed autonomy**, where the question is not "how fast can
+an agent type" but "can I let this run unsupervised, let it delegate and
+self-modify, and still know exactly what happened and why it was allowed."
 
-The runtime core is implemented and self-hosting: gateway daemon (JSON-RPC +
-HTTP REST), `SKILL.md` + `runtime.lock` parsing, multi-driver sandboxing
-(bubblewrap / docker / microvm / wasm), content-addressed artifacts, hash-chain
-causal logging, durable workflows, OFP federation with HMAC + constitution
-digest handshake, and MCP client/server plumbing.
+## Try it
 
-Governance is built alongside the runtime: the current constitution
-(`2026.08.30`) has 18 enforced rights and 182 rules, 179 of them enforced — see
-[`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md)
-for what is `ENFORCED` vs `PARTIAL` / `MISSING` / `DESIGN DEBT`. In-flight design work is
-tracked in [`docs/proposals/`](docs/proposals/README.md); superseded plans in
-[`docs/archived/`](docs/archived/).
+```bash
+cargo build                                        # build the workspace
+cargo run -p autonoetic -- gateway start           # start the gateway daemon
+cargo run -p autonoetic -- agent bootstrap         # install the reference agent bundles
+cargo run -p autonoetic -- chat planner.default    # talk to an agent
+cargo run -p autonoetic -- trace sessions          # read back what happened
+```
 
-## Quickstart Example
-
-A runnable smoke example now lives at [`examples/quickstart`](examples/quickstart/README.md).
-
-For planner/specialist implicit routing through CLI chat, see:
-
-- [`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md)
-
-From `autonoetic/`:
+A runnable smoke example lives at
+[`examples/quickstart`](examples/quickstart/README.md): by default it
+initializes an agent in an isolated workspace and runs one real headless call
+(needs `OPENROUTER_API_KEY`), or `smoke` mode for local startup/exit with no
+model call.
 
 ```bash
 bash examples/quickstart/run.sh
 ```
 
-By default it initializes an agent in an isolated `/tmp` workspace and runs a real headless call against OpenRouter `google/gemini-3-flash-preview` (requires `OPENROUTER_API_KEY`). You can also run `smoke` mode for local interactive startup/exit without a remote model call.
+For planner/specialist routing end to end, follow
+[`docs/start/planner-specialist-chat.md`](docs/start/planner-specialist-chat.md).
+The full command surface is in
+[`docs/reference/cli.md`](docs/reference/cli.md); reference agent bundles live
+under [`agents/`](agents), with the authoritative role → agent-id table in
+[`docs/AGENTS.md`](docs/AGENTS.md#roles-and-routing).
 
-Each run appends lifecycle/tool events to the agent causal trace at `agents/<agent_id>/history/causal_chain.jsonl`.
-By default, the gateway also captures redacted full evidence payloads with `evidence_ref` pointers in causal entries. Set `AUTONOETIC_EVIDENCE_MODE=off` if you want compact-only traces.
-Causal entries expose top-level `session_id`, `turn_id`, and `event_seq` fields for multi-run/multi-turn introspection, plus `entry_hash` / `prev_hash` linkage for chain integrity.
-You can inspect traces with:
-- `autonoetic trace sessions [--agent <agent_id>] [--json]`
-- `autonoetic trace show <session_id> [--agent <agent_id>] [--json]`
-- `autonoetic trace event <log_id> [--agent <agent_id>] [--json]`
-- `autonoetic trace follow <session_id> [--agent <agent_id>] [--json]`
-- `autonoetic trace fork <session_id> [--message <text>] [--at-turn N] [--interactive]`
-- `autonoetic trace history <session_id> [--agent <agent_id>] [--json]`
+## The nouns you will meet
 
-## Specialized Builder
+- **`SKILL.md`** — the unified manifest for agents and skills. AgentSkills-compliant top-level frontmatter (`name`, `description`, `metadata`), with Autonoetic runtime fields under `metadata.autonoetic`
+- **`runtime.lock`** — the pinned execution closure that makes a run reproducible
+- **Causal chain** — the hash-chained record of every turn and event, replayable and forkable
+- **Checkpoint** — a runnable session snapshot at every yield point: crash recovery, and forking a session from any past turn
+- **Artifact Store** — content-addressed (SHA-256) storage; agents pass handles, not blobs
+- **Cognitive Capsule** — a portable export of an agent bundle plus its runtime closure ([guide](docs/guide/cognitive-capsule.md))
 
-The canonical builder flow lives in the agent bundle at
-[`agents/evolution/specialized_builder.default/`](agents/evolution/specialized_builder.default/SKILL.md),
-which uses the revision pipeline (`content_write` → `artifact_build` →
-`agent_revision_create_from_intent` → `agent_revision_promote`).
+## What is not built yet
 
-Older runnable examples that demonstrated this flow (`examples/specialized_builder`,
-`examples/tiered_memory_probe`) have been archived under
-[`examples/archived/`](examples/archived) — they depended on the since-removed
-`agent.install` tool (constitution P-9.2) and on GNU-only `find -printf`, and no
-longer run against a current gateway.
+The list above carries a maturity per item; this is what has none. The runtime
+core is self-hosting, and the active frontier is making governed autonomy
+operational:
+
+- **bind-direction as declared data** — 97 clauses still to classify, and the
+  amendment that adopts the relational columns into the signed text;
+- **a seat for the served party** — `U-1`–`U-3` cannot be enforced until the
+  party they protect has a surface to act through; refusing a result is an act,
+  and acting needs a seat;
+- **`GateService` as the one audited gate** — session escalation and profile
+  sharing routed through a single suspension point;
+- **run-scoped decider appointment** — naming an agent as the decider for one
+  run, as a peer principal with a recorded appointment;
+- the CLI surface fully routed over the gateway's JSON-RPC API.
+
+Full marketplace workflows, hermetic capsule replay, an advanced memory
+substrate and richer federation polish are deferred until the governance
+machinery above is hardened. In-flight design work is tracked in
+[`docs/proposals/README.md`](docs/proposals/README.md).
+
+## Where to go next
+
+| | |
+|---|---|
+| [`docs/README.md`](docs/README.md) | The documentation map — which directory answers which question |
+| [`docs/start/concepts.md`](docs/start/concepts.md) | Autonoetic from first principles, for readers coming from direct-code assistants |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, data flow, security model, execution modes |
+| [`docs/AGENTS.md`](docs/AGENTS.md) | Roles, routing, `SKILL.md` fields, capabilities, lifecycle |
+| [`docs/reference/http-api.md`](docs/reference/http-api.md) | HTTP API for remote agents, SDK transport, authentication |
+
+## Lineage
+
+Autonoetic takes inspiration from systems like OpenFang, and reuses the
+OpenFang Protocol (OFP) for federation where possible — it is a robust,
+well-designed foundation for agent interoperability. Where Autonoetic diverges
+is documented above and in a code-level comparison with a representative
+direct-loop harness:
+[`docs/reports/2026-07-19-comparison-hermes-agent.md`](docs/reports/2026-07-19-comparison-hermes-agent.md).
 
 ## License
 
-Autonoetic is licensed under the [Apache License 2.0](LICENSE).
-
-This license provides explicit patent protections for users and contributors, making it suitable for both open-source and commercial use.
+Autonoetic is licensed under the [Apache License 2.0](LICENSE) — explicit
+patent protections for users and contributors, suitable for both open-source
+and commercial use.

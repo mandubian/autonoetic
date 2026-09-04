@@ -70,18 +70,44 @@ and both of those hold regardless of one's views on machine consciousness.
 ## 2. The social contract: who is bound, and to whom
 
 The constitution's structural novelty is **bind-direction discipline**: every
-clause binds exactly one party.
+clause binds exactly one party — and *which* party is **declared data**, not a
+convention read off the clause's ID prefix (#1284). Two fields carry it, over
+two deliberately different domains:
 
-- **Rules** (`P-*`) bind the *agent*: a finite, named set of forbidden
-  actions; everything else is permitted.
-- **Rights** (`Ri-*`) bind the *gateway*: unconditional entitlements the
-  enforcer owes every agent, revocable only by amendment.
-- **Obligations** (`O-*`) bind the *decider*: whoever exercises authority over
-  an agent owes duties mirroring the agent's own.
-- **A service charter** (`U-*`) binds the *community* — the gateway and the
-  agents together — toward the *served party*: the end-user, human or not,
-  whom the whole arrangement exists to serve. Declared as §12; not yet
-  mechanically enforced (see §5).
+- **`binds`** ranges over the three **powers**: `reasoner` (proposes and acts,
+  subject to gating), `enforcer` (mechanical enforcement — the Lawful
+  Executor), `decider` (resolves gates). A clause binds a *function*, so
+  authority attaches to the seat rather than to the species: an agent holding
+  `GateDecider` owes exactly what a human owes in that seat.
+- **`owed_to`** ranges over **principals** — who has standing to complain when
+  the clause is broken — plus one case where standing attaches to a seat
+  (`Ri-0.15`: decision context is owed to whoever decides, human or agent), and
+  one value for *nobody*. That last is what an **integrity property** is:
+  "sandboxes default to `--unshare-all`" benefits the operator, but nobody can
+  *claim* it — an agent cannot demand its own confinement and would rather not
+  have it.
+
+Two consequences follow that the prefixes cannot express:
+
+- **A right is a view, not a family.** An enforcer duty owed to the agent is an
+  agent right whatever its ID says: 27 clauses qualify, only 17 of them `Ri-`.
+  So the rights/rules ratio that §0 tracks as a design signal becomes
+  *derivable* rather than counted off prefixes — which is exactly what stops it
+  from being gameable by refiling clauses.
+- **The service charter binds the enforcer**, not "the community". `U-*` are
+  owed to the *served party* — the end-user, human or not, whom the whole
+  arrangement exists to serve — but a community is an aggregate of parties,
+  and §0 says every clause binds exactly one. The mechanism has to land on the
+  enforcer: an entitlement held against "everyone" is a claim, whereas an
+  invariant on the enforcer is a guarantee (§3.3 reached this in prose before
+  the classification confirmed it). Declared as §12; still not mechanically
+  enforced (see §5).
+
+There is also, by design, **no judiciary**: interpretation is abolished in
+favour of determinism plus amendment. Where the text is insufficient the
+remedies are rejection and amendment, never construal — which is what makes
+the law portable between implementations, since decidable rules transfer and
+jurisprudence does not.
 
 Most agent-safety frameworks are rules-only: pure constraint, where the
 enforcer owes nothing. Making the enforcer a bound party — and tracking the
@@ -299,7 +325,7 @@ Compact statements of what §3 implies, usable as review criteria:
 The five doors below were the original growth agenda. The 2026.07.08
 amendment **opened all five** at once — each as a drafted clause or
 mechanism, declared while it was cheap so the architecture would not have to
-move when the need became urgent. Under the active version (`2026.08.30`)
+move when the need became urgent. Under the active version (`2026.09.02`)
 two of the five are now mechanically enforced, and two further mechanisms
 shipped that were not on the original list. Status below, then what remains.
 
