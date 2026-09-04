@@ -126,7 +126,13 @@ const TO_AGENT: OwedTo = OwedTo::Principal(PrincipalKindTag::AutonoeticAgent);
 const TO_SERVED: OwedTo = OwedTo::Principal(PrincipalKindTag::ServedUser);
 
 
-/// [`right`] with its `requires` declared.
+/// An enforcer duty owed to the agent — an agent **right** in the
+/// substantive sense (RFC §2.5), whatever prefix the clause id carries.
+///
+/// The `_r` suffix is vestigial: it distinguished this from a `requires`-less
+/// variant that no longer exists, since `requires` became mandatory once every
+/// clause declared it. Kept because renaming four constructors across 221 call
+/// sites buys nothing.
 const fn right_r(
     id: &'static str,
     requires: Requires,
@@ -147,7 +153,8 @@ const fn right_r(
 // the constructor set enforces coverage for completed families. The three
 // remaining `requires`-less constructors survive only because the `P-*`
 // section tranches predate the field; each should go as its family completes.
-/// A decider obligation with its `requires` declared.
+/// A duty binding whoever occupies the **deciding seat** — occupant-agnostic,
+/// so a `GateDecider`-holding agent is bound identically to a human operator.
 const fn duty_r(
     id: &'static str,
     requires: Requires,
@@ -163,7 +170,8 @@ const fn duty_r(
 }
 
 
-/// [`property`] with its `requires` declared.
+/// An enforcer duty with no invocable beneficiary — an integrity property.
+/// See [`OwedTo::NoOne`] for why that is a positive claim rather than a gap.
 const fn property_r(
     id: &'static str,
     requires: Requires,
@@ -179,7 +187,8 @@ const fn property_r(
 }
 
 
-/// [`served`] with its `requires` declared.
+/// An enforcer duty owed to the **served party** — the end user a session
+/// ultimately serves.
 const fn served_r(
     id: &'static str,
     requires: Requires,
