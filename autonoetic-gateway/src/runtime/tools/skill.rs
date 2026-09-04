@@ -7,7 +7,8 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{
-    block_on_memory, extract_host, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry,
+    block_on_http, block_on_memory, extract_host, tier2_memory_for_native_tool, NativeTool,
+    NativeToolRegistry,
 };
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, LlmConfig};
 use autonoetic_types::capability::Capability;
@@ -162,22 +163,26 @@ impl NativeTool for SkillInstallTool {
         );
 
         // ── 4. Fetch the remote SKILL.md ──────────────────────────────────────
-        let url_clone = args.url.clone();
+        // `block_on_http` + the async client, not `reqwest::blocking`: tool
+        // execution runs on a runtime-entered thread, and reqwest 0.13's
+        // blocking wait loop enters a throwaway tokio runtime per call in
+        // debug builds — dropping it there panics with "Cannot drop a runtime
+        // in a context where blocking is not allowed" (tokio
+        // blocking/shutdown.rs:51), which surfaced as a ✗ on skill rows.
         let (http_status, fetched_bytes) = {
-            let result: anyhow::Result<(u16, Vec<u8>)> = (|| {
-                let client = reqwest::blocking::Client::builder()
+            let url = args.url.clone();
+            block_on_http(async move {
+                let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(15))
                     .build()?;
-                let resp = client.get(url_clone.as_str()).send()?;
+                let resp = client.get(url).send().await?;
                 let status = resp.status().as_u16();
-                if !resp.status().is_success() {
-                    let _ = resp.bytes()?;
+                if !(200..300).contains(&status) {
                     return Ok((status, Vec::new()));
                 }
-                let content = resp.bytes()?;
+                let content = resp.bytes().await?;
                 Ok((status, content.to_vec()))
-            })();
-            result?
+            })?
         };
 
         if !(200..300).contains(&(http_status as i32)) {
@@ -544,19 +549,27 @@ Fetch the document with a network-capable step and pass the markdown body in `co
             host
         ));
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client.get(url).send().map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    if !resp.status().is_success() {
+    // Same constraint as the `skill.install` fetch above: `reqwest::blocking`
+    // panics on a runtime-entered thread (debug builds drop a throwaway shell
+    // runtime inside reqwest's wait loop). Use the async client via
+    // `block_on_http` — the same egress pattern as the web tools.
+    let owned_url = url.to_string();
+    let (status, body) = block_on_http(async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let resp = client.get(owned_url).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        Ok((status, body))
+    })
+    .map_err(|e| e.to_string())?;
+    if !(200..300).contains(&status) {
         return Err(format!(
-            "HTTP {} while fetching skill markdown from {}",
-            status, url
+            "HTTP {status} while fetching skill markdown from {url}"
         ));
     }
-    resp.text().map_err(|e| e.to_string())
+    Ok(body)
 }
 
 fn extract_base_and_hosts(source_url: Option<&str>) -> (Option<String>, Vec<String>) {
@@ -1380,6 +1393,7 @@ fn apply_trust_mode(
 #[cfg(test)]
 mod skill_normalize_extractor_tests {
     use super::*;
+    use autonoetic_types::agent::RuntimeDeclaration;
 
     #[test]
     fn extractor_still_parses_method_path_endpoints() {
@@ -1512,5 +1526,74 @@ mod skill_normalize_extractor_tests {
         let step = synthesize_get_step(&path);
         assert_eq!(step.get("method").and_then(|v| v.as_str()), Some("GET"));
         assert_eq!(step.get("url").and_then(|v| v.as_str()), Some("/v1/forecast"));
+    }
+
+    fn manifest_allowing_localhost() -> AgentManifest {
+        // Same fixture shape as `tool_dispatch::test_manifest`, with
+        // NetworkAccess limited to loopback.
+        AgentManifest {
+            remote_access: None,
+            messaging: None,
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                mounts: Vec::new(),
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+                resident_idle_ttl_secs: None,
+            },
+            capabilities: vec![Capability::NetworkAccess {
+                hosts: vec!["127.0.0.1".to_string()],
+            }],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            adapter: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            sections: Vec::new(),
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
+        }
+    }
+
+    /// Regression: the `skill.install` / `skill_normalize` URL fetches used
+    /// `reqwest::blocking` directly on a runtime-entered thread. reqwest 0.13's
+    /// blocking wait loop enters a throwaway shell tokio runtime per call in
+    /// debug builds, and dropping a runtime inside an entered runtime panics
+    /// with "Cannot drop a runtime in a context where blocking is not allowed"
+    /// (tokio blocking/shutdown.rs:51) — the ✗ seen on `skill_normalize` rows.
+    /// The fixed transport (async client via `block_on_http`) must return a
+    /// plain connection error instead of panicking.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skill_url_fetch_survives_runtime_entered_thread() {
+        let policy = PolicyEngine::new(manifest_allowing_localhost());
+        // Loopback discard port — the connection is refused immediately, so
+        // the test stays offline. Under the old code this panicked while
+        // *building* the blocking client, before any connection attempt.
+        let result = fetch_markdown_for_skill_normalize(&policy, "http://127.0.0.1:9/x");
+        assert!(result.is_err(), "refused loopback fetch must error, not panic");
     }
 }
