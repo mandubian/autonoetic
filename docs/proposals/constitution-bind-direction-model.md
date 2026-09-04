@@ -446,6 +446,27 @@ freeze descriptions of today's Rust into constitutional text — both
 significantly harder to undo than to avoid, since a signed column can only be
 changed by amendment.
 
+**Status:** `requires` is implemented and declared for the 39 non-`P` clauses
+plus `P-8.1` (`enforcement_register::Requires`,
+`constitution_relations::requires`). The 84 numbered `P-*` classified in the
+section tranches await it — deliberately not back-filled from `verified_by`,
+because the mapping does not exist: `construction` and `chokepoint` do imply
+`preventive`, but `test`, `registry` and `sampling` say nothing either way, so
+deriving would have manufactured judgements nobody made.
+
+The first 40 came out **25 preventive / 6 detective / 9 both**. Nine mixed
+clauses in forty is high enough to matter: `Ri-0.4`, `Ri-0.6`, `Ri-0.8`,
+`Ri-0.11`, `Ri-0.13`, `Ri-0.18`, `U-3`, `P-8.1` and `Ri-0.3` each pair a
+representable core with a judgment-shaped penumbra. Under §2.4.3 they are all
+split candidates, which suggests the drafting consequence is not a corner case
+but the common one — worth knowing before part 3 decides how the column is
+written.
+
+`achieved` is **not** yet moved. `verified_by` still sits on the clause record
+and is rendered in the law table under a header saying it is conformance data
+pending relocation. Moving it needs the per-implementation register of §2.7,
+which #1284 lists as out of scope.
+
 #### 2.4.2 The register has no reader-facing surface
 
 A gap surfaced by the same implementation work, recorded here because it is

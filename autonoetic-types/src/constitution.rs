@@ -49,6 +49,17 @@ pub struct ConstitutionClause {
     /// remaining numbered clauses is tracked work (#1284 part 2), and a
     /// visible gap is worth more than a plausible falsehood.
     pub binds: String,
+    /// What the clause **requires** of any implementation:
+    /// `preventive`, `detective`, `preventive+detective`, or absent while the
+    /// clause awaits its tranche (RFC #1283 §2.4.1).
+    ///
+    /// Distinct from [`ConstitutionClause::enforcement`], which cites *this*
+    /// gateway's mechanism. A federated peer comparing law needs the
+    /// requirement; a peer auditing conformance needs the citation. Carried
+    /// here because §2.4.2's reader-facing pair is the law table **and** this
+    /// API — a constitutional field on only one of the two is half a surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<String>,
     /// One-line statement — the first sentence of the clause in the source.
     pub gloss: String,
     /// Enforcement citation (code/test site) when the clause is mechanically
