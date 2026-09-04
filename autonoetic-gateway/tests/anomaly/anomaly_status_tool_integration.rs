@@ -232,6 +232,58 @@ fn adjudicator_reads_any_flag_by_id_but_list_stays_self() {
     );
 }
 
+/// A misconfigured office manifest (`patterns: []` or whitespace-only)
+/// must not escalate to read-any — the read path mirrors the write path's
+/// non-empty-pattern requirement (Copilot review on this PR).
+#[test]
+fn adjudicator_grant_without_usable_patterns_gets_no_read_escalation() {
+    let h = make_harness();
+    let filer = zero_capability_manifest("witness.default");
+    let flag_id = file_flag(&h, &filer, "sess-x", "under review");
+
+    for bad_patterns in [vec![], vec!["  ".to_string()]] {
+        let broken_office = manifest_for(
+            "ombudsman.default",
+            vec![Capability::AnomalyAdjudicate {
+                patterns: bad_patterns,
+            }],
+        );
+        let resp = invoke(
+            &h,
+            "anomaly_status",
+            &broken_office,
+            &format!(r#"{{"flag_id": "{flag_id}"}}"#),
+        );
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], "anomaly_flag_not_found");
+    }
+}
+
+/// The list form truncates at MAX_LISTED with the note as a sibling field —
+/// `flags` stays homogeneous (every element has flag_id) and count ==
+/// flags.len() (Copilot review on this PR).
+#[test]
+fn list_truncation_keeps_flags_homogeneous() {
+    let h = make_harness();
+    let manifest = zero_capability_manifest("witness.default");
+    for i in 0..35 {
+        file_flag(&h, &manifest, &format!("sess-{i}"), "odd");
+    }
+
+    let resp = invoke(&h, "anomaly_status", &manifest, r#"{}"#);
+    assert_eq!(resp["ok"], true, "{resp}");
+    assert_eq!(resp["count"], 32);
+    assert_eq!(resp["truncated"], true);
+    assert_eq!(resp["flags"].as_array().unwrap().len(), 32);
+    for flag in resp["flags"].as_array().unwrap() {
+        assert!(flag.get("flag_id").is_some(), "heterogeneous element: {flag}");
+    }
+    assert!(
+        resp["note"].as_str().unwrap_or_default().contains("most recent"),
+        "truncation note must be a sibling field: {resp}"
+    );
+}
+
 #[test]
 fn status_filter_and_invalid_status() {
     let h = make_harness();

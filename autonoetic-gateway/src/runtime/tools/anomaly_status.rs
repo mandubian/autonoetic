@@ -135,10 +135,14 @@ impl NativeTool for AnomalyStatusTool {
             }
         }
 
-        let is_adjudicator = manifest
-            .capabilities
-            .iter()
-            .any(|c| matches!(c, Capability::AnomalyAdjudicate { .. }));
+        // Adjudicator read requires a *usable* grant — at least one
+        // non-empty pattern. A misconfigured office manifest
+        // (`patterns: []` or whitespace) must not escalate to read-any;
+        // mirrors the write path's per-pattern check in anomaly_adjudicate.
+        let is_adjudicator = manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::AnomalyAdjudicate { patterns }
+                if patterns.iter().any(|p| !p.trim().is_empty()))
+        });
 
         match args.flag_id.as_deref() {
             Some(flag_id) => {
@@ -177,22 +181,24 @@ impl NativeTool for AnomalyStatusTool {
                 // one flag and stays out of band here).
                 let flags =
                     store.list_anomaly_flags(args.status.as_deref(), Some(&manifest.agent.id), MAX_LISTED)?;
-                let mut items: Vec<serde_json::Value> = flags
-                    .iter()
-                    .map(|f| flag_summary(f))
-                    .collect();
-                if items.len() == MAX_LISTED {
-                    items.push(json!({
-                        "note": format!("showing the {MAX_LISTED} most recent filings only")
-                    }));
-                }
-                Ok(json!({
+                let truncated = flags.len() == MAX_LISTED;
+                let mut response = json!({
                     "ok": true,
                     "kind": "anomaly_flag_list",
                     "count": flags.len(),
-                    "flags": items,
-                })
-                .to_string())
+                    "truncated": truncated,
+                    "flags": flags.iter().map(flag_summary).collect::<Vec<_>>(),
+                });
+                // Truncation note as a sibling field, never an element of
+                // `flags` — the array stays homogeneous (every element is a
+                // flag summary), and count == flags.len() always holds.
+                if truncated {
+                    response.as_object_mut().unwrap().insert(
+                        "note".to_string(),
+                        json!(format!("showing the {MAX_LISTED} most recent filings only")),
+                    );
+                }
+                Ok(response.to_string())
             }
         }
     }
