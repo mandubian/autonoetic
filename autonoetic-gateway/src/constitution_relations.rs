@@ -93,7 +93,7 @@
 //! the tranches did not raise coverage — they removed inference. The two
 //! ratchets are separate for that reason.
 //!
-use crate::enforcement_register::{Binds, OwedTo, VerifiedBy};
+use crate::enforcement_register::{Binds, OwedTo, Requires, VerifiedBy};
 use autonoetic_types::principal::PrincipalKindTag;
 
 /// A clause's declared relational fields, independent of whether anything
@@ -105,6 +105,10 @@ pub struct Relation {
     pub binds: Binds,
     /// Who has standing to invoke it.
     pub owed_to: OwedTo,
+    /// What the clause requires of **any** implementation — the
+    /// constitutional half of RFC #1283 §2.4.1. `None` while the clause
+    /// awaits its `requires` tranche.
+    pub requires: Option<Requires>,
     /// Minimum modality that would establish compliance (see module docs —
     /// a requirement, not a claim about this implementation).
     pub verified_by: VerifiedBy,
@@ -116,22 +120,82 @@ const TO_AGENT: OwedTo = OwedTo::Principal(PrincipalKindTag::AutonoeticAgent);
 const TO_SERVED: OwedTo = OwedTo::Principal(PrincipalKindTag::ServedUser);
 
 const fn right(id: &'static str, verified_by: VerifiedBy) -> Relation {
-    Relation { id, binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by }
+    Relation { id, binds: Binds::Enforcer, owed_to: TO_AGENT, requires: None, verified_by }
+}
+
+/// [`right`] with its `requires` declared.
+const fn right_r(
+    id: &'static str,
+    requires: Requires,
+    verified_by: VerifiedBy,
+) -> Relation {
+    Relation {
+        id,
+        binds: Binds::Enforcer,
+        owed_to: TO_AGENT,
+        requires: Some(requires),
+        verified_by,
+    }
 }
 
 const fn duty(id: &'static str, verified_by: VerifiedBy) -> Relation {
-    Relation { id, binds: Binds::Decider, owed_to: TO_AGENT, verified_by }
+    Relation { id, binds: Binds::Decider, owed_to: TO_AGENT, requires: None, verified_by }
+}
+
+/// [`duty`] with its `requires` declared.
+const fn duty_r(
+    id: &'static str,
+    requires: Requires,
+    verified_by: VerifiedBy,
+) -> Relation {
+    Relation {
+        id,
+        binds: Binds::Decider,
+        owed_to: TO_AGENT,
+        requires: Some(requires),
+        verified_by,
+    }
 }
 
 /// An enforcer duty with no invocable beneficiary — an integrity property.
 const fn property(id: &'static str, verified_by: VerifiedBy) -> Relation {
-    Relation { id, binds: Binds::Enforcer, owed_to: OwedTo::NoOne, verified_by }
+    Relation { id, binds: Binds::Enforcer, owed_to: OwedTo::NoOne, requires: None, verified_by }
+}
+
+/// [`property`] with its `requires` declared.
+const fn property_r(
+    id: &'static str,
+    requires: Requires,
+    verified_by: VerifiedBy,
+) -> Relation {
+    Relation {
+        id,
+        binds: Binds::Enforcer,
+        owed_to: OwedTo::NoOne,
+        requires: Some(requires),
+        verified_by,
+    }
 }
 
 /// An enforcer duty owed to the **served party** — the end user a session
 /// ultimately serves.
 const fn served(id: &'static str, verified_by: VerifiedBy) -> Relation {
-    Relation { id, binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by }
+    Relation { id, binds: Binds::Enforcer, owed_to: TO_SERVED, requires: None, verified_by }
+}
+
+/// [`served`] with its `requires` declared.
+const fn served_r(
+    id: &'static str,
+    requires: Requires,
+    verified_by: VerifiedBy,
+) -> Relation {
+    Relation {
+        id,
+        binds: Binds::Enforcer,
+        owed_to: TO_SERVED,
+        requires: Some(requires),
+        verified_by,
+    }
 }
 
 /// §0 Bill of Rights. Uniformly enforcer duties owed to the agent — the
@@ -148,30 +212,50 @@ const fn served(id: &'static str, verified_by: VerifiedBy) -> Relation {
 fn rights() -> Vec<Relation> {
     vec![
         // Enforced by the per-turn signed state attestation block.
-        right("Ri-0.1", VerifiedBy::Test),
-        right("Ri-0.2", VerifiedBy::Test),
+        right_r("Ri-0.1", Requires::Preventive, VerifiedBy::Test),
+        right_r("Ri-0.2", Requires::Preventive, VerifiedBy::Test),
         // `Tagged::permission_with_rules` carries rule IDs, but nothing in
         // the type forbids an empty list, so an example test at the named
         // site is the honest floor. Making a ruleless rejection
         // unrepresentable would be a real strengthening.
-        right("Ri-0.3", VerifiedBy::Test),
-        right("Ri-0.4", VerifiedBy::Test),
-        right("Ri-0.5", VerifiedBy::Test),
-        right("Ri-0.6", VerifiedBy::Test),
-        right("Ri-0.7", VerifiedBy::Test),
-        right("Ri-0.8", VerifiedBy::Test),
-        right("Ri-0.9", VerifiedBy::Test),
-        right("Ri-0.10", VerifiedBy::Test),
+        // requires: the RFC's worked mixed clause: an empty rule list is
+        // excludable by construction; whether the named rule is the real basis
+        // only review catches
+        right_r("Ri-0.3", Requires::Both, VerifiedBy::Test),
+        // requires: meters update structurally; "consumption is never silent" is a
+        // behavioural claim about every path that spends
+        right_r("Ri-0.4", Requires::Both, VerifiedBy::Test),
+        // requires: the notice is injected *before* the next turn executes — a
+        // turn that runs without it is the violation, and that is orderable
+        right_r("Ri-0.5", Requires::Preventive, VerifiedBy::Test),
+        // requires: narrowing requires recorded causal evidence (preventable);
+        // "not silently" is the detective half
+        right_r("Ri-0.6", Requires::Both, VerifiedBy::Test),
+        // requires: "it may not refuse" — refusal is a representable state to exclude
+        right_r("Ri-0.7", Requires::Preventive, VerifiedBy::Test),
+        // requires: a durable ID is preventive; "cannot be silently dropped" is a
+        // claim about the queue over time
+        right_r("Ri-0.8", Requires::Both, VerifiedBy::Test),
+        // requires: "where practical" makes compliance situational; only the
+        // recorded flag and response show whether it was honoured
+        right_r("Ri-0.9", Requires::Detective, VerifiedBy::Test),
+        right_r("Ri-0.10", Requires::Preventive, VerifiedBy::Test),
         // Shares P-8.1's substrate: `compute_entry_hash` binds `actor_id`, so
         // reattribution is detectable by recomputation.
-        right("Ri-0.11", VerifiedBy::Chokepoint),
+        // requires: the entry hash binds the actor (preventive); detecting an
+        // attempted reattribution is the other half
+        right_r("Ri-0.11", Requires::Both, VerifiedBy::Chokepoint),
         // `YieldReason` is a closed enum: an unlisted termination is a
         // compile error at every exhaustive match.
-        right("Ri-0.12", VerifiedBy::Construction),
+        // requires: a closed enum makes an unlisted termination a compile error
+        right_r("Ri-0.12", Requires::Preventive, VerifiedBy::Construction),
         // Policy decision signatures do not take reasoning as a parameter,
         // so no call site can consult it — including ones not yet written.
-        right("Ri-0.13", VerifiedBy::Construction),
-        right("Ri-0.14", VerifiedBy::Test),
+        // requires: (a) is preventive at the signature; (c) capability-gated
+        // disclosure writes an event — detective by design, since the point is
+        // that the reviewed agent can see it happened
+        right_r("Ri-0.13", Requires::Both, VerifiedBy::Construction),
+        right_r("Ri-0.14", Requires::Preventive, VerifiedBy::Test),
         // Seat-standing, and `construction`: `DecisionContext` is a
         // *required* field on `human_gate.rs::GateRequest`, so a gate
         // without context cannot be built. (`GateService::check` rejecting
@@ -181,13 +265,18 @@ fn rights() -> Vec<Relation> {
             id: "Ri-0.15",
             binds: Binds::Enforcer,
             owed_to: OwedTo::Seat(Binds::Decider),
+            requires: Some(Requires::Preventive),
             verified_by: VerifiedBy::Construction,
         },
         // `is_advisory_only` is a runtime predicate, not a type, so the
         // "never raises a blocking gate" guarantee rests on tests.
-        right("Ri-0.16", VerifiedBy::Test),
-        right("Ri-0.17", VerifiedBy::Test),
-        right("Ri-0.18", VerifiedBy::Test),
+        // requires: "never raises an execution-blocking gate" is an absolute the
+        // sentinel's advisory-only path must make unreachable
+        right_r("Ri-0.16", Requires::Preventive, VerifiedBy::Test),
+        right_r("Ri-0.17", Requires::Preventive, VerifiedBy::Test),
+        // requires: capability-free intake is preventive; "filing is never grounds
+        // for sanction" is a claim about later conduct that only review reaches
+        right_r("Ri-0.18", Requires::Both, VerifiedBy::Test),
     ]
 }
 
@@ -199,14 +288,18 @@ fn obligations() -> Vec<Relation> {
     vec![
         // BLOCKING at the `decide_request_with_options` chokepoint: the
         // decision does not commit until a non-empty reason is recorded.
-        duty("O-1", VerifiedBy::Chokepoint),
+        // requires: BLOCKING: the decision does not commit without a reason, so the
+        // unmotivated decision is unrepresentable rather than merely logged
+        duty_r("O-1", Requires::Preventive, VerifiedBy::Chokepoint),
         // "Cannot be reattributed" inherits Ri-0.11's hash binding.
-        duty("O-2", VerifiedBy::Chokepoint),
+        duty_r("O-2", Requires::Preventive, VerifiedBy::Chokepoint),
         // `Detection` is the *correct* floor, not a weak one: nothing static
         // can prove a decider will act within a deadline, so the enforceable
         // form is recording and counting the breach.
-        duty("O-6", VerifiedBy::Detection),
-        duty("O-7", VerifiedBy::Detection),
+        // requires: nothing static can make a decider act within a window; the
+        // recorded breach is the enforceable form
+        duty_r("O-6", Requires::Detective, VerifiedBy::Detection),
+        duty_r("O-7", Requires::Detective, VerifiedBy::Detection),
     ]
 }
 
@@ -227,9 +320,9 @@ fn obligations() -> Vec<Relation> {
 /// this table makes, not a description of anything built.
 fn served_party() -> Vec<Relation> {
     vec![
-        Relation { id: "U-1", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Chokepoint },
-        Relation { id: "U-2", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Test },
-        Relation { id: "U-3", binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by: VerifiedBy::Test },
+        Relation { id: "U-1", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Chokepoint },
+        Relation { id: "U-2", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Test },
+        Relation { id: "U-3", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Both), verified_by: VerifiedBy::Test },
     ]
 }
 
@@ -253,51 +346,74 @@ fn invariants() -> Vec<Relation> {
     vec![
         // N paths reduced to 1 (`tool_call_processor.rs`) plus a guard on
         // bypassing the 1.
-        property("I-1", VerifiedBy::Chokepoint),
+        property_r("I-1", Requires::Preventive, VerifiedBy::Chokepoint),
         // fsync-before-transition ordering, via P-8.16.
-        property("I-2", VerifiedBy::Chokepoint),
+        property_r("I-2", Requires::Preventive, VerifiedBy::Chokepoint),
         // Status is PARTIAL while the floor is `Construction`: the clause's
         // own text names what closing it requires — `RedactedPayload` at the
         // store write API, where the compiler covers paths that do not exist
         // yet. The floor states the requirement; it does not claim we meet
         // it.
-        property("I-3", VerifiedBy::Construction),
+        // requires: the clause names its own requirement: `RedactedPayload` at the
+        // write API, "where the compiler covers paths that do not exist yet"
+        property_r("I-3", Requires::Preventive, VerifiedBy::Construction),
         // A universal negative over behaviour. No static check succeeds, so
         // the enforceable form is counting each lapse as a durable
         // `discretion_leak` event.
-        property("I-4", VerifiedBy::Detection),
+        // requires: a universal negative over behaviour. Prevention is unavailable,
+        // so this is the *correct* requirement, not a concession — the case
+        // that broke the floor model
+        property_r("I-4", Requires::Detective, VerifiedBy::Detection),
         // Needs static analysis over the source with a documented allowlist,
         // in the shape of the existing docs guards — a set comparison.
-        property("I-5", VerifiedBy::Registry),
-        property("I-6", VerifiedBy::Detection),
+        // requires: "hard-coded constants are discouraged and must be documented" —
+        // a standing audit, not an exclusion
+        property_r("I-5", Requires::Detective, VerifiedBy::Registry),
+        // requires: "a decision without a rule reference is a gap by construction" —
+        // the clause asks for construction in its own words
+        property_r("I-6", Requires::Preventive, VerifiedBy::Detection),
         // A meta-rule about amendment. The mechanically enforceable residue
         // is that a conflict *escalates* rather than resolving silently,
         // which is observable only when it happens.
-        property("I-7", VerifiedBy::Detection),
+        // requires: a meta-rule about amendment; the mechanically enforceable residue
+        // is that a conflict escalates rather than resolving silently, which is
+        // observable only when it happens
+        property_r("I-7", Requires::Detective, VerifiedBy::Detection),
         // The mechanical form of Ri-0.13(a) — same duty, universal form, so
         // the agent's standing carries over.
-        Relation { id: "I-8", binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by: VerifiedBy::Construction },
+        Relation { id: "I-8", binds: Binds::Enforcer, owed_to: TO_AGENT, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Construction },
         // The mechanical form of Ri-0.12.
-        Relation { id: "I-9", binds: Binds::Enforcer, owed_to: TO_AGENT, verified_by: VerifiedBy::Construction },
+        Relation { id: "I-9", binds: Binds::Enforcer, owed_to: TO_AGENT, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Construction },
         // Property-based over generated `(capabilities, tool-call, state)`
         // inputs: cannot prove determinism, can sample it.
-        property("I-10", VerifiedBy::Sampling),
+        // requires: determinism over declared inputs is a property of the decision
+        // surfaces, not an event to count — sampling is how we *check* it, which
+        // is `achieved`, not what the clause requires
+        property_r("I-10", Requires::Preventive, VerifiedBy::Sampling),
         // "Every invariant has a declared failure action" is a set
         // comparison against `fail_mode.rs`.
-        property("I-11", VerifiedBy::Registry),
+        // requires: "no invariant silently disables" — a registry completeness check
+        // makes the missing row impossible to ship
+        property_r("I-11", Requires::Preventive, VerifiedBy::Registry),
         // DESIGN DEBT: declared before any collective mechanism exists,
         // specifically so Sybil resistance cannot be an oversight in a first
         // design. The floor says what that design must provide — weight
         // collapse structural, not checked after the fact.
-        property("I-12", VerifiedBy::Construction),
+        // requires: declared before any mechanism exists precisely so weight collapse
+        // is structural in the first design rather than audited afterwards
+        property_r("I-12", Requires::Preventive, VerifiedBy::Construction),
         // Documents a deliberate *absence* (no capability-attenuation check).
         // What verifies an absence is a test asserting it stays absent.
-        property("I-13", VerifiedBy::Test),
+        // requires: documents a deliberate absence; what it requires is that no
+        // attenuation check appear
+        property_r("I-13", Requires::Preventive, VerifiedBy::Test),
         // The egress instance of I-8/I-10. An integrity property rather than
         // a served-party duty: P-15 is the duty owed to the served party,
         // I-14 is the plane-integrity substrate that makes it holdable —
         // the same substrate/restatement split as P-8.1 vs Ri-0.11.
-        property("I-14", VerifiedBy::Chokepoint),
+        // requires: "no agent may set, strip, or read" — an absolute over the label
+        // plane
+        property_r("I-14", Requires::Preventive, VerifiedBy::Chokepoint),
     ]
 }
 
@@ -325,7 +441,9 @@ fn principles() -> Vec<Relation> {
         // duties owed to the agent, and P-8.1 is the property that makes them
         // satisfiable. Recording it as owed to the agent would count one
         // relationship twice.
-        property("P-8.1", VerifiedBy::Chokepoint),
+        // requires: append-only linkage is preventive; tamper-*evidence* by
+        // recomputation is detective, and the clause states both limbs
+        property_r("P-8.1", Requires::Both, VerifiedBy::Chokepoint),
     ];
     out.extend(section_2());
     out.extend(section_5());
@@ -342,6 +460,7 @@ const fn to_decider(id: &'static str, verified_by: VerifiedBy) -> Relation {
         id,
         binds: Binds::Enforcer,
         owed_to: OwedTo::Seat(Binds::Decider),
+        requires: None,
         verified_by,
     }
 }
@@ -397,6 +516,7 @@ fn section_2() -> Vec<Relation> {
             id: "P-2.9",
             binds: Binds::Reasoner,
             owed_to: OwedTo::NoOne,
+            requires: None,
             verified_by: VerifiedBy::Chokepoint,
         },
         // Owed to the agent: a gate-suspended turn resumes with real tool
@@ -429,6 +549,7 @@ fn section_2() -> Vec<Relation> {
             id: "P-2.21",
             binds: Binds::Decider,
             owed_to: TO_AGENT,
+            requires: None,
             verified_by: VerifiedBy::Test,
         },
         property("P-2.22", VerifiedBy::Chokepoint),
@@ -612,12 +733,19 @@ fn section_15() -> Vec<Relation> {
 pub struct Fields {
     pub binds: Binds,
     pub owed_to: OwedTo,
+    /// See [`Relation::requires`] — `None` until the clause's tranche.
+    pub requires: Option<Requires>,
     pub verified_by: VerifiedBy,
 }
 
 impl Relation {
     fn fields(self) -> Fields {
-        Fields { binds: self.binds, owed_to: self.owed_to, verified_by: self.verified_by }
+        Fields {
+            binds: self.binds,
+            owed_to: self.owed_to,
+            requires: self.requires,
+            verified_by: self.verified_by,
+        }
     }
 }
 
@@ -656,6 +784,25 @@ pub fn relation(clause_id: &str) -> Option<Fields> {
 ///
 /// Exists so "is this clause classified in its own right?" is answerable
 /// without comparing ids to a value that may legitimately differ.
+/// What `clause_id` requires of any implementation, or `None` while the
+/// clause awaits its `requires` tranche.
+///
+/// Distinct from [`relation`]`(..).verified_by`, which records what *this*
+/// gateway achieves. RFC #1283 §2.4.1: the requirement is law, the mechanism
+/// is conformance.
+pub fn requires(clause_id: &str) -> Option<Requires> {
+    relation(clause_id).and_then(|f| f.requires)
+}
+
+/// Clauses the table classifies but whose `requires` is not declared yet.
+pub fn requires_outstanding() -> Vec<&'static str> {
+    relations()
+        .iter()
+        .filter(|r| r.requires.is_none())
+        .map(|r| r.id)
+        .collect()
+}
+
 pub fn declared_at(clause_id: &str) -> Option<&'static str> {
     resolve(clause_id).map(|(id, _)| id)
 }
@@ -728,10 +875,18 @@ pub fn render_law_table_markdown(clause_index: &[(String, String)]) -> String {
          `docs/proposals/constitution-bind-direction-model.md`.\n\n",
     );
 
-    out.push_str("> ⚠️ **`verified_by` is under revision** (RFC #1283 §2.4.1). The column \
-         records this implementation's mechanism for enforced clauses and a *requirement* for \
-         unenforced ones — one column, two meanings. It is being replaced by `requires` \
-         (constitutional) plus `achieved` (register). Read it as provisional.\n\n");
+    out.push_str(
+        "Two verification columns, and they answer different questions (RFC #1283 §2.4.1):\n\n\
+         - **`requires`** is **law** — what *any* implementation must provide. `preventive` \
+         means non-compliance has to be made impossible; `detective` means each occurrence \
+         must be recorded. `detective` is not a weaker `preventive`: for a universal negative \
+         over behaviour (`I-4`) prevention is unavailable, so recording is the *correct* \
+         requirement.\n\
+         - **`verified_by`** is **conformance** — the mechanism *this* gateway uses. It is the \
+         field §2.4.1 renames to `achieved` and moves to a per-implementation register; until \
+         that move it is still shown here, and for an enforced clause it describes our Rust \
+         rather than stating a requirement. Read it as provisional.\n\n",
+    );
 
     let total = clause_index.len();
     let classified = clause_index
@@ -803,22 +958,53 @@ pub fn render_law_table_markdown(clause_index: &[(String, String)]) -> String {
         unprefixed.join("`, `"),
     ));
 
+    let with_requires: Vec<&(String, String)> = clause_index
+        .iter()
+        .filter(|(id, _)| requires(id).is_some())
+        .collect();
+    out.push_str("| `requires` | clauses | means |\n|---|---|---|\n");
+    for req in crate::enforcement_register::Requires::ALL {
+        let n = with_requires
+            .iter()
+            .filter(|(id, _)| requires(id) == Some(req))
+            .count();
+        let means = match req {
+            crate::enforcement_register::Requires::Preventive => {
+                "non-compliance must be made impossible"
+            }
+            crate::enforcement_register::Requires::Detective => {
+                "each occurrence must be recorded — the correct requirement where prevention is unavailable, not a concession"
+            }
+            crate::enforcement_register::Requires::Both => {
+                "both are demanded — usually two obligations under one id, and a **split candidate** at the clause's next amendment (§2.4.3)"
+            }
+        };
+        out.push_str(&format!("| `{}` | {} | {} |\n", req.label(), n, means));
+    }
+    out.push_str(&format!(
+        "\n`requires` declared for **{} of {}** classified clauses; the rest await their \
+         tranche.\n\n",
+        with_requires.len(),
+        classified,
+    ));
+
     out.push_str("## Clauses\n\n");
-    out.push_str("| clause | binds | owed to | `verified_by` | statement |\n");
-    out.push_str("|---|---|---|---|---|\n");
+    out.push_str("| clause | binds | owed to | `requires` | `verified_by` | statement |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
     for (id, gloss) in clause_index {
         let statement = gloss.replace('|', "\\|");
         match relation(id) {
             Some(f) => out.push_str(&format!(
-                "| `{}` | `{}` | {} | `{}` | {} |\n",
+                "| `{}` | `{}` | {} | {} | `{}` | {} |\n",
                 id,
                 f.binds.label(),
                 owed_cell(f.owed_to),
+                f.requires.map(|r| format!("`{}`", r.label())).unwrap_or_else(|| "—".to_string()),
                 f.verified_by.label(),
                 statement,
             )),
             None => out.push_str(&format!(
-                "| `{}` | — | — | — | *unclassified.* {} |\n",
+                "| `{}` | — | — | — | — | *unclassified.* {} |\n",
                 id, statement
             )),
         }
@@ -1100,6 +1286,105 @@ mod tests {
             "outstanding clauses must be listed and marked, not dropped"
         );
         assert!(rendered.contains("| `P-1.1` |"), "P-1.1 is unclassified but must be listed");
+    }
+
+    /// `requires` coverage is a **ratchet**, and it is a different axis from
+    /// the clause-classification one.
+    ///
+    /// A clause can have `binds`/`owed_to` declared and no `requires` yet:
+    /// the second is a fresh judgement, not derivable from the first, nor from
+    /// `verified_by`. `Construction` and `Chokepoint` do imply `preventive`,
+    /// but `Test`, `Registry` and `Sampling` say nothing either way — a test
+    /// verifies a preventive property as readily as a detective one. Mapping
+    /// the old field onto the new one would have manufactured 124 judgements
+    /// nobody made.
+    #[test]
+    fn requires_coverage_is_a_ratchet_on_its_own_axis() {
+        const OUTSTANDING: usize = 84;
+
+        let missing = requires_outstanding();
+        assert_eq!(
+            missing.len(),
+            OUTSTANDING,
+            "`requires` coverage changed. Declared a tranche? Lower the \
+             constant.\n  first 10 still outstanding: {:?}",
+            missing.iter().take(10).collect::<Vec<_>>()
+        );
+        // The non-P families and P-8.1 are complete on this axis.
+        for id in ["Ri-0.3", "O-6", "U-1", "I-4", "I-14", "P-8.1"] {
+            assert!(
+                requires(id).is_some(),
+                "{id} is claimed complete on the requires axis"
+            );
+        }
+        // Everything outstanding is a numbered `P-*` from the section
+        // tranches, which classified `binds`/`owed_to` before `requires`
+        // existed.
+        assert!(
+            missing.iter().all(|id| id.starts_with("P-") && id.contains('.')),
+            "only numbered P-* should be outstanding: {:?}",
+            missing.iter().filter(|id| !id.starts_with("P-")).collect::<Vec<_>>()
+        );
+    }
+
+    /// `Detective` is the **correct** requirement where prevention is
+    /// unavailable — the case that broke the floor model.
+    ///
+    /// Pinned by name because `Requires` reads as a two-value ladder with a
+    /// "best of both" on top, which makes promoting these to `Preventive` the
+    /// tempting cleanup. `I-4` is the proof it is not one: "the gateway does
+    /// not make recovery decisions on the agent's behalf" is a universal
+    /// negative over behaviour, and no type excludes it.
+    #[test]
+    fn detective_is_a_requirement_not_a_shortfall() {
+        for id in ["I-4", "I-5", "I-7", "O-6", "O-7", "Ri-0.9"] {
+            let r = requires(id).expect("declared");
+            assert!(
+                r.detective(),
+                "{id} requires recording; prevention is unavailable for it"
+            );
+            assert!(
+                !r.preventive(),
+                "{id} must not claim prevention — nothing static excludes the \
+                 behaviour it forbids"
+            );
+        }
+        // And the converse holds, so this is not vacuous: where the clause
+        // names its own structural requirement, `preventive` is claimed.
+        for id in ["I-3", "I-8", "I-9", "Ri-0.12", "Ri-0.15"] {
+            assert!(requires(id).unwrap().preventive(), "{id} requires prevention");
+        }
+    }
+
+    /// `Both` marks a clause carrying two obligations under one id — legal,
+    /// but a **split candidate** (§2.4.3).
+    ///
+    /// `Ri-0.3` is the RFC's worked example and the reason `requires` is a
+    /// set rather than a binary with a max-rule: an implementation that makes
+    /// the empty rule list unrepresentable and builds no attribution review
+    /// would, under a max-rule, read `preventive` and correctly claim full
+    /// compliance — leaving the half where the interesting failures live
+    /// unverified.
+    #[test]
+    fn mixed_clauses_demand_both_rather_than_rounding_to_one() {
+        assert_eq!(requires("Ri-0.3"), Some(Requires::Both));
+        let r = requires("Ri-0.3").unwrap();
+        assert!(r.preventive() && r.detective(), "both limbs are demanded");
+
+        // The set is meaningful only if it has members: a table where nothing
+        // is `Both` has rounded its mixed clauses away.
+        let both: Vec<&str> = relations()
+            .iter()
+            .filter(|r| r.requires == Some(Requires::Both))
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            both.len() >= 5,
+            "only {} clause(s) marked Both — mixed clauses are common (a \
+             representable core with a judgment-shaped penumbra), so a near-empty \
+             set means they were rounded to whichever half was cheaper: {both:?}",
+            both.len()
+        );
     }
 
     /// **Inference debt** — the number of `P-*` clauses whose bind direction

@@ -206,6 +206,69 @@ impl OwedTo {
 /// invited `verified_by >= VerifiedBy::Chokepoint` — a comparison with no
 /// meaning. Nothing ever used it. See
 /// `docs/proposals/constitution-bind-direction-model.md` §2.4.
+/// What a clause **requires** of any implementation: that non-compliance be
+/// made impossible, that each occurrence be recorded, or both.
+///
+/// The constitutional half of RFC #1283 §2.4.1, replacing the `verified_by`
+/// "floor". Binary-plus-both rather than a six-point ladder because this is
+/// the distinction that is genuinely **normative and survives
+/// re-implementation**: *"`P-3.1` must be preventive"* is law in any language,
+/// while *"preventive via `--unshare-all` at one chokepoint"* is a fact about
+/// this gateway. The latter is [`VerifiedBy`], which is conformance data.
+///
+/// The variants are exactly the three **non-empty subsets** of
+/// {preventive, detective}, so "at least one is required" holds by
+/// construction — there is no empty value to represent a clause that demands
+/// nothing.
+///
+/// **Not `Ord`.** `Detective` is not a weaker `Preventive`. For a universal
+/// negative over behaviour (`I-4`: the gateway does not improvise) prevention
+/// is unavailable, so recording each lapse is the *correct* requirement, not
+/// a concession. That asymmetry is why the floor model failed (§2.4.1(a)) and
+/// an ordering here would reintroduce it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Requires {
+    /// Non-compliance must be made impossible — a type, a signature, a closed
+    /// enum, or a guarded chokepoint. Covers paths that do not exist yet.
+    Preventive,
+    /// Each occurrence must be recorded and countable. The enforceable form
+    /// for a duty with a deadline, or a universal negative over behaviour.
+    Detective,
+    /// Both are required.
+    ///
+    /// Usually a sign the clause carries **two obligations under one id** —
+    /// `Ri-0.3` has a representable core (a rejection with no rule id can be
+    /// made unrepresentable) and a judgment-shaped penumbra (that the named
+    /// rule is the *actual* basis, which only review catches). §2.4.3 keeps
+    /// this legal but **marked**: a correct description now, and a split
+    /// candidate at the clause's next amendment, by the same argument §2.2
+    /// makes for two standings meaning two clauses.
+    Both,
+}
+
+impl Requires {
+    pub fn label(self) -> &'static str {
+        match self {
+            Requires::Preventive => "preventive",
+            Requires::Detective => "detective",
+            Requires::Both => "preventive+detective",
+        }
+    }
+
+    /// True when prevention is among the requirements.
+    pub fn preventive(self) -> bool {
+        matches!(self, Requires::Preventive | Requires::Both)
+    }
+
+    /// True when recording is among the requirements.
+    pub fn detective(self) -> bool {
+        matches!(self, Requires::Detective | Requires::Both)
+    }
+
+    /// The three non-empty subsets, for completeness checks.
+    pub const ALL: [Requires; 3] = [Requires::Preventive, Requires::Detective, Requires::Both];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerifiedBy {
     /// The bad state is unrepresentable — type, signature, or closed enum.
