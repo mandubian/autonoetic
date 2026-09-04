@@ -8182,16 +8182,22 @@ mod tests {
         };
         assert_eq!(clause("P-15.1")["binds"], "enforcer");
         assert_eq!(clause("Ri-0.2")["binds"], "enforcer");
-        assert_eq!(
-            clause("P-1.1")["binds"],
-            autonoetic_types::constitution::BINDS_UNDECLARED
-        );
-        // No clause reports the retired party names.
+        // `P-1.1` reported `undeclared` until §1 was classified (#1284). Every
+        // clause the constitution declares now resolves a bind direction, so
+        // the sentinel should appear nowhere — asserted below.
+        assert_eq!(clause("P-1.1")["binds"], "enforcer");
+        // No clause reports the retired party names, and none is undeclared.
         assert!(
             !clauses
                 .iter()
                 .any(|c| c["binds"] == "agent" || c["binds"] == "gateway"),
             "the prefix derivation's party names must not survive anywhere"
+        );
+        assert!(
+            !clauses.iter().any(|c| {
+                c["binds"] == autonoetic_types::constitution::BINDS_UNDECLARED
+            }),
+            "classification is complete, so no clause may report `undeclared`"
         );
 
         // include_text attaches the full markdown.

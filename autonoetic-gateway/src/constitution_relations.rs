@@ -59,39 +59,45 @@
 //! description-vs-requirement defect, committed in the doc comment that
 //! warned against it.
 //!
-//! # Coverage
+//! # Coverage: complete
 //!
-//! Complete: `Ri-*` (18), `O-*` (4), `U-*` (3), `I-*` (14), and §2, §5, §7,
-//! §9, §15 of the numbered `P-*` — **124 clauses**.
+//! **All 221 clauses** the active constitution declares carry a declared
+//! `binds`, `owed_to` and `requires`. Nothing is inferred from an ID prefix,
+//! nothing inherits a section grouping, and nothing is outstanding — the
+//! ratchets that tracked the gap are pinned at zero, and `requires` is
+//! mandatory on the record so its coverage is a type property.
 //!
-//! **97 numbered `P-*` remain**, across §1, §3, §4, §6, §8, §10 and §11.
-//! Classified per section because "who must comply" is a semantic judgement
-//! per clause, which is why #1284 sequences them as separate reviewable
-//! tranches. They are not silently absent: [`unclassified_clauses`]
-//! enumerates them and `tests::the_unclassified_count_is_a_ratchet` pins the
-//! exact number, so a new clause cannot arrive unclassified and each tranche
-//! has to lower the constant.
+//! # What the completed classification says
 //!
-//! # Section-grouping inference is now **zero**
+//! **One clause in 221 binds the reasoner.** 215 bind the enforcer, 5 bind
+//! the decider, and `P-2.9` alone binds the agent — "they must attach
+//! `execution_trace_id` from a completed run".
 //!
-//! Bind direction for a numbered clause used to be answerable two ways: from
-//! this table, or by inheriting the *enforcement register's section grouping*
-//! (`binds("P-5.2")` reaching `P-5` through parent lookup). The second is the
-//! inheritance this module warns against below — it assumes every clause in a
-//! section binds what the section binds — and it covered 84 clauses across
-//! §2, §5, §7, §9 and §15.
+//! That is worth sitting with, because the old `binds()` reported *every*
+//! `P-*` as binding the agent. The document is almost entirely a constraint
+//! on the party with power, not on the party under governance: agents are
+//! told what will be prevented, not what they must do. `docs/concepts/philosophy.md`
+//! §2 argues bind direction is the structural novelty here; the measured
+//! ratio is 215:1 in the direction that claim predicts, which is a stronger
+//! result than the prose ever asserted.
 //!
-//! All five sections are classified, so no clause resolves by inheritance any
-//! more; `tests::section_grouping_inference_is_a_ratchet` pins it at 0. The
-//! register's section groupings survive only to answer `binds("P-7")` for
-//! contract-health, which aggregates *by section* — a summary of a group, not
-//! a claim about any clause.
+//! **38 clauses are agent rights by relation** — enforcer duties owed to the
+//! agent. Only **17** of them carry an `Ri-` prefix; the other **21** are
+//! filed under rule IDs. (`Ri-0.15` is the eighteenth right and is *not* in
+//! this set: its `DecisionContext` is owed to the deciding seat, not the
+//! agent.) So more than half of what an agent can actually invoke does not
+//! look like a right, and §0's rights/rules ratio — computed from prefixes —
+//! understates rights by better than a factor of two.
 //!
-//! Ordering note, since it was not obvious: these five went first not for
-//! size but because they were the ones already answering with a guess.
-//! Classifying a section converts its clauses from inherited to declared, so
-//! the tranches did not raise coverage — they removed inference. The two
-//! ratchets are separate for that reason.
+//! Five further clauses are owed to the agent but bind the **decider**
+//! (`O-1`, `O-2`, `O-6`, `O-7`, `P-2.21`). They are duties owed to the agent
+//! without being agent rights, which is the distinction `is_agent_right`
+//! draws by requiring `binds == Enforcer` — a right is a claim against the
+//! party that holds power over you, not against a peer occupying a seat.
+//!
+//! **167 clauses are owed to no one** — integrity properties, the largest
+//! group by far. That is the category the prefix scheme had no home for
+//! (RFC defect 1.4(3)), and it turns out to be most of the document.
 //!
 use crate::enforcement_register::{Binds, OwedTo, Requires, VerifiedBy};
 use autonoetic_types::principal::PrincipalKindTag;
@@ -455,10 +461,17 @@ fn principles() -> Vec<Relation> {
         // recomputation is detective, and the clause states both limbs
         property_r("P-8.1", Requires::Both, VerifiedBy::Chokepoint),
     ];
+    out.extend(section_1());
     out.extend(section_2());
+    out.extend(section_3());
+    out.extend(section_4());
     out.extend(section_5());
+    out.extend(section_6());
     out.extend(section_7());
+    out.extend(section_8());
     out.extend(section_9());
+    out.extend(section_10());
+    out.extend(section_11());
     out.extend(section_15());
     out
 }
@@ -477,6 +490,262 @@ const fn to_decider_r(
         requires,
         verified_by,
     }
+}
+
+/// §1 — Capability & Rights.
+///
+/// Capability enforcement, and enforcer throughout: every clause is a gate
+/// the gateway operates. `P-1.10` is the single agent-facing one — "never
+/// advisory" means a denial arrives as a real error rather than a suggestion,
+/// which is the Ri-0.3 family.
+fn section_1() -> Vec<Relation> {
+    vec![
+        // requires: "no overrides" is an absolute on the gateway: `can_invoke_tool` is the
+        // single gate and there is no bypass parameter
+        property_r("P-1.1", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-1.2", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.3", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-1.4", Requires::Preventive, VerifiedBy::Test),
+        // requires: "the gateway owns the detected-host contract" names its own bound
+        // party — the agent supplies no hosts
+        property_r("P-1.5", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.6", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.7", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.9", Requires::Preventive, VerifiedBy::Test),
+        // requires: owed to the agent: "never advisory" means a denial arrives as a real
+        // error rather than a suggestion the agent might reasonably ignore — the
+        // Ri-0.3 family
+        right_r("P-1.10", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-1.11", Requires::Preventive, VerifiedBy::Test),
+    ]
+}
+
+/// §3 — Sandbox Isolation.
+///
+/// Integrity properties almost without exception, and the section that supplies
+/// the model's canonical `owed_to: none` case: `P-3.1`'s `--unshare-all`
+/// benefits the operator, but an agent cannot *claim* its own confinement and
+/// would prefer not to have it.
+///
+/// `P-3.5` is the exception on both axes — owed to the agent (it learns the
+/// call failed rather than hanging) and `detective`, since classifying a
+/// driver's network errors is pattern-matching, so a novel shape is a miss.
+fn section_3() -> Vec<Relation> {
+    vec![
+        // requires: the RFC's canonical `owed_to: none` example: an agent cannot demand
+        // its own confinement and would prefer not to have it
+        property_r("P-3.1", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-3.2", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-3.3", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-3.4", Requires::Preventive, VerifiedBy::Test),
+        // requires: owed to the agent — it learns the call failed instead of hanging.
+        // `Detective` because error classification is pattern-matching over a
+        // driver's error surface: a novel error shape is a miss, not an
+        // excluded state
+        right_r("P-3.5", Requires::Detective, VerifiedBy::Detection),
+        property_r("P-3.6", Requires::Preventive, VerifiedBy::Test),
+        // requires: preventive on the gateway's own half — it refuses to start an exec
+        // without declarations. The clause is candid that quota *enforcement* is
+        // externalized to operator driver profiles (only wasm has a built-in
+        // limiter), which is a conformance fact, not a weaker requirement
+        property_r("P-3.7", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-3.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-3.9", Requires::Preventive, VerifiedBy::Test),
+        // requires: "regardless of the candidate's declared NetworkAccess" — the gate
+        // overrides a capability, so the deny cannot be reached around
+        property_r("P-3.10", Requires::Preventive, VerifiedBy::Chokepoint),
+    ]
+}
+
+/// §4 — Credential & Secret Protection.
+///
+/// Enforcer, integrity properties, overwhelmingly preventive: the section exists
+/// to make secret exposure unrepresentable rather than auditable.
+///
+/// Two clauses are honest about the limit of that. `P-4.12` blocks
+/// secret-shaped text by *pattern*, so coverage is audited; `P-4.15` pairs a
+/// refusal to start with a causal event recording the probe.
+fn section_4() -> Vec<Relation> {
+    vec![
+        // requires: "secrets never enter agent context" — the injection boundary is where
+        // the value first exists, so the agent-visible path has nothing to leak
+        property_r("P-4.1", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-4.2", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-4.3", Requires::Preventive, VerifiedBy::Test),
+        // requires: a `cred_*` id *is* a reference; secret material is a different type
+        property_r("P-4.4", Requires::Preventive, VerifiedBy::Construction),
+        property_r("P-4.5", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-4.6", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-4.7", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-4.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-4.9", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-4.10", Requires::Preventive, VerifiedBy::Test),
+        // requires: I-4's one named exception — a recovery decision the gateway does make.
+        // Bounded to at most once per request, which is why it is a preventive
+        // requirement and not an open licence
+        property_r("P-4.11", Requires::Preventive, VerifiedBy::Test),
+        // requires: blocking is preventive; `prohibited_text_patterns` is a pattern set, so
+        // its coverage is audited rather than complete — a novel secret shape is
+        // a miss
+        property_r("P-4.12", Requires::Both, VerifiedBy::Test),
+        property_r("P-4.13", Requires::Preventive, VerifiedBy::Chokepoint),
+        // requires: the ordering invariant I-3 states universally
+        property_r("P-4.14", Requires::Preventive, VerifiedBy::Chokepoint),
+        // requires: refusing to start is preventive; the causal event recording the probe
+        // result is the detective half
+        property_r("P-4.15", Requires::Both, VerifiedBy::Test),
+    ]
+}
+
+/// §6 — Session, Workflow & Budget.
+///
+/// Budget and lifecycle machinery. Four clauses are owed to the agent, and two of
+/// them are right/mechanism pairs the RFC names (§1.4(2)): `P-6.21` ties the
+/// tree-budget circuit breaker to Ri-0.12 reason (b) rather than an operator
+/// stop, and `P-6.23`'s signed state block is what makes Ri-0.1's "inspect your
+/// own state" true at every turn.
+fn section_6() -> Vec<Relation> {
+    vec![
+        property_r("P-6.1", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.2", Requires::Preventive, VerifiedBy::Chokepoint),
+        // requires: "all calls in a batch reserve together" — partial reservation is the
+        // state being excluded
+        property_r("P-6.3", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-6.4", Requires::Preventive, VerifiedBy::Test),
+        // requires: "no silent-disable": an unavailable catalog with an active cap refuses
+        // the completion rather than proceeding uncapped
+        property_r("P-6.5", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.6", Requires::Preventive, VerifiedBy::Test),
+        // requires: logging *is* the requirement
+        property_r("P-6.7", Requires::Detective, VerifiedBy::Detection),
+        property_r("P-6.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.9", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.10", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.11", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.12", Requires::Preventive, VerifiedBy::Test),
+        // requires: "cover every yield reason" is a set comparison against the closed
+        // `YieldReason` enum — the registry shape
+        property_r("P-6.13", Requires::Preventive, VerifiedBy::Registry),
+        property_r("P-6.14", Requires::Preventive, VerifiedBy::Test),
+        // requires: owed to the agent: "atomically replays the pending tool call" is what
+        // spares it a synthetic retry prompt in place of real results
+        right_r("P-6.15", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.16", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.17", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.18", Requires::Preventive, VerifiedBy::Test),
+        right_r("P-6.19", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.20", Requires::Preventive, VerifiedBy::Test),
+        // requires: one of the six right/mechanism pairs (RFC §1.4(2)). The clause itself
+        // ties the circuit breaker to Ri-0.12 reason (b) rather than an operator
+        // stop, which is the guarantee the agent holds
+        right_r("P-6.21", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.22", Requires::Preventive, VerifiedBy::Test),
+        // requires: Ri-0.1's mechanism, and the second of the six pairs: the signed state
+        // block is what makes "inspect your own state" true at every turn
+        right_r("P-6.23", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.24", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-6.25", Requires::Preventive, VerifiedBy::Test),
+        // requires: `side_effect_state` is a closed enum, so an unclassified side effect is
+        // a compile error rather than an unhandled case
+        property_r("P-6.26", Requires::Preventive, VerifiedBy::Construction),
+    ]
+}
+
+/// §8 — Audit & Traceability.
+///
+/// The section where `detective` is most at home, and correctly so: "is logged",
+/// "is detectable", "emits an event" are satisfied *by* recording — the log is
+/// the compliance, not evidence of it.
+///
+/// Five clauses are `Both`, each pairing a structural guarantee with a
+/// recording duty: a unique id plus universal logging (`P-8.2`), a refusal plus
+/// a drift event (`P-8.12`), tracking plus cleanup audits (`P-8.15`), a
+/// validation error for privileged classes plus verbatim persistence
+/// (`P-8.18`). `P-8.19` is O-2's gateway-side mechanism.
+fn section_8() -> Vec<Relation> {
+    vec![
+        // requires: a unique `event_id` is preventive; "every event is logged" is a
+        // universal over emissions and is satisfied by recording
+        property_r("P-8.2", Requires::Both, VerifiedBy::Detection),
+        property_r("P-8.3", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-8.4", Requires::Preventive, VerifiedBy::Test),
+        // requires: "untruncated" is the load-bearing word — truncation is the excluded
+        // state
+        property_r("P-8.5", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-8.6", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-8.7", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-8.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-8.9", Requires::Preventive, VerifiedBy::Test),
+        // requires: "is detectable via promotion_history" — the clause asks for
+        // discoverability, not exclusion
+        property_r("P-8.10", Requires::Detective, VerifiedBy::Detection),
+        property_r("P-8.11", Requires::Preventive, VerifiedBy::Test),
+        // requires: refusing to start is preventive; the `runtime_lock_drift` event is the
+        // detective half, and the operator override is why both are needed
+        property_r("P-8.12", Requires::Both, VerifiedBy::Test),
+        property_r("P-8.13", Requires::Detective, VerifiedBy::Detection),
+        property_r("P-8.14", Requires::Preventive, VerifiedBy::Test),
+        // requires: tracking by `(root_session_id, host)` is preventive; inclusion in
+        // cleanup audits is the recording half
+        property_r("P-8.15", Requires::Both, VerifiedBy::Test),
+        // requires: the ordering I-2 states universally
+        property_r("P-8.16", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-8.17", Requires::Detective, VerifiedBy::Detection),
+        // requires: optional in general, but "for privileged tool classes, missing intent
+        // is a validation error" is preventive, and "persists the intent verbatim"
+        // is detective
+        property_r("P-8.18", Requires::Both, VerifiedBy::Test),
+        // requires: O-2's gateway-side mechanism: the agent under decision can always tell
+        // who decided
+        right_r("P-8.19", Requires::Preventive, VerifiedBy::Test),
+    ]
+}
+
+/// §10 — Federation / Remote.
+///
+/// Enforcer, integrity, preventive throughout. The load-bearing word is in
+/// `P-10.4` — remote agents "inherit *all* approval gates", so remoteness is
+/// not a bypass — and `P-10.7`'s spawn-tree collapse is what `I-12` extends to
+/// any future decision weight.
+fn section_10() -> Vec<Relation> {
+    vec![
+        property_r("P-10.1", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-10.2", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-10.3", Requires::Preventive, VerifiedBy::Chokepoint),
+        // requires: "inherit *all* approval gates" — remoteness is not a bypass
+        property_r("P-10.4", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-10.5", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-10.6", Requires::Preventive, VerifiedBy::Test),
+        // requires: the spawn-tree collapse I-12 extends to any future decision weight
+        property_r("P-10.7", Requires::Preventive, VerifiedBy::Chokepoint),
+        // requires: constant-time comparison excludes the timing channel rather than
+        // detecting its use
+        property_r("P-10.8", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-10.9", Requires::Preventive, VerifiedBy::Test),
+    ]
+}
+
+/// §11 — Inter-Agent Messaging.
+///
+/// Half the section is owed to the agent, which is unusual and follows from what
+/// messaging is: delivery, payload preservation and consent are guarantees to
+/// the parties messaging. `P-11.5` is owed specifically to the *receiver* —
+/// consent is receiver-declared because evaluators hold no adjudicating
+/// capability.
+fn section_11() -> Vec<Relation> {
+    vec![
+        property_r("P-11.1", Requires::Preventive, VerifiedBy::Chokepoint),
+        right_r("P-11.2", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-11.3", Requires::Preventive, VerifiedBy::Test),
+        right_r("P-11.4", Requires::Preventive, VerifiedBy::Test),
+        // requires: owed to the agent, and specifically to the *receiver*: consent is
+        // receiver-declared because evaluators hold no adjudicating capability
+        right_r("P-11.5", Requires::Preventive, VerifiedBy::Chokepoint),
+        property_r("P-11.6", Requires::Preventive, VerifiedBy::Test),
+        property_r("P-11.7", Requires::Preventive, VerifiedBy::Test),
+        right_r("P-11.8", Requires::Preventive, VerifiedBy::Test),
+    ]
 }
 
 /// §2 — Approval Gates. The section that finally exercises the whole model:
@@ -918,11 +1187,19 @@ pub fn render_law_table_markdown(clause_index: &[(String, String)]) -> String {
         .filter(|(id, _)| relation(id).is_some())
         .count();
     out.push_str("## Coverage\n\n");
-    out.push_str(&format!(
-        "**{classified} of {total}** clauses classified. The remainder are numbered `P-*` \
-         awaiting their section tranche; they are counted, not hidden — a ratchet test pins \
-         the exact number so a new clause cannot arrive unclassified.\n\n",
-    ));
+    if classified == total {
+        out.push_str(&format!(
+            "**All {total} clauses classified.** Every clause the active constitution declares \
+             carries a declared `binds`, `owed_to` and `requires` — none is inferred from an ID \
+             prefix, and none is outstanding.\n\n",
+        ));
+    } else {
+        out.push_str(&format!(
+            "**{classified} of {total}** clauses classified. The remainder are numbered `P-*` \
+             awaiting their section tranche; they are counted, not hidden — a ratchet test pins \
+             the exact number so a new clause cannot arrive unclassified.\n\n",
+        ));
+    }
 
     out.push_str("| binds | clauses |\n|---|---|\n");
     for power in Binds::ALL {
@@ -1113,7 +1390,7 @@ mod tests {
         for id in &ids {
             assert!(seen.insert(*id), "{id} is classified more than once");
         }
-        assert_eq!(seen.len(), 124, "39 non-P + P-8.1 + §2 (29) + §5 (14) + §7 (22) + §9 (16) + §15 (3)");
+        assert_eq!(seen.len(), 221, "every clause the active constitution declares");
     }
 
     /// The four non-`P` families are **complete**. This is the coverage
@@ -1140,7 +1417,7 @@ mod tests {
     /// and update this number deliberately.
     #[test]
     fn the_unclassified_count_is_a_ratchet() {
-        const UNCLASSIFIED: usize = 97;
+        const UNCLASSIFIED: usize = 0;
         let outstanding = unclassified_among(&active_constitution_clause_ids());
         assert_eq!(
             outstanding.len(),
@@ -1176,13 +1453,14 @@ mod tests {
         assert_eq!(declared_at("I-8"), Some("I-8"));
         assert_eq!(declared_at("P-8.1"), Some("P-8.1"));
 
-        // Unclassified stays unclassified in both accessors, rather than one
-        // reporting a parent the other does not.
-        assert!(relation("P-1.1").is_none());
-        assert!(declared_at("P-1.1").is_none());
+        // Every declared clause is now classified, so the "unclassified"
+        // case is only reachable with an id the constitution does not
+        // declare — which is the boundary that still matters.
+        assert!(relation("P-99.1").is_none());
+        assert!(declared_at("P-99.1").is_none());
 
         // The two accessors never disagree about classification.
-        for id in ["Ri-0.2", "U-1", "O-6", "I-14", "P-1.1", "nonsense"] {
+        for id in ["Ri-0.2", "U-1", "O-6", "I-14", "P-1.1", "P-99.1", "nonsense"] {
             assert_eq!(
                 relation(id).is_some(),
                 declared_at(id).is_some(),
@@ -1199,10 +1477,15 @@ mod tests {
         // a hypothetical `Ri-0` section entry.
         assert_eq!(relation("Ri-0.15").unwrap().owed_to, OwedTo::Seat(Binds::Decider));
         assert_eq!(relation("Ri-0.2").unwrap().owed_to, TO_AGENT);
-        // An unclassified numbered clause with no classified parent stays
-        // unclassified rather than borrowing a neighbour's relation.
-        assert!(relation("P-1.1").is_none());
+        // A numbered clause the constitution does not declare stays
+        // unclassified rather than borrowing a neighbour's relation. `P-1.1`
+        // used to serve here; every declared clause is classified now, so the
+        // case needs an undeclared id.
+        assert!(relation("P-1.99").is_none());
         assert!(relation("nonsense").is_none());
+        // And a *declared* sub-clause resolves in its own right rather than
+        // inheriting from a section — `P-1` is not a clause.
+        assert_eq!(declared_at("P-1.1"), Some("P-1.1"));
     }
 
     /// A classified section is classified **completely**, and its clauses no
@@ -1218,7 +1501,10 @@ mod tests {
     #[test]
     fn a_classified_section_is_classified_completely_and_law_side() {
         let all = active_constitution_clause_ids();
-        for sec in ["P-2.", "P-5.", "P-7.", "P-9.", "P-15."] {
+        for sec in [
+            "P-1.", "P-2.", "P-3.", "P-4.", "P-5.", "P-6.", "P-7.", "P-8.", "P-9.",
+            "P-10.", "P-11.", "P-15.",
+        ] {
             let clauses: Vec<&String> =
                 all.iter().filter(|id| id.starts_with(sec)).collect();
             assert!(
@@ -1238,10 +1524,12 @@ mod tests {
                 );
             }
         }
-        // And the sections still awaiting a tranche are untouched, so this
-        // test cannot pass by the table having swallowed everything.
-        assert!(relation("P-1.1").is_none(), "§1 is not part of any tranche yet");
-        assert!(relation("P-6.1").is_none(), "§6 is not part of any tranche yet");
+        // No section awaits a tranche any more, so the anti-vacuity guard
+        // moves to the other side: an id the constitution does not declare
+        // must still resolve to nothing, or "classified completely" would be
+        // satisfied by a table that answers for anything.
+        assert!(relation("P-99.1").is_none(), "an undeclared id must not resolve");
+        assert!(relation("Ri-9.9").is_none(), "an undeclared id must not resolve");
     }
 
     fn active_constitution_clause_index() -> Vec<(String, String)> {
@@ -1303,13 +1591,17 @@ mod tests {
                 "{id} is classified but does not appear in the law table"
             );
         }
-        // And the unclassified are shown as such rather than omitted — a
-        // reader must be able to tell "not yet decided" from "not a clause".
+        // Nothing is outstanding any more, so the marker must be *absent* —
+        // its presence would mean a clause slipped back to unclassified.
         assert!(
-            rendered.contains("*unclassified.*"),
-            "outstanding clauses must be listed and marked, not dropped"
+            !rendered.contains("*unclassified.*"),
+            "the table claims complete coverage, so no row may be marked unclassified"
         );
-        assert!(rendered.contains("| `P-1.1` |"), "P-1.1 is unclassified but must be listed");
+        // Every declared clause has a row, including the ones that were the
+        // last to be classified.
+        for id in ["P-1.1", "P-6.1", "P-8.10", "P-11.5", "P-10.9"] {
+            assert!(rendered.contains(&format!("| `{id}` |")), "{id} must be listed");
+        }
     }
 
     /// `requires` coverage is enforced **by construction**, not by a ratchet.
@@ -1328,7 +1620,7 @@ mod tests {
         // Trivially true given the field's type; asserted so that widening it
         // back to `Option` fails here rather than passing quietly.
         let all = relations();
-        assert!(all.len() >= 124, "table shrank to {} clauses", all.len());
+        assert!(all.len() >= 221, "table shrank to {} clauses", all.len());
         for r in all {
             assert!(
                 crate::enforcement_register::Requires::ALL.contains(&r.requires),
@@ -1341,8 +1633,8 @@ mod tests {
         for id in ["Ri-0.3", "O-6", "U-1", "I-4", "P-8.1", "P-2.9", "P-7.22", "P-15.3"] {
             assert!(requires(id).is_some(), "{id} is classified");
         }
-        for id in ["P-1.1", "P-6.1", "nonsense"] {
-            assert!(requires(id).is_none(), "{id} is not classified");
+        for id in ["P-99.1", "Ri-9.9", "nonsense"] {
+            assert!(requires(id).is_none(), "{id} is not a declared clause");
         }
     }
 
