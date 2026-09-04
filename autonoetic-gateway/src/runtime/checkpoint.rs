@@ -1069,6 +1069,18 @@ impl SessionFork {
             suppress_until_turn: 0,
             trajectory_last_level: None,
             feedback_events: vec![],
+            // A fork is a new execution lineage: the source's sticky guard
+            // trip (e.g. `workflow_terminal` after a failed dispatch) must
+            // not stillborn the branch — the fork already escapes the terminal
+            // workflow because its fresh root session id gets a new workflow
+            // index on first spawn. Loop/failure counters stay inherited (the
+            // new branch starts with the source's budgets); only the sticky
+            // trip flag clears, so the fork's first `check_loop` is clean.
+            loop_guard_state: {
+                let mut guard = checkpoint.loop_guard_state.clone();
+                guard.trip_reason = None;
+                guard
+            },
             ..checkpoint.clone()
         };
         save_checkpoint(config, &forked_checkpoint)?;
@@ -1309,6 +1321,43 @@ mod tests {
             .get("tc_email_read_1")
             .expect("labeled result must survive the fork")
             .allows(Sink::RemoteModel));
+    }
+
+    /// A fork is a new execution lineage: the source's sticky guard trip
+    /// (e.g. `WorkflowTerminal` saved on a `MaxTurnsReached` checkpoint after
+    /// a failed dispatch) must not stillborn the branch — the fork escapes
+    /// the terminal workflow via its fresh root session id, so inheriting the
+    /// trip would just re-fire `check_loop` on the fork's first turn.
+    #[test]
+    fn fork_from_checkpoint_clears_inherited_guard_trip() {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        let mut tripped_guard = LoopGuard::default();
+        tripped_guard.trip(crate::runtime::guard::LoopGuardTripReason::WorkflowTerminal {
+            workflow_id: "wf-dead".to_string(),
+        });
+        let source = SessionCheckpoint {
+            loop_guard_state: tripped_guard,
+            yield_reason: YieldReason::MaxTurnsReached,
+            ..sample_checkpoint()
+        };
+
+        let fork = SessionFork::fork_from_checkpoint(&config, &source, Some("forked-trip"), None)
+            .expect("fork should succeed");
+
+        let forked_cp = load_checkpoint(&config, &fork.new_session_id, &source.turn_id)
+            .expect("should load forked checkpoint")
+            .expect("forked checkpoint must exist");
+        assert_eq!(
+            forked_cp.loop_guard_state.trip_reason, None,
+            "fork must clear the inherited sticky guard trip"
+        );
+        assert_eq!(
+            forked_cp.yield_reason,
+            YieldReason::Hibernation,
+            "fork must yield as Hibernation so the branch is auto-resumable"
+        );
     }
 
     #[test]

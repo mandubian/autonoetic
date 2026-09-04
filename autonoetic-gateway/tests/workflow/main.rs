@@ -12,5 +12,6 @@ mod approval_spawn_gate;
 mod completion_guard;
 mod parent_child_wait_suspension;
 mod state_promotion_verdict_source;
+mod terminal_workflow_resume;
 mod wait_signal_driven;
 mod chat_ingest_routing;

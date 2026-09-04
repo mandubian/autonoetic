@@ -2066,6 +2066,17 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             };
             format!("loop guard tripped: {reason}{rule}")
         }
+        // Terminal-workflow dispatch refusal (execution pre-flight). The
+        // escape hatch IS the message — surface the workflow and the fork
+        // command inline so the retry dead-end is self-explanatory.
+        "session.dispatch_refused" => {
+            let wf = field("workflow_id").unwrap_or_default();
+            let status = field("workflow_status").unwrap_or_default();
+            let cmd = field("fork_command").unwrap_or_default();
+            format!(
+                "dispatch refused: workflow {wf} is terminal ({status}) — fork to continue: {cmd}"
+            )
+        }
         "session.start" => format!(
             "session started{}",
             field("trigger_type").map(|t| format!(" ({t})")).unwrap_or_default()

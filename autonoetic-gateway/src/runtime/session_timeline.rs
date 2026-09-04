@@ -886,6 +886,7 @@ pub fn operator_comment_event(
 /// | `security.escape_threshold` | Attention | escape-probability threshold reached |
 /// | `llm.request_failed` / `llm.empty_response` | Error | LLM failures |
 /// | `guard.tripped` | Error | LoopGuard circuit breaker |
+/// | `session.dispatch_refused` | Error | dispatch pre-flight refused (terminal bound workflow) — carries the fork escape hint |
 /// | `session.emergency_stop` | Error | emergency stop fired |
 /// | `security.sandbox_escape` | Error | sandbox breach |
 /// | `tool.failed` | Error | reserved — no emitter today (failures use `tool.completed` with `ok:false`, bumped to Attention at the emit site). Kept so a future dedicated failure event lands at Error. |
@@ -901,6 +902,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "guard.tripped"
         | "session.emergency_stop"
         | "session.turn_hard_cap"
+        | "session.dispatch_refused"
         | "security.sandbox_escape"
         | "tool.failed" => Altitude::Error,
 

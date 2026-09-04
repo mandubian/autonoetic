@@ -3844,6 +3844,125 @@ impl GatewayExecutionService {
         }
     }
 
+    /// Resume/dispatch pre-flight: refuse to spend a turn on a session whose
+    /// bound workflow is already `Failed` or `Cancelled`.
+    ///
+    /// Working against a terminal workflow is a fixed point: `agent.spawn`
+    /// deterministically rejects, the LoopGuard hard-trips
+    /// `workflow_terminal`, the turn burns, and the error close re-marks the
+    /// workflow terminal — so every resume replays the same trip before the
+    /// agent can act. The interaction-resume path has had this gate since it
+    /// shipped (see `resume_interaction_inner`); this extends the refusal to
+    /// every dispatch through `spawn_agent_once` and adds the operator escape
+    /// hatch: forking from an earlier turn yields a fresh root session id,
+    /// whose first spawn creates a new `Active` workflow (the fork inherits
+    /// the checkpoint guard state, so fork from a pre-trip turn).
+    ///
+    /// `Completed` passes: a root-planner spawn reactivates a Completed
+    /// workflow (terminal guard in `runtime/tools/agent.rs`). `EmergencyStopped`
+    /// also passes — the P-6.14 refusal upstream (`resume_from_checkpoint` and
+    /// the trigger-coherence gate) owns that case with its own operator
+    /// contract, and changing its error shape would break the scheduler's
+    /// machine-matched strings.
+    pub fn ensure_root_workflow_resumable(&self, session_id: &str) -> anyhow::Result<()> {
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let Some(workflow_id) =
+            crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                &self.config, root,
+            )?
+        else {
+            return Ok(());
+        };
+        let Some(run) = crate::scheduler::workflow_store::load_workflow_run(
+            &self.config,
+            self.gateway_store.as_deref(),
+            &workflow_id,
+        )?
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            run.status,
+            autonoetic_types::workflow::WorkflowRunStatus::Failed
+                | autonoetic_types::workflow::WorkflowRunStatus::Cancelled
+        ) {
+            return Ok(());
+        }
+        let turns = crate::runtime::checkpoint::list_checkpoints(&self.config, root)
+            .unwrap_or_default();
+        let mut msg = format!(
+            "Cannot dispatch session '{}': bound workflow '{}' is already terminal \
+             ({}). New work cannot be spawned against a terminal workflow, so \
+             resuming cannot make progress — the LoopGuard hard-trips the \
+             deterministic rejection before the agent can act.",
+            session_id,
+            workflow_id,
+            run.status.as_str()
+        );
+        if turns.is_empty() {
+            msg.push_str(
+                " No forkable checkpoints exist for this session — start a new \
+                 session instead.",
+            );
+        } else {
+            msg.push_str(&format!(
+                " To continue this work, fork from an earlier turn — a fork gets \
+                 a fresh root session and therefore a fresh workflow, and the \
+                 fork clears the inherited guard trip: \
+                 `autonoetic trace fork {} --at-turn <N>` (or press F on a fork \
+                 divider in the room TUI). Forkable turns: {}.",
+                root,
+                turns.join(", ")
+            ));
+        }
+
+        // The refusal fires on the *async* wake path for room-sent messages
+        // (`event.ingest` with `async_mode: true` returns ok before the
+        // dispatch runs), so the RPC error never reaches the operator. Make it
+        // visible: a gateway-log warning plus a canonical-timeline event the
+        // room renders (same surface as `guard.tripped`).
+        tracing::warn!(
+            target: "execution",
+            session_id = %session_id,
+            root_session_id = %root,
+            workflow_id = %workflow_id,
+            workflow_status = %run.status.as_str(),
+            "Dispatch refused: bound workflow is terminal (Failed/Cancelled); \
+             fork from an earlier turn to continue this work"
+        );
+        if let Some(store) = self.gateway_store.as_ref() {
+            let principal = autonoetic_types::principal::Principal::agent("gateway");
+            let role = crate::runtime::session_timeline::derive_role("gateway");
+            let tl = crate::runtime::session_timeline::build_timeline_event(
+                root.to_string(),
+                session_id.to_string(),
+                None,
+                &principal,
+                &role,
+                "session.dispatch_refused",
+                None,
+                Some(serde_json::json!({
+                    "reason": "terminal_workflow",
+                    "session_id": session_id,
+                    "workflow_id": workflow_id,
+                    "workflow_status": run.status.as_str(),
+                    "forkable_turns": turns,
+                    "fork_command": format!("autonoetic trace fork {} --at-turn <N>", root),
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(err) = store.create_live_digest_event(&tl) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %err,
+                    "session.dispatch_refused timeline emit failed"
+                );
+            }
+        }
+
+        anyhow::bail!("{msg}");
+    }
+
     pub async fn spawn_agent_once(
         &self,
         agent_id: &str,
@@ -4560,6 +4679,13 @@ impl GatewayExecutionService {
                 String,
                 Option<String>,
             )> = async {
+            // Terminal-workflow pre-flight: refuse before spending the turn.
+            // A `Failed`/`Cancelled` bound workflow makes every dispatch a
+            // burned turn (deterministic `agent.spawn` rejection → LoopGuard
+            // `workflow_terminal` hard-trip → error close re-fails the
+            // workflow). See `ensure_root_workflow_resumable` for the fork
+            // escape hatch offered in the refusal message.
+            self.ensure_root_workflow_resumable(session_id)?;
             Ok(if task_id.is_some() {
                 let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint_strict(
                     &self.config,
