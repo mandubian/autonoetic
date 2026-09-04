@@ -527,6 +527,144 @@ pub fn unclassified_among(clause_ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Render the **law table** — every clause the constitution declares, its
+/// declared relation, and whether it is classified yet.
+///
+/// The reader-facing half of RFC #1283 §2.4.2. Before this, bind direction was
+/// readable by code and invisible to a reader: the generated enforcement
+/// register covered the 19 clauses with enforcement entries, so 54 of the 73
+/// classified clauses — every `U-*`, every `I-*`, most `Ri-*` — appeared in no
+/// document at all. Declaring a relation nobody can read defeats the point of
+/// declaring it.
+///
+/// Deliberately a *separate* document from the enforcement register, because
+/// they answer different questions and have different lifetimes. This one is
+/// the law: what each clause obliges, of whom, to whom — the same for any
+/// implementation. The register is conformance: which of *our* code sites and
+/// tests hold it up. A re-implementation replaces the second and inherits the
+/// first (§2.7).
+///
+/// Takes the clause index rather than reading the loaded constitution, so it
+/// is pure and testable without booting a gateway.
+pub fn render_law_table_markdown(clause_index: &[(String, String)]) -> String {
+    let mut out = String::new();
+    out.push_str("# Constitutional Law Table (generated)\n\n");
+    out.push_str(
+        "> **Generated** from `autonoetic-gateway/src/constitution_relations.rs`. Do not edit \
+         by hand — run the generator (`BLESS_LAW_TABLE=1`). One row per clause the active \
+         constitution declares, recording **which power it binds**, **who has standing to \
+         invoke it**, and the verification field. Bind direction is declared data, never \
+         derived from the ID prefix (#1284).\n\n\
+         This is the **law** side: what a clause obliges, of whom, to whom — identical for any \
+         implementation. Which code holds it up is conformance data and lives in \
+         [`enforcement-register.md`](enforcement-register.md). See \
+         `docs/proposals/constitution-bind-direction-model.md`.\n\n",
+    );
+
+    out.push_str("> ⚠️ **`verified_by` is under revision** (RFC #1283 §2.4.1). The column \
+         records this implementation's mechanism for enforced clauses and a *requirement* for \
+         unenforced ones — one column, two meanings. It is being replaced by `requires` \
+         (constitutional) plus `achieved` (register). Read it as provisional.\n\n");
+
+    let total = clause_index.len();
+    let classified = clause_index
+        .iter()
+        .filter(|(id, _)| relation(id).is_some())
+        .count();
+    out.push_str("## Coverage\n\n");
+    out.push_str(&format!(
+        "**{classified} of {total}** clauses classified. The remainder are numbered `P-*` \
+         awaiting their section tranche; they are counted, not hidden — a ratchet test pins \
+         the exact number so a new clause cannot arrive unclassified.\n\n",
+    ));
+
+    out.push_str("| binds | clauses |\n|---|---|\n");
+    for power in Binds::ALL {
+        let n = clause_index
+            .iter()
+            .filter(|(id, _)| relation(id).map(|r| r.binds) == Some(power))
+            .count();
+        out.push_str(&format!("| `{}` | {} |\n", power.label(), n));
+    }
+    out.push('\n');
+
+    out.push_str("| owed to | clauses | means |\n|---|---|---|\n");
+    out.push_str(&format!(
+        "| `autonoetic_agent` | {} | a duty the agent can invoke — an agent **right**, whatever \
+         the ID prefix says |\n",
+        count_owed(clause_index, |o| o == TO_AGENT)
+    ));
+    out.push_str(&format!(
+        "| `served_user` | {} | owed to the end user a session serves |\n",
+        count_owed(clause_index, |o| o == TO_SERVED)
+    ));
+    out.push_str(&format!(
+        "| `decider` *(seat)* | {} | owed to whoever occupies the deciding seat, human or agent |\n",
+        count_owed(clause_index, |o| matches!(o, OwedTo::Seat(_)))
+    ));
+    out.push_str(&format!(
+        "| `none` | {} | an **integrity property**: no invocable beneficiary. Not a lesser \
+         clause — nobody can *claim* their own sandbox confinement |\n",
+        count_owed(clause_index, |o| o == OwedTo::NoOne)
+    ));
+    out.push('\n');
+
+    let mut agent_rights: Vec<&str> = clause_index
+        .iter()
+        .filter(|(id, _)| {
+            relation(id).is_some_and(|r| r.owed_to.is_agent_right(r.binds))
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    agent_rights.sort_unstable();
+    out.push_str(&format!(
+        "**Agent rights by relation** ({}): `{}`\n\nA right is a *view*, not a family: an \
+         enforcer duty owed to the agent is an agent right regardless of prefix. This list is \
+         therefore not the `Ri-*` set — `P-5.3`, `P-5.8`, `P-5.11` and `P-9.12` are here on \
+         their relation, and §0's rights/rules ratio would be computed from this rather than \
+         from prefixes.\n\n",
+        agent_rights.len(),
+        agent_rights.join("`, `"),
+    ));
+
+    out.push_str("## Clauses\n\n");
+    out.push_str("| clause | binds | owed to | `verified_by` | statement |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for (id, gloss) in clause_index {
+        let statement = gloss.replace('|', "\\|");
+        match relation(id) {
+            Some(f) => out.push_str(&format!(
+                "| `{}` | `{}` | {} | `{}` | {} |\n",
+                id,
+                f.binds.label(),
+                owed_cell(f.owed_to),
+                f.verified_by.label(),
+                statement,
+            )),
+            None => out.push_str(&format!(
+                "| `{}` | — | — | — | *unclassified.* {} |\n",
+                id, statement
+            )),
+        }
+    }
+    out
+}
+
+fn count_owed(index: &[(String, String)], pred: impl Fn(OwedTo) -> bool) -> usize {
+    index
+        .iter()
+        .filter(|(id, _)| relation(id).is_some_and(|r| pred(r.owed_to)))
+        .count()
+}
+
+fn owed_cell(owed: OwedTo) -> String {
+    match owed {
+        OwedTo::NoOne => "none *(integrity property)*".to_string(),
+        OwedTo::Seat(power) => format!("`{}` *(seat)*", power.label()),
+        OwedTo::Principal(kind) => format!("`{}`", kind.as_str()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +855,74 @@ mod tests {
         // And the sections still awaiting a tranche are untouched, so this
         // test cannot pass by the table having swallowed everything.
         assert!(relation("P-2.20").is_none() || declared_at("P-2.20") != Some("P-2.20"));
+    }
+
+    fn active_constitution_clause_index() -> Vec<(String, String)> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent")
+            .to_path_buf();
+        let path = root.join(autonoetic_types::config::default_constitution_source_path());
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        crate::constitution_digest::clause_index(&text)
+    }
+
+    /// Regenerate the committed law table.
+    ///
+    /// `BLESS_LAW_TABLE=1 cargo test -p autonoetic-gateway --lib bless_law_table`
+    #[test]
+    fn bless_law_table() {
+        if std::env::var("BLESS_LAW_TABLE").is_err() {
+            return;
+        }
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/constitution/law-table.md"
+        );
+        std::fs::write(path, render_law_table_markdown(&active_constitution_clause_index()))
+            .expect("write law table");
+    }
+
+    /// The committed law table matches what the code would render.
+    ///
+    /// Same drift guard the enforcement register carries, for the same reason:
+    /// a generated document that can silently disagree with its generator is
+    /// worse than no document, because a reader trusts it.
+    #[test]
+    fn generated_law_table_matches_committed_doc() {
+        let committed = include_str!("../../docs/constitution/law-table.md");
+        assert_eq!(
+            render_law_table_markdown(&active_constitution_clause_index()),
+            committed,
+            "generated law table differs from the committed doc; regenerate \
+             docs/constitution/law-table.md (BLESS_LAW_TABLE=1)"
+        );
+    }
+
+    /// The law table shows **every** clause — including the ones no
+    /// implementation enforces.
+    ///
+    /// This is the gap §2.4.2 named. `U-1`–`U-3` are MISSING, so they can
+    /// never appear in the enforcement register; before this document they
+    /// appeared nowhere, which made the served party's charter invisible in
+    /// exactly the corpus meant to make it legible.
+    #[test]
+    fn the_law_table_covers_clauses_no_code_enforces() {
+        let rendered = render_law_table_markdown(&active_constitution_clause_index());
+        for id in ["U-1", "U-2", "U-3", "I-8", "I-14", "Ri-0.15", "O-6", "P-5.3"] {
+            assert!(
+                rendered.contains(&format!("| `{id}` |")),
+                "{id} is classified but does not appear in the law table"
+            );
+        }
+        // And the unclassified are shown as such rather than omitted — a
+        // reader must be able to tell "not yet decided" from "not a clause".
+        assert!(
+            rendered.contains("*unclassified.*"),
+            "outstanding clauses must be listed and marked, not dropped"
+        );
+        assert!(rendered.contains("| `P-1.1` |"), "P-1.1 is unclassified but must be listed");
     }
 
     /// **Inference debt** — the number of `P-*` clauses whose bind direction
