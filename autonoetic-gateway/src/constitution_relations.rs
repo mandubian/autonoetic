@@ -27,16 +27,37 @@
 //! sourced rights from the register while hardcoding their bind direction as
 //! a literal, so the one place that could disagree with the register did.
 //!
-//! # `verified_by` is a requirement, not a claim
+//! # `verified_by` — **under revision, do not build on it**
 //!
-//! The floor states the **minimum modality an implementation must reach** for
-//! the clause to count as enforced. It is not an assertion that this gateway
-//! reaches it. `I-3` declares `Construction` while its own status is
-//! `PARTIAL` — that pairing is the point: it says what closing the gap
-//! requires (`RedactedPayload` at the write API, where the compiler covers
-//! paths that do not exist yet) rather than lowering the bar to what is
-//! currently built. Enforcement *status* lives in the constitution's status
-//! cell and in the register; this field never duplicates it.
+//! RFC #1283 **rev 3 §2.4.1 supersedes this field's model.** Read that before
+//! adding a `verified_by` value or reasoning about one; the account below is
+//! kept because the values in this table were assigned under it, not because
+//! it is the intended design.
+//!
+//! Two defects, both found by implementing it:
+//!
+//! - **The "floor" needs a total order this model denies.** `Construction` is
+//!   not stronger than `Detection` for a universal negative over behaviour
+//!   (`I-4`), so "at least X" is not well-formed. The `Ord` derives that
+//!   asserted such an order are gone.
+//! - **The field means two different things and nothing marks which.** For an
+//!   ENFORCED clause the value describes *this implementation* — `Ri-0.3` is
+//!   `Test` because `Tagged::permission_with_rules` does not forbid an empty
+//!   rule list, a fact about our types rather than about what the clause
+//!   demands. For an unmet clause it states a *requirement*: `I-3` declares
+//!   `Construction` while its status is `PARTIAL`, naming what closing the gap
+//!   needs. One column, two semantics.
+//!
+//! Replacement: `requires` (`preventive | detective`, constitutional — the
+//! distinction that survives re-implementation) plus `achieved`
+//! (modality + site, per implementation, register-side). Enforcement *status*
+//! stays in the constitution's status cell and the register; neither field
+//! duplicates it.
+//!
+//! The old text read "`verified_by` is a requirement, not a claim". That was
+//! the intent and is not what the data does — which is exactly the
+//! description-vs-requirement defect, committed in the doc comment that
+//! warned against it.
 //!
 //! # Coverage
 //!

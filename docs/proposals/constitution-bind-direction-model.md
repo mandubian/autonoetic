@@ -2,10 +2,11 @@
 
 > **rev 3** — §2.4 revised after implementing parts 1–2. The `verified_by`
 > "floor" model is superseded by `requires` (constitutional) + `achieved`
-> (register); §2.4.2 records that the classification has no reader-facing
-> surface yet.
+> (register), with `requires` a non-empty set (§2.4.3); §2.4.2 records that the
+> classification has no reader-facing surface yet.
 
-Status: **Open** (proposal — no code, no amendment)
+Status: **Partial** — parts 1–2 shipped in code (#1293, #1298, #1302);
+**no amendment yet**, and §2.4.1 must land before one adopts the columns.
 Date: 2026-09-02 — **revision 3** (2026-09-04), after implementing parts 1–2
 Scope: the family structure of constitutional clause IDs, and the `binds` model in
 `enforcement_register.rs`. Supersedes nothing; blocks nothing.
@@ -33,7 +34,9 @@ Scope: the family structure of constitutional clause IDs, and the `binds` model 
 >   total order the RFC itself denies, and in practice the field recorded this
 >   implementation's Rust for enforced clauses while stating a requirement for
 >   unenforced ones. Replaced by `requires: preventive | detective`
->   (constitutional) + `achieved: modality @ site` (register).
+>   (constitutional) + `achieved: modality @ site` (register). `requires` is a
+>   non-empty **set**, not a binary — mixed clauses like `Ri-0.3` demand both,
+>   and a max-rule would let the judgment-shaped half go unverified (§2.4.3).
 > - The modality taxonomy is reclassified as **statute material** — it tracks
 >   verification practice, not law, so signing it would put an amendment
 >   ceremony in front of every advance in technique.
@@ -419,7 +422,7 @@ is already statute-frequency").
 
 | field | tier | domain | answers |
 |---|---|---|---|
-| `requires` | **constitutional** | `preventive` \| `detective` | must non-compliance be made impossible, or is recording each occurrence sufficient? |
+| `requires` | **constitutional** | a non-empty subset of {`preventive`, `detective`} — see §2.4.3 | must non-compliance be made impossible, is recording each occurrence sufficient, or are both demanded? |
 | `achieved` | **register** (per implementation) | a modality + its site | what this gateway actually does, e.g. `construction @ policy.rs:679` |
 
 `requires` is binary because that is the distinction which is genuinely
@@ -466,6 +469,51 @@ inverts the point of declaring it. Two generated surfaces close it —
 
 That pair *is* §2.7's law/conformance split, arrived at from the reader's side
 rather than the federation side.
+
+#### 2.4.3 Mixed clauses: `requires` is a non-empty **set**, not a binary
+
+Review raised the case that decides the field's shape, using this RFC's own
+worked example against it. `Ri-0.3` ("every rejection names the rule ID that
+caused it") has two parts of different natures:
+
+- a **representable core** — a rejection carrying *no* rule id can be made
+  unrepresentable, e.g. by a non-empty rule type at the denial constructor;
+- a **judgment-shaped penumbra** — that the named rule is the *actual* basis
+  for the denial. Nothing static distinguishes a correct attribution from a
+  plausible-but-wrong one; only recording and reviewing attributions does.
+
+The suggested reading was a max-rule: if any part must be preventive, the
+clause is `requires: preventive`. **That is the wrong resolution**, and for
+the same reason the floor model failed. It is lossy in the direction that
+matters: an implementation that makes the core unrepresentable and builds *no*
+attribution detection would read the column and correctly claim full
+compliance, while the penumbra — the half where the interesting failures live
+— goes unverified. A max-rule reproduces "one value, two semantics" one level
+up.
+
+**`requires` is a non-empty subset of {`preventive`, `detective`}** — three
+legal values, not two. `Ri-0.3` is `{preventive, detective}`: make the empty
+rule list impossible *and* record attributions so a wrong one is discoverable.
+Both are demanded, so both are stated.
+
+This costs almost nothing in expressiveness (a two-element domain has three
+non-empty subsets) and it keeps the field's meaning single: every listed
+value is a thing the implementation must provide.
+
+**Drafting consequence, and it is the useful half.** A clause that requires
+both is usually *two obligations sharing an id*. The RFC already draws this
+conclusion on the other axis — §2.2: "Single-valued, mirroring §0's 'exactly
+one party': two standings means two clauses, which keeps the non-duplication
+test well-formed." The identical argument applies to verification nature: two
+natures in one clause means one id is carrying two obligations, and §0's
+one-clause-one-party discipline is the precedent for splitting it.
+
+So `{preventive, detective}` is legal but **marked**: it is a correct
+description *and* a signal that the clause is a split candidate at its next
+amendment. It is not retroactive — §8 holds that this RFC changes no clause
+statement, and splitting one is a statement change requiring its own
+amendment. The set keeps the record honest until then, instead of rounding to
+whichever half is cheaper to claim.
 
 ### 2.5 Rights and obligations are duals, not duplicates
 
