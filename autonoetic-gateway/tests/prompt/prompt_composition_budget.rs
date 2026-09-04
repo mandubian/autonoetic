@@ -328,12 +328,23 @@ impl Report {
 /// cleanly" tool calls that each burned a full model round (~35k tokens);
 /// the doctrine is cheaper than the behavior it prevents by ~4 orders of
 /// magnitude per session.
-const PLANNER_CEILINGS: (usize, usize, usize) = (75_900, 92_400, 104_400);
-const CODER_CEILINGS: (usize, usize, usize) = (60_400, 70_400, 70_400);
+///
+/// PLANNER + CODER + COLLAB raised 2026-09-04 (planner
+/// 75900→76800/92400→93300/104400→105400, coder
+/// 60400→61500/70400→71200/70400→71200, collab
+/// 92900→93700/—/103400→104300) with cause: the new `anomaly_status`
+/// tool — the capability-free reporter-self read path for anomaly flags
+/// (Ri-0.18 symmetry; #770 follow-up). It cannot be capability- or
+/// tier-gated: the least-privileged witness that may file a flag must be
+/// able to re-read its own filing, so the schema is paid on every turn of
+/// every agent by design (~1.5-1.9k ch measured per agent). Measured
+/// headroom is ~0.3-0.5%, matching the tight-ratchet style.
+const PLANNER_CEILINGS: (usize, usize, usize) = (76_800, 93_300, 105_400);
+const CODER_CEILINGS: (usize, usize, usize) = (61_500, 71_200, 71_200);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_900, 103_400, 103_400);
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (93_700, 103_400, 104_300);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///

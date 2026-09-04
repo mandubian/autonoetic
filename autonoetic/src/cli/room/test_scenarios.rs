@@ -150,6 +150,9 @@ fn llm_round(root: &str, model: &str, in_t: u32, out_t: u32) -> SessionTimelineE
                 "model": model,
                 "input_tokens": in_t,
                 "output_tokens": out_t,
+                // Plausible prompt-prefix cache hit (~70% of input) so the
+                // stats panel / dividers exercise the cached display.
+                "cached_tokens": in_t * 7 / 10,
             })
             .to_string(),
         ),

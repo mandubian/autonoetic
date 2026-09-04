@@ -646,16 +646,28 @@ fn build_info_panel(
                     String::new()
                 };
                 lines.push(format!(
-                    "    {:<24} {:>4} calls  in {}  out {}{}",
+                    "    {:<24} {:>4} calls  in {}  cached {}  out {}{}",
                     model,
                     m.calls,
                     format_tokens(m.input_tokens),
+                    format_tokens(m.cached_tokens),
                     format_tokens(m.output_tokens),
                     err_tag,
                 ));
             }
         }
-        lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
+        let cache_pct = if stats.total_input > 0 {
+            stats.total_cached as f64 / stats.total_input as f64 * 100.0
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "  Tokens     in {}  (cached {} · {:.0}%)   out {}",
+            format_tokens(stats.total_input),
+            format_tokens(stats.total_cached),
+            cache_pct,
+            format_tokens(stats.total_output)
+        ));
         let avg_in = stats.total_input / stats.llm_calls as u64;
         let avg_out = stats.total_output / stats.llm_calls as u64;
         lines.push(format!("  Avg/call   in {}   out {}", format_tokens(avg_in), format_tokens(avg_out)));
@@ -731,7 +743,17 @@ fn build_header(
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
     if stats.llm_calls > 0 {
-        right_parts.push(format!("{} → {} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+        let mut part = format!(
+            "{} → {} ●{}",
+            format_tokens(stats.total_input),
+            format_tokens(stats.total_output),
+            stats.llm_calls
+        );
+        if stats.total_cached > 0 {
+            let pct = stats.total_cached as f64 / stats.total_input.max(1) as f64 * 100.0;
+            part.push_str(&format!(" · cache {:.0}%", pct));
+        }
+        right_parts.push(part);
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
@@ -3766,12 +3788,18 @@ struct ModelStats {
     calls: u64,
     input_tokens: u64,
     output_tokens: u64,
+    /// Prompt-prefix cache hits (subset of `input_tokens`) — billed at the
+    /// discounted cache-read rate.
+    cached_tokens: u64,
     errors: u64,
 }
 
 struct SessionStats {
     total_input: u64,
     total_output: u64,
+    /// Cache-hit subset of `total_input` (0 for sessions without cache
+    /// telemetry — older events lack `cached_tokens`).
+    total_cached: u64,
     llm_calls: u64,
     models: Vec<String>,
     /// Per-model breakdown of calls, tokens, and errors.
@@ -3797,6 +3825,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
     let mut stats = SessionStats {
         total_input: 0,
         total_output: 0,
+        total_cached: 0,
         llm_calls: 0,
         models: Vec::new(),
         per_model: HashMap::new(),
@@ -3813,9 +3842,13 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                     "llm.round" => {
                         let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                         let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        // Cache hits are a subset of the input prompt; clamp so
+                        // a misbehaving provider can't push the sum past `inp`.
+                        let cached = v.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0).min(inp);
                         if inp > 0 || out > 0 {
                             stats.total_input += inp;
                             stats.total_output += out;
+                            stats.total_cached += cached;
                             stats.llm_calls += 1;
                         }
 
@@ -3852,6 +3885,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                             m.calls += 1;
                             m.input_tokens += inp;
                             m.output_tokens += out;
+                            m.cached_tokens += cached;
                         }
                     }
                     "llm.request_failed" => {
@@ -7531,6 +7565,19 @@ pub fn run(
                 selected
             };
             let early_spinner = SPINNER_FRAMES[spinner_frame];
+            // Mirror the full refresh's unread marker (`unread_marker` below)
+            // over the cached row count. Without this, while scrolled away with
+            // unread rows the early frame omits the `── N new ──` line the full
+            // frame renders — every scroll event paints the list twice in two
+            // layouts one line apart (the scroll flicker).
+            let early_unread_marker = if !follow
+                && unread_count > 0
+                && unread_count < view_rows.len()
+            {
+                Some((view_rows.len() - unread_count, unread_count))
+            } else {
+                None
+            };
             let early_stats = compute_session_stats(&entries);
             let early_gate_count = count_active_gates(&entries, &resolved, &acted);
             let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
@@ -7586,7 +7633,7 @@ pub fn run(
                     early_gate.as_ref(),
                     early_spinner,
                     &view_turn_boundaries,
-                    None,
+                    early_unread_marker,
                     show_reasoning,
                     &early_stats,
                     early_pending_plans,
@@ -8315,7 +8362,7 @@ pub fn run(
         );
         let list_height = list_area_height as usize;
         let width = term_size.width as usize;
-        let rail_w = 2usize;
+        let rail_w = 1usize;
         let glyph_w = 3usize;
         let label_w = 12usize.min(width / 4);
         let content_w = width.saturating_sub(rail_w + glyph_w + MARK_W + label_w + 2);
@@ -9259,7 +9306,7 @@ fn build_rich_row_lines(
         lines.push(Line::from(Span::styled(bar, style)));
     }
     let rail_style = Style::default().fg(row_rail_color(spec));
-    let rail_block = "▌".repeat(rail_w);
+    let rail_block = row_rail_glyph(spec).to_string();
     let glyph = if spec.in_flight {
         spinner_glyph
     } else if spec.tone == RowTone::OperatorGate {
@@ -9271,7 +9318,16 @@ fn build_rich_row_lines(
     let head_style = row_headline_style(spec);
     let label_style = row_label_style(spec);
     let detail_style = row_detail_style(spec);
-    let cont_pad = " ".repeat(rail_w + glyph_w + MARK_W + label_w + 1);
+    // Continuation lines repeat the rail glyph in a dimmed variant so a
+    // multi-line row reads as one continuous bar; the trailing pad keeps
+    // their text aligned with the first line's content column.
+    let cont_prefix = vec![
+        Span::styled(
+            row_rail_glyph(spec).to_string(),
+            rail_style.add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" ".repeat(glyph_w + MARK_W + label_w + 1)),
+    ];
     // Egress marker (#971): a colored glyph when this row's content is labeled.
     // `■` is single-width so the reserved 1-cell column keeps labeled and
     // unlabeled rows column-aligned (a double-width emoji would push the
@@ -9294,7 +9350,7 @@ fn build_rich_row_lines(
             &mut lines,
             spec,
             content_w,
-            &cont_pad,
+            &cont_prefix,
             first_prefix,
             head_style,
             detail_style,
@@ -9313,10 +9369,9 @@ fn build_rich_row_lines(
                 spans.push(Span::styled(chunk.clone(), head_style));
                 lines.push(Line::from(spans));
             } else {
-                lines.push(Line::from(vec![
-                    Span::raw(cont_pad.clone()),
-                    Span::styled(chunk.clone(), head_style),
-                ]));
+                let mut spans = cont_prefix.clone();
+                spans.push(Span::styled(chunk.clone(), head_style));
+                lines.push(Line::from(spans));
             }
         }
         if let Some(d) = &spec.detail {
@@ -9334,11 +9389,10 @@ fn build_rich_row_lines(
                     };
                     let avail = content_w.saturating_sub(prefix.chars().count());
                     for (j, chunk) in word_wrap_text(sub.trim_end(), avail).into_iter().enumerate() {
-                        let line_prefix = if j == 0 { prefix } else { "    " };
-                        lines.push(Line::from(vec![
-                            Span::raw(cont_pad.clone()),
-                            Span::styled(format!("{line_prefix}{chunk}"), detail_style),
-                        ]));
+                    let line_prefix = if j == 0 { prefix } else { "    " };
+                    let mut spans = cont_prefix.clone();
+                    spans.push(Span::styled(format!("{line_prefix}{chunk}"), detail_style));
+                    lines.push(Line::from(spans));
                     }
                 }
             }
@@ -9401,7 +9455,11 @@ fn build_collapsed_row_line(
         format!("{:<2}", render::altitude_glyph(Altitude::Detail))
     };
     let text = format!("{} ⟨{} {}⟩", glyph, count, summary);
-    Line::from(Span::styled(text, style))
+    // Squashed runs fold routine plumbing, so the leading rail uses the
+    // tool-call shape/hue — this keeps the left edge unbroken next to the
+    // rich rows it stands in for (rail + space aligns the glyph column).
+    let rail = Span::styled("┃ ", Style::default().fg(Color::Blue));
+    Line::from(vec![rail, Span::styled(text, style)])
 }
 
 /// Word-wrap prose to terminal cells (Unicode-aware). Blank input ⇒ one empty line.
@@ -9487,7 +9545,7 @@ fn push_agent_narrative_row(
     lines: &mut Vec<Line<'static>>,
     spec: &RowSpec,
     content_w: usize,
-    cont_pad: &str,
+    cont_prefix: &[Span<'static>],
     first_prefix: Vec<Span<'static>>,
     body_style: Style,
     detail_style: Style,
@@ -9495,7 +9553,7 @@ fn push_agent_narrative_row(
     let (meta, prose) = split_agent_narrative_content(&spec.headline, spec.detail.as_deref());
     let mut prefix = Some(first_prefix);
     if let Some(meta_line) = meta {
-        push_wrapped_detail_lines(lines, &meta_line, content_w, cont_pad, detail_style);
+        push_wrapped_detail_lines(lines, &meta_line, content_w, cont_prefix, detail_style);
         prefix = None;
     }
     if prose.trim().is_empty() {
@@ -9510,7 +9568,7 @@ fn push_agent_narrative_row(
         lines,
         &prose,
         content_w,
-        cont_pad,
+        cont_prefix,
         prefix,
         body_style,
     );
@@ -9521,7 +9579,7 @@ fn push_wrapped_markdown_body(
     lines: &mut Vec<Line<'static>>,
     body: &str,
     content_w: usize,
-    cont_pad: &str,
+    cont_prefix: &[Span<'static>],
     mut first_prefix: Option<Vec<Span<'static>>>,
     default_style: Style,
 ) {
@@ -9530,14 +9588,14 @@ fn push_wrapped_markdown_body(
     for md_line in markdown::render_markdown(&normalized) {
         let text = line_display_text(&md_line);
         if text.trim().is_empty() {
-            lines.push(Line::from(Span::raw(cont_pad.to_string())));
+            lines.push(Line::from(cont_prefix.to_vec()));
             continue;
         }
         if markdown::line_is_code_block(&md_line) {
             push_markdown_line(
                 lines,
                 &md_line,
-                cont_pad,
+                cont_prefix,
                 &mut first_prefix,
                 content_w,
                 false,
@@ -9556,10 +9614,9 @@ fn push_wrapped_markdown_body(
                 spans.push(Span::styled(chunk, style));
                 lines.push(Line::from(spans));
             } else {
-                lines.push(Line::from(vec![
-                    Span::raw(cont_pad.to_string()),
-                    Span::styled(chunk, style),
-                ]));
+                let mut spans = cont_prefix.to_vec();
+                spans.push(Span::styled(chunk, style));
+                lines.push(Line::from(spans));
             }
         }
     }
@@ -9569,7 +9626,7 @@ fn push_wrapped_markdown_body(
 fn push_markdown_line(
     lines: &mut Vec<Line<'static>>,
     md_line: &Line<'static>,
-    cont_pad: &str,
+    cont_prefix: &[Span<'static>],
     first_prefix: &mut Option<Vec<Span<'static>>>,
     content_w: usize,
     wrap: bool,
@@ -9580,7 +9637,7 @@ fn push_markdown_line(
             spans.extend(md_line.spans.clone());
             lines.push(Line::from(spans));
         } else {
-            let mut spans = vec![Span::raw(cont_pad.to_string())];
+            let mut spans = cont_prefix.to_vec();
             spans.extend(md_line.spans.clone());
             lines.push(Line::from(spans));
         }
@@ -9599,10 +9656,9 @@ fn push_markdown_line(
             spans.push(Span::styled(chunk, style));
             lines.push(Line::from(spans));
         } else {
-            lines.push(Line::from(vec![
-                Span::raw(cont_pad.to_string()),
-                Span::styled(chunk, style),
-            ]));
+            let mut spans = cont_prefix.to_vec();
+            spans.push(Span::styled(chunk, style));
+            lines.push(Line::from(spans));
         }
     }
 }
@@ -9612,7 +9668,7 @@ fn push_wrapped_detail_lines(
     lines: &mut Vec<Line<'static>>,
     text: &str,
     content_w: usize,
-    cont_pad: &str,
+    cont_prefix: &[Span<'static>],
     detail_style: Style,
 ) {
     for (i, sub) in text.split('\n').enumerate() {
@@ -9623,10 +9679,9 @@ fn push_wrapped_detail_lines(
         let avail = content_w.saturating_sub(prefix.chars().count());
         for (j, chunk) in word_wrap_text(sub.trim_end(), avail).into_iter().enumerate() {
             let line_prefix = if i == 0 && j == 0 { prefix } else { "    " };
-            lines.push(Line::from(vec![
-                Span::raw(cont_pad.to_string()),
-                Span::styled(format!("{line_prefix}{chunk}"), detail_style),
-            ]));
+            let mut spans = cont_prefix.to_vec();
+            spans.push(Span::styled(format!("{line_prefix}{chunk}"), detail_style));
+            lines.push(Line::from(spans));
         }
     }
 }
@@ -9639,6 +9694,23 @@ fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect()
+}
+
+/// Left-rail glyph: the *shape* carries the row class so the rail still reads
+/// with colors off (monochrome terminals, colorblind palettes) — solid block
+/// for speech and conclusions, heavy rule for tool plumbing, dashed rule for
+/// thought. Color (`row_rail_color`) layers identity and severity on top; an
+/// errored tool call stays plumbing-shaped (`┃`), just red.
+fn row_rail_glyph(spec: &RowSpec) -> &'static str {
+    match spec.tone {
+        RowTone::Reasoning => "╎",
+        RowTone::ToolCall => "┃",
+        RowTone::OperatorGate
+        | RowTone::VerdictPass
+        | RowTone::VerdictFail
+        | RowTone::AgentNarrative
+        | RowTone::Default => "▌",
+    }
 }
 
 /// Left-rail color: agent narrative keeps the seat hue; tool calls use a cool
@@ -10945,11 +11017,11 @@ fn draw(
         }
     }
 
-    // The terminal width caps each line. Reserve 2 cells for the actor rail
-    // and 3 cells for the altitude glyph + space, leaving the rest for the
-    // label + headline + detail.
+    // The terminal width caps each line. Reserve 1 cell for the shape-coded
+    // actor rail (`row_rail_glyph`) and 3 cells for the altitude glyph +
+    // space, leaving the rest for the label + headline + detail.
     let width = chunks[list_idx].width as usize;
-    let rail_w = 2usize;
+    let rail_w = 1usize;
     let glyph_w = 3usize;
     let label_w = 12usize.min(width / 4);
     let content_w = width.saturating_sub(rail_w + glyph_w + MARK_W + label_w + 2);
@@ -12769,13 +12841,13 @@ mod tests {
         };
         let boundaries: HashMap<usize, TurnDivider> = HashMap::new();
         let lines = build_rich_row_lines(
-            &spec, 2, &boundaries, Some((2, 47)), 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 2, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(first.contains("47 new since you scrolled"), "got: {first}");
         // Other rows don't get the marker.
         let lines = build_rich_row_lines(
-            &spec, 1, &boundaries, Some((2, 47)), 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 1, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(!first.contains("new since"), "got: {first}");
@@ -13066,6 +13138,59 @@ mod tests {
                 !reserved.contains(&color),
                 "{actor:?} uses {color:?}, which collides with a severity/tone-reserved color"
             );
+        }
+    }
+
+    fn rail_spec(tone: RowTone, altitude: Altitude) -> RowSpec {
+        RowSpec {
+            altitude,
+            actor: ActorKind::Specialist,
+            tone,
+            actor_label: "coder".into(),
+            headline: "did a thing".into(),
+            detail: None,
+            turn_id: None,
+            source_session_id: None,
+            turn_index: None,
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        }
+    }
+
+    #[test]
+    fn rail_glyph_shape_tracks_row_class_not_color() {
+        // Shape = row class (monochrome-safe); `row_rail_color` layers
+        // identity and severity on top. Severity overrides color, never
+        // shape: a failed tool call stays plumbing-shaped, just red.
+        assert_eq!(
+            row_rail_glyph(&rail_spec(RowTone::AgentNarrative, Altitude::Normal)),
+            "▌"
+        );
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::VerdictPass, Altitude::Normal)), "▌");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::VerdictFail, Altitude::Normal)), "▌");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::OperatorGate, Altitude::Normal)), "▌");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::Default, Altitude::Normal)), "▌");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::ToolCall, Altitude::Normal)), "┃");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::Reasoning, Altitude::Normal)), "╎");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::ToolCall, Altitude::Error)), "┃");
+        assert_eq!(row_rail_glyph(&rail_spec(RowTone::ToolCall, Altitude::Attention)), "┃");
+        assert_eq!(
+            row_rail_glyph(&rail_spec(RowTone::AgentNarrative, Altitude::Attention)),
+            "▌"
+        );
+    }
+
+    #[test]
+    fn rail_glyphs_are_single_display_width() {
+        // The rail cell is 1 column wide; an ambiguous/double-width glyph
+        // here would desync every wrapped continuation line's padding.
+        for glyph in [row_rail_glyph(&rail_spec(RowTone::Default, Altitude::Normal)),
+                      row_rail_glyph(&rail_spec(RowTone::ToolCall, Altitude::Normal)),
+                      row_rail_glyph(&rail_spec(RowTone::Reasoning, Altitude::Normal))]
+        {
+            assert_eq!(UnicodeWidthStr::width(glyph), 1, "{glyph} is not 1 cell");
         }
     }
 
@@ -14697,12 +14822,17 @@ mod tests {
     fn collapsed_run_line_uses_spinner_glyph_when_in_flight() {
         let line = build_collapsed_row_line(3, "turn.start×3", true, "⠋");
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("⠋ "), "in-flight collapsed row should start with spinner glyph: {text}");
+        assert!(
+            text.starts_with("┃ ⠋ "),
+            "in-flight collapsed row should lead with rail + spinner glyph: {text}"
+        );
 
         let line = build_collapsed_row_line(3, "turn.start×3", false, "⠋");
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("┃ "), "collapsed rows keep the tool rail: {text}");
+        let body = text.trim_start_matches("┃ ");
         assert!(
-            text.starts_with('·') || text.starts_with('⟨'),
+            body.starts_with('·') || body.starts_with('⟨'),
             "closed collapsed row should not start with spinner: {text}"
         );
     }
@@ -15008,6 +15138,7 @@ mod tests {
         SessionStats {
             total_input: 0,
             total_output: 0,
+            total_cached: 0,
             llm_calls: 0,
             models: Vec::new(),
             per_model: HashMap::new(),
@@ -15017,6 +15148,80 @@ mod tests {
             pending_calls: Vec::new(),
             pending_age_turns: None,
         }
+    }
+
+    // ---- cached-token accounting (#prompt-cache observability) ----
+
+    fn cached_round_entry(in_t: u64, out_t: u64, cached_t: u64) -> SessionTimelineEntry {
+        SessionTimelineEntry {
+            event_id: "ev-cache".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: autonoetic_types::principal::Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: "llm.round".into(),
+            altitude: Altitude::Detail,
+            occurred_at: "2026-06-01T00:00:00Z".into(),
+            payload: Some(
+                serde_json::json!({
+                    "model": "test/model",
+                    "input_tokens": in_t,
+                    "output_tokens": out_t,
+                    "cached_tokens": cached_t,
+                })
+                .to_string(),
+            ),
+            refs: autonoetic_types::session_timeline::TimelineRefs::default(),
+        }
+    }
+
+    #[test]
+    fn session_stats_clamp_and_aggregate_cached_tokens() {
+        let entries = vec![
+            cached_round_entry(1000, 100, 600),
+            // Provider-reported cache hits above the input are clamped to it.
+            cached_round_entry(500, 50, 900),
+            // Events without cache telemetry (older rows) count as 0.
+            cached_round_entry(400, 40, 0),
+        ];
+        let stats = compute_session_stats(&entries);
+        assert_eq!(stats.total_input, 1900);
+        assert_eq!(stats.total_cached, 600 + 500, "clamped to input");
+        assert_eq!(stats.total_output, 190);
+        let m = &stats.per_model["model"];
+        assert_eq!(m.calls, 3);
+        assert_eq!(m.cached_tokens, 1100);
+
+        let header = build_header(
+            "session-root-1",
+            "tui",
+            &stats,
+            0,
+            true,
+            FloorMode::Altitude(Altitude::Normal),
+            true,
+            None,
+            false,
+            120,
+        );
+        assert!(header.contains("cache 58%"), "{header}");
+
+        // A session without cache telemetry keeps the header unchanged.
+        let no_cache = compute_session_stats(&[cached_round_entry(100, 10, 0)]);
+        let plain = build_header(
+            "session-root-1",
+            "tui",
+            &no_cache,
+            0,
+            true,
+            FloorMode::Altitude(Altitude::Normal),
+            true,
+            None,
+            false,
+            120,
+        );
+        assert!(!plain.contains("cache"), "{plain}");
     }
 
     #[test]
@@ -15072,7 +15277,7 @@ mod tests {
             egress_label: Some("local_only".into()),
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
@@ -15104,14 +15309,14 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.contains("turn 3"), "got: {bar}");
         assert!(bar.contains("3 calls: read×2, grep"), "got: {bar}");
         assert!(bar.contains("1.2k/340 tok"), "got: {bar}");
-        // The bar is width-bounded: prefix + fill == total_w (60+3+1+12+2+2).
-        assert_eq!(bar.chars().count(), 80, "got: {bar}");
+        // The bar is width-bounded: prefix + fill == total_w (60+3+1+12+1+2).
+        assert_eq!(bar.chars().count(), 79, "got: {bar}");
 
         // Wide glyphs in the stats (💭 = 2 cells) must not overflow the bar:
         // fit + fill are computed in display cells, so the rendered width is
@@ -15125,21 +15330,21 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &wide_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &wide_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(
             UnicodeWidthStr::width(bar.as_str()),
-            80,
+            79,
             "display width must equal total_w; got: {bar}"
         );
-        assert!(bar.chars().count() < 80, "wide glyph counted as 1 char: {bar}");
+        assert!(bar.chars().count() < 79, "wide glyph counted as 1 char: {bar}");
 
         // A boundary without stats keeps the plain divider shape.
         let plain_boundaries: HashMap<usize, TurnDivider> =
             [(0usize, TurnDivider::default())].into_iter().collect();
         let lines = build_rich_row_lines(
-            &spec, 0, &plain_boundaries, None, 60, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &plain_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.starts_with("── turn 3 ") && bar.ends_with('─'), "got: {bar}");
@@ -15165,7 +15370,7 @@ mod tests {
             egress_label: None,
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(!joined.contains('■'), "unlabeled row must not show a marker: {joined}");

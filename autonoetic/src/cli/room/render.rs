@@ -3554,6 +3554,7 @@ pub fn turn_summary(
     }
     let mut total_in: u64 = 0;
     let mut total_out: u64 = 0;
+    let mut total_cached: u64 = 0;
     let mut calls: u64 = 0;
     let mut models: Vec<String> = Vec::new();
     let mut in_turn = false;
@@ -3569,8 +3570,10 @@ pub fn turn_summary(
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(p) {
                         let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                         let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        let cached = v.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0).min(inp);
                         total_in += inp;
                         total_out += out;
+                        total_cached += cached;
                         calls += 1;
                         if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
                             let short = m.split('/').last().unwrap_or(m).to_string();
@@ -3594,6 +3597,15 @@ pub fn turn_summary(
         format!("tokens out: {} ({})", total_out, format_tokens_compact(total_out)),
         format!("models:    {}", models.join(", ")),
     ];
+    if total_cached > 0 {
+        let pct = total_cached as f64 / total_in.max(1) as f64 * 100.0;
+        lines.push(format!(
+            "cached in: {} ({}) · {:.0}%",
+            total_cached,
+            format_tokens_compact(total_cached),
+            pct
+        ));
+    }
     let ratio = if total_in > 0 {
         format!("{:.1}%", total_out as f64 / total_in as f64 * 100.0)
     } else {
@@ -3625,8 +3637,8 @@ fn format_tokens_compact(n: u64) -> String {
 /// what is visible so far — the label refreshes as the turn progresses.
 ///
 /// Returns a map turn_id → label fragment (e.g.
-/// `4 calls: read×2, grep · 45.2k↓/3.1k↑ tok · 💭×3`). Turns with nothing to
-/// report are absent — their dividers stay plain.
+/// `4 calls: read×2, grep · 45.2k/3.1k tok · cache 71% · 💭×3`). Turns with
+/// nothing to report are absent — their dividers stay plain.
 pub fn turn_divider_labels(
     entries: &[SessionTimelineEntry],
     wanted: &HashSet<String>,
@@ -3641,6 +3653,7 @@ pub fn turn_divider_labels(
         seen_calls: HashSet<String>,
         tokens_in: u64,
         tokens_out: u64,
+        tokens_cached: u64,
         reasoning: usize,
         first_at: Option<chrono::DateTime<chrono::FixedOffset>>,
         last_at: Option<chrono::DateTime<chrono::FixedOffset>>,
@@ -3656,6 +3669,7 @@ pub fn turn_divider_labels(
             seen_calls: HashSet::new(),
             tokens_in: 0,
             tokens_out: 0,
+            tokens_cached: 0,
             reasoning: 0,
             first_at: None,
             last_at: None,
@@ -3690,8 +3704,10 @@ pub fn turn_divider_labels(
             }
             "llm.round" => {
                 if let Some(p) = parse_entry_payload(e) {
-                    agg.tokens_in += p.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let inp = p.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    agg.tokens_in += inp;
                     agg.tokens_out += p.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    agg.tokens_cached += p.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0).min(inp);
                 }
             }
             "agent.reasoning" => agg.reasoning += 1,
@@ -3715,11 +3731,16 @@ pub fn turn_divider_labels(
             parts.push(format!("{} calls: {}", agg.calls, names.join(", ")));
         }
         if agg.tokens_in > 0 || agg.tokens_out > 0 {
-            parts.push(format!(
+            let mut tok = format!(
                 "{}/{} tok",
                 format_tokens_compact(agg.tokens_in),
                 format_tokens_compact(agg.tokens_out)
-            ));
+            );
+            if agg.tokens_cached > 0 {
+                let pct = agg.tokens_cached as f64 / agg.tokens_in.max(1) as f64 * 100.0;
+                tok.push_str(&format!(" · cache {:.0}%", pct));
+            }
+            parts.push(tok);
         }
         if agg.reasoning > 0 {
             parts.push(format!("💭×{}", agg.reasoning));
@@ -4188,6 +4209,79 @@ mod tests {
             payload: Some(payload.to_string()),
             refs: TimelineRefs::default(),
         }
+    }
+
+    #[test]
+    fn cached_tokens_surface_in_turn_summary_and_divider() {
+        let round = |turn: &str, in_t: u64, out_t: u64, cached_t: u64| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                "llm.round",
+                Altitude::Detail,
+                serde_json::json!({"input_tokens": in_t, "output_tokens": out_t, "cached_tokens": cached_t}),
+            );
+            e.turn_id = Some(turn.into());
+            e
+        };
+        let end = |turn: &str| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                "turn.end",
+                Altitude::Detail,
+                serde_json::json!({}),
+            );
+            e.turn_id = Some(turn.into());
+            e
+        };
+        let start = |turn: &str| {
+            let mut e = entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                "turn.start",
+                Altitude::Detail,
+                serde_json::json!({}),
+            );
+            e.turn_id = Some(turn.into());
+            e
+        };
+        // 1200 in; cache hits clamp per-round: 600 + min(500, 400) = 1000 → 83%.
+        let all = vec![
+            start("t1"),
+            round("t1", 800, 100, 600),
+            round("t1", 400, 50, 500),
+            end("t1"),
+        ];
+        let idx = all.len() - 1;
+        let lines = turn_summary(&all[idx], &all, idx).expect("turn.end summarizes its rounds");
+        let cached_line = lines
+            .iter()
+            .find(|l| l.starts_with("cached in:"))
+            .expect("cached line present when cache telemetry exists");
+        assert!(cached_line.contains("1000"), "{cached_line}");
+        assert!(cached_line.contains("83%"), "{cached_line}");
+
+        let wanted: HashSet<String> = ["t1"].into_iter().map(String::from).collect();
+        let labels = turn_divider_labels(&all, &wanted);
+        assert!(
+            labels["t1"].contains("1.2k/150 tok"),
+            "base token fragment unchanged: {:?}",
+            labels["t1"]
+        );
+        assert!(labels["t1"].contains("cache 83%"), "{:?}", labels["t1"]);
+
+        // No cache telemetry → no cache fragment anywhere (older sessions).
+        let plain = vec![start("t2"), round("t2", 800, 100, 0), end("t2")];
+        let idx2 = plain.len() - 1;
+        let lines2 = turn_summary(&plain[idx2], &plain, idx2).expect("summarizes");
+        assert!(
+            !lines2.iter().any(|l| l.starts_with("cached in:")),
+            "{lines2:?}"
+        );
+        let wanted2: HashSet<String> = ["t2"].into_iter().map(String::from).collect();
+        let labels2 = turn_divider_labels(&plain, &wanted2);
+        assert!(!labels2["t2"].contains("cache"), "{:?}", labels2["t2"]);
     }
 
     #[test]

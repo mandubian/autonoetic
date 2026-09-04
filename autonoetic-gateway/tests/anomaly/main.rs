@@ -10,3 +10,4 @@ mod support;
 
 mod anomaly_adjudicate_tool_integration;
 mod anomaly_flag_integration;
+mod anomaly_status_tool_integration;

@@ -912,12 +912,15 @@ impl AgentExecutor {
         // #772 A.2: surface this agent's own still-pending constitutional
         // proposals and anomaly flags in its signed per-turn block —
         // "voice with amnesia is no voice". Mirrors the pending_escalation_ids
-        // gathering above. The store queries filter to non-terminal statuses
-        // in SQL (before the LIMIT) so terminal decisions can't displace
-        // still-pending items from the bounded window, and errors propagate:
-        // a signed "authoritative" attestation must not silently omit civic
-        // items because a query failed.
-        let (pending_proposal_ids, pending_flag_ids) = match self.gateway_store.as_deref() {
+        // gathering above. Flags carry provenance summaries (subject,
+        // filing session, severity, age) rather than bare ids: a resumed
+        // model instance must be able to reason about a flag it does not
+        // remember filing. The store queries filter to non-terminal
+        // statuses in SQL (before the LIMIT) so terminal decisions can't
+        // displace still-pending items from the bounded window, and errors
+        // propagate: a signed "authoritative" attestation must not silently
+        // omit civic items because a query failed.
+        let (pending_proposal_ids, pending_flags) = match self.gateway_store.as_deref() {
             Some(store) => {
                 let proposals = store.list_pending_constitutional_proposals(
                     Some(&self.manifest.agent.id),
@@ -927,7 +930,16 @@ impl AgentExecutor {
                     store.list_pending_anomaly_flags(Some(&self.manifest.agent.id), 64)?;
                 (
                     proposals.into_iter().map(|p| p.proposal_id).collect(),
-                    flags.into_iter().map(|f| f.flag_id).collect(),
+                    flags
+                        .into_iter()
+                        .map(|f| crate::runtime::state_attestation::FlagSummary {
+                            flag_id: f.flag_id,
+                            severity: f.severity,
+                            subject_ref: f.subject_ref,
+                            reporter_session_id: f.reporter_session_id,
+                            filed_at: f.created_at,
+                        })
+                        .collect(),
                 )
             }
             None => (Vec::new(), Vec::new()),
@@ -989,7 +1001,7 @@ impl AgentExecutor {
                 pending_user_interaction_ids,
                 pending_escalation_ids,
                 pending_proposal_ids,
-                pending_flag_ids,
+                pending_flags,
                 pending_invitations,
                 budget_meters,
                 burn_rate,

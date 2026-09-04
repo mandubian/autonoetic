@@ -538,10 +538,12 @@
             </div>
             <div class="w-full bg-slate-900 h-2 rounded border border-slate-800 overflow-hidden flex">
               <div id="token-bar-in" class="bg-accentIndigo h-full" style="width: 0%;"></div>
+              <div id="token-bar-cached" class="bg-emerald-500 h-full" style="width: 0%;" title="cached input tokens (cheap cache hits)"></div>
               <div id="token-bar-out" class="bg-accentViolet h-full" style="width: 0%;"></div>
             </div>
             <div class="flex justify-between text-[10px] text-slate-500 font-mono">
               <span id="hud-tokens-in">in: 0</span>
+              <span id="hud-tokens-cached" class="text-emerald-500">cached: 0 (0%)</span>
               <span id="hud-tokens-out">out: 0</span>
             </div>
           </div>
@@ -2828,11 +2830,13 @@
         } else if (eventType === 'llm.round') {
           const inTok = payload?.input_tokens || 0;
           const outTok = payload?.output_tokens || 0;
+          const cachedTok = Math.min(payload?.cached_tokens || 0, inTok);
+          const cachePct = inTok > 0 ? Math.round((cachedTok / inTok) * 100) : 0;
           richBody = `
             <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1 text-[13px]">
               <div class="flex items-center justify-between text-slate-400 font-mono text-[11px]">
                 <span>🧠 LLM Reasoning Round</span>
-                <span>In: ${inTok.toLocaleString()} tok │ Out: ${outTok.toLocaleString()} tok</span>
+                <span>In: ${inTok.toLocaleString()} tok (<span class="text-emerald-500" title="prompt cache hits — billed at the discounted cache-read rate">${cachedTok.toLocaleString()} cached · ${cachePct}%</span>) │ Out: ${outTok.toLocaleString()} tok</span>
               </div>
               ${payload?.thinking || payload?.intent ? `
                 <p class="text-slate-300 text-[13px] italic bg-slate-900/60 p-2 rounded border-l-2 border-accentIndigo pl-2.5 font-sans">${escapeHTML(payload.thinking || payload.intent)}</p>
@@ -4000,7 +4004,11 @@
       if (type === 'turn.start') return `Turn ${payload?.turn_number || ''} started`;
       if (type === 'turn.end') return `Turn completed`;
       if (type === 'operator.message') return payload?.message || payload?.text || 'Operator message';
-      if (type === 'llm.round') return `LLM round (${payload?.input_tokens || 0} in / ${payload?.output_tokens || 0} out tokens)`;
+      if (type === 'llm.round') {
+        const inT = payload?.input_tokens || 0;
+        const cachedT = Math.min(payload?.cached_tokens || 0, inT);
+        return `LLM round (${inT.toLocaleString()} in · ${cachedT.toLocaleString()} cached / ${payload?.output_tokens || 0} out tokens)`;
+      }
       if (type === 'tool.call' || type === 'tool.result') return `${type === 'tool.call' ? 'Called' : 'Result from'} ${payload?.tool_name || payload?.name || ''}`;
       if (type === 'content_write') return `Wrote file: ${payload?.name || payload?.sandbox_path || 'unknown'}`;
       if (type === 'approval.pending') return payload?.command || payload?.summary || 'Approval required';
@@ -4050,6 +4058,7 @@
       let llmCalls = 0;
       let inputTokens = 0;
       let outputTokens = 0;
+      let cachedTokens = 0;
       activeGrants.clear();
 
       eventList.forEach(e => {
@@ -4059,6 +4068,7 @@
             const p = JSON.parse(e.payload);
             if (p.input_tokens) inputTokens += p.input_tokens;
             if (p.output_tokens) outputTokens += p.output_tokens;
+            if (p.cached_tokens) cachedTokens += p.cached_tokens;
           } catch(err) {}
         }
         try {
@@ -4067,7 +4077,10 @@
         } catch(err) {}
       });
 
+      if (cachedTokens > inputTokens) cachedTokens = inputTokens;
+      const freshInputTokens = inputTokens - cachedTokens;
       const totalTokens = inputTokens + outputTokens;
+      const cachePct = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
       const grantCount = lastGrantsData
         ? ((lastGrantsData.session_approval_grants || []).length +
            (lastGrantsData.egress_declassification_grants || []).length)
@@ -4075,15 +4088,19 @@
       document.getElementById('hud-llm-calls').innerText = llmCalls;
       document.getElementById('hud-grants-count').innerText = grantCount;
       document.getElementById('hud-tokens-total').innerText = totalTokens.toLocaleString();
-      document.getElementById('hud-tokens-in').innerText = `in: ${inputTokens.toLocaleString()}`;
+      document.getElementById('hud-tokens-total').title = `${freshInputTokens.toLocaleString()} fresh in + ${cachedTokens.toLocaleString()} cached in + ${outputTokens.toLocaleString()} out`;
+      document.getElementById('hud-tokens-in').innerText = `in: ${inputTokens.toLocaleString()} (fresh: ${freshInputTokens.toLocaleString()})`;
+      document.getElementById('hud-tokens-cached').innerText = `cached: ${cachedTokens.toLocaleString()} (${cachePct}%)`;
       document.getElementById('hud-tokens-out').innerText = `out: ${outputTokens.toLocaleString()}`;
       renderOverview();
 
       if (totalTokens > 0) {
-        document.getElementById('token-bar-in').style.width = `${(inputTokens / totalTokens) * 100}%`;
+        document.getElementById('token-bar-in').style.width = `${(freshInputTokens / totalTokens) * 100}%`;
+        document.getElementById('token-bar-cached').style.width = `${(cachedTokens / totalTokens) * 100}%`;
         document.getElementById('token-bar-out').style.width = `${(outputTokens / totalTokens) * 100}%`;
       } else {
         document.getElementById('token-bar-in').style.width = `0%`;
+        document.getElementById('token-bar-cached').style.width = `0%`;
         document.getElementById('token-bar-out').style.width = `0%`;
       }
     }
