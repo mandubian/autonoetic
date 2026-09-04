@@ -40,14 +40,31 @@
 //!
 //! # Coverage
 //!
-//! `Ri-*`, `O-*`, `U-*` and `I-*` are complete (39 clauses), plus `P-8.1`.
-//! The remaining 181 numbered `P-*` are classified per section in later tranches — "who must comply" is
-//! a semantic judgement per clause, which is why #1284 sequences them as
-//! separate reviewable pieces. They are not silently absent:
+//! Complete: `Ri-*` (18), `O-*` (4), `U-*` (3), `I-*` (14), and §5, §9, §15
+//! of the numbered `P-*` — 73 clauses.
+//!
+//! **148 numbered `P-*` remain**, across §1, §2, §3, §4, §6, §7, §8, §10 and
+//! §11. They are classified per section because "who must comply" is a
+//! semantic judgement per clause, which is why #1284 sequences them as
+//! separate reviewable tranches. They are not silently absent:
 //! [`unclassified_clauses`] enumerates them and
 //! `tests::the_unclassified_count_is_a_ratchet` pins the exact number, so a
 //! new clause cannot arrive unclassified and each tranche has to lower the
 //! constant.
+//!
+//! # Why §5, §9 and §15 came first
+//!
+//! Not size — **inference debt**. Before this tranche, `binds("P-5.2")`
+//! answered from the *enforcement register's section grouping* `P-5`, reached
+//! by parent lookup. That is precisely the inheritance this module warns
+//! against below: it assumes every clause in a section binds what the section
+//! binds. 84 clauses across §2, §5, §7, §9 and §15 were resolving that way, so
+//! the coverage figure part 2 reported was mostly answered by a guess.
+//!
+//! Classifying a section converts its clauses from inherited to declared and
+//! the guess stops being load-bearing for them. §2 and §7 are the remaining
+//! 51; once they land, the register's section groupings can be deleted
+//! outright.
 
 use crate::enforcement_register::{Binds, OwedTo, VerifiedBy};
 use autonoetic_types::principal::PrincipalKindTag;
@@ -82,6 +99,12 @@ const fn duty(id: &'static str, verified_by: VerifiedBy) -> Relation {
 /// An enforcer duty with no invocable beneficiary — an integrity property.
 const fn property(id: &'static str, verified_by: VerifiedBy) -> Relation {
     Relation { id, binds: Binds::Enforcer, owed_to: OwedTo::NoOne, verified_by }
+}
+
+/// An enforcer duty owed to the **served party** — the end user a session
+/// ultimately serves.
+const fn served(id: &'static str, verified_by: VerifiedBy) -> Relation {
+    Relation { id, binds: Binds::Enforcer, owed_to: TO_SERVED, verified_by }
 }
 
 /// §0 Bill of Rights. Uniformly enforcer duties owed to the agent — the
@@ -269,13 +292,123 @@ fn invariants() -> Vec<Relation> {
 /// 182 clauses with a guess and call it declared, which is the failure this
 /// whole model exists to end.
 fn principles() -> Vec<Relation> {
-    vec![
+    let mut out = vec![
         // The causal chain is the substrate every correction-machinery clause
         // stands on. `owed_to: NoOne` deliberately: Ri-0.2 and Ri-0.11 are the
         // duties owed to the agent, and P-8.1 is the property that makes them
         // satisfiable. Recording it as owed to the agent would count one
         // relationship twice.
         property("P-8.1", VerifiedBy::Chokepoint),
+    ];
+    out.extend(section_5());
+    out.extend(section_9());
+    out.extend(section_15());
+    out
+}
+
+/// §5 — I/O Schema Validation. Every clause binds the **enforcer**: §5 is
+/// gateway validation machinery throughout, and not one clause obliges the
+/// reasoner to do anything.
+///
+/// The discriminating axis here is `owed_to`, and it splits the section in a
+/// way the prefix could never express. Most of §5 is well-formedness — nobody
+/// can *claim* that a schema was checked. Three clauses are different: the
+/// hint on a failed coercion, the uniform error envelope, and repair being
+/// strictly opt-in are all things the agent can demand, because each protects
+/// the agent from the gateway. They are the §5 instances of the parent
+/// principle's own promise — "no gateway judgment about the agent's output is
+/// silent or hidden".
+fn section_5() -> Vec<Relation> {
+    vec![
+        property("P-5.1", VerifiedBy::Chokepoint),
+        // `Construction`: the LLM-coercion fallback was *removed*, so
+        // "coercion is deterministic only" holds because the non-deterministic
+        // path is not in `SchemaEnforcementMode` to select.
+        property("P-5.2", VerifiedBy::Construction),
+        // Owed to the agent — a failure that does not say what to do next is
+        // the Ri-0.3 defect wearing a schema error's clothes.
+        right("P-5.3", VerifiedBy::Test),
+        // Logging every pass/coerce/reject is a universal over decisions, so
+        // recording is the enforceable form. The *duty to log* is an integrity
+        // property; the agent's right to read what was logged is Ri-0.2, and
+        // conflating them would count one relationship twice.
+        property("P-5.4", VerifiedBy::Detection),
+        property("P-5.5", VerifiedBy::Test),
+        // "Authoritative runtime state, not LLM claims" is the §5 instance of
+        // I-8: the verdict is a function of recorded state, never of model
+        // output.
+        property("P-5.6", VerifiedBy::Test),
+        property("P-5.7", VerifiedBy::Test),
+        // Owed to the agent, and the reason is the DISCRETION LEAK marker on
+        // the clause itself: repair means the gateway rewriting the agent's
+        // output. "Strictly opt-in, defaults false, attempts clamped" is a
+        // limit on the gateway held *for* the agent.
+        right("P-5.8", VerifiedBy::Chokepoint),
+        property("P-5.9", VerifiedBy::Test),
+        property("P-5.10", VerifiedBy::Test),
+        // Owed to the agent: the agent is the consumer of these errors, and a
+        // uniform envelope is what makes a failure machine-actionable rather
+        // than a string to guess at.
+        right("P-5.11", VerifiedBy::Test),
+        property("P-5.12", VerifiedBy::Test),
+        property("P-5.13", VerifiedBy::Chokepoint),
+        // `Construction`: `FailureClass` is a closed enum and classification
+        // is a pure function of gateway-observed state.
+        property("P-5.14", VerifiedBy::Construction),
+    ]
+}
+
+/// §9 — Agent Install & Provenance. Enforcer throughout, and almost entirely
+/// integrity properties: an agent cannot demand that its own activation be
+/// gated, and would generally prefer it were not.
+///
+/// `P-9.12` is the exception — a health report *returned in a response* is
+/// owed to whoever called for it.
+fn section_9() -> Vec<Relation> {
+    vec![
+        property("P-9.1", VerifiedBy::Chokepoint),
+        // `Construction`: "not a runtime tool" is enforced by the tool being
+        // absent from the registry, so there is no call site to gate.
+        property("P-9.2", VerifiedBy::Construction),
+        // Content-addressing *is* immutability: a changed revision is a
+        // different address.
+        property("P-9.3", VerifiedBy::Construction),
+        property("P-9.4", VerifiedBy::Chokepoint),
+        property("P-9.5", VerifiedBy::Test),
+        property("P-9.6", VerifiedBy::Test),
+        property("P-9.7", VerifiedBy::Chokepoint),
+        property("P-9.8", VerifiedBy::Test),
+        property("P-9.9", VerifiedBy::Chokepoint),
+        property("P-9.10", VerifiedBy::Test),
+        property("P-9.11", VerifiedBy::Chokepoint),
+        right("P-9.12", VerifiedBy::Test),
+        property("P-9.13", VerifiedBy::Test),
+        // DESIGN DEBT — trust domains do not constrain cross-domain spawns
+        // yet. The floor states what closing it requires, not what exists.
+        property("P-9.14", VerifiedBy::Chokepoint),
+        // The single door: N activation surfaces reduced to one gate matrix,
+        // with the startup bootstrap exception made parameter-explicit
+        // (`auto_promote: bool`) rather than implicit — a guarded bypass,
+        // which is what separates a chokepoint from a convention.
+        property("P-9.15", VerifiedBy::Chokepoint),
+        property("P-9.16", VerifiedBy::Test),
+    ]
+}
+
+/// §15 — Data Egress Localization. The one section whose duties run to the
+/// **served party** rather than to the agent or to no one, which is what
+/// `philosophy.md` §3.3 argued in prose: *"an entitlement in §12 would be a
+/// claim, whereas an invariant on the enforcer is a guarantee."*
+///
+/// This is also the section the old `binds()` was most wrong about. It
+/// reported `agent` for all three — a party `I-14` forbids from setting,
+/// stripping or reading a label at all, so the agent could not comply even in
+/// principle.
+fn section_15() -> Vec<Relation> {
+    vec![
+        served("P-15.1", VerifiedBy::Chokepoint),
+        served("P-15.2", VerifiedBy::Chokepoint),
+        served("P-15.3", VerifiedBy::Chokepoint),
     ]
 }
 
@@ -435,7 +568,7 @@ mod tests {
         for id in &ids {
             assert!(seen.insert(*id), "{id} is classified more than once");
         }
-        assert_eq!(seen.len(), 40, "expected the four non-P families plus P-8.1");
+        assert_eq!(seen.len(), 73, "39 non-P clauses + P-8.1 + §5 (14) + §9 (16) + §15 (3)");
     }
 
     /// The four non-`P` families are **complete**. This is the coverage
@@ -462,7 +595,7 @@ mod tests {
     /// and update this number deliberately.
     #[test]
     fn the_unclassified_count_is_a_ratchet() {
-        const UNCLASSIFIED: usize = 181;
+        const UNCLASSIFIED: usize = 148;
         let outstanding = unclassified_among(&active_constitution_clause_ids());
         assert_eq!(
             outstanding.len(),
@@ -527,6 +660,95 @@ mod tests {
         assert!(relation("nonsense").is_none());
     }
 
+    /// A classified section is classified **completely**, and its clauses no
+    /// longer resolve by inheriting the enforcement register's section
+    /// grouping.
+    ///
+    /// The second half is the point of the tranche. Before it,
+    /// `binds("P-5.2")` answered from the register's `P-5` grouping via parent
+    /// lookup — an inference that assumes every clause in a section binds what
+    /// the section binds. A half-classified section is the worst state to be
+    /// in: some clauses declared, the rest still quietly inheriting, with
+    /// nothing marking which is which.
+    #[test]
+    fn a_classified_section_is_classified_completely_and_law_side() {
+        let all = active_constitution_clause_ids();
+        for sec in ["P-5.", "P-9.", "P-15."] {
+            let clauses: Vec<&String> =
+                all.iter().filter(|id| id.starts_with(sec)).collect();
+            assert!(
+                clauses.len() >= 3,
+                "{sec}* extraction went blind: {} clauses",
+                clauses.len()
+            );
+            for id in clauses {
+                // Declared in its own right — `declared_at` returning the id
+                // itself is what distinguishes a classification from an
+                // inherited one.
+                assert_eq!(
+                    declared_at(id),
+                    Some(id.as_str()),
+                    "{id} is not classified in its own right; a section is \
+                     classified completely or not at all"
+                );
+            }
+        }
+        // And the sections still awaiting a tranche are untouched, so this
+        // test cannot pass by the table having swallowed everything.
+        assert!(relation("P-2.20").is_none() || declared_at("P-2.20") != Some("P-2.20"));
+    }
+
+    /// **Inference debt** — the number of `P-*` clauses whose bind direction
+    /// is still answered by inheriting an enforcement-register *section*
+    /// grouping rather than by a declaration. A ratchet, like the
+    /// unclassified count.
+    ///
+    /// This is the metric the `P-*` tranches actually move, and it is not the
+    /// same as coverage. A clause inheriting `P-5`'s relation already reports
+    /// a bind direction, so classifying §5 does not raise the declared count
+    /// by one — it converts an answer from *inferred* to *declared*. Counting
+    /// only coverage would show this tranche as a no-op while it removes 33
+    /// guesses.
+    ///
+    /// Reaches zero when §2 and §7 land, at which point the register's
+    /// section groupings can be deleted and this test replaced by an assertion
+    /// that no such inheritance exists at all.
+    #[test]
+    fn section_grouping_inference_is_a_ratchet() {
+        const INHERITED_FROM_A_SECTION_GROUPING: usize = 51;
+
+        let inherited: Vec<String> = active_constitution_clause_ids()
+            .into_iter()
+            .filter(|id| id.starts_with("P-"))
+            // Not declared law-side …
+            .filter(|id| declared_at(id).is_none())
+            // … but the register resolves it, which can only be through a
+            // section grouping, since every numbered register clause is
+            // law-side (`the_register_and_the_law_table_never_disagree`).
+            .filter(|id| crate::enforcement_register::binds(id).is_some())
+            .collect();
+
+        let mut sections: Vec<&str> = inherited
+            .iter()
+            .map(|id| id.split('.').next().unwrap_or(id))
+            .collect();
+        sections.sort_unstable();
+        sections.dedup();
+
+        assert_eq!(
+            inherited.len(),
+            INHERITED_FROM_A_SECTION_GROUPING,
+            "section-grouping inference changed. Classified a section? Lower \
+             the constant. It must never rise: a clause moving from declared \
+             back to inherited is a regression.\n  still inferring: {sections:?}"
+        );
+        assert_eq!(
+            sections,
+            vec!["P-2", "P-7"],
+            "only §2 and §7 should still infer; §5/§9/§15 are classified"
+        );
+    }
+
     /// `U-*` bind the enforcer and are owed to the served party — the fix for
     /// the §0/§12 contradiction the RFC records as defect 1.3, where §0 says
     /// a clause binds exactly one party while §12 spoke of "the community…
@@ -538,6 +760,43 @@ mod tests {
             assert_eq!(r.binds, Binds::Enforcer, "{id} must bind the enforcer");
             assert_eq!(r.owed_to, TO_SERVED, "{id} is owed to the served party");
         }
+    }
+
+    /// **§15 is owed to the served party**, not to the agent — the whole
+    /// section, not just the `U-*` charter.
+    ///
+    /// Pinned by name because an earlier draft of the §15 tranche could be
+    /// flipped to `owed_to: autonoetic_agent` without a single test failing.
+    /// The claim is load-bearing twice over: it is the RFC's own migration
+    /// entry for `P-15.*`, and it is the correction to what `binds()` used to
+    /// report — `agent`, a party `I-14` forbids from setting, stripping or
+    /// reading an egress label, so the agent could not comply even in
+    /// principle.
+    ///
+    /// Data locality exists for the end user whose content carries the label.
+    /// Recording it as owed to the agent would say the confinement is a
+    /// guarantee *to the party being confined*.
+    #[test]
+    fn egress_localization_is_owed_to_the_served_party() {
+        let clauses: Vec<String> = active_constitution_clause_ids()
+            .into_iter()
+            .filter(|id| id.starts_with("P-15."))
+            .collect();
+        assert_eq!(clauses.len(), 3, "expected the three §15 clauses");
+        for id in &clauses {
+            let r = relation(id).expect("§15 is classified");
+            assert_eq!(r.binds, Binds::Enforcer, "{id} must bind the enforcer");
+            assert_eq!(
+                r.owed_to, TO_SERVED,
+                "{id} is owed to the served party — the end user whose content \
+                 carries the label, never the agent being confined by it"
+            );
+        }
+
+        // I-14 is the plane-integrity substrate underneath, and is *not* a
+        // served-party duty — the substrate/restatement distinction this
+        // module draws for P-8.1 vs Ri-0.11, applied to egress.
+        assert_eq!(relation("I-14").unwrap().owed_to, OwedTo::NoOne);
     }
 
     /// Invariants are classified per clause, not as a family — the `I-`
