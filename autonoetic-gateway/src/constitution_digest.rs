@@ -1134,17 +1134,12 @@ mod tests {
         // that I-14 forbids from touching an egress label at all.
         assert_eq!(clause("P-15.1").binds, "enforcer");
 
-        // Not in the register: reports `undeclared` rather than a guess, and
-        // still carries its enforcement citation. This is the deliberate
-        // trade of #1284 part 1 — 109 of 207 clauses lose a prefix-derived
-        // label, including 9 `Ri-*` whose label happened to be right, in
-        // exchange for the guarantee that no reported direction is inferred.
-        // Narrowing the fallback to `Ri-*` "because rights really do bind the
-        // enforcer" would keep a derivation that silently mislabels the first
-        // right which does not (the `Ri-0.15` seat-standing shape). Closing
-        // the gap properly is #1284 part 2.
+        // `P-1.1` is in no enforcement register entry's clause set, yet it
+        // now resolves a bind direction — which is the whole point of the
+        // law/conformance split. It kept its enforcement citation throughout,
+        // so the two axes are demonstrably independent.
         let p11 = clause("P-1.1");
-        assert_eq!(p11.binds, autonoetic_types::constitution::BINDS_UNDECLARED);
+        assert_eq!(p11.binds, "enforcer");
         assert!(p11.enforcement.as_deref().unwrap_or("").contains("tool_call_processor"));
 
         // Ri-0.10 reported `undeclared` in #1293: it is not in the
@@ -1194,14 +1189,24 @@ mod tests {
         assert_eq!(clause("Ri-0.3").requires.as_deref(), Some("preventive+detective"));
         assert_eq!(clause("I-4").requires.as_deref(), Some("detective"));
         assert_eq!(clause("Ri-0.12").requires.as_deref(), Some("preventive"));
-        // Absent, not guessed, while a clause awaits its tranche — the same
-        // discipline `binds` follows with `BINDS_UNDECLARED`. §2 is fully
-        // declared now, so the examples come from the sections that have had
-        // no tranche at all.
-        assert!(clause("P-1.1").requires.is_none());
-        assert!(clause("P-6.1").requires.is_none());
-        // A declared `P-*`, so this is not vacuous.
+        // Every declared clause now carries all three fields, so nothing on
+        // this surface reports `undeclared` any more — which is the claim
+        // worth pinning, since it is the end state the tranches were for.
         assert_eq!(clause("P-2.20").requires.as_deref(), Some("preventive"));
+        assert_eq!(clause("P-1.1").requires.as_deref(), Some("preventive"));
+        assert_eq!(clause("P-8.10").requires.as_deref(), Some("detective"));
+        for c in &p.clauses {
+            assert!(
+                c.requires.is_some(),
+                "{} has no requirement; the classification is claimed complete",
+                c.id
+            );
+            assert_ne!(
+                c.binds, autonoetic_types::constitution::BINDS_UNDECLARED,
+                "{} still reports an undeclared bind direction",
+                c.id
+            );
+        }
 
         // The retired party names appear nowhere.
         for c in &p.clauses {
@@ -1213,33 +1218,18 @@ mod tests {
             );
         }
 
-        // Coverage, measured through this surface rather than approximated:
-        // the numbers in the #1284 tranches are only meaningful if they come
-        // from the code path a client actually calls.
+        // Coverage is total, measured through this surface rather than
+        // approximated — the numbers in the #1284 tranches only mean anything
+        // if they come from the code path a client actually calls.
         let undeclared = p
             .clauses
             .iter()
             .filter(|c| c.binds == autonoetic_types::constitution::BINDS_UNDECLARED)
             .count();
-        let declared = p.clauses.len() - undeclared;
-        assert!(
-            declared >= 124,
-            "declared bind directions regressed to {declared}/{} — the non-P \
-             families plus the register's section-level groupings should cover \
-             at least this many",
-            p.clauses.len()
+        assert_eq!(
+            undeclared, 0,
+            "every declared clause must resolve a bind direction; {undeclared} do not"
         );
-        // Every remaining gap is a numbered P-* awaiting its section tranche.
-        for c in p.clauses.iter() {
-            if c.binds == autonoetic_types::constitution::BINDS_UNDECLARED {
-                assert!(
-                    c.id.starts_with("P-"),
-                    "{} is undeclared but is not a numbered P-* clause; the \
-                     other families are claimed complete",
-                    c.id
-                );
-            }
-        }
 
         // include_text attaches the full markdown.
         let full = constitution_profile(true);

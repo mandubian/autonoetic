@@ -446,42 +446,45 @@ freeze descriptions of today's Rust into constitutional text — both
 significantly harder to undo than to avoid, since a signed column can only be
 changed by amendment.
 
-**Status:** `requires` is implemented and declared for **all 124 classified
-clauses** (`enforcement_register::Requires`,
-`constitution_relations::requires`). Not back-filled from `verified_by` — the
-mapping does not exist: `construction` and `chokepoint` do imply `preventive`,
-but `test`, `registry` and `sampling` are neutral, so deriving would have
-manufactured judgements nobody made. `I-10` is the proof: `sampling` is how
-determinism is *checked*, while the clause requires prevention.
+**Status: the classification is complete.** All **221** clauses the active
+constitution declares carry a declared `binds`, `owed_to` and `requires`
+(`constitution_relations`, rendered to
+`docs/constitution/law-table.md`). Nothing is inferred from an ID prefix,
+nothing inherits a section grouping, and `requires` is mandatory on the clause
+record — so its coverage is a type property, not a ratchet.
 
-Coverage is now a **type property** rather than a ratchet. Completing the
-`P-*` sections left every `requires`-less constructor unused, so they were
-removed and the field made mandatory on the clause record: a clause cannot
-enter the table without a requirement, and it does not compile if it tries.
-That is the model's own make-the-gap-unrepresentable move applied to the
-model's data.
+Not back-filled from `verified_by`: the mapping does not exist, since `test`,
+`registry` and `sampling` are neutral between the two requirements. `I-10` is
+the proof — `sampling` is how determinism is *checked*, while the clause
+requires prevention.
 
-**Distribution: 99 preventive / 10 detective / 15 both.** The 15 mixed clauses
-are §2.4.3 split candidates, and their concentration is the finding part 3
-needs:
+**What the completed set says, and it is more than bookkeeping:**
 
-| family | clauses | `Both` | rate |
-|---|---|---|---|
-| §0 rights, §O, §12, §13 | 39 | 8 | **20%** |
-| §2, §5, §7, §9, §15 rules | 85 | 7 | 8% |
+- **One clause in 221 binds the reasoner** — `P-2.9`. 215 bind the enforcer,
+  5 the decider. The old `binds()` reported *every* `P-*` as binding the
+  agent; measured, the document is almost entirely a constraint on the party
+  with power. §2 of `concepts/philosophy.md` argues bind direction is the
+  structural novelty here, and 215:1 in the predicted direction is a stronger
+  result than the prose asserts.
+- **38 clauses are agent rights by relation**, of which only **17** carry an
+  `Ri-` prefix and **21** are filed under rule IDs. (`Ri-0.15` is the
+  eighteenth right and is excluded — its `DecisionContext` is owed to the
+  deciding *seat*.) §0's rights/rules ratio, computed from prefixes,
+  understates rights by better than a factor of two, which is a live argument
+  for §2.6: the ratio is an honesty metric, and it is currently dishonest in
+  the direction that flatters the rules.
+- **167 clauses are owed to no one** — integrity properties, the largest group
+  by far and the category the prefix scheme had no home for (defect 1.4(3)).
+  Most of the document turns out to be that category.
+- **`requires`: 185 preventive / 15 detective / 21 both.** The `Both` rate
+  settles at **9.5%**, and the family concentration holds: 20% in §0/§O/§12/§13
+  against 8% in the operational rules, for the reason those sections differ —
+  a right claims something about conduct over time, a rule gates a concrete
+  action.
 
-Mixed clauses cluster in the **rights and invariants**, not the operational
-rules — and the reason is legible once seen. A right makes a claim about
-conduct over time ("never silently", "never grounds for sanction", "cannot be
-retroactively reattributed"), which pairs a representable core with a
-judgment-shaped penumbra. An operational rule gates a concrete action, which is
-either blocked or not.
-
-So the drafting consequence is real but **bounded and localised**: part 3 faces
-~15 split candidates, mostly in §0 and §13, not a document-wide restructure.
-Splitting them is a statement change requiring its own amendment (§8), so the
-practical order is: adopt the columns with `Both` recorded where it holds, then
-split those clauses in a later amendment if the marking proves load-bearing.
+So part 3 faces ~21 split candidates, mostly in the rights and invariants, and
+the columns can be adopted with `Both` recorded where it holds. Splitting is a
+statement change needing its own amendment (§8).
 
 `achieved` is **not** yet moved. `verified_by` still sits on the clause record
 and is rendered in the law table under a header saying it is conformance data
