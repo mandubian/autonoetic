@@ -219,6 +219,70 @@ fn every_registered_clause_appears_in_the_signed_text() {
     }
 }
 
+/// Collapse runs of whitespace, so a phrase that spans a hard-wrapped line
+/// can be matched as written.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// **The correcting sentence must itself be true**, and computed rather than
+/// typed.
+///
+/// The amendment exists because a false asserted sentence sat pinned in signed
+/// text for months. Its correction shipped in review with the wrong number —
+/// "181 of the 182" and one exception, when the answer is 180 and two, because
+/// `P-2.21` binds the decider. The document contradicted itself: the
+/// measurement table said `enforcer: 215`, and 215 requires 180.
+///
+/// Prose that states a count about the register is the same failure mode as
+/// prose that states a bind direction about a clause. Both must be read back
+/// from the data, not maintained by hand.
+#[test]
+fn the_measured_counts_in_the_signed_text_match_the_register() {
+    use autonoetic_gateway::constitution_relations as rel;
+    use autonoetic_gateway::enforcement_register::Binds;
+
+    let p_clauses: Vec<&'static str> = rel::relations()
+        .iter()
+        .filter(|r| r.id.starts_with("P-"))
+        .map(|r| r.id)
+        .collect();
+    let enforcer = p_clauses
+        .iter()
+        .filter(|id| rel::relation(id).map(|f| f.binds) == Some(Binds::Enforcer))
+        .count();
+    let exceptions: Vec<&str> = p_clauses
+        .iter()
+        .copied()
+        .filter(|id| rel::relation(id).map(|f| f.binds) != Some(Binds::Enforcer))
+        .collect();
+
+    for version in versions_with_relations() {
+        // Whitespace-collapsed: the constitution is hard-wrapped at ~70
+        // columns, so any phrase long enough to be worth asserting spans a
+        // line break. Searching the raw text finds nothing and reports the
+        // claim as missing — a false negative this file has produced twice.
+        let text = squash(&version_text(&version));
+        assert!(
+            text.contains(&format!(
+                "**{enforcer} of the {} `P-*` bind the",
+                p_clauses.len()
+            )),
+            "{version}'s correction sentence does not state the measured count \
+             ({enforcer} of {}). Registered exceptions: {exceptions:?}",
+            p_clauses.len()
+        );
+        // Every exception must be named. A count with an unnamed exception is
+        // how `P-2.21` got erased from the first draft.
+        for id in &exceptions {
+            assert!(
+                text.contains(&format!("`{id}` binds")),
+                "{version} states the count but does not name the exception {id}"
+            );
+        }
+    }
+}
+
 /// The amendment's own before/after, captured as a test.
 ///
 /// The process asks for something that fails before the change and passes

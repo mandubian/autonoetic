@@ -19,9 +19,13 @@ The prior text said, in §0:
 > everything under §0 binds the gateway, everything under §1–§11 binds the
 > agent, and everything under §O binds the decider.
 
-Classifying all 221 clauses (#1284) found that **181 of the 182 `P-*` bind the
-enforcer, not the agent.** Only `P-2.9` binds the reasoner — "they must attach
-`execution_trace_id` from a completed run".
+Classifying all 221 clauses (#1284) found that **180 of the 182 `P-*` bind the
+enforcer.** The exceptions are two: `P-2.9` binds the reasoner ("they must
+attach `execution_trace_id` from a completed run"), and `P-2.21` binds the
+**decider** — an agent-decider that cannot determine a gate owes escalation
+rather than rejection. `P-2.21` is the one operational rule that binds a
+*seat*, and it is the reason `binds` ranges over powers rather than occupants:
+a human operator in that position owes exactly the same thing.
 
 That is not drift. The sentence was asserted, and a test pinned it
 (`principles_bind_agent_rights_bind_gateway`), so the implementation agreed
@@ -143,6 +147,41 @@ because the same test that reads the document reads the register. It is RFC
   prevention and detection usually carries two obligations under one id, and
   splitting one is a statement change needing its own amendment. Marking is
   the honest interim.
+
+## One defect repaired, one left for a decision
+
+Both are pre-existing malformations that make the *digest's* enforcement table
+record the wrong string for a clause. Signing freezes whatever is here, so
+this is the last cheap moment for either.
+
+**Repaired: `P-9.13`.** Its row was missing the `Source` cell — 4 cells where
+every neighbour has 5 — so `extract_enforcement_table`, which filters empty
+cells and reads `cells[3]`, recorded its **Status** ("ENFORCED") as the
+enforcement citation. The `Source` cell is restored and `cells[3]` is now the
+real citation. No statement text changes.
+
+**Not repaired: `P-5.2`.** Its statement contains a literal `|` inside a code
+span — `` `Disabled | Deterministic` `` — which splits the row, so `cells[3]`
+lands on the **Source** and the digest records `schema-enforcement-hook.md` as
+the enforcement citation. Three ways to fix it, each with a cost, and the
+choice is not the drafter's:
+
+1. **Escape it (`\|`)** — does nothing. `extract_enforcement_table` uses a
+   plain `line.split('|')`, which ignores markdown escaping, so the row still
+   splits. It would change the signed bytes while fixing nothing.
+2. **Teach the parser to honour `\|`** — correct, but **six already-signed
+   versions** (2026.05.05 through 2026.05.29) contain escaped pipes, so their
+   digests would no longer reproduce. "The digest is the identity of the law"
+   is precisely what breaks.
+3. **Rewrite the statement** to avoid the character (`` `Disabled` or
+   `Deterministic` ``) — meaning-preserving and typographical, but it *is* an
+   edit to a clause statement, which this amendment otherwise does not do.
+
+(3) is the only one that works, and it is a deliberate exception to this
+amendment's "no clause statement is edited" claim rather than something to
+slip in. Recorded here so the next signer decides knowingly; the defect is
+inert for enforcement (the citation is documentation, not a check) and affects
+only what the digest hashes.
 
 ## Signing and activation
 
