@@ -291,9 +291,12 @@ pub fn constitution_profile(
                 .unwrap_or_else(|| {
                     autonoetic_types::constitution::BINDS_UNDECLARED.to_string()
                 });
+            let requires = crate::constitution_relations::requires(&id)
+                .map(|r| r.label().to_string());
             ConstitutionClause {
                 id,
                 binds,
+                requires,
                 gloss,
                 enforcement,
             }
@@ -573,8 +576,14 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
 pub fn clause_index(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
 
-    for line in text.lines() {
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+
+        // Table rows are one physical line by construction, so no folding.
         if line.trim_start().starts_with('|') {
             let cells: Vec<&str> = line.trim_start().trim_start_matches('|').split('|').collect();
             let id = cells.first().map(|c| c.trim()).unwrap_or_default();
@@ -584,28 +593,49 @@ pub fn clause_index(text: &str) -> Vec<(String, String)> {
             }
             continue;
         }
+
         // `- **I-12** Any collective decision mechanism …` and the two whose
         // bold span carries a parenthetical: `- **I-13 (Creation is not
         // delegation.)** A newborn agent's …`.
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("- **I-") {
-            let id: String = std::iter::once('I')
-                .chain("-".chars())
-                .chain(
-                    rest.chars()
-                        .take_while(|c| c.is_ascii_digit() || *c == '.'),
-                )
-                .collect();
-            if !is_whole_clause_id(&id) || !seen.insert(id.clone()) {
-                continue;
-            }
-            // The statement is whatever follows the closing `**`.
-            let gloss = rest
-                .split_once("**")
-                .map(|(_, tail)| first_sentence(tail.trim()))
-                .unwrap_or_default();
-            out.push((id, gloss));
+        let Some(rest) = trimmed.strip_prefix("- **I-") else {
+            continue;
+        };
+        let id: String = std::iter::once('I')
+            .chain("-".chars())
+            .chain(rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.'))
+            .collect();
+        if !is_whole_clause_id(&id) || !seen.insert(id.clone()) {
+            continue;
         }
+
+        // **Fold the continuation lines before looking for a sentence end.**
+        // The `I-*` bullets are hard-wrapped prose, so 12 of the 14 have no
+        // sentence terminator on their first physical line — `first_sentence`
+        // then returned the whole line, and the rendered gloss stopped
+        // mid-clause ("Gateway does not make recovery decisions on the
+        // agent's"). A continuation is any indented non-empty line up to the
+        // blank line or next bullet that ends the item.
+        let mut folded = rest.to_string();
+        while i < lines.len() {
+            let next = lines[i];
+            let is_continuation = !next.trim().is_empty()
+                && next.starts_with(char::is_whitespace)
+                && !next.trim_start().starts_with("- ");
+            if !is_continuation {
+                break;
+            }
+            folded.push(' ');
+            folded.push_str(next.trim());
+            i += 1;
+        }
+
+        // The statement is whatever follows the closing `**`.
+        let gloss = folded
+            .split_once("**")
+            .map(|(_, tail)| first_sentence(tail.trim()))
+            .unwrap_or_default();
+        out.push((id, gloss));
     }
     out
 }
@@ -851,6 +881,74 @@ fn normalize_config_path_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
 
+    /// Hard-wrapped `I-*` bullets are folded before the sentence split.
+    ///
+    /// The constitution wraps its invariant bullets at ~70 columns, so 12 of
+    /// the 14 have no sentence terminator on their first physical line.
+    /// Scanning `text.lines()` and calling `first_sentence` on one line
+    /// returned the line itself, and the rendered gloss stopped mid-clause —
+    /// "Gateway does not make recovery decisions on the agent's". Shipped in
+    /// #1304, caught in review of #1306.
+    ///
+    /// This is the same hard-wrap trap that makes single-line phrase greps
+    /// unreliable against this document; worth a test rather than a habit.
+    #[test]
+    fn wrapped_invariant_bullets_fold_before_the_sentence_split() {
+        // Built by joining rather than as a multi-line literal on purpose:
+        // Rust's `\<newline>` continuation strips the *leading whitespace* of
+        // the following line, which is exactly the indent that marks a
+        // continuation — so the obvious fixture silently tests the wrong
+        // input. (Cost me a red test to notice.)
+        let doc = [
+            "- **I-4** Gateway does not make recovery decisions on the agent's",
+            "  behalf. (See §14.) **Exception:** P-4.11 is a recovery decision.",
+            "",
+            "- **I-5** Rules live in manifests. Hard-coded constants are discouraged.",
+        ]
+        .join("\n");
+        let doc = doc.as_str();
+        let idx = clause_index(doc);
+        assert_eq!(idx.len(), 2, "both bullets indexed: {idx:?}");
+        assert_eq!(
+            idx[0],
+            (
+                "I-4".to_string(),
+                "Gateway does not make recovery decisions on the agent's behalf.".to_string()
+            ),
+            "the continuation line must be folded in before splitting"
+        );
+        // A bullet whose first line is already a complete sentence must not
+        // absorb the *next* bullet.
+        assert_eq!(idx[1].0, "I-5");
+        assert_eq!(idx[1].1, "Rules live in manifests.");
+
+        // Every invariant in the real document ends up with a terminated
+        // sentence or a deliberate non-sentence — never a mid-word cut.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent")
+            .to_path_buf();
+        let text = std::fs::read_to_string(
+            root.join(autonoetic_types::config::default_constitution_source_path()),
+        )
+        .expect("read constitution");
+        let invariants: Vec<(String, String)> = clause_index(&text)
+            .into_iter()
+            .filter(|(id, _)| id.starts_with("I-"))
+            .collect();
+        assert_eq!(invariants.len(), 14);
+        for (id, gloss) in &invariants {
+            assert!(
+                gloss.len() > 40,
+                "{id}'s gloss is suspiciously short — {gloss:?}"
+            );
+            assert!(
+                !gloss.ends_with("the agent's") && !gloss.ends_with("declared failure action"),
+                "{id} is still truncated mid-clause: {gloss:?}"
+            );
+        }
+    }
+
     /// The dot rule is **family-dependent**, and getting it uniform in either
     /// direction is a real miscount: requiring a dot everywhere drops all 21
     /// `O-`/`U-`/`I-` clauses, and allowing one everywhere admits `P-2` — a
@@ -1088,6 +1186,18 @@ mod tests {
              span carries a parenthetical (I-13, I-14)"
         );
         assert_eq!(p.clauses.len(), 221, "every declared clause is indexed");
+
+        // `requires` is a **constitutional** field, so it has to reach the
+        // API too — §2.4.2's reader-facing pair is the law table *and* this
+        // surface, and a peer comparing law against ours reads the
+        // requirement, not our code citation.
+        assert_eq!(clause("Ri-0.3").requires.as_deref(), Some("preventive+detective"));
+        assert_eq!(clause("I-4").requires.as_deref(), Some("detective"));
+        assert_eq!(clause("Ri-0.12").requires.as_deref(), Some("preventive"));
+        // Absent, not guessed, while a clause awaits its tranche — the same
+        // discipline `binds` follows with `BINDS_UNDECLARED`.
+        assert!(clause("P-2.20").requires.is_none());
+        assert!(clause("P-1.1").requires.is_none());
 
         // The retired party names appear nowhere.
         for c in &p.clauses {

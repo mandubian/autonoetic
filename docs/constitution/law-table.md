@@ -247,19 +247,19 @@ A right is a *view*, not a family: an enforcer duty owed to the agent is an agen
 | `O-6` | `decider` | `autonoetic_agent` | `detective` | `detection` | A proposal review authority owes every Ri-0.8 proposal a **recorded decision** (`approved`/`rejected`/`deferred`/`under_review`) with motivation once actioned, **within a bounded adjudication window**. |
 | `O-7` | `decider` | `autonoetic_agent` | `detective` | `detection` | An anomaly review authority owes every Ri-0.18 flag a **recorded decision** (`confirmed`/`dismissed`/`deferred`, with `under_review` as the non-terminal holding state) with motivation once actioned, **within a bounded adjudication window**. |
 | `I-1` | `enforcer` | none *(integrity property)* | `preventive` | `chokepoint` | No native-tool code path bypasses `policy.can_invoke_tool`. |
-| `I-2` | `enforcer` | none *(integrity property)* | `preventive` | `chokepoint` | No causal-chain-visible state transition is acknowledged |
-| `I-3` | `enforcer` | none *(integrity property)* | `preventive` | `construction` | Redaction runs before persistence on every path that can |
-| `I-4` | `enforcer` | none *(integrity property)* | `detective` | `detection` | Gateway does not make recovery decisions on the agent's |
+| `I-2` | `enforcer` | none *(integrity property)* | `preventive` | `chokepoint` | No causal-chain-visible state transition is acknowledged before the corresponding event is durable on disk. |
+| `I-3` | `enforcer` | none *(integrity property)* | `preventive` | `construction` | Redaction runs before persistence on every path that can contain secret-shaped content. |
+| `I-4` | `enforcer` | none *(integrity property)* | `detective` | `detection` | Gateway does not make recovery decisions on the agent's behalf. |
 | `I-5` | `enforcer` | none *(integrity property)* | `detective` | `registry` | Rules live in manifests or declared configuration |
-| `I-6` | `enforcer` | none *(integrity property)* | `preventive` | `detection` | Every enforcement decision is attributable to a rule ID in |
+| `I-6` | `enforcer` | none *(integrity property)* | `preventive` | `detection` | Every enforcement decision is attributable to a rule ID in the causal chain. |
 | `I-7` | `enforcer` | none *(integrity property)* | `detective` | `detection` | Rights (§0) supersede rules (§1–§11) on conflict. |
-| `I-8` | `enforcer` | `autonoetic_agent` | `preventive` | `construction` | Gateway policy decisions (accept / reject) are functions |
-| `I-9` | `enforcer` | `autonoetic_agent` | `preventive` | `construction` | Every session termination is attributable to exactly one |
-| `I-10` | `enforcer` | none *(integrity property)* | `preventive` | `sampling` | Gateway decision surfaces are deterministic over declared |
-| `I-11` | `enforcer` | none *(integrity property)* | `preventive` | `registry` | Every constitutional invariant has a declared failure action |
-| `I-12` | `enforcer` | none *(integrity property)* | `preventive` | `construction` | Any collective decision mechanism among principals (voting, |
-| `I-13` | `enforcer` | none *(integrity property)* | `preventive` | `test` | A newborn agent's capabilities are |
-| `I-14` | `enforcer` | none *(integrity property)* | `preventive` | `chokepoint` | Egress labels (§15) are |
+| `I-8` | `enforcer` | `autonoetic_agent` | `preventive` | `construction` | Gateway policy decisions (accept / reject) are functions only of declared actions, capabilities, and recorded state. |
+| `I-9` | `enforcer` | `autonoetic_agent` | `preventive` | `construction` | Every session termination is attributable to exactly one reason in the closed list declared under Ri-0.12. |
+| `I-10` | `enforcer` | none *(integrity property)* | `preventive` | `sampling` | Gateway decision surfaces are deterministic over declared inputs |
+| `I-11` | `enforcer` | none *(integrity property)* | `preventive` | `registry` | Every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. |
+| `I-12` | `enforcer` | none *(integrity property)* | `preventive` | `construction` | Any collective decision mechanism among principals (voting, weighted advisory verdicts, or any future franchise) must collapse an agent and its spawn-descendants into a single principal for weight purposes — extending P-10.7's spawn-tree trust-boundary collapse (defined for gate self-approval) to any future decision weight. |
+| `I-13` | `enforcer` | none *(integrity property)* | `preventive` | `test` | A newborn agent's capabilities are granted through the promotion gate — evidence plus the approved capability delta (P-2.25) — and are neither inherited from, nor bounded by, the creating agent's own capabilities. |
+| `I-14` | `enforcer` | none *(integrity property)* | `preventive` | `chokepoint` | Egress labels (§15) are declared metadata manipulated only by the gateway |
 | `P-15.1` | `enforcer` | `served_user` | — | `chokepoint` | Content carrying an egress label must never be included in a request to a sink the label excludes |
 | `P-15.2` | `enforcer` | `served_user` | — | `chokepoint` | Any surface that moves session-derived bytes off-machine — sandbox `share_net`, gateway web tools, hook deliveries, remote MCP calls, OFP federation, context compression — gates on session taint before send |
 | `P-15.3` | `enforcer` | `served_user` | — | `chokepoint` | A label widens only via an explicit, operator-approved **declassification grant** — content- or host-scoped, optionally expiring, revocable at any time, and causal-logged (`egress.declassified` on grant, `grant_revocation` on revoke). |

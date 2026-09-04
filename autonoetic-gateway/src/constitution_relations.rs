@@ -138,11 +138,13 @@ const fn right_r(
     }
 }
 
-const fn duty(id: &'static str, verified_by: VerifiedBy) -> Relation {
-    Relation { id, binds: Binds::Decider, owed_to: TO_AGENT, requires: None, verified_by }
-}
-
-/// [`duty`] with its `requires` declared.
+// `duty` (the `requires`-less constructor) is gone: every `O-*` declares its
+// `requires`, so nothing used it. Removing it rather than keeping it dead
+// means a new decider obligation cannot be added without declaring the field —
+// the constructor set enforces coverage for completed families. The three
+// remaining `requires`-less constructors survive only because the `P-*`
+// section tranches predate the field; each should go as its family completes.
+/// A decider obligation with its `requires` declared.
 const fn duty_r(
     id: &'static str,
     requires: Requires,
@@ -320,9 +322,14 @@ fn obligations() -> Vec<Relation> {
 /// this table makes, not a description of anything built.
 fn served_party() -> Vec<Relation> {
     vec![
-        Relation { id: "U-1", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Chokepoint },
-        Relation { id: "U-2", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Preventive), verified_by: VerifiedBy::Test },
-        Relation { id: "U-3", binds: Binds::Enforcer, owed_to: TO_SERVED, requires: Some(Requires::Both), verified_by: VerifiedBy::Test },
+        // requires: a refusal the gateway can ignore is not a refusal — the
+        // surface must make ignoring it impossible, not merely logged.
+        served_r("U-1", Requires::Preventive, VerifiedBy::Chokepoint),
+        served_r("U-2", Requires::Preventive, VerifiedBy::Test),
+        // requires: export is preventive (it either produces the account or
+        // fails); deletion is detective — you cannot prove absence, only
+        // record and audit the shredding.
+        served_r("U-3", Requires::Both, VerifiedBy::Test),
     ]
 }
 

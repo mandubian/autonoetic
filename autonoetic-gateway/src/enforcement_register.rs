@@ -183,29 +183,6 @@ impl OwedTo {
     }
 }
 
-/// How compliance is established — a **floor**, not an exact modality
-/// (RFC #1283 §2.4).
-///
-/// Each clause declares a *minimum* that implementations may exceed, because
-/// modality is itself partly implementation-shaped: Rust reaches
-/// [`VerifiedBy::Construction`] for `Ri-0.12` with a closed enum, while a
-/// Python re-implementation cannot and would reach for
-/// [`VerifiedBy::Registry`] plus [`VerifiedBy::Test`]. Pinning an exact
-/// modality would silently presume this implementation's type system.
-///
-/// **[`VerifiedBy::Detection`] is not a deficiency.** The variant order reads
-/// as strength-of-prevention, and `Construction` is strictly strongest because
-/// it covers call sites that do not exist yet — but a floor is *per clause*.
-/// For a universal negative over behaviour (`P-5`'s discretion leaks, `O-6`'s
-/// SLA breaches) no static check can succeed, so `Detection` is the *correct*
-/// answer, not a weaker one. Never "upgrade" such a floor: doing so demands
-/// the impossible and produces a false claim of proof.
-///
-/// **Deliberately not `Ord`.** An earlier version derived it, which asserted
-/// a total order this doc comment spends its last paragraph denying, and
-/// invited `verified_by >= VerifiedBy::Chokepoint` — a comparison with no
-/// meaning. Nothing ever used it. See
-/// `docs/proposals/constitution-bind-direction-model.md` §2.4.
 /// What a clause **requires** of any implementation: that non-compliance be
 /// made impossible, that each occurrence be recorded, or both.
 ///
@@ -269,6 +246,39 @@ impl Requires {
     pub const ALL: [Requires; 3] = [Requires::Preventive, Requires::Detective, Requires::Both];
 }
 
+/// How compliance is established. **The model here is superseded — read
+/// RFC #1283 §2.4.1 first**
+/// (`docs/proposals/constitution-bind-direction-model.md`).
+///
+/// The values in [`crate::constitution_relations`] were assigned under the
+/// "floor" account below, which is why it is retained. It is not the intended
+/// design: a floor presumes a total order, and there is none. `Construction`
+/// is not stronger than [`VerifiedBy::Detection`] for a universal negative
+/// over behaviour — for `I-4` or `O-6`, detection is the *only* modality that
+/// applies, so "at least X" is not a well-formed requirement. The field also
+/// means two different things depending on the clause: this implementation's
+/// mechanism for an enforced one, a requirement for an unmet one.
+///
+/// Replacement: `requires` (`preventive | detective` — a non-empty set,
+/// constitutional) plus `achieved` (modality + site, per implementation).
+///
+/// **Never "upgrade" a `Detection` value** on a behavioural universal. The
+/// variant order reads as a quality ladder, which makes raising them the
+/// tempting cleanup; it would demand the impossible and assert a proof nobody
+/// holds. Under `requires` this stops being a temptation, because
+/// `detective` is a positive statement about the clause's nature rather than a
+/// low rung.
+///
+/// **Deliberately not `Ord`.** An earlier version derived it, asserting the
+/// total order the paragraph above denies and inviting
+/// `verified_by >= VerifiedBy::Chokepoint`, a comparison with no meaning.
+/// Nothing ever used it.
+///
+/// The retained account still explains why modality cannot be pinned exactly:
+/// Rust reaches `Construction` for `Ri-0.12` via a closed enum, while a Python
+/// re-implementation cannot and would reach for [`VerifiedBy::Registry`] plus
+/// [`VerifiedBy::Test`]. That observation is what `achieved` captures, and it
+/// is the half of §2.4 that survived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerifiedBy {
     /// The bad state is unrepresentable — type, signature, or closed enum.
