@@ -2551,8 +2551,8 @@ fn handle_credential_put(
         input
     };
 
-    autonoetic_gateway::vault::ensure_default_key(&config.agents_dir)?;
-    let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+    autonoetic_gateway::vault::ensure_default_key(&gateway_dir)?;
+    let vault_path = autonoetic_gateway::vault::default_vault_path(&gateway_dir);
     let mut vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path)?;
     vault.set_secret(secret_name, secret_value);
     vault.persist_to_file(&vault_path)?;
@@ -4018,7 +4018,7 @@ llm_presets:
         assert_eq!(cred.secret_name, "OPENWEATHER_API_KEY");
         assert_eq!(cred.allowed_hosts, vec!["api.openweathermap.org"]);
 
-        let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+        let vault_path = autonoetic_gateway::vault::default_vault_path(&gateway_dir);
         let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path).unwrap();
         assert_eq!(
             vault.get_secret("OPENWEATHER_API_KEY").unwrap().expose_secret(),
@@ -4072,7 +4072,8 @@ llm_presets:
         std::env::remove_var("TEST_AUTONOETIC_CREDO");
 
         let config = autonoetic_gateway::config::load_config(&config_path).unwrap();
-        let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        let vault_path = autonoetic_gateway::vault::default_vault_path(&gateway_dir);
         let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path).unwrap();
         assert_eq!(
             vault.get_secret("TEST_KEY").unwrap().expose_secret(),

@@ -1401,18 +1401,24 @@ pub fn approve_request_with_options(
         });
 
         // Store secrets in vault — fail-closed, require VAULT_PATH.
-        // Fall back to the config's agents_dir when the env var is unset
-        // (the normal case for approvals arriving via the TUI; credential_setup
-        // resolves the vault path at tool-execution time but does not set the
-        // env var, so the approval handler needs the fallback).
+        // Fall back to the gateway dir (config.runtime_dir) when the env var
+        // is unset (the normal case for approvals arriving via the TUI;
+        // credential_setup resolves the vault path at tool-execution time but
+        // does not set the env var, so the approval handler needs the
+        // fallback). This must match every other vault site (credential_check,
+        // sandbox_exec, artifact_prepare): the reorg made runtime_dir the
+        // single vault home; agents_dir is ingest-only.
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::vault::default_vault_path(&config.agents_dir));
+            .unwrap_or_else(|| {
+                crate::vault::default_vault_path(&crate::execution::gateway_root_dir(config))
+            });
         // Ensure the vault key is available (credential_setup already called
         // this, but the approval handler may run in a context where the env var
         // was cleared or unreachable — the call is idempotent/nop if already set).
-        let _ = crate::vault::ensure_default_key(&config.agents_dir);
+        let _ =
+            crate::vault::ensure_default_key(&crate::execution::gateway_root_dir(config));
         let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
@@ -2464,7 +2470,7 @@ mod tests {
 
         // The discriminating assertion: had the effects run before the guard,
         // this would now be "second".
-        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        let vault_path = crate::vault::default_vault_path(&gateway_dir);
         let vault = crate::vault::Vault::load_from_file(&vault_path).unwrap();
         use secrecy::ExposeSecret;
         assert_eq!(
@@ -2570,7 +2576,7 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        let vault_path = crate::vault::default_vault_path(&gateway_dir);
         // No vault file at all, or one without the secret — either proves the
         // refusal happened before the write.
         if let Ok(vault) = crate::vault::Vault::load_from_file(&vault_path) {

@@ -20,19 +20,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// When `AUTONOETIC_VAULT_KEY` / `AUTONOETIC_VAULT_KEY_PATH` are unset, ensures
-/// `{agents_dir}/.gateway/vault.key` exists (see [`crate::vault::ensure_default_key`]).
+/// `{runtime_dir}/vault.key` exists (see [`crate::vault::ensure_default_key`]).
 ///
 /// Returns `true` if this invocation created a new key file.
 pub fn ensure_vault_key_for_bootstrap_workspace(config: &GatewayConfig) -> Result<bool> {
-    let key_path = crate::execution::gateway_root_dir(&config).join("vault.key");
+    let gateway_dir = crate::execution::gateway_root_dir(config);
+    let key_path = gateway_dir.join("vault.key");
     let had_file_before = key_path.exists();
     if std::env::var("AUTONOETIC_VAULT_KEY").is_ok()
         || std::env::var("AUTONOETIC_VAULT_KEY_PATH").is_ok()
     {
-        crate::vault::ensure_default_key(&config.agents_dir)?;
+        crate::vault::ensure_default_key(&gateway_dir)?;
         return Ok(false);
     }
-    crate::vault::ensure_default_key(&config.agents_dir)?;
+    crate::vault::ensure_default_key(&gateway_dir)?;
     let created = !had_file_before && key_path.exists();
     if created {
         tracing::info!(
