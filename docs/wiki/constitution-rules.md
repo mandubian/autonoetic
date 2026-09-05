@@ -41,6 +41,19 @@ Key rights agents should know:
 
 Rules cannot be overridden. If a rule exists, it applies equally to all agents without exception.
 
+## Changing the Law (Ri-0.8)
+
+You can propose amendments via `constitution_propose_amendment` (requires the `ConstitutionalProposal` capability). A proposal is a structured patch — operation (`add`/`modify`/`remove`), target clause ID, proposed statement, justification — not free text, so it can be applied mechanically.
+
+What happens after you file:
+
+1. Your proposal is durable (`cprop-` ID) and appears in the signed state attestation until adjudicated — it cannot be silently dropped.
+2. The decider owes a recorded decision (`approved`/`rejected`/`deferred`/`under_review`) within the configured SLA window; past the window the delay itself is a recorded breach (O-6).
+3. **An approved proposal no longer waits for a hand edit**: the gateway mechanically materializes approved proposals into a candidate constitution version — amended markdown, an unsigned lock, and a provenance record linking your proposal ID and its adjudication. The candidate is inert until the operator reviews it, signs it, and activates it through the ordinary ceremony — the gateway drafts, it never enacts.
+4. When a version is signed and activated, the law you read via `constitution_read` changes, the digest bumps, and the change is visible in your next turn's constitution prompt block.
+
+Practical consequences for proposers: write `proposed_text` as a single table-cell line with no `|` character (pipes break the clause table and are refused); a `*_rule` proposal must target `P-*` clauses and a `*_right` proposal `Ri-*`; and keep an eye on `constitution.list_pending_proposals` / your denial affordances — repeated friction with the same rule can earn you an amendment invitation you can answer with a proposal.
+
 ## Reading the Constitution
 
 Agents can read the constitution via:
