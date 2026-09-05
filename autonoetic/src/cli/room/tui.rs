@@ -4903,18 +4903,62 @@ pub fn run(
                                             "session_id": &*root_session_id,
                                         })) {
                                             Ok(v) => {
-                                                let pn = v.get("preset_name").and_then(|x| x.as_str()).unwrap_or("?");
-                                                let prov = v.get("provider").and_then(|x| x.as_str()).unwrap_or("?");
-                                                let mdl = v.get("model").and_then(|x| x.as_str()).unwrap_or("?");
-                                                let ovr = v.get("session_override_preset").and_then(|x| x.as_str()).filter(|x| !x.is_empty());
-                                                let avail = presets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
-                                                let binding = match ovr {
-                                                    Some(p) => format!(" (override: {p})"),
-                                                    None => String::new(),
-                                                };
-                                                status = Some(format!(
-                                                    "→ {pn}{binding}: {prov}/{mdl}   available: {avail}"
-                                                ));
+                                                // The gateway's running config is the
+                                                // authoritative preset catalog — only
+                                                // fall back to the local config file when
+                                                // an older gateway doesn't send it.
+                                                let avail = v
+                                                    .get("available_presets")
+                                                    .and_then(|a| a.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter()
+                                                            .filter_map(|p| {
+                                                                p.get("name").and_then(|n| n.as_str())
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                            .join(" · ")
+                                                    })
+                                                    .filter(|s| !s.is_empty())
+                                                    .unwrap_or_else(|| {
+                                                        presets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" · ")
+                                                    });
+                                                if let Some(e) = v
+                                                    .get("agent_load_error")
+                                                    .and_then(|x| x.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                {
+                                                    status = Some(format!(
+                                                        "✗ {e}   available presets: {avail}"
+                                                    ));
+                                                } else if v.get("agent_bound").and_then(|x| x.as_bool()) == Some(false) {
+                                                    // Session opened, no turn yet: nothing
+                                                    // bound — but a preset set now applies
+                                                    // from the first turn.
+                                                    let ovr = v
+                                                        .get("binding")
+                                                        .and_then(|b| b.get("preset_override"))
+                                                        .and_then(|x| x.as_str())
+                                                        .filter(|s| !s.is_empty());
+                                                    let cur = match ovr {
+                                                        Some(p) => format!(" · override: {p}"),
+                                                        None => String::new(),
+                                                    };
+                                                    status = Some(format!(
+                                                        "ℹ no agent bound yet — /model <preset> applies from the first turn{cur}   available: {avail}"
+                                                    ));
+                                                } else {
+                                                    let pn = v.get("preset_name").and_then(|x| x.as_str()).unwrap_or("?");
+                                                    let prov = v.get("provider").and_then(|x| x.as_str()).unwrap_or("?");
+                                                    let mdl = v.get("model").and_then(|x| x.as_str()).unwrap_or("?");
+                                                    let ovr = v.get("session_override_preset").and_then(|x| x.as_str()).filter(|x| !x.is_empty());
+                                                    let binding = match ovr {
+                                                        Some(p) => format!(" (override: {p})"),
+                                                        None => String::new(),
+                                                    };
+                                                    status = Some(format!(
+                                                        "→ {pn}{binding}: {prov}/{mdl}   available: {avail}"
+                                                    ));
+                                                }
                                             }
                                             Err(e) => status = Some(format!("✗ {e}")),
                                         }
@@ -4926,9 +4970,20 @@ pub fn run(
                                             "set_by": "operator:tui",
                                         })) {
                                             Ok(v) => {
-                                                let prov = v.get("resolved").and_then(|r| r.get("provider")).and_then(|x| x.as_str()).unwrap_or("?");
-                                                let mdl = v.get("resolved").and_then(|r| r.get("model")).and_then(|x| x.as_str()).unwrap_or("?");
-                                                status = Some(format!("✓ model override → {preset} ({prov}/{mdl})"));
+                                                match v.get("resolved").and_then(|r| r.get("provider")).and_then(|x| x.as_str()) {
+                                                    Some(prov) => {
+                                                        let mdl = v.get("resolved").and_then(|r| r.get("model")).and_then(|x| x.as_str()).unwrap_or("?");
+                                                        status = Some(format!("✓ model override → {preset} ({prov}/{mdl})"));
+                                                    }
+                                                    None => {
+                                                        // No agent bound yet: the override is
+                                                        // stored and validated against config;
+                                                        // it applies from the first turn.
+                                                        status = Some(format!(
+                                                            "✓ model override → {preset} — applies from the session's first turn"
+                                                        ));
+                                                    }
+                                                }
                                             }
                                             Err(e) => status = Some(format!("✗ {e}")),
                                         }

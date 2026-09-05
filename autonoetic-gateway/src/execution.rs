@@ -1239,32 +1239,97 @@ impl GatewayExecutionService {
     ) -> anyhow::Result<serde_json::Value> {
         let session_id = session_id.trim();
         anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
-        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
-        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
-        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
+        let root = crate::runtime::content_store::root_session_id(session_id);
         let binding = self
             .gateway_store
             .as_ref()
-            .and_then(|gs| {
-                gs.get_session_inference_binding(crate::runtime::content_store::root_session_id(
-                    session_id,
-                ))
-                .ok()
-                .flatten()
-            });
-        Ok(serde_json::json!({
+            .and_then(|gs| gs.get_session_inference_binding(root).ok().flatten());
+        // A session opened but not yet bound to an agent (no turn has run) is
+        // not an error state — `/model` works there: the catalog is visible
+        // and a preset set now applies from the first turn.
+        let agent_bound = agent_id.map(str::trim).filter(|s| !s.is_empty()).is_some()
+            || self
+                .gateway_store
+                .as_ref()
+                .and_then(|gs| gs.get_session_agent_binding(session_id).ok().flatten())
+                .is_some();
+        let mut out = serde_json::json!({
             "ok": true,
             "session_id": session_id,
-            "root_session_id": crate::runtime::content_store::root_session_id(session_id),
-            "agent_id": agent_id,
-            "preset_name": profile.preset_name,
-            "preset_source": profile.snapshot_preset_source(),
-            "session_override_preset": profile.session_override_preset,
-            "provider": profile.llm_config.provider,
-            "model": profile.llm_config.model,
-            "is_routing_preset": profile.is_routing_preset,
+            "root_session_id": root,
+            "agent_bound": agent_bound,
+            // Authoritative preset catalog: what the RUNNING gateway config
+            // allows `/model` to switch to. The operator client must not
+            // guess this from its own (possibly stale/different) config file.
+            "available_presets": self.available_presets_json(),
+            // Graceful degradation: an unpromoted agent must not take the
+            // whole `/model` surface down — the preset list stays visible and
+            // the resolution failure lands here instead of failing the RPC.
+            "agent_load_error": serde_json::Value::Null,
             "binding": binding,
-        }))
+        });
+        if agent_bound {
+            match self.resolve_session_inference_profile(session_id, agent_id) {
+                Ok((agent, profile)) => {
+                    let obj = out.as_object_mut().expect("object literal");
+                    obj.insert("agent_id".to_string(), serde_json::json!(agent));
+                    obj.insert("preset_name".to_string(), serde_json::json!(profile.preset_name));
+                    obj.insert(
+                        "preset_source".to_string(),
+                        serde_json::json!(profile.snapshot_preset_source()),
+                    );
+                    obj.insert(
+                        "session_override_preset".to_string(),
+                        serde_json::json!(profile.session_override_preset),
+                    );
+                    obj.insert("provider".to_string(), serde_json::json!(profile.llm_config.provider));
+                    obj.insert("model".to_string(), serde_json::json!(profile.llm_config.model));
+                    obj.insert(
+                        "is_routing_preset".to_string(),
+                        serde_json::json!(profile.is_routing_preset),
+                    );
+                }
+                Err(e) => {
+                    out["agent_load_error"] = serde_json::json!(e.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve the agent + inference profile behind a session's `/model`
+    /// surface. Fails when the session has no agent binding or the bound
+    /// agent cannot be loaded (e.g. never promoted).
+    fn resolve_session_inference_profile(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<(String, crate::runtime::inference_profile::ResolvedInferenceProfile)> {
+        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
+        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
+        Ok((agent_id, profile))
+    }
+
+    /// The running config's `llm_presets`, sorted, as the `/model` catalog.
+    fn available_presets_json(&self) -> serde_json::Value {
+        let mut names: Vec<&String> = self.config.llm_presets.keys().collect();
+        names.sort();
+        serde_json::Value::Array(
+            names
+                .iter()
+                .filter_map(|name| {
+                    let preset = self.config.llm_presets.get(*name)?;
+                    Some(serde_json::json!({
+                        "name": name,
+                        "provider": preset.provider,
+                        "model": preset.model,
+                        "chat_only": preset.chat_only.unwrap_or(false),
+                        "tier": preset.tier,
+                    }))
+                })
+                .collect(),
+        )
     }
 
     pub fn set_session_inference_override(
@@ -1283,13 +1348,46 @@ impl GatewayExecutionService {
             .gateway_store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session inference override"))?;
-        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
-        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
-        crate::runtime::inference_profile::validate_inference_override(
-            &manifest,
-            &self.config,
-            preset,
-        )?;
+        // Validation needs an agent manifest for the mechanical chat_only /
+        // tool-capability gate. A session opened but not yet bound to an agent
+        // (no turn has run) has none — `/model` must still work there, so the
+        // gate degrades to its agent-independent half: the preset must exist,
+        // and chat_only presets are rejected outright (they can never be
+        // proven safe for the agent that will eventually bind).
+        let explicit_agent = agent_id.map(str::trim).filter(|s| !s.is_empty());
+        let session_bound = explicit_agent.is_some()
+            || store
+                .get_session_agent_binding(session_id)
+                .ok()
+                .flatten()
+                .is_some();
+        let (validated_agent_id, profile_preview) = if session_bound {
+            let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+            let (manifest, _) = self.load_agent_manifest(&agent_id).map_err(|e| {
+                anyhow::anyhow!("cannot switch model for session '{session_id}': {e}")
+            })?;
+            let preview = crate::runtime::inference_profile::validate_inference_override(
+                &manifest,
+                &self.config,
+                preset,
+            )?;
+            (Some(agent_id), Some(preview))
+        } else {
+            let chat_only = self
+                .config
+                .llm_presets
+                .get(preset)
+                .ok_or_else(|| anyhow::anyhow!("Unknown llm preset '{preset}'"))?
+                .chat_only
+                .unwrap_or(false);
+            anyhow::ensure!(
+                !chat_only,
+                "Preset '{preset}' is chat_only and cannot be verified against a \
+                 tool-capable agent before the session's first turn binds one — \
+                 pick a non-chat_only preset"
+            );
+            (None, None)
+        };
         let root = crate::runtime::content_store::root_session_id(session_id);
         let binding = store.upsert_session_inference_binding(
             root,
@@ -1297,10 +1395,13 @@ impl GatewayExecutionService {
             reason,
             set_by,
         )?;
-        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
+        let (resolved_provider, resolved_model) = match &profile_preview {
+            Some(preview) => (Some(preview.provider.clone()), Some(preview.model.clone())),
+            None => (None, None),
+        };
         let event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: format!("inference-override-{}", uuid::Uuid::new_v4()),
-            agent_id: agent_id.clone(),
+            agent_id: validated_agent_id.clone().unwrap_or_default(),
             session_id: session_id.to_string(),
             turn_id: None,
             event_seq: 0,
@@ -1316,8 +1417,8 @@ impl GatewayExecutionService {
                     "preset": preset,
                     "reason": reason,
                     "set_by": set_by,
-                    "resolved_provider": profile.llm_config.provider,
-                    "resolved_model": profile.llm_config.model,
+                    "resolved_provider": resolved_provider,
+                    "resolved_model": resolved_model,
                 })
                 .to_string(),
             ),
@@ -1326,16 +1427,22 @@ impl GatewayExecutionService {
             reason: reason.map(str::to_string),
         };
         let _ = store.create_causal_event(&event);
+        let resolved = profile_preview.map(|preview| {
+            serde_json::json!({
+                "preset_name": preset,
+                "provider": preview.provider,
+                "model": preview.model,
+            })
+        });
         Ok(serde_json::json!({
             "ok": true,
             "session_id": session_id,
             "root_session_id": root,
             "binding": binding,
-            "resolved": {
-                "preset_name": profile.preset_name,
-                "provider": profile.llm_config.provider,
-                "model": profile.llm_config.model,
-            }
+            // Null when no agent is bound yet: the override is stored and
+            // applies from the first turn, but there is no manifest to
+            // preview a provider/model against.
+            "resolved": resolved,
         }))
     }
 
