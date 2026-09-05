@@ -6775,6 +6775,28 @@ pub fn run(
                         KeyCode::Char('s') => {
                             squash = !squash;
                             persist_room_view_prefs(floor, squash, show_reasoning);
+                            // Unsquashing with no collapsed runs in view changes
+                            // nothing on screen (only the header indicator flips),
+                            // which reads as a broken key. This is expected in
+                            // story mode — the floor already hides routine runs,
+                            // so there is nothing to fold — but say so instead
+                            // of staying silent. `view_rows` is the previous
+                            // frame's rows for the same floor.
+                            if !squash
+                                && !view_rows.is_empty()
+                                && !view_rows
+                                    .iter()
+                                    .any(|r| matches!(r, RenderedRow::Collapsed { .. }))
+                            {
+                                status = Some(
+                                    if floor == FloorMode::Story {
+                                        "story mode already hides routine runs — nothing to unsquash ('a' changes floor)".to_string()
+                                    } else {
+                                        "no collapsed runs in view — nothing to unsquash"
+                                            .to_string()
+                                    },
+                                );
+                            }
                         }
                         // Y: copy the selected row to the clipboard — the
                         // actionable token for a tool row (command/path/ref/id),
@@ -8526,6 +8548,13 @@ pub fn run(
                         "⚠ Plan {plan_id} awaiting approval — y approve · n revise · Esc close"
                     ));
                 }
+            } else if follow {
+                // Already announced and the operator explicitly re-followed
+                // (End/f) since: keep the cursor pinned to the newest row.
+                // Otherwise any row-count change (unsquash, new events) leaves
+                // the cursor stranded mid-list while the viewport stays pinned
+                // to the bottom, and the next j/k resumes from the stale spot.
+                selected = rows.len().saturating_sub(1);
             }
         } else if follow {
             selected = rows.len().saturating_sub(1);
