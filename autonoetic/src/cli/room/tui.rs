@@ -10285,12 +10285,17 @@ fn switch_session(
 /// `None` when the gateway has no matching session.
 /// Non-resumable synthetic sessions are hidden from `/session`:
 /// - the reserved `"system"` root id (scheduled system agents, auto-learning
-///   jobs, the sentinel), and
+///   jobs, the sentinel),
 /// - `background::<agent_id>` roots (decision::`background_session_id`) — the
-///   background/scheduled workers' own state sessions; an operator attaching
-///   to one would inject messages into a background loop.
+///   background/scheduled workers' own state sessions, and
+/// - `sched-child-<job_id>` roots — a cron job's run session, reused across
+///   every firing of the job (scheduler `QueuedTaskRun.child_session_id`).
+/// Attaching to any of these would inject operator messages into
+/// scheduler-owned machinery rather than resuming a conversation.
 fn is_system_session(root_session_id: &str) -> bool {
-    root_session_id == "system" || root_session_id.starts_with("background::")
+    root_session_id == "system"
+        || root_session_id.starts_with("background::")
+        || root_session_id.starts_with("sched-child-")
 }
 
 /// Turn id of the timeline row the cursor is on, if any. Maps the view cursor
@@ -13457,6 +13462,7 @@ mod tests {
         assert!(is_system_session("system"));
         assert!(is_system_session("background::improvement.steward"));
         assert!(is_system_session("background::memory-curator.default"));
+        assert!(is_system_session("sched-child-sj-a7bfb84b-a5a6-41d5-8246-631c8ffd5b1c"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
         // A real agent id that merely contains the word is still resumable.
