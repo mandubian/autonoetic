@@ -231,10 +231,29 @@ pub(crate) fn normalize_inline_section_labels(input: &str) -> String {
 /// Unicode rule conversion, unfenced code fences, then promote standalone
 /// `Label:` lines to headings.
 pub(crate) fn normalize_narrative_prose(input: &str) -> String {
-    let s = normalize_unicode_rules(input);
+    let s = normalize_escaped_newlines(input);
+    let s = normalize_unicode_rules(&s);
     normalize_prose_sections(&normalize_fenced_code(&normalize_inline_section_labels(
         &s,
     )))
+}
+
+/// Repair over-escaped newlines. Models sometimes emit a summary as one
+/// physical line with literal `\n` escape sequences (double-encoded JSON in
+/// the io.returns envelope). When literal `\n`s dominate a body that has few
+/// or no real line breaks, they were meant as breaks — unescape them so
+/// paragraphs and lists render. Bodies with real newlines and at most a stray
+/// literal mention (e.g. prose *about* `\n`) are left untouched.
+fn normalize_escaped_newlines(input: &str) -> String {
+    let real = input.matches('\n').count();
+    let escaped = input.matches("\\n").count();
+    if escaped < 3 || escaped <= real * 4 {
+        return input.to_string();
+    }
+    input
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
 }
 
 /// Convert Unicode box-drawing horizontal rules (runs of `─`, `━`, `═`, `▔`,
@@ -616,6 +635,23 @@ mod tests {
         assert!(out.contains("### Evidence"), "out={out}");
         assert!(out.contains("### Fix Options"), "out={out}");
         assert!(out.contains("| Date |"), "table row preserved: {out}");
+    }
+
+    #[test]
+    fn normalize_narrative_prose_unescapes_double_encoded_newlines() {
+        // Model over-escaped its io.returns summary (literal `\\n` in the
+        // stored payload): the body must read as paragraphs/list, not as a
+        // wall of `\n` text.
+        let raw = "Verdict: the bridge is healthy. Everything checks out:\\n\\n- GET /v1/health → HTTP 204\\n- GET / → 404, expected\\n\\nNext step: a real send test.";
+        let out = normalize_narrative_prose(raw);
+        assert!(!out.contains("\\n"), "escapes must be gone: {out}");
+        assert!(out.contains("\n- GET /v1/health"), "list item on its own line: {out}");
+        assert!(out.matches('\n').count() >= 4, "paragraphs restored: {out}");
+
+        // A genuinely multi-line body with one stray literal mention is left
+        // alone (prose *about* `\n` is legit).
+        let real = "line one\nline two\nline three\nuse \\n in printf";
+        assert_eq!(normalize_narrative_prose(real), real);
     }
 
     #[test]
