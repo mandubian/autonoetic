@@ -234,11 +234,30 @@ pub fn apply_proposals_to_text(
     Ok(AppliedAmendments { text, edits })
 }
 
+/// A `*_rule` proposal must target `P-*` clauses; a `*_right` proposal
+/// `Ri-*`. Intake does not enforce the family match, and a mismatched
+/// proposal that slipped through adjudication would otherwise silently edit
+/// the wrong family's table rows — this is the materializer's last chance to
+/// refuse.
+fn require_target_family(
+    proposal_id: &str,
+    kind: &str,
+    target: &str,
+) -> anyhow::Result<()> {
+    let required = if kind.ends_with("_rule") { "P-" } else { "Ri-" };
+    anyhow::ensure!(
+        target.starts_with(required),
+        "proposal {proposal_id}: kind {kind} must target {required}* clauses, found {target:?}"
+    );
+    Ok(())
+}
+
 /// Modify: replace the statement cell, preserving every other cell byte for
 /// byte (Source, Enforcement, Status, Relation are facts about enforcement,
 /// not part of what the proposal amends).
 fn apply_modify(lines: &mut [String], p: &MaterializableProposal) -> anyhow::Result<ProposalEdit> {
     let target = require_target(&p.proposal_id, &p.target_id)?;
+    require_target_family(&p.proposal_id, &p.kind, target)?;
     let statement = sanitized_statement(&p.proposal_id, p.proposed_text.as_deref())?;
 
     let idx = find_unique_row(lines, target, &p.proposal_id)?;
@@ -269,6 +288,7 @@ fn apply_modify(lines: &mut [String], p: &MaterializableProposal) -> anyhow::Res
 /// Remove: delete the clause's row outright.
 fn apply_remove(lines: &mut Vec<String>, p: &MaterializableProposal) -> anyhow::Result<ProposalEdit> {
     let target = require_target(&p.proposal_id, &p.target_id)?;
+    require_target_family(&p.proposal_id, &p.kind, target)?;
     let idx = find_unique_row(lines, target, &p.proposal_id)?;
     let before = lines.remove(idx).trim().to_string();
     Ok(ProposalEdit {
@@ -287,6 +307,7 @@ fn apply_remove(lines: &mut Vec<String>, p: &MaterializableProposal) -> anyhow::
 /// the operator's substantive act before signing.
 fn apply_add(lines: &mut Vec<String>, p: &MaterializableProposal) -> anyhow::Result<ProposalEdit> {
     let target = require_target(&p.proposal_id, &p.target_id)?;
+    require_target_family(&p.proposal_id, &p.kind, target)?;
     let statement = sanitized_statement(&p.proposal_id, p.proposed_text.as_deref())?;
     let (family, section_prefix) = clause_family_and_section(target).ok_or_else(|| {
         anyhow::anyhow!(
@@ -605,6 +626,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
+    }
+
+    #[test]
+    fn kind_target_family_mismatch_is_refused() {
+        // A *_right proposal targeting a P-* clause would silently edit the
+        // wrong family's table rows.
+        for (kind, target) in [
+            ("modify_right", "P-8.1"),
+            ("remove_rule", "Ri-0.1"),
+            ("add_rule", "Ri-0.19"),
+            ("add_right", "P-8.20"),
+        ] {
+            let err = apply_proposals_to_text(
+                BASE,
+                &[proposal("cprop-mix", kind, Some(target), Some("x"))],
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("must target"),
+                "{kind}/{target}: expected family mismatch refusal, got: {msg}"
+            );
+        }
     }
 
     #[test]

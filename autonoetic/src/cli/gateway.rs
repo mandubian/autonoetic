@@ -3216,10 +3216,32 @@ fn handle_constitution_materialize(
 
 fn truncate_cell(row: &str) -> String {
     let one_line = row.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.len() > 100 {
-        format!("{}…", &one_line[..100])
+    // Char-boundary truncation: constitution rows carry multibyte glyphs
+    // (`·`, `—`), and a byte-index slice here would panic mid-run.
+    if one_line.chars().count() > 100 {
+        let cut: String = one_line.chars().take(100).collect();
+        format!("{cut}…")
     } else {
         one_line
+    }
+}
+
+#[cfg(test)]
+mod materialize_output_tests {
+    use super::truncate_cell;
+
+    #[test]
+    fn truncation_is_char_boundary_safe() {
+        // 120 `·` glyphs: 240 bytes, 120 chars — a byte-index [..100] slice
+        // would panic here.
+        let row = format!("| P-8.1 | {} |", "·".repeat(120));
+        let out = truncate_cell(&row);
+        assert_eq!(out.chars().count(), 101, "100 chars + ellipsis");
+        assert!(out.ends_with('…'));
+
+        // Short rows pass through untouched, whatever the byte length.
+        let short = format!("| P-8.1 | {} |", "·".repeat(40));
+        assert_eq!(truncate_cell(&short), short);
     }
 }
 
