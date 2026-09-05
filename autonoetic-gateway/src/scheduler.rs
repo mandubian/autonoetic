@@ -4641,6 +4641,7 @@ mod adjudication_sla_tests {
             published_in_release: None,
             created_at: old_rfc3339(1_000),
             sla_breached_at: None,
+            materialized_in_version: None,
         }
     }
 

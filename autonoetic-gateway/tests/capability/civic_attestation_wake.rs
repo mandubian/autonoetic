@@ -62,6 +62,7 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             published_in_release: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             sla_breached_at: None,
+            materialized_in_version: None,
         })
         .expect("insert proposal");
 

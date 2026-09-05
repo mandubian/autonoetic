@@ -40,6 +40,7 @@ fn seed_proposal(proposal_id: &str, status: &str, proposer: &str) -> Constitutio
         published_in_release: None,
         operator_decision: None,
         sla_breached_at: None,
+        materialized_in_version: None,
     }
 }
 

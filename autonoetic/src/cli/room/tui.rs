@@ -1179,21 +1179,27 @@ fn build_attention_strip_line(rows: &[ApprovalRow], width: usize) -> Line<'stati
     Line::from(spans)
 }
 
+/// Detail line for the gate the operator is looking at. The `A` approvals-popup
+/// affordance is appended only while gates are pending — with nothing to list
+/// (or only already-resolved rows) the line stays quiet instead of showing a
+/// dead hint.
 fn build_attention_detail_line(
     gate: Option<&GateRef>,
     rows: &[ApprovalRow],
     width: usize,
 ) -> Line<'static> {
+    let list_hint = (rows.iter().any(|r| r.is_pending)).then(|| {
+        Span::styled(" · A list", Style::default().fg(Color::DarkGray))
+    });
+
     let relevant = gate
         .and_then(|g| rows.iter().find(|r| r.id == g.id))
         .or_else(|| rows.iter().find(|r| r.is_pending))
         .or_else(|| rows.first());
 
     let Some(r) = relevant else {
-        return Line::from(Span::styled(
-            " Press A for approvals list · y/n or Enter to act on selected item",
-            Style::default().fg(Color::DarkGray),
-        ));
+        // No gates at all in this session; line 2 already says so.
+        return Line::from("");
     };
 
     let action_hint = gate
@@ -1211,12 +1217,17 @@ fn build_attention_detail_line(
         Style::default().fg(Color::DarkGray),
     );
     let state_span = Span::styled(
-        format!("[{}]", state_label),
+        format!(" [{}]", state_label),
         Style::default().fg(state_color),
     );
 
-    // Width-aware truncation of the summary so the state tag stays visible.
-    let overhead = kind_span.content.width() + action_span.content.width() + state_span.content.width() + 1;
+    // Width-aware truncation of the summary so the state tag and list hint
+    // stay visible.
+    let mut overhead = kind_span.content.width() + action_span.content.width()
+        + state_span.content.width() + 1;
+    if let Some(hint) = &list_hint {
+        overhead += hint.content.width();
+    }
     let available = width.saturating_sub(overhead);
     let summary = if r.summary.width() > available {
         truncate_str(&r.summary, available)
@@ -1225,7 +1236,9 @@ fn build_attention_detail_line(
     };
     let summary_span = Span::styled(format!("{} ", summary), Style::default().fg(Color::White));
 
-    Line::from(vec![kind_span, summary_span, action_span, state_span])
+    let mut spans = vec![kind_span, summary_span, action_span, state_span];
+    spans.extend(list_hint);
+    Line::from(spans)
 }
 
 fn build_footer(
@@ -8565,7 +8578,7 @@ pub fn run(
                     RenderedRow::Line(spec) => {
                         build_rich_row_lines(
                             spec, i, &turn_boundaries, unread_marker, content_w, glyph_w,
-                            rail_w, label_w, spinner_glyph, show_reasoning,
+                            rail_w, label_w, spinner_glyph, show_reasoning, false,
                         )
                         .len()
                     }
@@ -9439,6 +9452,12 @@ fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
 /// "who said what." Used by the custom render loop in `draw` so we can
 /// measure the row's physical height and stop rendering cleanly when a
 /// multi-line row no longer fits in the remaining viewport area.
+///
+/// `is_selected` applies the cursor highlight to the row's *content* lines
+/// only: the turn divider / unread rule attached above the row are
+/// decoration, and reversing them too made the cursor read as sitting on two
+/// rows at once (notably on forkable turns, where the divider carries the
+/// `⑂ fork` tag).
 fn build_rich_row_lines(
     spec: &RowSpec,
     row_index: usize,
@@ -9450,6 +9469,7 @@ fn build_rich_row_lines(
     label_w: usize,
     spinner_glyph: &'static str,
     show_reasoning: bool,
+    is_selected: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     // Unread separator: a highlighted rule above the first row the operator
@@ -9621,6 +9641,15 @@ fn build_rich_row_lines(
         out.extend(kept);
     } else {
         out.extend(physical);
+    }
+    if is_selected {
+        // Highlight content lines only; leading decoration (divider, unread
+        // rule) stays plain so one row = one highlighted band.
+        let highlight = Style::default().add_modifier(Modifier::REVERSED);
+        let decor = out.iter().take_while(|l| is_divider_line(l)).count();
+        for l in out.iter_mut().skip(decor) {
+            l.style = l.style.patch(highlight);
+        }
     }
     out
 }
@@ -11249,6 +11278,7 @@ fn draw(
                     label_w,
                     spinner_glyph,
                     show_reasoning,
+                    false,
                 )
                 .len()
             }
@@ -11262,8 +11292,6 @@ fn draw(
     } else {
         compute_viewport_offset(safe_selected, list_height, &row_heights, prev_viewport_offset)
     };
-    let highlight = Style::default().add_modifier(Modifier::REVERSED);
-
     let mut y: u16 = list_area.y;
     let list_end_y = list_area.y.saturating_add(list_area.height);
     let mut i = viewport_offset;
@@ -11282,6 +11310,7 @@ fn draw(
                     label_w,
                     spinner_glyph,
                     show_reasoning,
+                    i == safe_selected,
                 );
                 let n = lines.len();
                 (lines, n)
@@ -11302,24 +11331,13 @@ fn draw(
         if line_count == 0 || line_count > remaining {
             break;
         }
-        let styled: Vec<Line<'static>> = if i == safe_selected {
-            lines
-                .into_iter()
-                .map(|mut l| {
-                    l.style = l.style.patch(highlight);
-                    l
-                })
-                .collect()
-        } else {
-            lines
-        };
         let row_area = Rect {
             x: list_area.x,
             y,
             width: list_area.width,
             height: line_count as u16,
         };
-        f.render_widget(Paragraph::new(styled), row_area);
+        f.render_widget(Paragraph::new(lines), row_area);
         y = y.saturating_add(line_count as u16);
         i += 1;
     }
@@ -13099,13 +13117,13 @@ mod tests {
         };
         let boundaries: HashMap<usize, TurnDivider> = HashMap::new();
         let lines = build_rich_row_lines(
-            &spec, 2, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 2, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(first.contains("47 new since you scrolled"), "got: {first}");
         // Other rows don't get the marker.
         let lines = build_rich_row_lines(
-            &spec, 1, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 1, &boundaries, Some((2, 47)), 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(!first.contains("new since"), "got: {first}");
@@ -13519,13 +13537,27 @@ mod tests {
         assert!(text.contains("which provider?"), "{text}");
         assert!(text.contains("Enter/i/r answer"), "{text}");
         assert!(text.contains("[pending]"), "{text}");
+        assert!(text.contains("· A list"), "{text}");
     }
 
     #[test]
-    fn attention_detail_line_hints_when_empty() {
+    fn attention_detail_line_stays_quiet_with_no_gates() {
         let line = build_attention_detail_line(None, &[], 120);
+        assert!(line.spans.is_empty(), "{line:?}");
+    }
+
+    #[test]
+    fn attention_detail_line_hides_list_hint_for_resolved_only_rows() {
+        let rows = vec![ApprovalRow {
+            id: "a1".into(),
+            kind: "APPROVAL",
+            is_pending: false,
+            summary: "done".into(),
+        }];
+        let line = build_attention_detail_line(None, &rows, 120);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("Press A for approvals list"), "{text}");
+        assert!(text.contains("[resolved]"), "{text}");
+        assert!(!text.contains("A list"), "{text}");
     }
 
     #[test]
@@ -15570,7 +15602,7 @@ mod tests {
             egress_label: Some("local_only".into()),
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
@@ -15602,7 +15634,7 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.contains("turn 3"), "got: {bar}");
@@ -15623,7 +15655,7 @@ mod tests {
             },
         );
         let lines = build_rich_row_lines(
-            &spec, 0, &wide_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &wide_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(
@@ -15637,11 +15669,60 @@ mod tests {
         let plain_boundaries: HashMap<usize, TurnDivider> =
             [(0usize, TurnDivider::default())].into_iter().collect();
         let lines = build_rich_row_lines(
-            &spec, 0, &plain_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &plain_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let bar: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(bar.starts_with("── turn 3 ") && bar.ends_with('─'), "got: {bar}");
         assert!(!bar.contains("calls"), "got: {bar}");
+    }
+
+    #[test]
+    fn selection_highlight_skips_turn_divider_line() {
+        // The cursor on a turn's first row used to reverse the attached
+        // `═══ ⑂ fork ═══` divider too, so the screen showed two highlighted
+        // bands and it was unclear which row `F` would fork from. The divider
+        // is decoration: it must stay plain while the content line highlights.
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Specialist,
+            tone: RowTone::Default,
+            actor_label: "coder".into(),
+            headline: "did the thing".into(),
+            detail: None,
+            turn_id: Some("turn-000003".into()),
+            source_session_id: None,
+            turn_index: Some(3),
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let mut turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        turn_boundaries.insert(0, TurnDivider { forkable: true, stats: None });
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true, true,
+        );
+        assert!(lines.len() >= 2, "divider + content expected: {lines:?}");
+        assert!(lines[0].spans[0].content.starts_with('═'), "expected fork divider first");
+        assert!(
+            !lines[0].style.add_modifier.contains(Modifier::REVERSED),
+            "divider must not take the selection highlight"
+        );
+        assert!(
+            lines[1].style.add_modifier.contains(Modifier::REVERSED),
+            "content line must carry the selection highlight"
+        );
+
+        // Unselected rows keep everything plain.
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, None, 60, 3, 1, 12, SPINNER_FRAMES[0], true, false,
+        );
+        for l in &lines {
+            assert!(
+                !l.style.add_modifier.contains(Modifier::REVERSED),
+                "no highlight when unselected"
+            );
+        }
     }
 
     #[test]
@@ -15663,7 +15744,7 @@ mod tests {
             egress_label: None,
         };
         let lines = build_rich_row_lines(
-            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true,
+            &spec, 0, &turn_boundaries, None, 40, 3, 1, 12, SPINNER_FRAMES[0], true, false,
         );
         let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
         assert!(!joined.contains('■'), "unlabeled row must not show a marker: {joined}");

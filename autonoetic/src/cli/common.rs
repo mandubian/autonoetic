@@ -626,6 +626,21 @@ pub enum GatewayConstitutionCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Materialize approved amendment proposals into a candidate constitution
+    /// version directory: the amended markdown, an unsigned lock, and a
+    /// provenance record linking each proposal to its adjudication (#810).
+    /// The gateway drafts; signing and activation stay with the operator.
+    Materialize {
+        /// Proposal IDs to materialize (defaults to every approved proposal
+        /// not yet materialized, oldest first).
+        proposal_ids: Vec<String>,
+        /// Candidate version tag (defaults to today's date, `YYYY.MM.DD`).
+        #[arg(long)]
+        version: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

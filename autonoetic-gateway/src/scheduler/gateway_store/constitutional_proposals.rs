@@ -49,9 +49,15 @@ pub struct ConstitutionalProposal {
     /// proposal sits un-adjudicated past the configured SLA (O-6). `None`
     /// means either not yet overdue or the SLA check hasn't run.
     pub sla_breached_at: Option<String>,
+    /// The candidate constitution version this proposal was drafted into by
+    /// the amendment materializer (#810). `None` until
+    /// [`GatewayStore::mark_proposals_materialized`] stamps it. Separate from
+    /// `published_in_release`: drafting a candidate directory and labelling a
+    /// release batch are different acts in the ceremony.
+    pub materialized_in_version: Option<String>,
 }
 
-const PROPOSAL_COLUMNS: &str = "proposal_id, proposer_agent_id, proposer_session_id, kind, target_id, proposed_text, justification, evidence_json, status, operator_decision, decision_reason, decided_by, decided_at, published_in_release, created_at, sla_breached_at";
+const PROPOSAL_COLUMNS: &str = "proposal_id, proposer_agent_id, proposer_session_id, kind, target_id, proposed_text, justification, evidence_json, status, operator_decision, decision_reason, decided_by, decided_at, published_in_release, created_at, sla_breached_at, materialized_in_version";
 
 fn row_to_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConstitutionalProposal> {
     let evidence_str: String = row.get(7)?;
@@ -73,6 +79,7 @@ fn row_to_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConstitutionalPr
         published_in_release: row.get(13)?,
         created_at: row.get(14)?,
         sla_breached_at: row.get(15)?,
+        materialized_in_version: row.get(16)?,
     })
 }
 
@@ -83,7 +90,7 @@ impl GatewayStore {
         conn.execute(
             &format!(
                 "INSERT INTO constitutional_proposals ({PROPOSAL_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
             ),
             params![
                 p.proposal_id,
@@ -103,6 +110,10 @@ impl GatewayStore {
                 p.created_at,
                 // sla_breached_at: always NULL at insert; stamped later by
                 // flag_proposal_sla_breaches, never at filing time.
+                None::<String>,
+                // materialized_in_version: always NULL at insert; stamped by
+                // mark_proposals_materialized when the materializer drafts the
+                // candidate version (#810).
                 None::<String>,
             ],
         )?;
@@ -238,9 +249,9 @@ impl GatewayStore {
 
     /// Mark every approved-but-unpublished proposal with the given release tag.
     /// Returns the proposal IDs that were marked (caller can record them in a
-    /// release note). The constitution markdown is *not* mutated here — the
-    /// operator edits the file by hand and the digest bumps naturally on
-    /// rebuild via `include_str!`.
+    /// release note). This stamps a label only — the mechanical drafting of
+    /// the markdown is the amendment materializer's job (#810,
+    /// `constitution_materializer.rs` / `gateway constitution materialize`).
     ///
     /// Atomic via `UPDATE … RETURNING` so the returned list is exactly the
     /// rows this call mutated, even under concurrent operators.
@@ -256,6 +267,56 @@ impl GatewayStore {
             .query_map(params![release_tag], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ids)
+    }
+
+    /// Every **approved but not yet materialized** proposal, oldest first —
+    /// the work queue for the amendment materializer (#810). Oldest-first so
+    /// a candidate version applies amendments in the order they were approved.
+    pub fn list_approved_unmaterialized_proposals(&self) -> Result<Vec<ConstitutionalProposal>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM constitutional_proposals \
+             WHERE status = 'approved' AND materialized_in_version IS NULL \
+             ORDER BY created_at ASC, proposal_id ASC"
+        ))?;
+        let rows = stmt.query_map([], row_to_proposal)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Stamp the candidate constitution version a proposal was materialized
+    /// into (#810). Returns the IDs actually stamped. Atomic via
+    /// `UPDATE … RETURNING` with a `materialized_in_version IS NULL` guard,
+    /// so a proposal is stamped exactly once even if two operators race —
+    /// mirrors [`GatewayStore::publish_approved_proposals`].
+    pub fn mark_proposals_materialized(
+        &self,
+        proposal_ids: &[String],
+        version: &str,
+    ) -> Result<Vec<String>> {
+        if proposal_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders = proposal_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "UPDATE constitutional_proposals \
+             SET materialized_in_version = ?1 \
+             WHERE materialized_in_version IS NULL AND proposal_id IN ({placeholders}) \
+             RETURNING proposal_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut param_vals: Vec<&dyn rusqlite::types::ToSql> = vec![&version];
+        for id in proposal_ids {
+            param_vals.push(id);
+        }
+        let stamped = stmt
+            .query_map(param_vals.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(stamped)
     }
 
     /// Stamp `sla_breached_at` on proposals overdue for adjudication, returning
@@ -325,6 +386,7 @@ mod tests {
             published_in_release: None,
             created_at: created_at.to_string(),
             sla_breached_at: None,
+            materialized_in_version: None,
         }
     }
 
@@ -440,6 +502,73 @@ mod tests {
         let tight = store.list_pending_constitutional_proposals(Some("auditor.default"), 1)?;
         assert_eq!(tight.len(), 1);
         assert_eq!(tight[0].proposal_id, "prop-review");
+
+        Ok(())
+    }
+
+    #[test]
+    fn materialized_queue_is_approved_only_and_oldest_first() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+
+        // Approved oldest → newest, one still-pending, one already materialized.
+        store.insert_constitutional_proposal(&sample_proposal(
+            "cprop-a",
+            "2025-01-01T00:00:00Z",
+            "approved",
+        ))?;
+        store.insert_constitutional_proposal(&sample_proposal(
+            "cprop-pending",
+            "2025-01-02T00:00:00Z",
+            "pending",
+        ))?;
+        store.insert_constitutional_proposal(&sample_proposal(
+            "cprop-b",
+            "2025-01-03T00:00:00Z",
+            "approved",
+        ))?;
+        store.insert_constitutional_proposal(&sample_proposal(
+            "cprop-done",
+            "2025-01-04T00:00:00Z",
+            "approved",
+        ))?;
+        store.mark_proposals_materialized(&["cprop-done".to_string()], "2026.01.01")?;
+
+        let queue = store.list_approved_unmaterialized_proposals()?;
+        let ids: Vec<&str> = queue.iter().map(|p| p.proposal_id.as_str()).collect();
+        assert_eq!(ids, vec!["cprop-a", "cprop-b"], "pending and already-materialized proposals must be excluded; order is oldest-first");
+
+        Ok(())
+    }
+
+    #[test]
+    fn mark_materialized_stamps_once_and_reports_skips() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.insert_constitutional_proposal(&sample_proposal(
+            "cprop-x",
+            "2025-01-01T00:00:00Z",
+            "approved",
+        ))?;
+
+        let first = store.mark_proposals_materialized(&["cprop-x".to_string()], "2026.02.02")?;
+        assert_eq!(first, vec!["cprop-x"]);
+
+        // Second call for the same proposal: the NULL guard skips it — the
+        // proposal keeps its FIRST materialization version.
+        let second = store.mark_proposals_materialized(&["cprop-x".to_string()], "2026.03.03")?;
+        assert!(second.is_empty());
+        let row = store
+            .get_constitutional_proposal("cprop-x")?
+            .expect("row exists");
+        assert_eq!(row.materialized_in_version.as_deref(), Some("2026.02.02"));
+
+        // Unknown IDs are simply absent from the returned list, and an empty
+        // input is a no-op rather than a SQL error.
+        let unknown = store.mark_proposals_materialized(&["cprop-nope".to_string()], "2026.02.02")?;
+        assert!(unknown.is_empty());
+        let none = store.mark_proposals_materialized(&[], "2026.02.02")?;
+        assert!(none.is_empty());
 
         Ok(())
     }

@@ -2499,6 +2499,7 @@ mod civic_health_tests {
             published_in_release: None,
             created_at: created_at.to_string(),
             sla_breached_at: None,
+            materialized_in_version: None,
         }
     }
 
