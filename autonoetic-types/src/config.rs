@@ -892,7 +892,7 @@ impl Default for ConstitutionConfig {
 /// default paths, the `CURRENT` pointer, and the lock-inventory tests all stay
 /// in sync from this one edit. The guard test
 /// `current_file_matches_active_constitution_version` fails CI if the two drift.
-pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.09.04";
+pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.09.05";
 
 pub fn default_constitution_source_path() -> PathBuf {
     PathBuf::from(format!(
