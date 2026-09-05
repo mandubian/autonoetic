@@ -9773,14 +9773,23 @@ fn push_agent_narrative_row(
     detail_style: Style,
 ) {
     let (meta, prose) = split_agent_narrative_content(&spec.headline, spec.detail.as_deref());
-    let mut prefix = Some(first_prefix);
+    let mut first_prefix = if meta.is_some() { None } else { Some(first_prefix) };
     if let Some(meta_line) = meta {
         push_wrapped_detail_lines(lines, &meta_line, content_w, cont_prefix, detail_style);
-        prefix = None;
+    }
+    // Message-card callouts (`◆ YOU: …` next-step, `⚠` anomalies) render with
+    // dedicated emphasis styles ahead of the markdown prose — the operator's
+    // action item must not drown in the body.
+    let (callouts, prose) = take_callout_paragraphs(&prose);
+    for callout in &callouts {
+        push_callout_paragraph(lines, callout, content_w, cont_prefix, &mut first_prefix);
+    }
+    if !callouts.is_empty() {
+        lines.push(Line::from(cont_prefix.to_vec()));
     }
     if prose.trim().is_empty() {
-        if prefix.is_some() {
-            let mut spans = prefix.take().unwrap();
+        if let Some(prefix) = first_prefix {
+            let mut spans = prefix;
             spans.push(Span::styled(String::new(), body_style));
             lines.push(Line::from(spans));
         }
@@ -9791,9 +9800,51 @@ fn push_agent_narrative_row(
         &prose,
         content_w,
         cont_prefix,
-        prefix,
+        first_prefix,
         body_style,
     );
+}
+
+/// Pop `◆ YOU:` / `⚠` callout paragraphs out of a structured message card body
+/// so they can be rendered with emphasis styles instead of flowing through the
+/// markdown pipeline.
+fn take_callout_paragraphs(prose: &str) -> (Vec<String>, String) {
+    let mut callouts = Vec::new();
+    let mut rest = Vec::new();
+    for para in prose.split("\n\n") {
+        let t = para.trim();
+        if t.starts_with("◆ ") || t.starts_with("⚠ ") {
+            callouts.push(t.to_string());
+        } else {
+            rest.push(para);
+        }
+    }
+    (callouts, rest.join("\n\n"))
+}
+
+/// Render one callout paragraph: `◆ YOU:` in bold cyan (the operator's action
+/// item), `⚠` in warning yellow. Never truncated — wrapped instead.
+fn push_callout_paragraph(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    content_w: usize,
+    cont_prefix: &[Span<'static>],
+    first_prefix: &mut Option<Vec<Span<'static>>>,
+) {
+    let style = if text.starts_with('◆') {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    for (j, chunk) in word_wrap_text(text, content_w.saturating_sub(2)).into_iter().enumerate() {
+        let body = if j == 0 { chunk } else { format!("  {chunk}") };
+        let mut spans = match first_prefix.take() {
+            Some(pfx) => pfx,
+            None => cont_prefix.to_vec(),
+        };
+        spans.push(Span::styled(body, style));
+        lines.push(Line::from(spans));
+    }
 }
 
 /// Render markdown prose into wrapped list rows with optional rail/glyph prefix.
@@ -15723,6 +15774,62 @@ mod tests {
                 "no highlight when unselected"
             );
         }
+    }
+
+    #[test]
+    fn message_card_callouts_render_with_emphasis_styles() {
+        // `◆ YOU:` (the operator's action item) must pop: bold cyan, full text,
+        // ahead of the summary prose. `⚠` anomalies render in warning yellow.
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Planner,
+            tone: RowTone::AgentNarrative,
+            actor_label: "planner".into(),
+            headline: String::new(),
+            detail: Some(
+                "[failed] · wf: wf-17f8a245\n\n\
+                 ◆ YOU: pick a path (fallback draft / coder retry / debugger) and deploy the bridge\n\n\
+                 ⚠ aflag-1369801619ea (medium, pending adjudication)\n\n\
+                 Status: the build is blocked after two identical timeouts."
+                    .into(),
+            ),
+            turn_id: Some("turn-000007".into()),
+            source_session_id: None,
+            turn_index: Some(7),
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+        let lines = build_rich_row_lines(
+            &spec, 0, &boundaries, None, 90, 3, 1, 12, SPINNER_FRAMES[0], true, false,
+        );
+        let text_of = |l: &Line| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
+        let you = lines
+            .iter()
+            .find(|l| text_of(l).contains("◆ YOU:"))
+            .unwrap_or_else(|| panic!("no YOU line: {lines:?}"));
+        let you_style = you.spans.last().unwrap().style;
+        assert_eq!(you_style.fg, Some(Color::Cyan), "{you:?}");
+        assert!(you_style.add_modifier.contains(Modifier::BOLD), "{you:?}");
+        assert!(
+            text_of(you).contains("deploy the bridge"),
+            "the ask must not be truncated: {}",
+            text_of(you)
+        );
+        let anomaly = lines
+            .iter()
+            .find(|l| text_of(l).contains("⚠ aflag-"))
+            .unwrap_or_else(|| panic!("no anomaly line: {lines:?}"));
+        let anomaly_style = anomaly.spans.last().unwrap().style;
+        assert_eq!(anomaly_style.fg, Some(Color::Yellow), "{anomaly:?}");
+        // The summary prose stays in the body (unstyled by the callout pass).
+        let body = lines
+            .iter()
+            .find(|l| text_of(l).contains("the build is blocked"))
+            .unwrap_or_else(|| panic!("no body line: {lines:?}"));
+        assert_ne!(body.spans.last().unwrap().style.fg, Some(Color::Cyan));
     }
 
     #[test]

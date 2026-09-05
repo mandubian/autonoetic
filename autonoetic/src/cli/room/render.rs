@@ -354,11 +354,12 @@ fn structured_with_lead_prose(
         one_line(lead, 120)
     };
     let mut detail_parts = Vec::new();
+    if let Some(meta) = card_meta_line(obj) {
+        detail_parts.push(meta);
+    }
+    detail_parts.extend(card_callouts(obj));
     if !lead.is_empty() {
         detail_parts.push(preserve_lines(lead, NARRATIVE_BODY_MAX));
-    }
-    if let Some(sub) = structured_subline(obj) {
-        detail_parts.push(sub);
     }
     if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
         let title = summary_title(s);
@@ -442,50 +443,164 @@ fn summary_detail_body(s: &str, headline: &str) -> Option<String> {
     }
 }
 
-/// Render a scalar JSON value as a short inline fact.
-fn scalar_fact_preview(v: &serde_json::Value) -> Option<String> {
+/// `result` keys that are short operator-relevant identities — the only facts
+/// kept on a structured message card's tracking line. Prose-bearing fields
+/// (build_scope, next_step, preserved_work, …) are excluded by design:
+/// `next_step` is promoted to the `◆ YOU:` callout, the rest stay in the
+/// summary prose or one `Enter` away.
+const TRACKING_FACT_KEYS: &[&str] = &[
+    "agent_id",
+    "target_agent_id",
+    "task_id",
+    "failed_tasks",
+    "workflow_id",
+    "plan_id",
+    "artifact_ref",
+    "entrypoint",
+    "approval_id",
+];
+
+/// Compact label for a whitelisted tracking fact.
+fn tracking_fact_label(key: &str) -> &str {
+    match key {
+        "agent_id" => "agent",
+        "target_agent_id" => "for",
+        "task_id" => "task",
+        "failed_tasks" => "failed",
+        "workflow_id" => "wf",
+        "artifact_ref" => "artifact",
+        "approval_id" => "approval",
+        other => other,
+    }
+}
+
+/// Short identity value for the tracking line; longer prose is excluded.
+fn tracking_fact_value(v: &serde_json::Value) -> Option<String> {
     match v {
-        serde_json::Value::String(s) => {
-            let preview = one_line(s, 80);
-            if preview.is_empty() {
-                None
-            } else {
-                Some(preview)
-            }
+        serde_json::Value::String(s) => Some(one_line(s, 36)),
+        serde_json::Value::Array(arr) => {
+            let joined = arr
+                .iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| one_line(s, 24))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(one_line(&joined, 48))
         }
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
 }
 
-/// Flat string/scalar facts from a structured `result` for the list sub-line.
-/// Nested objects/arrays collapse to `(+N fields)` / `[N]` — never full JSON.
-fn result_prose_line(result: Option<&serde_json::Value>) -> Option<String> {
-    let obj = result?.as_object()?;
+/// One `⚠` callout line from an `anomalies[]` entry
+/// (`{observation, severity, subject_ref, …}`).
+fn anomaly_callout_line(a: &serde_json::Value) -> Option<String> {
+    let observation = a.get("observation").and_then(|v| v.as_str())?;
     let mut parts = Vec::new();
-    if let Some(id) = obj.get("agent_id").and_then(|v| v.as_str()) {
-        parts.push(format!("agent: {id}"));
-    }
-    for (k, v) in obj {
-        if k == "agent_id" {
-            continue;
+    for key in ["id", "anomaly_id", "flag"] {
+        if let Some(id) = a.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            parts.push(id.to_string());
+            break;
         }
-        match v {
-            serde_json::Value::Object(map) => parts.push(format!("{k} (+{} fields)", map.len())),
-            serde_json::Value::Array(arr) => parts.push(format!("{k}[{}]", arr.len())),
-            other => {
-                if let Some(preview) = scalar_fact_preview(other) {
-                    parts.push(format!("{k}: {preview}"));
-                }
+    }
+    if let Some(sev) = a.get("severity").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        parts.push(sev.to_string());
+    }
+    if let Some(st) = a
+        .get("status")
+        .or_else(|| a.get("adjudication"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(st.to_string());
+    }
+    if let Some(subject) = a.get("subject_ref").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        parts.push(subject.to_string());
+    }
+    let head = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} · ", parts.join(" · "))
+    };
+    Some(format!("⚠ {head}{}", one_line(observation, 120)))
+}
+
+/// The `◆ YOU:` / `⚠` callout paragraphs for a structured message card.
+/// `next_step` — the one field that tells the operator what *they* must do —
+/// is promoted to a full-length (never truncated) callout; anomalies render as
+/// their own event line. The TUI recognizes the leading glyphs and styles
+/// them; other channels read them as plain text.
+fn card_callouts(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let next_step = obj
+        .get("result")
+        .and_then(|r| r.get("next_step"))
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("next_step").and_then(|v| v.as_str()));
+    if let Some(step) = next_step.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(format!("◆ YOU: {step}"));
+    }
+    if let Some(anomalies) = obj.get("anomalies").and_then(|v| v.as_array()) {
+        for a in anomalies {
+            if let Some(line) = anomaly_callout_line(a) {
+                out.push(line);
             }
         }
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
+    // Fact-form anomaly reference (`anomaly_flag: "aflag-… (medium, …)"`).
+    let flag = obj
+        .get("result")
+        .and_then(|r| r.get("anomaly_flag"))
+        .or_else(|| obj.get("anomaly_flag"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(flag) = flag {
+        out.push(format!("⚠ {flag}"));
     }
+    out
+}
+
+/// The compact `[status] · agent … · task …` tracking line: status chip,
+/// top-level error, and whitelisted identity facts from the message object and
+/// its `result`. Prose-bearing fields (build_scope, preserved_work, …) are
+/// deliberately excluded — they live in the summary prose or one `Enter` away.
+/// Hard-capped so it stays a single `↳`-style meta line.
+fn card_meta_line(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
+        parts.push(format!("[{status}]"));
+    }
+    if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
+        let preview = one_line(err, 100);
+        if !preview.is_empty() {
+            parts.push(format!("error: {preview}"));
+        }
+    }
+    if let Some(plan_id) = plan_id_from_proposal(obj) {
+        parts.push(format!("plan: {plan_id}"));
+        seen.insert("plan_id");
+    }
+    let mut push_facts = |source: &serde_json::Map<String, serde_json::Value>| {
+        for key in TRACKING_FACT_KEYS {
+            if !seen.insert(key) {
+                continue;
+            }
+            if let Some(val) = source.get(*key).and_then(tracking_fact_value) {
+                if !val.is_empty() {
+                    parts.push(format!("{}: {}", tracking_fact_label(key), val));
+                }
+            }
+        }
+    };
+    if let Some(result) = obj.get("result").and_then(|r| r.as_object()) {
+        push_facts(result);
+    }
+    push_facts(obj);
+    if parts.is_empty() {
+        return None;
+    }
+    Some(one_line(&parts.join(" · "), 158))
 }
 
 fn plan_id_from_proposal(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
@@ -727,38 +842,6 @@ fn plan_proposal_preview(
     (headline, Some(lines.join("\n")))
 }
 
-/// Status chip + flat result facts (+ error/plan_id when present) for list sub-lines.
-fn structured_subline(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
-        parts.push(format!("[{status}]"));
-    }
-    if let Some(plan_id) = plan_id_from_proposal(obj) {
-        parts.push(format!("plan: {plan_id}"));
-    }
-    if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
-        let preview = one_line(err, 100);
-        if !preview.is_empty() {
-            parts.push(format!("error: {preview}"));
-        }
-    }
-    if is_plan_proposal_object(obj) {
-        return if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" · "))
-        };
-    }
-    if let Some(result) = result_prose_line(obj.get("result")) {
-        parts.push(result);
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
-    }
-}
-
 /// List-row projection for structured agent messages (`summary`/`result`,
 /// install intents, child notifications). Returns `(headline, detail)` where
 /// the headline is human-readable and detail is an optional compact sketch.
@@ -793,9 +876,10 @@ fn structured_object_preview(obj: &serde_json::Map<String, serde_json::Value>) -
         return None;
     };
     let mut detail_parts = Vec::new();
-    if let Some(sub) = structured_subline(obj) {
-        detail_parts.push(sub);
+    if let Some(meta) = card_meta_line(obj) {
+        detail_parts.push(meta);
     }
+    detail_parts.extend(card_callouts(obj));
     if let Some(s) = summary_raw {
         if let Some(body) = summary_detail_body(s, &headline) {
             detail_parts.push(body);
@@ -5934,8 +6018,11 @@ mod tests {
         assert!(detail.contains("walkthrough"));
         assert!(detail.contains("[ok]"));
         assert!(detail.contains("agent: fibonacci-next"));
-        assert!(detail.contains("explanation (+2 fields)"));
-        assert!(detail.contains("state_management (+1 fields)"));
+        // Card projection: only identity facts stay on the tracking line;
+        // nested objects (explanation, state_management) leave the list row —
+        // they remain visible in the Enter detail pane.
+        assert!(!detail.contains("(+"), "no field-count sketches on card rows");
+        assert!(!detail.contains("explanation"), "{detail}");
     }
 
     #[test]
@@ -6058,6 +6145,64 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_structured_message_card_promotes_next_step_and_anomalies() {
+        // T7-shaped delegation status: prose-bearing `result` fields must not
+        // be flattened into a truncated fact blob. `next_step` — what the
+        // operator must do — becomes a full-length `◆ YOU:` callout, anomalies
+        // render as `⚠` lines, and only identity facts stay on the meta line.
+        let msg = serde_json::json!({
+            "status": "failed",
+            "summary": "Status: the build is blocked after two identical timeouts.\n\nOne decision from you — pick a path.",
+            "anomalies": [
+                {
+                    "observation": "Two identical llm_transport timeouts on coder.default, zero output both times.",
+                    "severity": "medium",
+                    "subject_ref": "task-8ca111a8"
+                }
+            ],
+            "result": {
+                "agent_id": "coder.default",
+                "build_scope": "SKILL.md + main.py + test_main.py, stdlib-only, offline tests",
+                "build_status": "blocked — 2 identical llm_transport timeouts on coder.default, zero output both times",
+                "failed_tasks": "task-8ca111a8, task-11ee8ebc",
+                "next_step": "operator picks a path (fallback draft / coder retry / debugger) and deploys the bridge per the runbook, then replies with its URL",
+                "preserved_work": "research report (content handle cnt_6abcf619), bridge deployment runbook, full build plan",
+                "anomaly_flag": "aflag-1369801619ea",
+                "workflow_id": "wf-17f8a245"
+            }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("card detail");
+        // The ask, in full — never truncated mid-sentence.
+        assert!(detail.contains("◆ YOU: operator picks a path (fallback draft / coder retry / debugger) and deploys the bridge per the runbook, then replies with its URL"), "{detail}");
+        // Anomalies as their own callout lines.
+        assert!(detail.contains("⚠ medium · task-8ca111a8 · Two identical llm_transport timeouts"), "{detail}");
+        assert!(detail.contains("⚠ aflag-1369801619ea"), "{detail}");
+        // Meta line: status chip + identity facts only.
+        assert!(detail.contains("[failed]"), "{detail}");
+        assert!(detail.contains("failed: task-8ca111a8, task-11ee8ebc"), "{detail}");
+        assert!(detail.contains("wf: wf-17f8a245"), "{detail}");
+        // Prose-bearing result fields leave the list row entirely.
+        assert!(!detail.contains("build_scope:"), "{detail}");
+        assert!(!detail.contains("build_status:"), "{detail}");
+        assert!(!detail.contains("preserved_work:"), "{detail}");
+        assert!(!detail.contains("next_step:"), "{detail}");
+        // Meta line must stay short enough for the `↳` meta treatment.
+        let meta = detail.lines().next().unwrap();
+        assert!(meta.starts_with("[failed]"), "{meta}");
+        assert!(meta.chars().count() <= 160, "{meta}");
+        // Summary prose still renders below the card layers.
+        assert!(detail.contains("the build is blocked after two identical timeouts"), "{detail}");
+    }
+
+    #[test]
     fn render_spec_splits_prose_prefix_from_embedded_json_message() {
         let structured = serde_json::json!({
             "status": "ok",
@@ -6084,7 +6229,7 @@ mod tests {
         assert!(!spec.headline.contains('"'), "headline must not contain JSON");
         let detail = spec.detail.expect("structured detail");
         assert!(detail.contains("[ok]"));
-        assert!(detail.contains("approval_id"));
+        assert!(detail.contains("approval: apr-esc-esc_eba476c5dfe3"));
         assert!(detail.contains("Installation Status") || detail.contains("federation gates passed"));
 
         let lines = format_detail(&e);
