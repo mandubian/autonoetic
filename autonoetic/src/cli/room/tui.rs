@@ -10283,11 +10283,14 @@ fn switch_session(
 
 /// Fetch the most recent session id, optionally filtered by agent. Returns
 /// `None` when the gateway has no matching session.
-/// System sessions (e.g. scheduled system agents, auto-learning jobs, the
-/// sentinel) are recorded under the reserved `"system"` root id. The operator
-/// can't resume or switch into them, so `/session` hides them.
+/// Non-resumable synthetic sessions are hidden from `/session`:
+/// - the reserved `"system"` root id (scheduled system agents, auto-learning
+///   jobs, the sentinel), and
+/// - `background::<agent_id>` roots (decision::`background_session_id`) — the
+///   background/scheduled workers' own state sessions; an operator attaching
+///   to one would inject messages into a background loop.
 fn is_system_session(root_session_id: &str) -> bool {
-    root_session_id == "system"
+    root_session_id == "system" || root_session_id.starts_with("background::")
 }
 
 /// Turn id of the timeline row the cursor is on, if any. Maps the view cursor
@@ -13265,10 +13268,16 @@ mod tests {
     #[test]
     fn system_sessions_are_hidden_from_session_list() {
         // The reserved `"system"` root id is used by scheduled system agents,
-        // auto-learning jobs, and the sentinel — none are operator-resumable.
+        // auto-learning jobs, and the sentinel; `background::<agent>` roots are
+        // the background/scheduled workers' state sessions — none are
+        // operator-resumable.
         assert!(is_system_session("system"));
+        assert!(is_system_session("background::improvement.steward"));
+        assert!(is_system_session("background::memory-curator.default"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
+        // A real agent id that merely contains the word is still resumable.
+        assert!(!is_system_session("session-background-reader"));
     }
 
     // ---- grants panel: envelope-lock visibility ----
