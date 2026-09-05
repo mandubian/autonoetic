@@ -8,7 +8,7 @@ The active constitution version is recorded in the pointer file `docs/constituti
 
 ## Agent Rights (Bill of Rights)
 
-These rights **bind the gateway** on the agent's behalf — they are not granted at discretion.
+These rights **bind the enforcer** (the gateway is its occupant here) and are owed to you — not granted at discretion. Each clause states this in its `Relation`: `binds · owed to · requires`.
 
 Key rights agents should know:
 - **Ri-0.1**: Right to inspect your own capabilities, budget, pending gates, spawn depth, and session lineage

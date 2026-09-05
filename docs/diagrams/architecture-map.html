@@ -1540,11 +1540,11 @@
         <g class="gnode law">
           <rect x="340" y="40" width="560" height="162" rx="8"/>
           <text class="t" x="620" y="72" text-anchor="middle">CONSTITUTION</text>
-          <text class="s" x="620" y="90" text-anchor="middle">versioned · signed · digest-pinned · federated</text>
-          <text class="r" x="368" y="118"><tspan class="rid">Rules  P-*</tspan>  →  bind the Agent</text>
-          <text class="r" x="368" y="140"><tspan class="rid">Rights  Ri-*</tspan>  →  bind the Gateway</text>
+          <text class="s" x="620" y="90" text-anchor="middle">versioned · signed · digest-pinned · bind-direction declared per clause</text>
+          <text class="r" x="368" y="118"><tspan class="rid">Rules  P-*</tspan>  →  bind the Enforcer (180 of 182)</text>
+          <text class="r" x="368" y="140"><tspan class="rid">Rights  Ri-*</tspan>  →  Enforcer, owed to the Agent</text>
           <text class="r" x="368" y="162"><tspan class="rid">Obligations  O-*</tspan>  →  bind the Decider</text>
-          <text class="r" x="368" y="184" style="opacity:.62; font-style:italic"><tspan class="rid">Served  U-*</tspan>  →  bind the Community (declared, unenforced)</text>
+          <text class="r" x="368" y="184" style="opacity:.62; font-style:italic"><tspan class="rid">Served  U-*</tspan>  →  Enforcer, owed to the Served (declared)</text>
         </g>
 
         <!-- RUNTIME -->
@@ -1660,9 +1660,9 @@
     </div>
 
     <div class="graph-legend">
-      <div class="item"><span class="ln rules"></span>Rules bind agent</div>
-      <div class="item"><span class="ln rights"></span>Rights bind gateway</div>
-      <div class="item"><span class="ln oblig"></span>Obligations bind decider</div>
+      <div class="item"><span class="ln rules"></span>Rules → enforcer</div>
+      <div class="item"><span class="ln rights"></span>Rights → enforcer, owed to agent</div>
+      <div class="item"><span class="ln oblig"></span>Obligations → decider</div>
       <div class="item"><span class="ln flow"></span>Data / control flow</div>
       <div class="item"><span class="ln adv"></span>Advisory — never blocks</div>
       <div class="item"><span class="ln loop"></span>Amendment loop</div>

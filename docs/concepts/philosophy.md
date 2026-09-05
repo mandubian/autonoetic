@@ -54,7 +54,7 @@ agent must know to reason well:
 - Its **operational** state (budget, capabilities, pending gates, the law in
   force) is handed *in full*, every turn, in the signed attestation block. The
   agent is taught this block is more authoritative than its own memory.
-- Its **normative** standing (the rights that bind the gateway on its behalf)
+- Its **normative** standing (the rights that bind the enforcer on its behalf)
   is *surfaced by default* — the headline rights (Ri-0.2 read your history,
   Ri-0.3 named rejection, Ri-0.11 non-repudiation) are named in the foundation
   prompt every agent receives, and the one-call `self_describe` tool is nudged
@@ -90,10 +90,12 @@ two deliberately different domains:
 Two consequences follow that the prefixes cannot express:
 
 - **A right is a view, not a family.** An enforcer duty owed to the agent is an
-  agent right whatever its ID says: 27 clauses qualify, only 17 of them `Ri-`.
-  So the rights/rules ratio that §0 tracks as a design signal becomes
-  *derivable* rather than counted off prefixes — which is exactly what stops it
-  from being gameable by refiling clauses.
+  agent right whatever its ID says: with all 221 clauses classified, **38
+  qualify — only 17 of them `Ri-`**. So the rights/rules ratio that §0 tracks
+  as a design signal is *derived* rather than counted off prefixes, which is
+  what stops it being gameable by refiling clauses. Counted off prefixes it
+  read 18 against 182; it was understating rights by better than a factor of
+  two, in the direction that flatters the rules.
 - **The service charter binds the enforcer**, not "the community". `U-*` are
   owed to the *served party* — the end-user, human or not, whom the whole
   arrangement exists to serve — but a community is an aggregate of parties,

@@ -225,6 +225,70 @@ fn squash(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Every clause row is well-formed — exactly six cells.
+///
+/// Two malformations of this class have been found by hand, and both made the
+/// *digest* record the wrong enforcement citation, because
+/// `extract_enforcement_table` filters empty cells and reads `cells[3]`
+/// without ever checking arity:
+///
+/// - `P-9.13` was missing its `Source` cell, so `cells[3]` was its **Status**
+///   ("ENFORCED"). Repaired by the 2026.09.04 amendment.
+/// - `P-5.2` has a literal `|` inside a code span, producing a seventh cell,
+///   so `cells[3]` was its **Source**. Repaired by 2026.09.05.
+///
+/// Neither was visible to any check. This closes the class.
+///
+/// Only the newest version is asserted: earlier ones are frozen bytes, and
+/// several carry malformations repairable only by amendment.
+#[test]
+fn every_clause_row_is_well_formed() {
+    let Some(version) = versions_with_relations().pop() else {
+        panic!("no constitution version carries a Relation column");
+    };
+    let text = version_text(&version);
+
+    let mut malformed = Vec::new();
+    let mut checked = 0usize;
+    for line in text.lines() {
+        let t = line.trim();
+        if !(t.starts_with('|') && t.ends_with('|')) {
+            continue;
+        }
+        let cells: Vec<&str> = t[1..t.len() - 1]
+            .split('|')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .collect();
+        let Some(id) = cells.first() else { continue };
+        if !is_clause_id(id) {
+            continue;
+        }
+        checked += 1;
+        // ID | statement | source/why | enforcement | status | relation
+        if cells.len() != 6 {
+            malformed.push(format!("{id}: {} cells, expected 6", cells.len()));
+        }
+    }
+
+    assert!(
+        checked >= 207,
+        "expected every clause table row in {version}; saw {checked} — this \
+         scan is no longer finding them"
+    );
+    assert!(
+        malformed.is_empty(),
+        "{} clause row(s) in {version} are malformed. The digest's enforcement \
+         table reads `cells[3]` after filtering empty cells, so a missing or \
+         extra cell silently records the wrong citation — a Source or a Status \
+         where the code reference belongs. A literal `|` inside a code span is \
+         the usual cause; escaping it does not help, because the parser \
+         plain-splits.\n\n  {}\n",
+        malformed.len(),
+        malformed.join("\n  ")
+    );
+}
+
 /// **The correcting sentence must itself be true**, and computed rather than
 /// typed.
 ///

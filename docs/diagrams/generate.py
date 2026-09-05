@@ -115,7 +115,7 @@ PEERS = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720" width=
   <path d="M 986 676 L 956 676 M 956 706 L 956 676" class="frame" />
 
   <text x="500" y="48" text-anchor="middle" class="h1">One law over humans and AI agents</text>
-  <text x="500" y="70" text-anchor="middle" class="dek">Every clause binds exactly one party &#183; equal standing, not identical rights &#183; a community that corrects itself</text>
+  <text x="500" y="70" text-anchor="middle" class="dek">Every clause binds exactly one power &#183; equal standing, not identical rights &#183; a community that corrects itself</text>
 
   <circle cx="500" cy="150" r="64" fill="{GOLDBG}" stroke="{GOLD}" stroke-width="2" />
   <circle cx="500" cy="150" r="55" fill="none" stroke="{GOLD}" stroke-width="0.8" opacity="0.5" />
@@ -174,7 +174,7 @@ PEERS = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720" width=
     <path d="M 821 467 L 836 467" />
   </g>
   <text x="800" y="488" text-anchor="middle" class="mono">seats: reasoner &#183; decider &#183; auditor</text>
-  <text x="800" y="503" text-anchor="middle" class="dim">27 RIGHTS OWED BY RELATION</text>
+  <text x="800" y="503" text-anchor="middle" class="dim">38 RIGHTS OWED BY RELATION</text>
 
   <rect x="398" y="330" width="204" height="138" rx="6" class="card-gw" />
   <text x="500" y="352" text-anchor="middle" class="h3">Gateway</text>
@@ -335,7 +335,7 @@ BET = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 580" width="1
   <rect x="36" y="256" width="3.5" height="140" fill="{GOLD}" />
   <text x="54" y="280" class="h3" fill="{GOLD}">It knows the others</text>
   <text x="54" y="296" class="tag" fill="{SEC}">ONE LAW, READABLE BY ALL</text>
-  <text x="54" y="318" class="mono">27 rights it may invoke, by relation</text>
+  <text x="54" y="318" class="mono">38 rights it may invoke, by relation</text>
   <text x="54" y="334" class="mono">what a decider owes it (O-1 &#183; O-2)</text>
   <text x="54" y="350" class="mono">what the served party is owed (U-2)</text>
   <text x="54" y="366" class="mono">authority sits in the seat (P-2.20)</text>

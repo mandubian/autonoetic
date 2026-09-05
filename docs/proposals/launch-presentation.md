@@ -195,7 +195,7 @@ Keep this slide tight. One contrast.
 | Everyone else | Autonoetic |
 |---|---|
 | Trust the prompt | Trust the constitution |
-| Rules bind only the agent | Rules bind the agent; rights bind the gateway |
+| Rules bind only the agent | Rules bind the enforcer too — 180 of 182 |
 | Secrets in context | Secrets gateway-owned |
 | Chat history | Immutable causal chain |
 | Mutable files, silent edits | Content-addressed artifacts — nothing is ever overwritten |
@@ -400,7 +400,8 @@ the demo earned its keep. Status:
 2. **Problem** — power without shared rules.
 3. **Reframe** — it's not about caging AI. It's about law that binds everyone.
 4. **The split** — agents propose, the gateway executes.
-5. **The contract** — rules bind the agent; rights bind the gateway.
+5. **The contract** — the law binds the enforcer, not just the agent:
+   180 of 182 rules constrain the party with power.
 6. **Use-cases** — the six stories above. Pick three for the room.
 7. **The demo** — show the trace.
 8. **The honest frame** — correctability over perfection; the correction

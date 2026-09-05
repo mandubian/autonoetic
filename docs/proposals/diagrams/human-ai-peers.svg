@@ -149,7 +149,7 @@
     <text x="500" y="418" text-anchor="middle" class="mono" fill="#8b949e">Deterministic enforcement,</text>
     <text x="500" y="433" text-anchor="middle" class="mono" fill="#8b949e">no improvised judgment.</text>
     <text x="500" y="455" text-anchor="middle" class="mono">It is a bound party too —</text>
-    <text x="500" y="470" text-anchor="middle" class="mono">§0 rights bind the gateway.</text>
+    <text x="500" y="470" text-anchor="middle" class="mono">§0 rights bind the enforcer.</text>
   </g>
   <!-- law → gateway, broken around the strapline band -->
   <path d="M 500 240 L 500 252" class="e-law" />
