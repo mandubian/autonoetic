@@ -1900,19 +1900,37 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             );
 
                             // Populate code excerpts for operator inspection (Phase 1).
-                            if let Some(ref art_id) = explicit_mount_artifact_id {
-                                if let Some(gw_dir) = gateway_dir {
-                                    let excerpts =
-                                        crate::runtime::code_excerpts::build_code_excerpts(
-                                            art_id, gw_dir,
-                                        );
-                                    let _ = store.set_approval_code_excerpts(
-                                        &gate_id,
-                                        excerpts.as_deref(),
-                                        None,
-                                    );
-                                }
-                            }
+                            // Artifact mounts excerpt the bundle; plain script commands
+                            // fall back to the source the remote-access analysis
+                            // already loaded, so `python3 script.py` gates carry the
+                            // same `── code this runs ──` body the analysis cues cite.
+                            // When no real source resolved (`code_to_analyze` is just
+                            // the command echoed back), attach nothing — the command
+                            // line under `executes command:` is all there is.
+                            let excerpts = match explicit_mount_artifact_id.as_deref() {
+                                Some(art_id) => gateway_dir.and_then(|gw_dir| {
+                                    crate::runtime::code_excerpts::build_code_excerpts(
+                                        art_id, gw_dir,
+                                    )
+                                }),
+                                None => infer_primary_script_display(&effective_command)
+                                    .filter(|_| {
+                                        code_to_analyze.trim() != effective_command.trim()
+                                    })
+                                    .and_then(|script| {
+                                        crate::runtime::code_excerpts::script_code_excerpt(
+                                            Some(&script),
+                                            &code_to_analyze,
+                                            "python",
+                                        )
+                                        .map(|x| vec![x])
+                                    }),
+                            };
+                            let _ = store.set_approval_code_excerpts(
+                                &gate_id,
+                                excerpts.as_deref(),
+                                None,
+                            );
 
                             return serde_json::to_string(&serde_json::json!({
                                 "ok": false,

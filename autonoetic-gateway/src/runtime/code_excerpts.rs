@@ -9,7 +9,7 @@ const MAX_TOTAL_BYTES: usize = 128 * 1024;
 const MAX_PER_FILE_BYTES: usize = 32 * 1024;
 const MAX_FILES: usize = 5;
 
-fn language_from_path(path: &str) -> String {
+pub(crate) fn language_from_path(path: &str) -> String {
     if path.ends_with(".py") || path.ends_with(".python") {
         return "python".to_string();
     }
@@ -55,6 +55,64 @@ fn is_executable_source(name: &str) -> bool {
         && !name_lower.contains("lock") && !name_lower.starts_with('.')
 }
 
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Head/tail-bound a body to [`MAX_PER_FILE_BYTES`], keeping the head and the
+/// tail with a truncation marker between. Returns
+/// `(bounded_content, truncated, original_size)`.
+fn bound_content(content: &str) -> (String, bool, Option<usize>) {
+    let size = content.len();
+    if size <= MAX_PER_FILE_BYTES {
+        return (content.to_string(), false, None);
+    }
+    let head_end = floor_char_boundary(content, MAX_PER_FILE_BYTES / 2);
+    let tail_start = floor_char_boundary(content, size - MAX_PER_FILE_BYTES / 4);
+    let bounded = format!(
+        "{}…\n/* --- truncated {} bytes --- */\n\n{}",
+        &content[..head_end],
+        size - MAX_PER_FILE_BYTES,
+        &content[tail_start..]
+    );
+    (bounded, true, Some(size))
+}
+
+/// Single-file excerpt for ad-hoc command content analyzed at approval time —
+/// the `python3 script.py` case where there is no artifact bundle to excerpt.
+/// The remote-access analysis already loaded this source (sandbox's
+/// `extract_code_for_analysis`); attaching it to the approval record is what
+/// makes the `── code this runs ──` block possible for plain script gates.
+/// `language_hint` backs the extension-derived language (scripts without a
+/// recognizable extension).
+pub fn script_code_excerpt(
+    file_name: Option<&str>,
+    content: &str,
+    language_hint: &str,
+) -> Option<CodeExcerpt> {
+    let body = content.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let language = file_name
+        .map(language_from_path)
+        .filter(|l| l.as_str() != "text")
+        .unwrap_or_else(|| language_hint.to_string());
+    let (bounded, truncated, truncated_from) = bound_content(body);
+    Some(CodeExcerpt {
+        file_name: file_name.unwrap_or("<inline>").to_string(),
+        content: bounded,
+        language,
+        size_bytes: body.len(),
+        truncated,
+        truncated_from_bytes: truncated_from,
+    })
+}
+
 /// Build code excerpts from an artifact. Returns `None` when the artifact
 /// cannot be resolved or contains no eligible source files.
 pub fn build_code_excerpts(
@@ -77,19 +135,8 @@ pub fn build_code_excerpts(
         }
         let language = language_from_path(name);
         let size_bytes = content.len();
-        let (truncated_content, truncated_from) = if size_bytes > MAX_PER_FILE_BYTES {
-            let head = &content[..MAX_PER_FILE_BYTES / 2];
-            let tail = &content[content.len() - MAX_PER_FILE_BYTES / 4..];
-            let truncated = format!(
-                "{}…\n/* --- truncated {} bytes --- */\n\n{}",
-                String::from_utf8_lossy(head),
-                size_bytes - MAX_PER_FILE_BYTES,
-                String::from_utf8_lossy(tail),
-            );
-            (truncated, Some(size_bytes))
-        } else {
-            (String::from_utf8_lossy(content).to_string(), None)
-        };
+        let text = String::from_utf8_lossy(content);
+        let (truncated_content, truncated, truncated_from) = bound_content(&text);
         let new_total = total_bytes + truncated_content.len();
         if new_total > MAX_TOTAL_BYTES {
             break;
@@ -100,7 +147,7 @@ pub fn build_code_excerpts(
             content: truncated_content,
             language,
             size_bytes,
-            truncated: truncated_from.is_some(),
+            truncated,
             truncated_from_bytes: truncated_from,
         });
     }
@@ -213,4 +260,54 @@ pub fn build_risk_summary(
         auditor_verdict,
         auditor_findings_link,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_excerpt_passes_small_content_through() {
+        let ex = script_code_excerpt(Some("/tmp/signal_self_test.py"), "print('hi')\n", "python")
+            .expect("excerpt for non-empty content");
+        assert_eq!(ex.file_name, "/tmp/signal_self_test.py");
+        assert_eq!(ex.content, "print('hi')");
+        assert_eq!(ex.language, "python");
+        assert!(!ex.truncated);
+        assert_eq!(ex.truncated_from_bytes, None);
+        assert_eq!(ex.size_bytes, "print('hi')".len());
+    }
+
+    #[test]
+    fn script_excerpt_bounds_large_content_head_and_tail() {
+        let body = format!("{}\n{}\n", "a".repeat(40_000), "b".repeat(40_000));
+        let ex = script_code_excerpt(Some("/tmp/big.py"), &body, "python")
+            .expect("excerpt for non-empty content");
+        assert!(ex.truncated);
+        assert_eq!(ex.truncated_from_bytes, Some(body.trim().len()));
+        assert!(ex.content.contains("truncated"));
+        assert!(ex.content.starts_with("aaaa"));
+        assert!(ex.content.ends_with("bbbb"));
+    }
+
+    #[test]
+    fn script_excerpt_is_none_for_empty_content() {
+        assert!(script_code_excerpt(Some("/tmp/s.py"), "   \n", "python").is_none());
+    }
+
+    #[test]
+    fn script_excerpt_language_hint_fills_unrecognized_extension() {
+        let ex = script_code_excerpt(Some("/tmp/run_me"), "x = 1", "python")
+            .expect("excerpt for non-empty content");
+        assert_eq!(ex.language, "python");
+    }
+
+    #[test]
+    fn script_excerpt_never_panics_on_multibyte_boundary() {
+        // 'é' is 2 bytes; 40_000 chars of it straddles every cut point.
+        let body = "é".repeat(40_000);
+        let ex = script_code_excerpt(Some("/tmp/unicode.py"), &body, "python")
+            .expect("excerpt for non-empty content");
+        assert!(ex.truncated);
+    }
 }

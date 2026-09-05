@@ -12307,7 +12307,17 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
         }
     }
     match modal.gate.kind {
-        GateKind::Approval => " ⚠ APPROVAL REQUIRED ".to_string(),
+        GateKind::Approval => {
+            // Name the action in the border so the operator can tell a
+            // sandbox_exec gate from a web_fetch gate without reading the body.
+            let action = entry
+                .and_then(|e| payload_field_str(e, "action"))
+                .unwrap_or_else(|| "approval".into());
+            format!(
+                " ⚠ APPROVAL REQUIRED — {} ",
+                render::one_line(&action, 28)
+            )
+        }
         GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ".to_string(),
         GateKind::Escalation => " ⚠ ESCALATION ".to_string(),
         GateKind::Interaction => " ❓ QUESTION PENDING ".to_string(),
@@ -12529,6 +12539,98 @@ fn gate_modal_input_panel_height(gi: &GateInput, width: u16, status: Option<&str
     lines.len().max(3) as u16 + 1
 }
 
+/// Style one plain gate-modal body line. The line generators (`render_spec`
+/// detail, `gate_inspect_detail_lines`) share a small text grammar —
+/// `  label: value` fields, label-only section headers, `── section ──`
+/// separators, indented bodies, `· file` bullets — and coloring that grammar
+/// turns the modal from a flat wall of text into a scannable decision
+/// surface. Returns one or more lines (separators get leading breathing
+/// room).
+fn gate_modal_body_lines(line: &str) -> Vec<Line<'static>> {
+    // Section separator ("── what this approval does ──"): bold amber, with a
+    // blank line above so the content blocks read as distinct sections.
+    if line.starts_with("── ") && line.ends_with(" ──") {
+        return vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
+    }
+    // Keymap hints ("↳ y approve …") and truncation markers ("…(+N more lines)")
+    // are chrome, not content — dim them.
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('↳') || trimmed.starts_with("…(+") {
+        return vec![Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    // Wildcard egress scope is the loudest warning on credential cards.
+    if line.contains("WILDCARD") {
+        return vec![Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ))];
+    }
+    let indent = line.len() - line.trim_start().len();
+    let body = line.trim_start();
+    // File bullet headers ("· script.py (1.2 KiB):") open the excerpt blocks.
+    if body.starts_with("· ") {
+        return vec![Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))];
+    }
+    // Field and section-label lines at card indent level ("  request:", "  purpose:",
+    // "executes command:"): color the label, keep the value plain so content
+    // dominates. Deep-indented bodies (code, wrapped prose) stay unstyled.
+    if indent <= 2 {
+        if let Some(idx) = body.find(": ") {
+            let label = &body[..idx];
+            let value = &body[idx + 2..];
+            let mut spans = vec![Span::styled(
+                format!("{}{label}: ", " ".repeat(indent)),
+                Style::default().fg(Color::Cyan),
+            )];
+            if label == "command" || label == "executes command" {
+                // The command is the single most decision-relevant value.
+                spans.push(Span::styled(
+                    value.to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else if label == "hosts" || label.starts_with("egress scope") {
+                // Network targets are the risk surface — amber them.
+                spans.push(Span::styled(
+                    value.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::raw(value.to_string()));
+            }
+            return vec![Line::from(spans)];
+        }
+        if body.ends_with(':') {
+            return vec![Line::from(Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+        }
+    }
+    vec![Line::raw(line.to_string())]
+}
+
 fn draw_gate_modal_peek_banner(
     f: &mut Frame,
     modal: &GateModal,
@@ -12680,7 +12782,7 @@ fn draw_gate_modal(
             if modal.gate.kind != GateKind::Plan {
                 if let Some(detail) = spec.detail {
                     for line in detail.lines() {
-                        content_lines.push(Line::from(line.to_string()));
+                        content_lines.extend(gate_modal_body_lines(line));
                     }
                 }
             } else {
@@ -12736,7 +12838,7 @@ fn draw_gate_modal(
             Style::default().fg(Color::DarkGray),
         )));
         for line in digest_lines {
-            content_lines.push(Line::from(line));
+            content_lines.extend(gate_modal_body_lines(&line));
         }
     } else if !digest_lines.is_empty()
         && modal.gate.kind != GateKind::Plan
@@ -12747,15 +12849,12 @@ fn draw_gate_modal(
         })
     {
         for line in digest_lines {
-            content_lines.push(Line::from(line));
+            content_lines.extend(gate_modal_body_lines(&line));
         }
     }
     if !content_block.is_empty() {
         for line in content_block {
-            content_lines.push(Line::from(Span::styled(
-                line,
-                Style::default().fg(Color::Gray),
-            )));
+            content_lines.extend(gate_modal_body_lines(&line));
         }
     }
 
@@ -13164,6 +13263,90 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("about:"), "{joined}");
         assert!(!joined.contains("── what this approval does ──"), "{joined}");
+    }
+
+    // ── Gate-modal body styling grammar ──
+
+    fn line_spans(line: &str) -> Vec<Span<'static>> {
+        gate_modal_body_lines(line)
+            .into_iter()
+            .flat_map(|l| l.spans)
+            .collect()
+    }
+
+    #[test]
+    fn gate_modal_body_colors_field_label_and_keeps_value_plain() {
+        let spans = line_spans("  request: apr-ad680b13");
+        assert_eq!(spans.len(), 2, "label span + value span");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[0].content, "  request: ");
+        assert_eq!(spans[1].style.fg, None);
+        assert_eq!(spans[1].content, "apr-ad680b13");
+    }
+
+    #[test]
+    fn gate_modal_body_bolds_the_command_value() {
+        let spans = line_spans("  command: python3 /tmp/signal_self_test.py");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(
+            spans[1].style.add_modifier,
+            Modifier::BOLD,
+            "the command is the decision-relevant value"
+        );
+    }
+
+    #[test]
+    fn gate_modal_body_amber_host_values() {
+        let spans = line_spans("  hosts: api.example.com, api2.example.com");
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn gate_modal_body_separator_gets_breathing_room_and_amber_bold() {
+        let lines = gate_modal_body_lines("── what this approval does ──");
+        assert_eq!(lines.len(), 2, "blank spacer + separator");
+        assert!(lines[0].spans.is_empty());
+        let span = &lines[1].spans[0];
+        assert_eq!(span.style.fg, Some(Color::Yellow));
+        assert_eq!(span.style.add_modifier, Modifier::BOLD);
+    }
+
+    #[test]
+    fn gate_modal_body_label_only_header_is_bold_cyan() {
+        let spans = line_spans("stated purpose:");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[0].style.add_modifier, Modifier::BOLD);
+    }
+
+    #[test]
+    fn gate_modal_body_indented_content_stays_plain() {
+        let spans = line_spans("    print('hello from the script')");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, None);
+        assert_eq!(spans[0].style.add_modifier, Modifier::empty());
+    }
+
+    #[test]
+    fn gate_modal_body_hints_and_truncation_dim() {
+        for line in ["  ↳ y approve · n reject · Esc peek timeline", "    …(+12 more lines)"] {
+            let spans = line_spans(line);
+            assert_eq!(spans[0].style.fg, Some(Color::DarkGray), "{line}");
+        }
+    }
+
+    #[test]
+    fn gate_modal_body_wildcard_is_red_bold() {
+        let spans = line_spans("    · * — WILDCARD: the secret can be sent to ANY host");
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+        assert_eq!(spans[0].style.add_modifier, Modifier::BOLD);
+    }
+
+    #[test]
+    fn gate_modal_body_excerpt_file_bullet_is_bold() {
+        let spans = line_spans("· signal_self_test.py (1234 bytes):");
+        assert_eq!(spans[0].style.fg, Some(Color::White));
+        assert_eq!(spans[0].style.add_modifier, Modifier::BOLD);
     }
 
     // ── Persisted view prefs ──
