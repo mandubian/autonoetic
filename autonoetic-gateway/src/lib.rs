@@ -11,6 +11,7 @@ pub mod capsule;
 pub mod causal_chain;
 pub mod config;
 pub mod constitution_digest;
+pub mod constitution_materializer;
 pub mod decider_appointment;
 pub mod decider_dispatch;
 pub mod constitution_glossary;

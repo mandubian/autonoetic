@@ -220,6 +220,29 @@ pub fn constitution_lock() -> Arc<ConstitutionLock> {
     runtime_arc().lock.clone()
 }
 
+/// The resolved on-disk path of the active constitution source.
+pub fn constitution_source_path() -> PathBuf {
+    runtime_arc().source_path.clone()
+}
+
+/// Compute the canonical constitution digest and clause counts for arbitrary
+/// text — the same extraction + payload the active lock pins.
+///
+/// Exposed for the amendment materializer (#810): a candidate version's
+/// unsigned lock must carry a digest byte-identical to what
+/// `docs/constitution/recompute_lock.py` will later sign over the same
+/// markdown, so it must go through exactly this code path. Returns
+/// `(digest_hex, rule_enforcement_count, right_enforcement_count)`.
+pub fn compute_constitution_digest(text: &str) -> (String, usize, usize) {
+    let rights_enforcement = extract_enforcement_table(text, "Ri-");
+    let rules_enforcement = extract_enforcement_table(text, "P-");
+    let payload = canonical_digest_payload(text, &rights_enforcement, &rules_enforcement);
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    (digest, rules_enforcement.len(), rights_enforcement.len())
+}
+
 pub fn constitution_version() -> Arc<str> {
     Arc::from(runtime_arc().lock.constitution_version.as_str())
 }

@@ -424,6 +424,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             published_in_release: None,
             created_at: now,
             sla_breached_at: None,
+            materialized_in_version: None,
         };
 
         store.insert_constitutional_proposal(&proposal)?;

@@ -3,6 +3,7 @@ mod support;
 
 mod abuse_approval_flood;
 mod abuse_degraded_mode;
+mod amendment_materializer;
 mod relation_column;
 mod abuse_sdk_bridge;
 mod abuse_spawn_depth;

@@ -3061,6 +3061,165 @@ pub async fn handle_gateway_constitution(
             }
             Ok(())
         }
+        super::common::GatewayConstitutionCommands::Materialize {
+            proposal_ids,
+            version,
+            json,
+        } => {
+            handle_constitution_materialize(&config, proposal_ids, version.as_deref(), *json)
+        }
+    }
+}
+
+/// Materialize approved proposals into a candidate constitution version
+/// (#810). The gateway drafts — this command writes an unsigned candidate
+/// directory and stamps the store; it never signs, never touches CURRENT,
+/// and never moves the active-version pin. The signature is the operator's.
+fn handle_constitution_materialize(
+    config: &autonoetic_types::config::GatewayConfig,
+    proposal_ids: &[String],
+    version: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use autonoetic_gateway::constitution_materializer::MaterializableProposal;
+
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    // The base is always the ACTIVE constitution, resolved and verified
+    // through the same machinery boot uses — a candidate is only ever drafted
+    // on top of the signed law in force.
+    autonoetic_gateway::constitution_digest::initialize_constitution(config)?;
+    autonoetic_gateway::constitution_digest::verify_constitution_lock_integrity()?;
+    let base_version = autonoetic_gateway::constitution_digest::constitution_version().to_string();
+    let base_source = autonoetic_gateway::constitution_digest::constitution_source_path();
+    let versions_dir = base_source
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot derive the versions directory from constitution source {}",
+                base_source.display()
+            )
+        })?;
+
+    let selected: Vec<_> = if proposal_ids.is_empty() {
+        store.list_approved_unmaterialized_proposals()?
+    } else {
+        let mut out = Vec::new();
+        for id in proposal_ids {
+            let p = store
+                .get_constitutional_proposal(id)?
+                .ok_or_else(|| anyhow::anyhow!("proposal {id} not found"))?;
+            anyhow::ensure!(
+                p.status == "approved",
+                "proposal {id} is '{}' — only approved proposals materialize",
+                p.status
+            );
+            anyhow::ensure!(
+                p.materialized_in_version.is_none(),
+                "proposal {id} was already materialized in {}",
+                p.materialized_in_version.as_deref().unwrap_or("?")
+            );
+            out.push(p);
+        }
+        out
+    };
+    anyhow::ensure!(
+        !selected.is_empty(),
+        "no approved proposals awaiting materialization"
+    );
+
+    let candidate_version = version
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y.%m.%d").to_string());
+
+    let materializable: Vec<MaterializableProposal> =
+        selected.iter().map(MaterializableProposal::from).collect();
+    let report = autonoetic_gateway::constitution_materializer::materialize_candidate_version(
+        &versions_dir,
+        &base_version,
+        &candidate_version,
+        &materializable,
+    )?;
+
+    // Stamp the store only after the candidate directory exists on disk. A
+    // stamp failure leaves the directory written but unstamped — the operator
+    // can re-run with explicit IDs (the directory guard prevents a clobber),
+    // so surface it loudly instead of rolling anything back.
+    let stamped = store.mark_proposals_materialized(&report.proposal_ids, &report.candidate_version)?;
+    if stamped.len() != report.proposal_ids.len() {
+        anyhow::bail!(
+            "candidate {} written, but only {}/{} proposals stamped — re-run with explicit \
+             proposal IDs to repair the stamps",
+            report.candidate_version,
+            stamped.len(),
+            report.proposal_ids.len()
+        );
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "report": report,
+                "stamped_proposal_ids": stamped,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Materialized {} proposal(s) into candidate version {} (base {})",
+        report.proposal_ids.len(),
+        report.candidate_version,
+        report.base_version
+    );
+    for edit in &report.edits {
+        match (edit.before.as_deref(), edit.after.as_deref()) {
+            (Some(_), Some(after)) => println!(
+                "  amended {} — {}",
+                edit.target_id.as_deref().unwrap_or("?"),
+                truncate_cell(after)
+            ),
+            (Some(_), None) => println!(
+                "  removed {}",
+                edit.target_id.as_deref().unwrap_or("?")
+            ),
+            (None, Some(after)) => println!(
+                "  added {} — {}",
+                edit.target_id.as_deref().unwrap_or("?"),
+                truncate_cell(after)
+            ),
+            (None, None) => unreachable!("an edit always has a before or an after"),
+        }
+    }
+    println!(
+        "\nCandidate: {}",
+        report.candidate_dir.display()
+    );
+    println!(
+        "Digest: {} ({} rules, {} rights cite enforcement)",
+        report.candidate_digest, report.rule_enforcement_count, report.right_enforcement_count
+    );
+    println!("\nThe candidate is unsigned and INERT — nothing is active yet. Next steps:");
+    println!("  1. Review the draft; complete DRAFT rows (Source, Status, Relation) substantively.");
+    println!(
+        "  2. Sign: python3 docs/constitution/recompute_lock.py --version {} \\",
+        report.candidate_version
+    );
+    println!("       --signing-sk-b64 \"$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64\"");
+    println!("  3. Activate through the ordinary ceremony (CURRENT + ACTIVE_CONSTITUTION_VERSION + bless).");
+    Ok(())
+}
+
+fn truncate_cell(row: &str) -> String {
+    let one_line = row.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.len() > 100 {
+        format!("{}…", &one_line[..100])
+    } else {
+        one_line
     }
 }
 

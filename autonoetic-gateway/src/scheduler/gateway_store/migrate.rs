@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 87;
+const SCHEMA_VERSION_LATEST: i64 = 88;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -572,6 +572,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_decider_gate_routings_v85(conn)?;
     apply_session_served_party_v86(conn)?;
     apply_session_mount_grants_v87(conn)?;
+    apply_proposal_materialization_v88(conn)?;
 
     Ok(())
 }
@@ -3896,6 +3897,52 @@ fn apply_session_mount_grants_v87(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![87_i64, "session_mount_grants", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// v88 — `constitutional_proposals.materialized_in_version` (#810).
+///
+/// The amendment materializer stamps the candidate constitution version a
+/// proposal was drafted into, closing the loop at the last mile: before this
+/// column, an approved proposal could only be tagged with a release label
+/// (`published_in_release`) and the markdown was edited by hand. Deliberately
+/// separate from `published_in_release` — materialization (the gateway drafts
+/// a candidate directory) and release (the operator labels a batch) are
+/// different acts at different points of the ceremony, and conflating them
+/// would make `gateway constitution release` a no-op for materialized
+/// proposals.
+fn apply_proposal_materialization_v88(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 88 {
+        return Ok(());
+    }
+
+    // The table is absent only in synthetic partial databases (e.g. the
+    // upgrade-path test that hand-crafts a v83-era store with a single
+    // table): every real deployment created `constitutional_proposals` at
+    // v22, which necessarily ran before this version. Nothing to upgrade
+    // there — and no proposal rows to stamp.
+    let table_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'constitutional_proposals'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_exists > 0 {
+        conn.execute_batch(
+            "ALTER TABLE constitutional_proposals ADD COLUMN materialized_in_version TEXT;
+             CREATE INDEX IF NOT EXISTS idx_constitutional_proposals_materialized
+               ON constitutional_proposals(materialized_in_version);",
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![88_i64, "proposal_materialization", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

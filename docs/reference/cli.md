@@ -133,6 +133,39 @@ enforcer says so. A `✓` marks clauses the gateway mechanically enforces. This 
 autonoetic gateway constitution show [--include-text] [--json]
 ```
 
+### `autonoetic gateway constitution release`
+
+Tag every approved-but-unpublished amendment proposal with a release label.
+The markdown is *not* edited by this command — use `materialize` below to
+draft the text mechanically.
+
+```bash
+autonoetic gateway constitution release <TAG> [--json]
+```
+
+### `autonoetic gateway constitution materialize`
+
+Draft approved Ri-0.8 proposals into a **candidate** constitution version
+(#810): applies each proposal to a copy of the active constitution (modify =
+replace the statement cell; remove = delete the row; add = insert after the
+clause's section siblings with explicit `DRAFT` placeholders), and writes
+`docs/constitution/versions/<candidate>/` containing the amended markdown,
+an **unsigned** lock (digest computed through the same canonicalization
+`recompute_lock.py` signs), and a `provenance.json` linking every proposal
+to its adjudication with a before/after row diff.
+
+The candidate is inert: `CURRENT`, the active-version pin, and all signed
+bytes are untouched. Review the draft (completing `DRAFT` rows' Source,
+Status, and Relation is the operator's substantive act), sign with
+`recompute_lock.py`, and activate through the ordinary ceremony.
+
+```bash
+autonoetic gateway constitution materialize [--version YYYY.MM.DD] [--json] [PROPOSAL_ID...]
+```
+
+With no IDs, every approved proposal not yet materialized is drafted, oldest
+first.
+
 ### `autonoetic gateway approvals`
 
 Manage pending approval requests for `agent_revision_promote` and `sandbox_exec` actions.

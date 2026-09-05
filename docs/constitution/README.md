@@ -93,3 +93,24 @@ Each constitutional release should:
 3. ensure the lock signature matches the lock payload (`docs/constitution/signing.md`),
 4. update `docs/constitution/CURRENT`,
 5. update `config/config-template.yaml` defaults when promoting the new release.
+
+### The amendment materializer (#810)
+
+Step 1 no longer has to be a hand edit. Approved Ri-0.8 proposals can be
+mechanically drafted into a candidate version:
+
+```bash
+autonoetic gateway constitution materialize [--version YYYY.MM.DD] [PROPOSAL_ID...]
+```
+
+This applies each approved-but-unmaterialized proposal to a copy of the
+active constitution (modify = replace the statement cell; remove = delete the
+row; add = insert after the clause's section siblings with explicit `DRAFT`
+placeholder cells that the operator completes substantively), writes
+`versions/<candidate>/` with the markdown, an **unsigned** lock whose digest
+is computed through the same canonicalization `recompute_lock.py` signs, and
+a `provenance.json` linking every proposal to its adjudication and a
+before/after row diff. The candidate directory is inert — the gateway drafts,
+never enacts: `CURRENT`, the active-version pin, and every signed byte stay
+untouched until the operator reviews, signs, and activates through the
+ceremony above.
