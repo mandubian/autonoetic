@@ -710,16 +710,18 @@ receipts for an audience in evaluation mode).
 
 **Sunday (the curious crowd — the bet, link included):**
 
-*(~261 chars — fits. Link counts as 23 via t.co. Author's edits, kept on
-purpose: "1y ago" stakes the wager; "humans included" marks the mixed
-community; and the "instead of a tool that has to be watched" contrast was
-deliberately dropped — agents *will* be watched, humans too; the claim is
-that the runtime makes them **watchable**, not that watching goes away.
-Don't re-add the contrast.)*
+*(~280 chars — right at the limit; if the composer overflows, drop "every"
+or shorten "open and running" → "open, running". Author's edits, kept on
+purpose: "1y ago" stakes the wager; "human incl." marks the mixed community;
+the "instead of a tool that has to be watched" contrast was deliberately
+dropped — agents *will* be watched, humans too; the claim is that the runtime
+makes them **watchable**, not that watching goes away. The constitution
+enters the bet sentence itself: "enforcer incl." / "human incl." name the two
+parties usually assumed to be outside the frame. Don't re-add the contrast.)*
 
-> The bet I made 1y ago when starting Autonoetic: an agent that knows itself — and knows what every other party is owed, humans included — can be a trusted community member.
+> The bet I made 1y ago when starting Autonoetic: under one signed constitution — enforcer incl. — an agent that knows itself, and what every other party is owed, human incl., can be a trusted community member.
 >
-> A wager, not a finding. The harness is experimental but open: [link]
+> Experimental harness, open and running: [link]
 
 **Monday (the working crowd — longer, the machinery):**
 
