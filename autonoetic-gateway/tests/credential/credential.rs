@@ -185,6 +185,8 @@ fn test_credential_crud() -> anyhow::Result<()> {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
 
     store.upsert_credential(&cred)?;
@@ -234,6 +236,8 @@ fn test_credential_expiry_check() -> anyhow::Result<()> {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
 
     let cred_valid = CredentialRecord {
@@ -253,6 +257,8 @@ fn test_credential_expiry_check() -> anyhow::Result<()> {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
 
     store.upsert_credential(&cred_expired)?;
@@ -290,6 +296,8 @@ fn test_credential_expiry_parsing() -> anyhow::Result<()> {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
 
     store.upsert_credential(&cred)?;
@@ -401,6 +409,8 @@ fn test_credential_request_denied_wrong_service() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -464,6 +474,8 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -532,6 +544,8 @@ fn egress_credential(allowed_hosts: Vec<String>) -> CredentialRecord {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 
@@ -728,6 +742,8 @@ fn test_credential_request_allowed_when_host_matches() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -800,6 +816,8 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -876,6 +894,8 @@ fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -942,6 +962,8 @@ fn test_credential_request_denied_expired() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -1009,6 +1031,8 @@ fn test_credential_request_denied_malformed_expiry() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -1076,6 +1100,8 @@ fn test_credential_request_denied_network_policy() {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred).unwrap();
 
@@ -2286,6 +2312,8 @@ fn refresh_credential(host: String, refresh_url: String) -> CredentialRecord {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: Some("expires_in".to_string()),
         label: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 
@@ -2566,6 +2594,8 @@ fn query_credential(host: String, inject_as: &str) -> CredentialRecord {
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 

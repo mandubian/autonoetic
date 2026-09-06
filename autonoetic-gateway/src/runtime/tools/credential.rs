@@ -235,6 +235,12 @@ impl NativeTool for CredentialCheckTool {
                     "service": c.service,
                     "inject_as": c.inject_as,
                     "created_by_agent": c.created_by_agent,
+                    // Record timestamps (gateway clock, RFC 3339) — lets an
+                    // agent answer "which credential is the latest" without
+                    // ever touching the secret value. `updated_at` bumps on
+                    // every re-set of the credential.
+                    "created_at": c.created_at,
+                    "updated_at": c.updated_at,
                     "secret_present": vault
                         .as_ref()
                         .map(|v| v.get_secret(&c.secret_name).is_some()),
@@ -3046,6 +3052,8 @@ fn execute_steps(
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
             label: label.map(str::to_string),
+            created_at: None,
+            updated_at: None,
         };
         store.upsert_credential(&cred)?;
         created_cred = Some(cred);

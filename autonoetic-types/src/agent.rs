@@ -974,6 +974,13 @@ pub struct CredentialRecord {
     /// JSON path to extract the new expiry from the refresh response (e.g. "$.expires_in").
     #[serde(default)]
     pub refresh_extract_expires_in: Option<String>,
+    /// When the credential record was first written (RFC 3339, gateway clock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// When the credential record was last re-set (RFC 3339). Bumped on every
+    /// upsert, so "latest credential" for a service is the max of this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 /// A step in the credential setup (automated registration) workflow.

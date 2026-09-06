@@ -2578,6 +2578,8 @@ fn handle_credential_put(
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred)?;
 
@@ -2608,15 +2610,24 @@ fn handle_credential_list(
         println!("No credentials found.");
     } else {
         println!(
-            "{:<36} {:<24} {:<24} {:<16} EXPIRES",
-            "CREDENTIAL ID", "SERVICE", "SECRET NAME", "INJECT AS"
+            "{:<36} {:<24} {:<24} {:<16} {:<20} UPDATED",
+            "CREDENTIAL ID", "SERVICE", "SECRET NAME", "INJECT AS", "EXPIRES"
         );
         for cred in &credentials {
             let inject = cred.inject_as.as_deref().unwrap_or("-");
             let expires = cred.expires_at.as_deref().unwrap_or("-");
+            // Compact UTC wall-clock (YYYY-MM-DD HH:MM) — full RFC 3339 stays
+            // available via --json.
+            let stamp = cred
+                .updated_at
+                .as_deref()
+                .or(cred.created_at.as_deref())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "-".to_string());
             println!(
-                "{:<36} {:<24} {:<24} {:<16} {}",
-                cred.credential_id, cred.service, cred.secret_name, inject, expires
+                "{:<36} {:<24} {:<24} {:<16} {:<20} {}",
+                cred.credential_id, cred.service, cred.secret_name, inject, expires, stamp
             );
         }
     }

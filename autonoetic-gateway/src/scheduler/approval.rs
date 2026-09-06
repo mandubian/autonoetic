@@ -1498,6 +1498,8 @@ pub fn approve_request_with_options(
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
             label,
+            created_at: None,
+            updated_at: None,
         };
         store.upsert_credential(&cred)?;
 

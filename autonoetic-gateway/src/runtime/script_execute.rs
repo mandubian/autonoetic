@@ -1172,6 +1172,8 @@ mod tests {
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
             label: None,
+            created_at: None,
+            updated_at: None,
         }
     }
 
