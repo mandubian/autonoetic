@@ -175,8 +175,11 @@ pub fn help_lines() -> Vec<String> {
             .to_string(),
         "  g (modal)    leave timeline peek · return to gate resolve overlay".to_string(),
         String::new(),
-        "Messaging".to_string(),
-        "  i            compose operator message (multi-line editor)".to_string(),
+        "Messaging (prompt-first)".to_string(),
+        "  type         typing anywhere composes — the prompt is always live".to_string(),
+        "  / (empty)    slash commands · ? (empty) opens this info pane".to_string(),
+        "  i            compose — refocus the prompt (Esc blurs to nav triage)".to_string(),
+        "  gates        pending gates peek as a banner: y/n act · type composes through".to_string(),
         "               Enter send · Shift+Enter newline".to_string(),
         "               ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy"
             .to_string(),
