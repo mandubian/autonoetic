@@ -1310,9 +1310,12 @@ fn build_attention_detail_line(
 }
 
 /// The `[n] label` items for a gate-input prompt, each label capped at `per`
-/// display columns. Truncation is per-item, not global: on a wide terminal
-/// every choice gets room to be understood instead of a fixed 24-column
-/// stub ("Approve and create sessio…").
+/// characters — the same char-count truncation as the room's other inline
+/// labels (`render::one_line`; a wide glyph can still render wider than its
+/// char count, so this is an upper bound, not exact columns). Truncation is
+/// per-item, not global: on a wide terminal every choice gets room to be
+/// understood instead of a fixed 24-character stub ("Approve and create
+/// sessio…").
 fn format_choice_items(options: &[GateOption], per: usize) -> String {
     options
         .iter()
@@ -1322,11 +1325,12 @@ fn format_choice_items(options: &[GateOption], per: usize) -> String {
         .join(" · ")
 }
 
-/// Per-choice label budget for a gate-input prompt line of `total` columns:
-/// distribute the free width across the choices. Floor keeps a crowded
-/// prompt readable; cap stops one long choice from eating the whole line.
-/// The overhead reservation covers the `[n] ` numbering, the ` · `
-/// separators, the input label + buffer, and the trailing key hint.
+/// Per-choice character budget for a gate-input prompt line of `total`
+/// columns: distribute the free width across the choices. Floor keeps a
+/// crowded prompt readable; cap stops one long choice from eating the whole
+/// line. The overhead reservation covers the `[n] ` numbering, the ` · `
+/// separators, the input label + buffer, and the trailing key hint. (Budgets
+/// are chars, matching `render::one_line`'s char-count truncation.)
 fn choice_budget(total: usize, count: usize) -> usize {
     let n = count.max(1);
     let overhead = 32 + n * 8;
@@ -13176,10 +13180,7 @@ fn gate_modal_input_panel_lines(
         )));
     }
 
-    let choices = format_choice_items(
-        &gi.options,
-        choice_budget(wrap_w.max(width as usize), gi.options.len()),
-    );
+    let choices = format_choice_items(&gi.options, choice_budget(wrap_w, gi.options.len()));
     let hint = if gi.details_mode {
         "Enter submit details · Esc cancel details".to_string()
     } else if gi.options.is_empty() {
@@ -16954,5 +16955,46 @@ fn footer_gate_input_uses_the_width_adaptive_choice_budget() {
     assert!(
         text.contains("Approve and create a session grant for the detected hosts"),
         "the full choice label must render on a wide footer: {text}"
+    );
+}
+
+#[test]
+fn modal_panel_choice_budget_uses_the_inner_width() {
+    // The modal panel's budget comes from the panel's inner text width
+    // (width - 2), not the outer width — and the hint line therefore fits
+    // the full choice label inside the panel.
+    let gi = GateInput {
+        action: GateAction::Answer,
+        id: "int-1".into(),
+        buffer: String::new(),
+        options: vec![GateOption {
+            id: "o1".into(),
+            label: "Approve and create a session grant for the detected hosts".into(),
+        }],
+        allow_freeform: false,
+        details_mode: false,
+        motivation_required: false,
+        required_confirm_phrase: None,
+        acknowledged_capabilities: Vec::new(),
+        secret_fields: Vec::new(),
+        credential_allowed_hosts: Vec::new(),
+        secret_values: Vec::new(),
+        secret_phase: false,
+        opened_in_modal: false,
+    };
+    let lines = gate_modal_input_panel_lines(&gi, 120, None);
+    let text: String = lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Approve and create a session grant for the detected hosts"),
+        "the full choice label must render in a 120-wide modal panel: {text}"
     );
 }
