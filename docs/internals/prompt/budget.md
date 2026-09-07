@@ -138,9 +138,16 @@ tokens), so real savings are typically higher.
 
 | Tier | Tools | When included |
 |------|-------|---------------|
-| **Core** | `content.*`, `knowledge.*`, `artifact.*`, `sandbox_exec` | Always (unless explicitly filtered) |
-| **Workflow** | `agent_spawn`, `agent_discover`, `approval.*`, `workflow.*`, `federation.*`, `promotion_query`, `credential.*`, `skill_normalize`, `scheduler.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
+| **Core** | `content.*`, `knowledge.*`, `artifact.*`, `sandbox_exec`, `skill_normalize` | Always (unless explicitly filtered) |
+| **Workflow** | `agent_spawn`, `agent_discover`, `approval.*`, `workflow.*`, `federation.*`, `promotion_query`, `credential.*`, `scheduler.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
 | **Specialized** | `web.*`, `execution.*`, `promotion_record`, `agent.revision.*`, and uncategorized tools | Excluded by `demote_tools` and `core_and_workflow` filtering |
+
+> `skill_normalize` is Core because its real boundary is its capability gate
+> (`is_available` requires `WriteAccess` covering `skills/`, plus the P-1.4
+> write check at execution) — the same shape as `sandbox_exec` being Core
+> while `CodeExecution` gates it. As a Workflow tool it was invisible to
+> Core-only child sessions of the agents that legitimately hold that
+> capability.
 
 ### Manifest-Level Tier Filtering
 

@@ -423,7 +423,7 @@ impl NativeTool for ArtifactExecTool {
         if !decision.is_allowed() {
             return Err(
                 autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
-                    anyhow::anyhow!(decision.explain_shell_denial("Artifact execution")),
+                    anyhow::anyhow!(decision.explain_shell_denial("Artifact execution", &command)),
                     decision
                         .enforced_rules
                         .into_iter()
