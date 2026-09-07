@@ -1077,6 +1077,13 @@ impl NativeTool for SkillNormalizeTool {
                 "session_content": session_content,
                 "discovery_record_registered": discovery_record_registered,
                 "dependency_installs": dependency_installs,
+                "dependency_routing": if dependency_installs.is_empty() { serde_json::Value::Null } else {
+                    serde_json::json!(
+                        "These lines look like dependency-install steps. Route them to packager.default \
+                         (it holds NetworkAccess + package_manager_commands and bakes installs into \
+                         artifact layers) — do not run them from a plain sandbox_exec."
+                    )
+                },
                 "message": "Content already contains autonoetic.onboarding steps; file written as-is. Use resolve with session_content.normalized_name, or credential_setup with skill_url=skill_path.",
             })
             .to_string());

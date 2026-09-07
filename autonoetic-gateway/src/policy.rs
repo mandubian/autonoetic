@@ -1538,7 +1538,8 @@ mod tests {
     }
 
     #[test]
-    fn explain_shell_denial_names_packager_for_wrapped_dependency_install() {        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+    fn explain_shell_denial_names_packager_for_wrapped_dependency_install() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
             patterns: vec!["python3 ".to_string()],
             commands: vec![],
         }]);
