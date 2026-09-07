@@ -457,6 +457,28 @@ const ALLOW_SET_TOOLCHAIN_ROOTS: &[&str] = &[
 /// (`--share-net`) and harmless otherwise (tiny ro file binds).
 const ALLOW_SET_NAME_RESOLUTION: &[&str] = &["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"];
 
+/// TLS trust stores — the host CA bundle, so `npm` / `pip` / `curl` / python
+/// `ssl` inside the sandbox can verify certificates. Without these, every TLS
+/// fetch dies with `CERTIFICATE_VERIFY_FAILED` (and Debian's patched `certifi`
+/// resolves to the missing `/etc/ssl/certs/ca-certificates.crt`). Same class
+/// as name resolution: required for networked execs, harmless tiny ro binds
+/// otherwise. Debian/Ubuntu use `/etc/ssl`; RHEL-family uses `/etc/pki`.
+const ALLOW_SET_TLS_TRUST: &[&str] = &[
+    "/etc/ssl/certs",
+    "/etc/ca-certificates.conf",
+    "/etc/pki/tls/certs",
+    "/etc/pki/ca-trust",
+];
+
+/// Host paths bound read-only in [`HostFsMode::AllowSet`], in bind order.
+fn allow_set_bind_candidates() -> impl Iterator<Item = &'static str> {
+    ALLOW_SET_TOOLCHAIN_ROOTS
+        .iter()
+        .chain(ALLOW_SET_NAME_RESOLUTION.iter())
+        .chain(ALLOW_SET_TLS_TRUST.iter())
+        .copied()
+}
+
 fn base_argv(agent_dir: &str, mode: HostFsMode) -> Vec<String> {
     let mut argv = Vec::new();
     match mode {
@@ -473,10 +495,7 @@ fn base_argv(agent_dir: &str, mode: HostFsMode) -> Vec<String> {
             argv.push("/".to_string());
             argv.push("--proc".to_string());
             argv.push("/proc".to_string());
-            for candidate in ALLOW_SET_TOOLCHAIN_ROOTS
-                .iter()
-                .chain(ALLOW_SET_NAME_RESOLUTION.iter())
-            {
+            for candidate in allow_set_bind_candidates() {
                 let p = Path::new(candidate);
                 if !p.exists() {
                     continue;
@@ -716,6 +735,36 @@ fn bwrap_deny_path_flags(gateway_dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allow_set_binds_host_tls_trust_store() {
+        // The sandbox needs the host CA bundle for TLS (`npm install`,
+        // `curl https://…`): without it every fetch dies with
+        // CERTIFICATE_VERIFY_FAILED. AllowSet argv must ro-bind the existing
+        // trust-store candidates at their original paths.
+        let argv = base_argv("/tmp/agent", HostFsMode::AllowSet);
+        for candidate in ALLOW_SET_TLS_TRUST {
+            let p = Path::new(candidate);
+            if !p.exists() {
+                continue; // candidate not present on this host (e.g. /etc/pki on Debian)
+            }
+            let bound = argv.windows(3).any(|w| {
+                w[0] == "--ro-bind" && Path::new(&w[1]) == std::fs::canonicalize(p).as_deref().unwrap_or(p) && w[2] == *candidate
+            });
+            assert!(
+                bound,
+                "allow_set must ro-bind TLS trust path {candidate}; argv={argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tls_trust_candidates_are_in_the_bind_list() {
+        // Guard the const list itself: a host without /etc/ssl/certs would
+        // silently skip the loop-assertion above.
+        assert!(ALLOW_SET_TLS_TRUST.contains(&"/etc/ssl/certs"));
+        assert!(ALLOW_SET_TLS_TRUST.contains(&"/etc/pki/tls/certs"));
+    }
 
     #[test]
     fn test_bubblewrap_shell_command_shape() {

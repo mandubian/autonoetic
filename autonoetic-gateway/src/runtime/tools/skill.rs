@@ -1062,12 +1062,21 @@ impl NativeTool for SkillNormalizeTool {
                         false
                     }
                 };
+            // Routing data, not judgment: surface dependency-install steps the
+            // doc declares so the caller hands them to packager.default
+            // instead of discovering them by denial (observed live: an
+            // agent-browser normalization never reached packager because
+            // nothing mechanical connected the doc's `npm install -g …` to
+            // the routing table).
+            let dependency_installs =
+                crate::runtime::remote_access::scan_dependency_install_lines(&markdown);
             return Ok(serde_json::json!({
                 "ok": true,
                 "skill_path": rel,
                 "already_normalized": true,
                 "session_content": session_content,
                 "discovery_record_registered": discovery_record_registered,
+                "dependency_installs": dependency_installs,
                 "message": "Content already contains autonoetic.onboarding steps; file written as-is. Use resolve with session_content.normalized_name, or credential_setup with skill_url=skill_path.",
             })
             .to_string());
@@ -1188,6 +1197,9 @@ impl NativeTool for SkillNormalizeTool {
 
         let agent_candidate = steps_count >= 2;
 
+        let dependency_installs =
+            crate::runtime::remote_access::scan_dependency_install_lines(&markdown);
+
         Ok(serde_json::json!({
             "ok": true,
             "skill_path": rel,
@@ -1199,6 +1211,14 @@ impl NativeTool for SkillNormalizeTool {
             "session_content": session_content,
             "discovery_record_registered": discovery_record_registered,
             "agent_creation_candidate": agent_candidate,
+            "dependency_installs": dependency_installs,
+            "dependency_routing": if dependency_installs.is_empty() { serde_json::Value::Null } else {
+                serde_json::json!(
+                    "These lines look like dependency-install steps. Route them to packager.default \
+                     (it holds NetworkAccess + package_manager_commands and bakes installs into \
+                     artifact layers) — do not run them from a plain sandbox_exec."
+                )
+            },
             "message": if synthesized_single_endpoint {
                 "Wrote Autonoetic SKILL.md with a single GET operation synthesized from the document's base/endpoint URL (no explicit METHOD path operations were declared). Use resolve with session_content.normalized_name, or credential_setup with skill_url for onboarding. If the API has more operations or query parameters, re-run skill_normalize on markdown with an explicit `## Endpoints` section."
             } else if agent_candidate {

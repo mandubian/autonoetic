@@ -91,11 +91,40 @@ impl PolicyDecision {
     /// loops on an agent that can never run the command.
     pub fn explain_shell_denial(&self, context_label: &'static str, command: &str) -> String {
         let base = match self.security_analysis.as_ref() {
-            Some(a) if !a.threats.is_empty() => format!(
-                "{} blocked by security policy (static analysis): {}",
-                context_label,
-                a.reason.as_deref().unwrap_or("security threats detected")
-            ),
+            Some(a) if !a.threats.is_empty() => {
+                // Threat-specific lawful moves (same "denials carry lawful
+                // next moves" contract as the capability table): a generic
+                // "security policy" wall gives the calling agent nothing to
+                // do, so it retries paraphrases — observed live when a
+                // packager burned its rejection budget probing an npm
+                // environment with `node -e` / `$(…)`.
+                let mut hints: Vec<&'static str> = Vec::new();
+                for threat in &a.threats {
+                    let hint: &str = match threat {
+                        SecurityThreat::CodeFromInput =>
+                            "write the code to a file first (content_write), then run it (`python3 file.py`, `node file.js`) — `-c`/stdin/exec-string code is rejected as code-from-input",
+                        SecurityThreat::ShellInjection =>
+                            "remove `$(...)`, backticks and unquoted expansions from the command — compute values in a separate step or inside a script file",
+                        SecurityThreat::EnvironmentDisclosure =>
+                            "read the specific environment variables you need inside your script instead of dumping `env`/`printenv`",
+                        SecurityThreat::Destructive
+                        | SecurityThreat::PrivilegeEscalation
+                        | SecurityThreat::NetworkExfiltration
+                        | SecurityThreat::SandboxEscape
+                        | SecurityThreat::ResourceExhaustion =>
+                            "rewrite the command without the flagged pattern, or route the task to an agent whose role legitimately requires it",
+                    };
+                    if !hints.contains(&hint) {
+                        hints.push(hint);
+                    }
+                }
+                format!(
+                    "{} blocked by security policy (static analysis): {}. Fix: {}.",
+                    context_label,
+                    a.reason.as_deref().unwrap_or("security threats detected"),
+                    hints.join("; ")
+                )
+            }
             _ => format!(
                 "{} not permitted: this command does not match any CodeExecution pattern or allowed command (rule P-1.9). \
 This is not a missing operator approval step—remote/network gating runs only after the command is allowed here. \
@@ -1470,8 +1499,46 @@ mod tests {
     }
 
     #[test]
-    fn explain_shell_denial_names_packager_for_wrapped_dependency_install() {
+    fn security_denial_names_threat_specific_lawful_moves() {
         let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        let decision = policy.can_exec_shell_detailed("node -e \"console.log(process.version)\"");
+        assert!(!decision.is_allowed());
+        let msg = decision.explain_shell_denial(
+            "Sandbox execution",
+            "node -e \"console.log(process.version)\"",
+        );
+        assert!(msg.contains("security policy"), "{msg}");
+        assert!(
+            msg.contains("content_write"),
+            "CodeFromInput denial must point at file-based execution: {msg}"
+        );
+        // The dependency-install hint is not appended to a non-install block.
+        assert!(!msg.contains("packager.default"), "{msg}");
+    }
+
+    #[test]
+    fn shell_injection_denial_names_the_expansion_fix() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        let command = "npm config get prefix; npm config get registry; readlink -f $(command -v node)";
+        let decision = policy.can_exec_shell_detailed(command);
+        assert!(!decision.is_allowed());
+        let msg = decision.explain_shell_denial("Sandbox execution", command);
+        assert!(
+            msg.contains("$(...)") || msg.contains("expansions"),
+            "ShellInjection denial must name the expansion fix: {msg}"
+        );
+    }
+
+    #[test]
+    fn explain_shell_denial_names_packager_for_wrapped_dependency_install() {        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
             patterns: vec!["python3 ".to_string()],
             commands: vec![],
         }]);
