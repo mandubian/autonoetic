@@ -4817,18 +4817,22 @@ pub fn run(
                                         } else {
                                             "planner.default"
                                         };
-                                        let mut params = serde_json::json!({
-                                            "session_id": &*root_session_id,
-                                            "target_agent_id": target,
-                                            "reason": note.as_deref().unwrap_or(if enable {
+                                        // The note, when given, becomes the
+                                        // handoff reason; without one the
+                                        // gateway records the mode flip itself.
+                                        let reason = note.clone().unwrap_or_else(|| {
+                                            if enable {
                                                 "switching to collaborative plan mode"
                                             } else {
                                                 "leaving collaborative plan mode"
-                                            }),
+                                            }
+                                            .to_string()
                                         });
-                                        if let Some(n) = note.as_deref() {
-                                            params["reason"] = serde_json::json!(n);
-                                        }
+                                        let params = serde_json::json!({
+                                            "session_id": &*root_session_id,
+                                            "target_agent_id": target,
+                                            "reason": reason,
+                                        });
                                         match rpc(client, "session.handoff", params) {
                                             Ok(value) => {
                                                 let to = value
@@ -10812,7 +10816,7 @@ fn switch_session(
     acted: &mut HashSet<String>,
     floor: &mut FloorMode,
     root_session_id: &mut String,
-    _target_agent_id: &mut Option<String>,
+    target_agent_id: &mut Option<String>,
     _limit: u32,
     new_id: &str,
     force_timeline_refresh: &mut bool,
@@ -10827,6 +10831,11 @@ fn switch_session(
     *follow = true;
     resolved.clear();
     acted.clear();
+    // The composer target (and the 🤝 header chip) belonged to the *previous*
+    // session's handoff. Clear it: the new session's messages follow its own
+    // binding (the binding wins at ingest), and the chip honestly reads
+    // planner.default until a handoff happens in this one.
+    *target_agent_id = None;
     *force_timeline_refresh = true;
     // Don't reset `floor` — the operator's altitude dial is a view preference,
     // not a session property. Keep the previous setting.

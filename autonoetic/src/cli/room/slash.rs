@@ -571,21 +571,19 @@ fn parse_agent(tail: &str) -> SlashCommand {
 /// (#1088): `on` rebinds the live session to `planner.collaborative` (the
 /// PlanFrame-aware planner), `off` hands back to `planner.default`. The note,
 /// when given, becomes the handoff reason and rides the successor's context
-/// envelope; without one the gateway records a default motive.
+/// envelope; without one the gateway records a default motive. `off` must be
+/// a whole token — `/collab office hours` is a note that happens to start
+/// with "off", not a mode flip.
 fn parse_collab(tail: &str) -> SlashCommand {
     let trimmed = tail.trim();
-    match trimmed.strip_prefix("off") {
-        Some(rest) => SlashCommand::CollabMode {
-            enable: false,
-            note: {
-                let note = rest.trim();
-                (!note.is_empty()).then(|| note.to_string())
-            },
-        },
-        None => SlashCommand::CollabMode {
-            enable: true,
-            note: (!trimmed.is_empty()).then(|| trimmed.to_string()),
-        },
+    let (enable, note) = match trimmed.split_once(char::is_whitespace) {
+        Some((head, rest)) if head.eq_ignore_ascii_case("off") => (false, rest.trim()),
+        _ if trimmed.eq_ignore_ascii_case("off") => (false, ""),
+        _ => (true, trimmed),
+    };
+    SlashCommand::CollabMode {
+        enable,
+        note: (!note.is_empty()).then(|| note.to_string()),
     }
 }
 
@@ -954,6 +952,22 @@ mod tests {
             SlashCommand::CollabMode {
                 enable: false,
                 note: Some("plan approved, build it".to_string()),
+            }
+        );
+        // "off" must be a whole token: a note that merely starts with "off"
+        // stays a note (and stays in collaborative mode).
+        assert_eq!(
+            parse("/collab office hours only"),
+            SlashCommand::CollabMode {
+                enable: true,
+                note: Some("office hours only".to_string()),
+            }
+        );
+        assert_eq!(
+            parse("/collab offplan"),
+            SlashCommand::CollabMode {
+                enable: true,
+                note: Some("offplan".to_string()),
             }
         );
     }
