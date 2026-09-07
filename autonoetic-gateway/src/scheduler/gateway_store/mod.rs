@@ -932,6 +932,16 @@ impl GatewayStore {
         decider_appointments::list_routings_for_appointment(&conn, appointment_id)
     }
 
+    /// Every routing ever made under appointments scoped to one root session,
+    /// oldest first — `deciders.review`.
+    pub fn list_decider_routings_for_scope(
+        &self,
+        scope_root_session: &str,
+    ) -> Result<Vec<autonoetic_types::decider_appointment::DeciderGateRouting>> {
+        let conn = self.conn.lock().unwrap();
+        decider_appointments::list_routings_for_scope(&conn, scope_root_session)
+    }
+
     pub fn get_decider_gate_routing(
         &self,
         routing_id: &str,

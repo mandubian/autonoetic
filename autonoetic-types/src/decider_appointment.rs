@@ -84,8 +84,10 @@ pub struct DeciderAppointment {
     pub risk_ceiling: ApprovalRisk,
 
     /// When true the verdict is recorded but the gate still parks for the
-    /// human. Phase 1 forces this true: binding mode does not exist until
-    /// calibration evidence does (§4.4, advisory before binding).
+    /// human — the default and the safe direction. When false the seat's
+    /// terminal verdict resolves the gate (`agent:<id>` attribution, verdict
+    /// still on the chain), and the appointment must carry a bound
+    /// (`expires_at` or `max_gates`) so a forgotten seat cannot linger.
     pub advice_only: bool,
 
     /// Wall-clock expiry. Independent of `max_gates`; whichever is reached
@@ -212,8 +214,10 @@ pub enum AppointmentError {
     /// delegable by a single operator gesture. Refused at appointment time
     /// rather than merely sitting above a configurable ceiling.
     CriticalNotAppointable,
-    /// Phase 1 ships advisory-only; binding appointments wait on calibration.
-    BindingNotYetAvailable,
+    /// A binding seat resolves gates without the operator, so it must be
+    /// bounded — `expires_at` or `max_gates`. An unbounded binding seat is a
+    /// standing auto-decider, which this record deliberately cannot express.
+    BindingRequiresBound,
     /// The appointee resolves to a **routing** preset, which selects a model
     /// per call. A seat served by a different model on different gates makes
     /// "which model produced this verdict" unanswerable, and the agreement
@@ -257,11 +261,11 @@ impl std::fmt::Display for AppointmentError {
                  different gates cannot say which model produced a verdict, and the agreement \
                  rate that would justify binding authority becomes meaningless"
             ),
-            Self::BindingNotYetAvailable => write!(
+            Self::BindingRequiresBound => write!(
                 f,
-                "Binding appointments are not available yet: phase 1 is advisory-only, so \
-                 advice_only must be true. Binding mode unlocks once the ledger carries \
-                 agreement evidence (§4.4, advisory before binding)"
+                "A binding appointment must carry a bound — expires_at or max_gates. A binding \
+                 seat resolves gates without the operator, so an unbounded one is a standing \
+                 auto-decider; attach at your own risk, but always with a horizon"
             ),
             Self::NoScope => write!(
                 f,

@@ -310,16 +310,16 @@ pub async fn sweep_undispatched_routings(
     woken
 }
 
-/// The advisory verdict, on the chain.
+/// The verdict, on the chain.
 ///
 /// Attribution reuses the `agent_decider.{kind}_gate` vocabulary so the seat's
 /// use surfaces in contract health under P-2.20 like any other ruling, with
-/// `status: "advised"` keeping an advisory verdict distinguishable from a
-/// binding decision at every surface. The payload carries the appointment
-/// reference, the digest of the gate card the seat was woken with (the Ri-0.15
-/// context it consumed — the card body is already durable on the approval
-/// row), and the seat's session, where its reads are causal-logged: an agent
-/// can only be interrogated through its record.
+/// `status: "advised"` (advisory seat) or `"resolved"` (binding seat) keeping
+/// the two modes distinguishable at every surface. The payload carries the
+/// appointment reference, the digest of the gate card the seat was woken with
+/// (the Ri-0.15 context it consumed — the card body is already durable on the
+/// approval row), and the seat's session, where its reads are causal-logged:
+/// an agent can only be interrogated through its record.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_advice_event(
     store: &crate::scheduler::gateway_store::GatewayStore,
@@ -338,7 +338,9 @@ pub fn emit_advice_event(
         timestamp: chrono::Utc::now().to_rfc3339(),
         category: "background.approval".to_string(),
         action: format!("agent_decider.{}_gate", routing.gate_kind),
-        status: "advised".to_string(),
+        // "advised" vs "resolved" is the advisory/binding distinction, taken
+        // from the routing row so the event cannot drift from the record.
+        status: if routing.advice_only { "advised" } else { "resolved" }.to_string(),
         enforced_rules: vec!["P-2.20".to_string()],
         target: Some(routing.gate_id.clone()),
         payload: Some(

@@ -1021,6 +1021,11 @@ pub enum GatewayDeciderCommands {
         /// whichever is reached first ends the appointment.
         #[arg(long)]
         max_gates: Option<u32>,
+        /// Binding seat: the verdict resolves the gate (attributed to the
+        /// agent, fail-closed on escalate/unparsable/timeout). Requires
+        /// --expires-at or --max-gates; attached at the operator's risk.
+        #[arg(long)]
+        binding: bool,
         /// Operator principal recorded as the appointer.
         #[arg(long, default_value = "operator")]
         appointed_by: String,
@@ -1064,6 +1069,17 @@ pub enum GatewayDeciderCommands {
         /// Include the per-gate ledger rows.
         #[arg(long)]
         include_routings: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// After-action review for one run: every gate a seat was routed, its
+    /// verdict and motivation, and the gate's final status — the record an
+    /// operator reads to audit a binding (or advisory) attachment.
+    Review {
+        /// Root session (the run) to review.
+        #[arg(long)]
+        root_session: String,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,

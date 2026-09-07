@@ -1278,6 +1278,14 @@ pub fn approve_request_with_options(
     // P-2.24: Dwell time enforcement. Reject if the approval was decided too
     // quickly after the request was created (operator must see the prompt
     // for a minimum time before confirming).
+    //
+    // Skipped for agent-decider attributions (`agent:<id>`): the dwell is a
+    // human-reflex guard — it protects an operator from confirming a prompt
+    // they have not actually read. A seat has no prompt on screen; its
+    // consideration is the bounded deliberation turn plus the O-1 motivation,
+    // and its authority is the appointment, re-verified by the P-2.20
+    // capability check below. Skipping the reflex timer for a verified-then
+    // ruled agent does not weaken the guard for humans.
     if let Some(min_dwell_ms) = req.min_dwell_ms {
         let multiplier = if config.approval_dwell_multiplier.is_finite()
             && config.approval_dwell_multiplier >= 0.0
@@ -1287,7 +1295,7 @@ pub fn approve_request_with_options(
             1.0
         };
         let effective_dwell = (min_dwell_ms as f64 * multiplier) as i64;
-        if effective_dwell > 0 {
+        if effective_dwell > 0 && parse_agent_decider_id(decided_by).is_none() {
             let created = chrono::DateTime::parse_from_rfc3339(&req.created_at).map_err(|e| {
                 anyhow::anyhow!(
                     "P-2.24: Cannot parse created_at '{}' for dwell-time check: {}",
@@ -1401,18 +1409,24 @@ pub fn approve_request_with_options(
         });
 
         // Store secrets in vault — fail-closed, require VAULT_PATH.
-        // Fall back to the config's agents_dir when the env var is unset
-        // (the normal case for approvals arriving via the TUI; credential_setup
-        // resolves the vault path at tool-execution time but does not set the
-        // env var, so the approval handler needs the fallback).
+        // Fall back to the gateway dir (config.runtime_dir) when the env var
+        // is unset (the normal case for approvals arriving via the TUI;
+        // credential_setup resolves the vault path at tool-execution time but
+        // does not set the env var, so the approval handler needs the
+        // fallback). This must match every other vault site (credential_check,
+        // sandbox_exec, artifact_prepare): the reorg made runtime_dir the
+        // single vault home; agents_dir is ingest-only.
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::vault::default_vault_path(&config.agents_dir));
+            .unwrap_or_else(|| {
+                crate::vault::default_vault_path(&crate::execution::gateway_root_dir(config))
+            });
         // Ensure the vault key is available (credential_setup already called
         // this, but the approval handler may run in a context where the env var
         // was cleared or unreachable — the call is idempotent/nop if already set).
-        let _ = crate::vault::ensure_default_key(&config.agents_dir);
+        let _ =
+            crate::vault::ensure_default_key(&crate::execution::gateway_root_dir(config));
         let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
@@ -1492,6 +1506,8 @@ pub fn approve_request_with_options(
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
             label,
+            created_at: None,
+            updated_at: None,
         };
         store.upsert_credential(&cred)?;
 
@@ -2464,7 +2480,7 @@ mod tests {
 
         // The discriminating assertion: had the effects run before the guard,
         // this would now be "second".
-        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        let vault_path = crate::vault::default_vault_path(&gateway_dir);
         let vault = crate::vault::Vault::load_from_file(&vault_path).unwrap();
         use secrecy::ExposeSecret;
         assert_eq!(
@@ -2570,7 +2586,7 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        let vault_path = crate::vault::default_vault_path(&gateway_dir);
         // No vault file at all, or one without the secret — either proves the
         // refusal happened before the write.
         if let Ok(vault) = crate::vault::Vault::load_from_file(&vault_path) {

@@ -1205,7 +1205,7 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 
 ### Decider Dispatch
 
-Run-scoped decider appointments (#1191, `gateway deciders …`). Phase 1 seats are advisory-only: a routed gate wakes the seat for one bounded turn, the verdict is recorded on the ledger, and the gate still parks for the operator.
+Run-scoped decider appointments (#1191, `gateway deciders …`). The default seat is advisory-only: a routed gate wakes the seat for one bounded turn, the verdict is recorded on the ledger, and the gate still parks for the operator. An operator may opt into a **binding** seat at appointment time (`gateway deciders appoint --binding`): the seat's terminal verdict resolves the gate through the standard approval machinery, attributed to `agent:<decider>`, fail-closed on escalate/unparsable/timeout — and the binding appointment must carry a bound (`expires_at` or `max_gates`).
 
 | Key | Type | Default | Description |
 |---|---|---|---|

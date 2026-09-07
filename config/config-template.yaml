@@ -905,7 +905,10 @@ llm_presets:
   # temperature 0: a decider that gives different verdicts for the same gate
   # card cannot be calibrated. Premium tier because the volume argument runs
   # opposite to the watchdog's — this fires on a handful of gates a night, each
-  # one replacing a decision the operator would otherwise have made.
+  # one replacing a decision the operator would otherwise have made. (A
+  # `--binding` seat resolves gates outright; it must carry --expires-at or
+  # --max-gates, so keep the model deterministic before you even think about
+  # letting it decide.)
   decider:
     provider: "anthropic"
     model: "claude-opus-4-20250514"

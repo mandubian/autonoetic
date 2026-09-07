@@ -843,6 +843,7 @@ pub async fn handle_gateway_deciders(
             ceiling,
             expires_at,
             max_gates,
+            binding,
             appointed_by,
             json,
         } => {
@@ -862,6 +863,9 @@ pub async fn handle_gateway_deciders(
             }
             if let Some(m) = max_gates {
                 params["max_gates"] = serde_json::json!(m);
+            }
+            if *binding {
+                params["binding"] = serde_json::json!(true);
             }
             let result = rpc.call("deciders.appoint", params)?;
             if *json {
@@ -888,10 +892,16 @@ pub async fn handle_gateway_deciders(
                 println!("  ceiling:     {}", a["risk_ceiling"].as_str().unwrap_or("?"));
                 // Say the advisory stage out loud: an operator who believes
                 // they just automated the gate away would be wrong, and the
-                // morning would be the wrong time to find out.
+                // morning would be the wrong time to find out. The binding
+                // case says the opposite just as loudly — the operator opted
+                // in, and the record shows it.
                 if a["advice_only"].as_bool().unwrap_or(true) {
                     println!(
                         "  mode:        advisory — the verdict is recorded, the gate still parks for you"
+                    );
+                } else {
+                    println!(
+                        "  mode:        BINDING — the verdict resolves the gate (fail-closed on escalate/timeout)"
                     );
                 }
                 match (a["expires_at"].as_str(), a["max_gates"].as_u64()) {
@@ -1029,6 +1039,60 @@ pub async fn handle_gateway_deciders(
                         r["human_decision"].as_str().unwrap_or("pending"),
                     );
                 }
+            }
+        }
+        GatewayDeciderCommands::Review { root_session, json } => {
+            let result = rpc.call(
+                "deciders.review",
+                serde_json::json!({ "root_session_id": root_session }),
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+            let routes = result["routings"].as_array().cloned().unwrap_or_default();
+            let appointments = result["appointments"].as_array().cloned().unwrap_or_default();
+            println!("Decider review for {}", root_session);
+            if appointments.is_empty() {
+                println!("  (no appointments ever seated for this run)");
+                return Ok(());
+            }
+            for a in &appointments {
+                println!(
+                    "  seat: {} ({}) — {}",
+                    a["decider_agent"].as_str().unwrap_or("?"),
+                    a["appointment_id"].as_str().unwrap_or("?"),
+                    if a["advice_only"].as_bool().unwrap_or(true) {
+                        "advisory"
+                    } else {
+                        "BINDING"
+                    }
+                );
+            }
+            println!();
+            println!(
+                "{:<24} {:<10} {:<10} {:<22} {}",
+                "GATE", "KIND", "MODE", "VERDICT", "GATE STATUS"
+            );
+            if routes.is_empty() {
+                println!("  (no gates were ever routed to a seat)");
+            }
+            for r in &routes {
+                println!(
+                    "{:<24} {:<10} {:<10} {:<22} {}",
+                    r["gate_id"].as_str().unwrap_or("?"),
+                    r["gate_kind"].as_str().unwrap_or("?"),
+                    if r["advice_only"].as_bool().unwrap_or(true) {
+                        "advisory"
+                    } else {
+                        "binding"
+                    },
+                    r["verdict"]
+                        .as_str()
+                        .map(|v| format!("{v} — {}", r["verdict_reason"].as_str().unwrap_or("")))
+                        .unwrap_or_else(|| "— unanswered —".to_string()),
+                    r["gate_status"].as_str().unwrap_or("pending"),
+                );
             }
         }
     }

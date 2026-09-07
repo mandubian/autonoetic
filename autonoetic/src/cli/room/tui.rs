@@ -617,6 +617,10 @@ fn build_info_panel(
     pending_plan_count: usize,
     status: Option<&str>,
     selected_spawn_agent: Option<&str>,
+    approval_rows: &[ApprovalRow],
+    info_grants: &[GrantRow],
+    info_grants_taint: Option<&str>,
+    info_anomalies: &[(String, String, String)],
 ) -> InfoPanel {
     let mut lines = Vec::new();
     let short_id = if root.len() > 32 {
@@ -710,6 +714,59 @@ fn build_info_panel(
         lines.push("  Active".to_string());
         for a in active {
             lines.push(a);
+        }
+    }
+    lines.push(String::new());
+    // Live governance snapshot (refreshed while the pane is open): pending
+    // approvals first (newest last — matches the approvals popup order), then
+    // grants with the ambient taint, then pending anomaly flags. Capped rows;
+    // the dedicated panels hold the full lists (A / G).
+    const INFO_MAX_ROWS: usize = 4;
+    let pending_approvals: Vec<&ApprovalRow> =
+        approval_rows.iter().filter(|r| r.is_pending).collect();
+    let resolved_approvals = approval_rows.len() - pending_approvals.len();
+    if approval_rows.is_empty() {
+        lines.push("  Approvals  —".to_string());
+    } else {
+        lines.push(format!(
+            "  Approvals  {} pending · {} resolved  (A: all)",
+            pending_approvals.len(),
+            resolved_approvals
+        ));
+        for r in pending_approvals.iter().take(INFO_MAX_ROWS) {
+            let summary = truncate_str(&r.summary, 56);
+            lines.push(format!("    ⏳ {} {} {summary}", r.kind, r.id));
+        }
+        if pending_approvals.len() > INFO_MAX_ROWS {
+            lines.push(format!("    … +{} more", pending_approvals.len() - INFO_MAX_ROWS));
+        }
+    }
+    if info_grants.is_empty() {
+        lines.push("  Grants     —".to_string());
+    } else {
+        let taint = info_grants_taint.unwrap_or("unrestricted");
+        lines.push(format!(
+            "  Grants     {}  taint: {taint}  (G: manage)",
+            info_grants.len()
+        ));
+        for g in info_grants.iter().take(INFO_MAX_ROWS) {
+            let summary = truncate_str(&g.summary, 52);
+            lines.push(format!("    {} #{} {summary}", g.kind.label(), g.id));
+        }
+        if info_grants.len() > INFO_MAX_ROWS {
+            lines.push(format!("    … +{} more", info_grants.len() - INFO_MAX_ROWS));
+        }
+    }
+    if info_anomalies.is_empty() {
+        lines.push("  Anomalies  —".to_string());
+    } else {
+        lines.push(format!("  Anomalies  {} pending", info_anomalies.len()));
+        for (flag_id, severity, subject) in info_anomalies.iter().take(INFO_MAX_ROWS) {
+            let subject = truncate_str(subject, 44);
+            lines.push(format!("    ⚠ {severity} {flag_id} {subject}"));
+        }
+        if info_anomalies.len() > INFO_MAX_ROWS {
+            lines.push(format!("    … +{} more", info_anomalies.len() - INFO_MAX_ROWS));
         }
     }
     lines.push(String::new());
@@ -1268,7 +1325,7 @@ fn build_footer(
         ))
     } else if compose.is_some() {
         Line::from(Span::styled(
-            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy · Esc cancel",
+            " Enter send · Shift+Enter newline · / commands · ? info · Esc nav · ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy",
             Style::default().fg(Color::Green),
         ))
     } else if let Some(gi) = input {
@@ -1306,11 +1363,11 @@ fn build_footer(
         Line::from(Span::styled(format!(" {s}"), Style::default().fg(color)))
     } else {
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
-        let nav = "q quit · j↓ k↑ · /help · c content · G grants · o artifact · ? info";
+        let nav = "q quit · j↓ k↑ · i prompt · /help · c content · G grants · o artifact · ? info";
         let nav_display = if footer_w < 50 {
-            "j↓ k↑ · /help · ?"
+            "j↓ k↑ · i · / · ?"
         } else if footer_w < 70 {
-            "q · j↓ k↑ · /help · o · ?"
+            "q · j↓ k↑ · i prompt · /help · o · ?"
         } else {
             nav
         };
@@ -2439,6 +2496,87 @@ fn fetch_grant_rows(
         .unwrap_or_default();
 
     (rows, taint, child_taints)
+}
+
+/// Pending anomaly flags for the info pane (`?`): `(flag_id, severity,
+/// subject_ref)`, oldest first (gateway returns creation order). `None` on
+/// RPC error — a sentinel the caller must honour by keeping the last-known
+/// snapshot, so a transient gateway failure never overwrites a populated
+/// pane with an empty section.
+fn fetch_info_anomalies(client: &RoomClient) -> Option<Vec<(String, String, String)>> {
+    let value = match rpc(
+        client,
+        "anomaly.list_pending",
+        serde_json::json!({ "status": "pending", "limit": 50 }),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(target: "room", error = %e, "anomaly.list_pending failed");
+            return None;
+        }
+    };
+    Some(
+        value
+            .get("flags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| {
+                        Some((
+                            f.get("flag_id")?.as_str()?.to_string(),
+                            f.get("severity")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            f.get("subject_ref")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// Open the session info pane (`?`) with an eager governance snapshot so it
+/// paints populated; the idle poll keeps it fresh while open. Single source
+/// of truth for the nav `?` arm and the empty-prompt `?` punch-through.
+fn open_info_panel(
+    client: &RoomClient,
+    root_session_id: &str,
+    info_panel_open: &mut bool,
+    info_scroll: &mut u16,
+    info_grants_rows: &mut Vec<GrantRow>,
+    info_grants_taint: &mut Option<String>,
+    info_anomaly_rows: &mut Vec<(String, String, String)>,
+    last_info_poll: &mut Instant,
+    status: &mut Option<String>,
+) {
+    *info_panel_open = true;
+    *info_scroll = 0;
+    let (rows, taint, _) = fetch_grant_rows(client, root_session_id);
+    *info_grants_rows = rows;
+    *info_grants_taint = taint;
+    // On a failed first read there is no last-known snapshot to keep; an
+    // empty pane section is honest until the idle poll succeeds.
+    *info_anomaly_rows = fetch_info_anomalies(client).unwrap_or_default();
+    *last_info_poll = Instant::now();
+    *status = Some("info: j/k scroll · Esc close".to_string());
+}
+
+/// Prompt-first: the room's resting state is a focused empty prompt. Closing
+/// an overlay (info pane, slash bar, gate modal) returns there, so typing
+/// immediately composes again — `i` stays as the manual fallback and Esc as
+/// the explicit nav opt-in. Never steals focus from an active comment draft.
+fn refocus_prompt(
+    compose: &mut Option<ComposeInput>,
+    compose_comment: &Option<(String, String)>,
+) {
+    if compose.is_none() && compose_comment.is_none() {
+        *compose = Some(ComposeInput::new());
+    }
 }
 
 // Labels panel (`T`) — operator live view of every labeled thing in the root
@@ -4252,7 +4390,10 @@ pub fn run(
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut pending_gate: Option<PendingGateResolve> = None; // background gate RPC
-    let mut compose: Option<ComposeInput> = None; // in-flight free-form message to the session
+    // Prompt-first (opencode-style): the composer is focused by default so
+    // typing immediately types a message. Esc blurs it into nav mode for
+    // single-key triage (j/k/y/n/…); `i` refocuses, `/` commands, `?` info.
+    let mut compose: Option<ComposeInput> = Some(ComposeInput::new()); // in-flight free-form message to the session
     // When Some, the active compose targets a file comment (name, version handle)
     // and submits via `content.comment` instead of a freeform session message.
     let mut compose_comment: Option<(String, String)> = None;
@@ -4304,6 +4445,14 @@ pub fn run(
     let mut approvals_popup: Option<ApprovalsPopup> = None;
     let mut grants_panel: Option<GrantsPanel> = None;
     let mut last_grants_poll = Instant::now();
+    // Info-pane (`?`) snapshots: grants + pending anomaly flags. Refreshed
+    // only while the pane is open (same poll-on-open contract as the grants /
+    // labels panels) so a closed pane never spams `grants.list` /
+    // `anomaly.list_pending`; fetched once eagerly on open.
+    let mut info_grants_rows: Vec<GrantRow> = Vec::new();
+    let mut info_grants_taint: Option<String> = None;
+    let mut info_anomaly_rows: Vec<(String, String, String)> = Vec::new();
+    let mut last_info_poll = Instant::now();
     let mut labels_panel: Option<LabelsPanel> = None;
     let mut last_labels_poll = Instant::now();
     // Ambient egress posture (#971): the current root-session taint name and a
@@ -4388,13 +4537,62 @@ pub fn run(
                         continue;
                     }
                     repaint_after_input = true;
-                    // Compose mode: multi-line editor with cursor + clipboard (#405).
-                    if let Some(c) = compose.as_mut() {
+                    // Compose mode (prompt-first): multi-line editor with cursor
+                    // + clipboard (#405). Focused by default; Esc blurs to nav.
+                    if compose.is_some() {
+                        // A leading `/`, `:` or `?` on an empty prompt punches
+                        // through to slash commands / the info pane instead of
+                        // typing into the message (opencode convention), so the
+                        // overlay keys keep working from the focused prompt.
+                        // Comment drafts keep the literal char.
+                        if compose_comment.is_none()
+                            && compose.as_ref().is_some_and(|c| c.buffer.is_empty())
+                            && matches!(
+                                key.code,
+                                KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?')
+                            )
+                            && !key
+                                .modifiers
+                                .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            if key.code == KeyCode::Char('?') {
+                                if info_panel_open {
+                                    // Dismiss the overlay, keep typing.
+                                    info_panel_open = false;
+                                    info_scroll = 0;
+                                } else {
+                                    // Yield focus so j/k/Esc work in the pane.
+                                    compose = None;
+                                    open_info_panel(
+                                        client,
+                                        &root_session_id,
+                                        &mut info_panel_open,
+                                        &mut info_scroll,
+                                        &mut info_grants_rows,
+                                        &mut info_grants_taint,
+                                        &mut info_anomaly_rows,
+                                        &mut last_info_poll,
+                                        &mut status,
+                                    );
+                                }
+                                continue;
+                            }
+                            compose = None;
+                            slash = Some(String::new());
+                            slash_sel = 0;
+                            status = None;
+                            continue;
+                        }
+                        let c = compose.as_mut().expect("compose checked above");
                         match handle_compose_key(c, &key, &mut clipboard) {
                             ComposeKeyResult::Continue => {}
                             ComposeKeyResult::Cancel => {
                                 compose = None;
                                 compose_comment = None;
+                                status = Some(
+                                    "nav — j/k scroll · y/n gates · i prompt · / commands · ? info"
+                                        .to_string(),
+                                );
                             }
                             ComposeKeyResult::Send(text) => {
                                 status = Some(if let Some((name, handle)) = compose_comment.take() {
@@ -4414,7 +4612,9 @@ pub fn run(
                                         None,
                                     )
                                 });
-                                compose = None;
+                                // Prompt-first: stay focused so the chat loop
+                                // never needs `i` (Esc explicitly blurs).
+                                compose = Some(ComposeInput::new());
                                 follow = true;
                                 force_timeline_refresh = true;
                                 // Sending a message resumes a paused session —
@@ -4442,7 +4642,9 @@ pub fn run(
                             slash_sel.min(suggestions.len() - 1)
                         };
                         match key.code {
-                            KeyCode::Esc => slash = None,
+                            KeyCode::Esc => {
+                                slash = None;
+                            }
                             KeyCode::Up => {
                                 if !suggestions.is_empty() {
                                     slash_sel = if menu_sel == 0 {
@@ -4599,6 +4801,126 @@ pub fn run(
                                         detail = Some(DetailPane::event(list_cron_detail(client, root_session_id), None));
                                         session_pick_list = None;
                                         wiki_request_ids = None;
+                                    }
+                                    SlashCommand::DeciderAttach {
+                                        agent,
+                                        binding,
+                                        ceiling,
+                                        kinds,
+                                        expires_at,
+                                        max_gates,
+                                    } => {
+                                        // The room is the operator surface: the
+                                        // appointment is recorded against the
+                                        // current run, attributed to the operator.
+                                        let mut params = serde_json::json!({
+                                            "decider_agent": agent,
+                                            "scope_root_session": &*root_session_id,
+                                            "appointed_by": "operator:session-room",
+                                        });
+                                        if !kinds.is_empty() {
+                                            params["kinds"] = serde_json::json!(kinds);
+                                        }
+                                        if let Some(c) = ceiling.as_deref() {
+                                            params["risk_ceiling"] = serde_json::json!(c);
+                                        }
+                                        if binding {
+                                            params["binding"] = serde_json::json!(true);
+                                        }
+                                        if let Some(e) = expires_at.as_deref() {
+                                            params["expires_at"] = serde_json::json!(e);
+                                        }
+                                        if let Some(m) = max_gates {
+                                            params["max_gates"] = serde_json::json!(m);
+                                        }
+                                        match rpc(client, "deciders.appoint", params) {
+                                            Ok(v) => {
+                                                let a = &v["appointment"];
+                                                let mode = if a["advice_only"]
+                                                    .as_bool()
+                                                    .unwrap_or(true)
+                                                {
+                                                    "advisory — verdicts recorded, gates still park for you"
+                                                } else {
+                                                    "BINDING — verdicts resolve gates (fail-closed)"
+                                                };
+                                                status = Some(format!(
+                                                    "✓ seated {} for this run ({mode}) — /decider review to audit",
+                                                    a["decider_agent"].as_str().unwrap_or(agent.as_str()),
+                                                ));
+                                                force_timeline_refresh = true;
+                                            }
+                                            Err(e) => status = Some(format!("✗ deciders.appoint: {e}")),
+                                        }
+                                    }
+                                    SlashCommand::DeciderReview => {
+                                        match rpc(
+                                            client,
+                                            "deciders.review",
+                                            serde_json::json!({ "root_session_id": &*root_session_id }),
+                                        ) {
+                                            Ok(v) => {
+                                                detail = Some(DetailPane::event(
+                                                    decider_review_lines(&v),
+                                                    None,
+                                                ));
+                                                detail_scroll = 0;
+                                                detail_h_scroll = 0;
+                                                session_pick_list = None;
+                                                wiki_request_ids = None;
+                                            }
+                                            Err(e) => status = Some(format!("✗ deciders.review: {e}")),
+                                        }
+                                    }
+                                    SlashCommand::DeciderDetach { appointment_id } => {
+                                        // Without an id, vacate the most recent
+                                        // still-active appointment for this run.
+                                        let target = match appointment_id.as_deref() {
+                                            Some(id) => Some(id.to_string()),
+                                            None => rpc(
+                                                client,
+                                                "deciders.list",
+                                                serde_json::json!({ "root_session_id": &*root_session_id }),
+                                            )
+                                            .ok()
+                                            .and_then(|v| {
+                                                v["appointments"].as_array().cloned()
+                                            })
+                                            .and_then(|rows| {
+                                                rows.iter()
+                                                    .filter(|a| {
+                                                        a["revoked_at"].is_null()
+                                                            && !a["expired"].as_bool().unwrap_or(false)
+                                                    })
+                                                    .filter_map(|a| {
+                                                        a["appointment_id"].as_str().map(str::to_string)
+                                                    })
+                                                    .next()
+                                            }),
+                                        };
+                                        match target {
+                                            Some(id) => {
+                                                match rpc(
+                                                    client,
+                                                    "deciders.revoke",
+                                                    serde_json::json!({
+                                                        "appointment_id": id,
+                                                        "revoked_by": "operator:session-room",
+                                                        "reason": "detached from the room (/decider detach)",
+                                                    }),
+                                                ) {
+                                                    Ok(_) => {
+                                                        status = Some(format!("✓ detached {id} — its verdicts stay attributed"));
+                                                        force_timeline_refresh = true;
+                                                    }
+                                                    Err(e) => status = Some(format!("✗ deciders.revoke: {e}")),
+                                                }
+                                            }
+                                            None => status = Some(
+                                                "✗ no active decider seat for this session (/decider attach first)"
+                                                    .to_string(),
+                                            ),
+                                        }
                                     }
                                     SlashCommand::ListPlans => {
                                         detail = Some(DetailPane::event(list_plans_detail(client, root_session_id), None));
@@ -5550,6 +5872,7 @@ pub fn run(
                                                         &mut acted,
                                                     );
                                                     gate_modal = None;
+                                                    refocus_prompt(&mut compose, &compose_comment);
                                                     status = Some(msg);
                                                     follow = true;
                                                     force_timeline_refresh = true;
@@ -5587,6 +5910,25 @@ pub fn run(
                                         ));
                                         status = None;
                                     }
+                                    continue;
+                                }
+                                // Prompt-first punch-through: any printable key that
+                                // peek mode does not own starts a message. The gate
+                                // stays pending in the peek banner; y/n still act it
+                                // once the composer is Esc-blurred.
+                                KeyCode::Char(c)
+                                    if !matches!(c, 'y' | 'n' | 'g' | 'q' | 'j' | 'k')
+                                        && !key
+                                            .modifiers
+                                            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                                {
+                                    let mut fresh = ComposeInput::new();
+                                    fresh.insert_char(c);
+                                    compose = Some(fresh);
+                                    status = Some(
+                                        "composing — gate still pending (Esc then y/n to act)"
+                                            .to_string(),
+                                    );
                                     continue;
                                 }
                                 _ => {}
@@ -5632,6 +5974,7 @@ pub fn run(
                                                         &mut acted,
                                                     );
                                                     gate_modal = None;
+                                                    refocus_prompt(&mut compose, &compose_comment);
                                                     status = Some(msg);
                                                     follow = true;
                                                     force_timeline_refresh = true;
@@ -6301,6 +6644,17 @@ pub fn run(
                                 );
                                 continue;
                             }
+                            // Peeked gate banner: Esc dismisses it entirely (the
+                            // gate stays pending — y on its row or the approvals
+                            // popup re-offers it). Esc never opens anything.
+                            if gate_modal.as_ref().is_some_and(|m| m.peek_timeline) {
+                                gate_modal = None;
+                                status = Some(
+                                    "gate banner dismissed — still pending (y on row re-opens)"
+                                        .to_string(),
+                                );
+                                continue;
+                            }
                             // Batch-close: when a sub-view is open from the content pane,
                             // one Esc closes everything back to the main timeline view.
                             if live_content_pane.is_some()
@@ -6352,7 +6706,8 @@ pub fn run(
                                 // Nothing open and nothing to cancel: Esc is a
                                 // no-op. It never arms quit either — the quit
                                 // reflex is q/Ctrl+C, and mashing a dismiss key
-                                // must not quit the room.
+                                // must not quit the room (nor refocus the
+                                // prompt — `i` / `/` do that explicitly).
                                 disarm_quit(&mut quit_armed_until, &mut status);
                                 if status.is_none() {
                                     status = Some(
@@ -6775,6 +7130,28 @@ pub fn run(
                         KeyCode::Char('s') => {
                             squash = !squash;
                             persist_room_view_prefs(floor, squash, show_reasoning);
+                            // Unsquashing with no collapsed runs in view changes
+                            // nothing on screen (only the header indicator flips),
+                            // which reads as a broken key. This is expected in
+                            // story mode — the floor already hides routine runs,
+                            // so there is nothing to fold — but say so instead
+                            // of staying silent. `view_rows` is the previous
+                            // frame's rows for the same floor.
+                            if !squash
+                                && !view_rows.is_empty()
+                                && !view_rows
+                                    .iter()
+                                    .any(|r| matches!(r, RenderedRow::Collapsed { .. }))
+                            {
+                                status = Some(
+                                    if floor == FloorMode::Story {
+                                        "story mode already hides routine runs — nothing to unsquash ('a' changes floor)".to_string()
+                                    } else {
+                                        "no collapsed runs in view — nothing to unsquash"
+                                            .to_string()
+                                    },
+                                );
+                            }
                         }
                         // Y: copy the selected row to the clipboard — the
                         // actionable token for a tool row (command/path/ref/id),
@@ -7055,8 +7432,9 @@ pub fn run(
                                 arm_estop(&mut estop_armed_until, &mut status);
                             }
                         }
-                        // /: slash-command mode (vim/Discord convention). `:`
-                        // and `?` are accepted aliases for muscle memory.
+                        // /: slash-command mode (`:` alias). `?` opens the
+                        // info pane instead — all reachable from nav and from
+                        // an empty prompt (see the compose punch-through).
                         KeyCode::Char('/') | KeyCode::Char(':') => {
                             detail = None;
                             info_panel_open = false;
@@ -7071,9 +7449,17 @@ pub fn run(
                                 info_panel_open = false;
                                 info_scroll = 0;
                             } else {
-                                info_panel_open = true;
-                                info_scroll = 0;
-                                status = Some("info: j/k scroll · Esc close".to_string());
+                                open_info_panel(
+                                    client,
+                                    &root_session_id,
+                                    &mut info_panel_open,
+                                    &mut info_scroll,
+                                    &mut info_grants_rows,
+                                    &mut info_grants_taint,
+                                    &mut info_anomaly_rows,
+                                    &mut last_info_poll,
+                                    &mut status,
+                                );
                             }
                         }
                         // c: toggle the live session content pane — a sectioned tree
@@ -7675,6 +8061,7 @@ pub fn run(
                         // resolved gate is the modal's gate; a follow-up gate opens
                         // a fresh modal when it lands.
                         gate_modal = None;
+                        refocus_prompt(&mut compose, &compose_comment);
                         if let Some(event_id) = resolved_event_id {
                             last_announced_gate_event = Some(event_id);
                         }
@@ -7733,6 +8120,7 @@ pub fn run(
                         if answer_timed_out {
                             acted.insert(gi.id.clone());
                             gate_modal = None;
+                            refocus_prompt(&mut compose, &compose_comment);
                             status = Some(format!(
                                 "{msg} — answer accepted; the agent turn is still \
                                  running (watch the timeline). If the question \
@@ -7741,6 +8129,7 @@ pub fn run(
                         } else if decision_landed {
                             acted.insert(gi.id.clone());
                             gate_modal = None;
+                            refocus_prompt(&mut compose, &compose_comment);
                             status = Some(match gi.action {
                                 GateAction::Approve => format!(
                                     "{msg} — approval recorded; the agent turn is resuming \
@@ -7841,6 +8230,10 @@ pub fn run(
                     early_pending_plans,
                     status.as_deref(),
                     early_spawn.as_deref(),
+                    &early_approval_rows,
+                    &info_grants_rows,
+                    info_grants_taint.as_deref(),
+                    &info_anomaly_rows,
                 ))
             } else {
                 None
@@ -7899,6 +8292,36 @@ pub fn run(
                 status = Some("Loading timeline…".to_string());
             }
             let boot_stats = compute_session_stats(&entries);
+            // Mirror the full-frame governance inputs so the boot frame (empty
+            // timeline) renders overlays identically — hardcoding `None` for
+            // the info pane made it flash: the keypress early-repaint drew it,
+            // the next boot frame erased it (info_panel_open stayed true).
+            let boot_gate = active_gate(&entries, &view_visible, None, &resolved, &acted);
+            let boot_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
+            let boot_gate_count = count_active_gates(&entries, &resolved, &acted);
+            let boot_info = if info_panel_open {
+                Some(build_info_panel(
+                    root_session_id,
+                    TuiChannel.kind(),
+                    &boot_stats,
+                    floor,
+                    squash,
+                    follow,
+                    show_reasoning,
+                    view_row_count,
+                    checkpoint_rows.len(),
+                    boot_gate.as_ref(),
+                    0,
+                    status.as_deref(),
+                    None,
+                    &boot_approval_rows,
+                    &info_grants_rows,
+                    info_grants_taint.as_deref(),
+                    &info_anomaly_rows,
+                ))
+            } else {
+                None
+            };
             terminal.draw(|f| {
                 draw(
                     f,
@@ -7925,9 +8348,9 @@ pub fn run(
                     &boot_stats,
                     0,
                     None,
-                    None,
+                    boot_info.as_ref(),
                     info_scroll,
-                    0,
+                    boot_gate_count,
                     artifact_viewer.as_ref(),
                     artifact_file_view.as_ref(),
                     live_content_pane.as_ref(),
@@ -7937,7 +8360,7 @@ pub fn run(
                         .as_ref()
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     approvals_popup.as_ref(),
-                    &[],
+                    &boot_approval_rows,
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
@@ -8179,6 +8602,38 @@ pub fn run(
                 if rows_changed || taint_changed {
                     needs_redraw = true;
                 }
+            }
+        }
+
+        // Info pane (`?`) idle refresh — same poll-on-open contract: a closed
+        // pane never spams `grants.list` / `anomaly.list_pending`. Plain
+        // snapshot replace (no selection to preserve); any change redraws.
+        // A failed anomaly poll returns `None` and keeps the last-known
+        // snapshot — a transient gateway error never blanks the section.
+        if info_panel_open
+            && last_info_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_info_poll = Instant::now();
+            let (rows, taint, _) = fetch_grant_rows(client, &root_session_id);
+            let grants_changed = rows.len() != info_grants_rows.len()
+                || rows
+                    .iter()
+                    .zip(info_grants_rows.iter())
+                    .any(|(a, b)| a.id != b.id || a.kind != b.kind)
+                || taint != info_grants_taint;
+            if grants_changed {
+                info_grants_rows = rows;
+                info_grants_taint = taint;
+            }
+            let mut changed = grants_changed;
+            if let Some(anomalies) = fetch_info_anomalies(client) {
+                if anomalies != info_anomaly_rows {
+                    info_anomaly_rows = anomalies;
+                    changed = true;
+                }
+            }
+            if changed {
+                needs_redraw = true;
             }
         }
 
@@ -8526,6 +8981,13 @@ pub fn run(
                         "⚠ Plan {plan_id} awaiting approval — y approve · n revise · Esc close"
                     ));
                 }
+            } else if follow {
+                // Already announced and the operator explicitly re-followed
+                // (End/f) since: keep the cursor pinned to the newest row.
+                // Otherwise any row-count change (unsquash, new events) leaves
+                // the cursor stranded mid-list while the viewport stays pinned
+                // to the bottom, and the next j/k resumes from the stale spot.
+                selected = rows.len().saturating_sub(1);
             }
         } else if follow {
             selected = rows.len().saturating_sub(1);
@@ -8533,7 +8995,18 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        if input.is_none() && pending_gate.is_none() && compose.is_none() && slash.is_none() {
+        // Prompt-first: an empty prompt (focused, no draft) yields to a
+        // blocking gate so approvals still pop with y/n live. A non-empty
+        // draft is never stolen — the attention strip signals instead.
+        let compose_yields_to_gate = compose
+            .as_ref()
+            .is_none_or(|c| c.buffer.trim().is_empty())
+            && compose_comment.is_none();
+        if input.is_none()
+            && pending_gate.is_none()
+            && slash.is_none()
+            && compose_yields_to_gate
+        {
             if let Some((gate_ref, event_id)) =
                 newest_blocking_gate_event(&entries, &resolved, &acted)
             {
@@ -8559,12 +9032,20 @@ pub fn run(
                     info_panel_open = false;
                     artifact_viewer = None;
                     artifact_file_view = None;
+                    // Yield the empty prompt so y/n reach the modal instead
+                    // of typing into the composer.
+                    compose = None;
                     let inspect_lines = gate_detail_for_modal(client, root_session_id, &gate_ref);
                     let plan_version = gate_entry_for_ref(&entries, &gate_ref)
                         .and_then(|e| plan_version_for(e));
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
+                        // Auto-announced gates open as the full blocking
+                        // modal when the operator is idle (empty prompt) so
+                        // approvals/clarifications never need an extra Enter
+                        // to review. Esc peeks the timeline; a non-empty
+                        // draft never gets here (see compose_yields_to_gate).
                         peek_timeline: false,
                         inspect_lines,
                         plan_version,
@@ -8577,6 +9058,9 @@ pub fn run(
                 .is_some_and(|g| g.id == modal.gate.id);
             if !still_active {
                 gate_modal = None;
+                // The gate resolved server-side while the modal was up: back
+                // to the resting prompt-first state.
+                refocus_prompt(&mut compose, &compose_comment);
             } else if modal.gate.kind == GateKind::Plan {
                 // A plan amendment can replace v1 with v2 while the modal is open
                 // (same plan_id, higher version). Refresh inspect_lines so the
@@ -8668,6 +9152,10 @@ pub fn run(
                 pending_plan_count,
                 status.as_deref(),
                 selected_spawn_agent.as_deref(),
+                &approval_rows,
+                &info_grants_rows,
+                info_grants_taint.as_deref(),
+                &info_anomaly_rows,
             ))
         } else {
             None
@@ -10285,12 +10773,17 @@ fn switch_session(
 /// `None` when the gateway has no matching session.
 /// Non-resumable synthetic sessions are hidden from `/session`:
 /// - the reserved `"system"` root id (scheduled system agents, auto-learning
-///   jobs, the sentinel), and
+///   jobs, the sentinel),
 /// - `background::<agent_id>` roots (decision::`background_session_id`) — the
-///   background/scheduled workers' own state sessions; an operator attaching
-///   to one would inject messages into a background loop.
+///   background/scheduled workers' own state sessions, and
+/// - `sched-child-<job_id>` roots — a cron job's run session, reused across
+///   every firing of the job (scheduler `QueuedTaskRun.child_session_id`).
+/// Attaching to any of these would inject operator messages into
+/// scheduler-owned machinery rather than resuming a conversation.
 fn is_system_session(root_session_id: &str) -> bool {
-    root_session_id == "system" || root_session_id.starts_with("background::")
+    root_session_id == "system"
+        || root_session_id.starts_with("background::")
+        || root_session_id.starts_with("sched-child-")
 }
 
 /// Turn id of the timeline row the cursor is on, if any. Maps the view cursor
@@ -10623,6 +11116,78 @@ fn approve_plan_and_wake(
         }
         Err(e) => Err(format!("✗ {e}")),
     }
+}
+
+/// Render a `deciders.review` payload into detail-pane lines: the seats that
+/// were attached to this run and, per routed gate, the seat's verdict with
+/// its motivation beside the gate's final status. The operator's after-action
+/// report for delegation review.
+fn decider_review_lines(payload: &serde_json::Value) -> Vec<String> {
+    let root = payload["root_session_id"].as_str().unwrap_or("?");
+    let appointments = payload["appointments"].as_array();
+    let routings = payload["routings"].as_array();
+    let mut lines = vec![format!("decider review — {root}")];
+    let seats = appointments.map(|a| a.len()).unwrap_or(0);
+    if seats == 0 {
+        lines.push(String::new());
+        lines.push("(no decider seat was ever attached to this run)".to_string());
+        lines.push("attach one with /decider attach — see /help".to_string());
+        return lines;
+    }
+    lines.push(String::new());
+    lines.push("Seats".to_string());
+    if let Some(rows) = appointments {
+        for a in rows {
+            let mode = if a["advice_only"].as_bool().unwrap_or(true) {
+                "advisory"
+            } else {
+                "BINDING"
+            };
+            let state = if a["revoked_at"].is_null() && !a["expired"].as_bool().unwrap_or(false) {
+                "active"
+            } else if a["revoked_at"].is_null() {
+                "expired"
+            } else {
+                "revoked"
+            };
+            lines.push(format!(
+                "  {} — {mode}, {state} · ceiling {} · decided {} gate(s)",
+                a["decider_agent"].as_str().unwrap_or("?"),
+                a["risk_ceiling"].as_str().unwrap_or("?"),
+                a["gates_decided"].as_u64().unwrap_or(0),
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Routed gates".to_string());
+    let routes = routings.map(|r| r.as_slice()).unwrap_or(&[]);
+    if routes.is_empty() {
+        lines.push("  (no gate was ever routed to a seat)".to_string());
+        return lines;
+    }
+    for r in routes {
+        let verdict = r["verdict"].as_str();
+        let mode = if r["advice_only"].as_bool().unwrap_or(true) {
+            "advisory"
+        } else {
+            "BINDING"
+        };
+        lines.push(format!(
+            "  {} [{mode}] — seat verdict: {} · gate status: {}",
+            r["gate_id"].as_str().unwrap_or("?"),
+            verdict.unwrap_or("— unanswered —"),
+            r["gate_status"].as_str().unwrap_or("pending"),
+        ));
+        if let Some(reason) = r["verdict_reason"].as_str() {
+            if !reason.is_empty() {
+                lines.push(format!("      motivation: {reason}"));
+            }
+        }
+        if let Some(at) = r["verdict_at"].as_str() {
+            lines.push(format!("      at {at}"));
+        }
+    }
+    lines
 }
 
 fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
@@ -13457,6 +14022,7 @@ mod tests {
         assert!(is_system_session("system"));
         assert!(is_system_session("background::improvement.steward"));
         assert!(is_system_session("background::memory-curator.default"));
+        assert!(is_system_session("sched-child-sj-a7bfb84b-a5a6-41d5-8246-631c8ffd5b1c"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
         // A real agent id that merely contains the word is still resumable.
@@ -15771,6 +16337,89 @@ mod tests {
             pending_calls: Vec::new(),
             pending_age_turns: None,
         }
+    }
+
+    #[test]
+    fn info_panel_shows_approvals_grants_and_anomalies() {
+        let approvals = vec![
+            ApprovalRow {
+                id: "apr-1".into(),
+                kind: "APPROVAL",
+                is_pending: true,
+                summary: "sandbox exec".into(),
+            },
+            ApprovalRow {
+                id: "apr-0".into(),
+                kind: "PLAN",
+                is_pending: false,
+                summary: "old plan".into(),
+            },
+        ];
+        let grants = vec![GrantRow {
+            kind: GrantKind::SessionApproval,
+            id: 7,
+            envelope_id: None,
+            summary: "example.com".into(),
+            detail: "root · by operator".into(),
+        }];
+        let anomalies = vec![(
+            "aflag-1".to_string(),
+            "high".to_string(),
+            "cred_signal-bridge_abc".to_string(),
+        )];
+        let panel = build_info_panel(
+            "session-123",
+            "tui",
+            &test_stats(),
+            FloorMode::Altitude(Altitude::Detail),
+            true,
+            true,
+            true,
+            10,
+            0,
+            None,
+            0,
+            None,
+            None,
+            &approvals,
+            &grants,
+            Some("local_only"),
+            &anomalies,
+        );
+        let text = panel.lines.join("\n");
+        assert!(text.contains("1 pending · 1 resolved"), "{text}");
+        assert!(text.contains("apr-1"), "{text}");
+        assert!(text.contains("taint: local_only"), "{text}");
+        assert!(text.contains("approval #7"), "{text}");
+        assert!(text.contains("1 pending"), "{text}");
+        assert!(text.contains("aflag-1"), "{text}");
+    }
+
+    #[test]
+    fn info_panel_empty_governance_sections_show_dashes() {
+        let panel = build_info_panel(
+            "session-123",
+            "tui",
+            &test_stats(),
+            FloorMode::Altitude(Altitude::Detail),
+            true,
+            true,
+            true,
+            0,
+            0,
+            None,
+            0,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+        );
+        let text = panel.lines.join("\n");
+        assert!(text.contains("Approvals  —"), "{text}");
+        assert!(text.contains("Grants     —"), "{text}");
+        assert!(text.contains("Anomalies  —"), "{text}");
     }
 
     // ---- cached-token accounting (#prompt-cache observability) ----

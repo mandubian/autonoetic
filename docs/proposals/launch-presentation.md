@@ -3,18 +3,40 @@
 This is a plan for *how to present Autonoetic at launch*. Short sentences. Real
 use-cases. It is the pitch, the demo, and the rollout — not the architecture.
 
+One framing decision up front: this is a **research bet, not a product
+launch**. Autonoetic is experimental research infrastructure. It does not
+compete with the interactive harnesses (Hermes, Claude Code,
+deepseek-harness — for a model-plus-terminal under your eyes, those tools are
+better). It exists to push one original idea as far as it goes in a running
+system: what do agents need in order to run unwatched, delegate, and
+self-modify under verifiable law? The deck's job is to state that wager
+plainly, then show the instrument built to test it.
+
 For the deep version, see [`../start/concepts.md`](../start/concepts.md); for
 the *why*, [`../concepts/philosophy.md`](../concepts/philosophy.md).
 
-> Resynced 2026-08-26 (#489): rebased onto current `main`; moved from top-level
-> `docs/` into `proposals/` per the docs reorganization (#1173/#1178);
-> reframed to the citizens-under-law philosophy the current docs lead with
-> (the earlier draft pitched the agent-as-threat framing the beginners doc
-> explicitly rejects); fixed the beginners-doc link (renamed to
-> `start/concepts.md`) and corrected the sandbox claim (`allow_set` is shipped
-> but opt-in, not the default). Feature status cross-checked against
-> [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md);
-> claims are mapped to the [ground concepts](../concepts/ground-concepts.md).
+> Resynced 2026-09-06: sandbox claim corrected — `host_fs: allow_set` is now
+> the *default* and the whole-host ro-bind is the deprecated opt-out (#1002
+> slices 4–6, including operator-approved session mount grants); the
+> "180 of 182" stat replaced by the declared bind-direction model — all 221
+> clauses classified, 215 bind the enforcer, 5 the decider, exactly 1 the
+> reasoner (2026.09.04/09.05 amendments; [`../constitution/law-table.md`](../constitution/law-table.md));
+> use-case 5's caveat updated for the shipped operator surface (session room
+> TUI, web cockpit, trace fork); new shipped beats added — `autonoetic improve
+> run`, sealed eval replay, the amendment materializer (#810), and the
+> served-party charter (`U-1`–`U-3`, `MISSING`) honesty beat.
+> Second pass, same date: added the **bet / wager framing** and the
+> experimental-research positioning from the README — the launch presents an
+> original idea and a long goal being tested in a running harness, not a
+> product competing with the interactive harnesses. Third pass: appended a
+> factual teaser tweet set (no marketing register, no shipped-claim
+> overreach).
+>
+> Previous resync: 2026-08-26 (#489) — rebased onto then-current `main`; moved
+> into `proposals/` per the docs reorganization (#1173/#1178); reframed to the
+> citizens-under-law philosophy; feature status cross-checked against
+> [`../reports/2026-08-26-capability-inventory.md`](../reports/2026-08-26-capability-inventory.md).
+> Claims are mapped to the [ground concepts](../concepts/ground-concepts.md).
 
 ---
 
@@ -85,6 +107,49 @@ law — and you can verify both sides run under it.
 
 ---
 
+## The bet (the long goal)
+
+Underneath the mechanics there is one original idea, and it is stated as a
+wager:
+
+> An agent that knows itself — its own past, its real capabilities, its
+> rights — and that knows what every other party is owed, humans included,
+> can become a trusted member of a community instead of a tool that has to
+> be watched.
+
+The strong form: an actor that can name its own obligations *and yours*
+reasons in the register humans reason in — about duties, standing, and
+reasons, not only about tasks. That is what would make it more intelligible
+to us, and what turns governing it into a matter of law rather than of
+supervision.
+
+This is where the name cashes out: self-knowing across time is the functional
+precondition the bet requires, so the runtime delivers it mechanically.
+
+Present the bet the way the project holds it — as a **wager, not a finding**:
+
+- **Left side — mechanical and shipped.** The verified self-model handed over
+  every turn, the readable law that binds both parties, the attribution
+  chain. Everything on this side is cited and tested today.
+- **Right side — claimed, not proven.** That such an actor reasons better, is
+  more understandable, more controllable. This is the direction the harness
+  is built to push.
+- **Bottom band — the ways the bet could be lost.** Named, and *measured
+  rather than assumed* — which is what the working rule is for:
+
+> *A rule without a test is a wish; a right without a test is a lie.*
+
+That rule is why the project is shaped as it is: not a product racing a
+roadmap, but a running harness that pushes each concept — citizenship,
+bind-direction, egress labels, evolution under gates — as far as it goes, so
+the bet can be won or lost on evidence.
+
+Say this early. It inoculates the whole deck: every claim that follows is
+either on the shipped left side (and you can show it) or on the claimed right
+side (and you say so).
+
+---
+
 ## Who it's for
 
 | Audience | Why they care |
@@ -94,8 +159,11 @@ law — and you can verify both sides run under it.
 | Security-conscious orgs | Secrets never enter the LLM context |
 | People who want to walk away | Overnight runs, typed wake-ups, no babysitting |
 
-Not for: a one-off `grep` or a quick script. Use a direct assistant for that.
-Autonoetic is for **governed autonomy**, not convenience.
+Not for: a one-off `grep` or a quick script — and not a competitor to the
+interactive harnesses. For a model-plus-terminal under your eyes, Hermes or
+Claude Code are the better tools. Autonoetic explores a different territory:
+**governed autonomy** — what agents need in order to run unwatched, delegate,
+and self-modify under verifiable law.
 
 ---
 
@@ -152,8 +220,10 @@ The new agent's powers are declared, bounded, and gated before it can run. No
 silent privilege escalation. The install is reviewed — sometimes by another agent.
 
 And the loop closes: tactics that work crystallize into skills, a steward
-judges flagged agents — the system improves itself under the same gates.
-(Full closed-loop automation is direction, not shipped.)
+judges flagged agents, and `autonoetic improve run` diagnoses past sessions,
+proposes a change, A/B-replays it and deploys through the same gates — the
+system improves itself under the same rules. (A fully autonomous loop with no
+operator in it is direction, not shipped.)
 
 **The line:** *"The system grows itself, under the same rules."*
 
@@ -167,12 +237,16 @@ exactly what changed. The agent picks up right where you left off.
 You're not approving from outside. You're a co-author *inside* the frame —
 a human citizen exercising the same standing as any other actor.
 
-> Implementation note: the operator-side workbench surfaces exist in the
-> codebase but are not wired into live agent tool discovery (`workbench_*`
-> and `artifact_project` are universally excluded). Present the *loop*
-> (comments, reconcile, immutable revision) — it ships in the gateway's
-> comment/revision machinery — but land the workbench-room story late or
-> honestly as "operator tooling in progress," not as a headline.
+> Implementation note: the agent-side workbench tools (`workbench_*` and
+> `artifact_project`) are still universally excluded from agent tool
+> discovery — the agent does not project the artifact for you. But the
+> *operator* surface has shipped: the session room
+> (`autonoetic room <id> --tui`) is one importance-ranked timeline across
+> every actor, where you resolve approvals and answer clarifications in
+> place; the gateway serves a web cockpit at `/`; and any past turn is
+> forkable into a live session (`autonoetic trace fork`). Present the
+> co-authoring loop through the room; land the agent-side workbench
+> projection late or honestly as "in progress," not as a headline.
 
 **The line:** *"Edit it yourself. The provenance survives."*
 
@@ -180,9 +254,12 @@ a human citizen exercising the same standing as any other actor.
 
 An agent ran for three hours while you were away.
 
-You ask: what did it do, why, by whom, with what authority, and on what evidence?
+You open the session room — one importance-ranked timeline across every
+actor — or ask the trace directly: what did it do, why, by whom, with what
+authority, and on what evidence?
 
-The causal chain answers all five. Per session. Hash-chained. Replayable.
+The causal chain answers all five. Per session. Hash-chained. Replayable —
+and forkable: any past turn can be re-entered as a live branch.
 
 **The line:** *"Not 'it did something.' A traceable system."*
 
@@ -195,7 +272,7 @@ Keep this slide tight. One contrast.
 | Everyone else | Autonoetic |
 |---|---|
 | Trust the prompt | Trust the constitution |
-| Rules bind only the agent | Rules bind the enforcer too — 180 of 182 |
+| Rules bind only the agent | Rules bind the enforcer too — 215 of 221 clauses; exactly 1 binds the agent |
 | Secrets in context | Secrets gateway-owned |
 | Chat history | Immutable causal chain |
 | Mutable files, silent edits | Content-addressed artifacts — nothing is ever overwritten |
@@ -209,14 +286,18 @@ append-only — history that wasn't attributed can never be re-attributed, so
 attribution happens at write time, forever.
 
 Every claim in that table is shipped and tested today:
-the constitution is versioned + signed (every boot verifies the digest),
-the sandbox `host_fs: allow_set` mode mounts only what the gateway asserts
-(opt-in today; the default flips after the deprecation window, #1002),
+the constitution is versioned + signed (every boot verifies the digest; the
+active version is 2026.09.05),
+the sandbox `host_fs: allow_set` mode is the **default** — nothing of the host
+exists inside a bubblewrap sandbox except what the gateway asserts; the legacy
+whole-host bind is a deprecated opt-out that logs a warning, and
+operator-approved session mount grants are the lawful way back in (#1002),
 artifacts and sessions carry egress labels that gate every off-machine
 boundary, and the credential vault injects server-side. (Federation row: the
 wire protocol and digest handshake ship; the gateway-side surface is still
 thin — see the honesty note below.) Tell the egress
-story if the room is security-heavy; it is the newest complete arc.
+story if the room is security-heavy — scope it to this machine; federation and
+MCP sinks are the open phase.
 
 The deeper idea — lead with it, don't save it for the Q&A:
 
@@ -242,6 +323,7 @@ a mechanical form — the recurring structures every feature is built from
 | Your emails never reach a remote model | Data-locality label lattice (meet, never widen) |
 | It runs while you sleep, and survives restarts | Durability: checkpoints, continuations, typed wake-ups |
 | The community evolves its own law | Exit & voice; advisory before binding; office before occupant |
+| The law names its own gaps | Status as constitutional vocabulary — the served-party charter (`U-1`–`U-3`) is written into the signed text as `MISSING` |
 
 If a claim can't name its mechanism, cut the claim.
 
@@ -249,9 +331,11 @@ If a claim can't name its mechanism, cut the claim.
 
 ## The honest frame (this *is* the pitch, not a caveat)
 
-Autonoetic's founding bet is **correctability over perfection**: the gateway
-is fallible by nature, and legitimacy comes from errors being reportable,
-attributable, and correctable — not from the enforcer being right.
+The wager underneath the big one is **correctability over perfection**: the
+gateway is fallible by nature, and legitimacy comes from errors being
+reportable, attributable, and correctable — not from the enforcer being
+right. Correction machinery is what makes the community trustworthy enough
+for the bet above to be testable at all.
 
 So the pitch is not "unbreakable." It is:
 
@@ -261,12 +345,20 @@ So the pitch is not "unbreakable." It is:
   the report cannot be silently dropped; it is owed an adjudication.
 - The gateway reports on itself: `trace contract-health` shows what the law
   actually enforces, and every place the gateway improvises is counted as a
-  named discretion leak.
+  named discretion leak. By design there is **no judiciary** — the gateway is
+  a Lawful Executor applying pre-committed rules deterministically, because
+  decidable rules transfer between implementations and jurisprudence does not.
 - An advisory sentinel watches for approval bypass, capability accretion,
   prompt injection, sandbox escape — it observes and never blocks, by
   constitutional design (Ri-0.16): judgment layers earn authority from
   calibration evidence, never from assertion.
-- The law can be amended, by the actors it governs, through a signed process.
+- The law names its own gaps in its own vocabulary: the three clauses owed to
+  the *served party* — refuse a result, obtain a plain-language account, take
+  your data (`U-1`–`U-3`) — are written into the signed text as `MISSING`.
+  The debt is published, not hidden.
+- The law can be amended, by the actors it governs, through a signed process —
+  and an approved proposal now *materializes* automatically into a candidate
+  constitution version ready for signing (#810).
 - The machinery that makes correction possible (read your chain, named
   rejections, propose amendments, non-repudiation, the hash-chain itself) is
   **entrenched** — amendable only to be strengthened, never weakened.
@@ -284,12 +376,15 @@ Order matters. Build tension, then pay it off.
 2. **Show the spawn tree.** Planner → researcher, coder, test runner, auditor.
 3. **Hit a gate.** "This agent wants to call weather.com." You approve *that host*.
 4. **Show the secret boundary.** The coder's prompt — no token in it.
-5. **Open the trace.** `autonoetic trace sessions`. Who did what, with what authority.
+5. **Open the trace.** `autonoetic trace sessions`. Who did what, with what
+   authority. Or open the session room (`autonoetic room <id> --tui`) for the
+   importance-ranked timeline.
 6. **Replay the punchline.** "Everything you just saw is recorded. Forever."
 
 Backup demo if time is short: just steps 1, 5, 6. The trace *is* the product.
 
-> Commands verified on `main` (2026-08-26). The trace surface is
+> Commands verified on `main` (2026-08-26); names re-confirmed against the
+> README on 2026-09-06 (not re-run). The trace surface is
 > `autonoetic trace sessions` / `trace show <session>` (it was `trace list`
 > in June — renamed when the CLI was routed over JSON-RPC, #1119). The
 > quickstart needs an LLM provider: it defaults to `openrouter_gfl`; point it
@@ -400,41 +495,61 @@ the demo earned its keep. Status:
 2. **Problem** — power without shared rules.
 3. **Reframe** — it's not about caging AI. It's about law that binds everyone.
 4. **The split** — agents propose, the gateway executes.
-5. **The contract** — the law binds the enforcer, not just the agent:
-   180 of 182 rules constrain the party with power.
-6. **Use-cases** — the six stories above. Pick three for the room.
-7. **The demo** — show the trace.
-8. **The honest frame** — correctability over perfection; the correction
-   machinery is entrenched.
-9. **The bigger idea** — actors as citizens; a community that can evolve its
-   own law; gateways that federate, verifying each other's law by digest
-   before their agents cooperate.
+5. **The contract** — the law binds the enforcer, not just the agent: of 221
+   clauses, 215 bind the enforcer and 5 bind whoever decides; exactly one
+   binds the agent. Bind direction is declared data, not a naming convention.
+6. **The bet** — why this direction exists: an actor that knows itself and
+   what every party is owed can be a trusted community member, not a watched
+   tool. A wager, not a finding — the harness exists to test it, and the
+   failure modes are named and measured. Around it: a community that can
+   evolve its own law, and gateways that federate, verifying each other's law
+   by digest before their agents cooperate.
+7. **Use-cases** — the six stories above. Pick three for the room.
+8. **The demo** — show the trace.
+9. **The honest frame** — correctability over perfection; the correction
+   machinery is entrenched; the gaps are named in the law's own vocabulary.
 10. **Call to action** — run the quickstart.
 
 ---
 
 ## Messaging guardrails
 
-This is pre-release. Be precise. Over-claiming kills trust faster than modesty.
+This is experimental research infrastructure, presented as a bet. Be precise.
+Over-claiming kills trust faster than modesty.
 
 **Say:**
 - "Agents propose, the gateway executes." (true, core)
+- "This is experimental research infrastructure testing a specific bet." (true — and it inoculates every over-claim question)
+- "The bet is a wager with a measurement plan: the left side is shipped, the right side is claimed, the failure modes are named." (true, and it is the project's own working rule)
 - "The law binds the enforcer too — agents have rights, and every rejection names its rule." (true, shipped — the structural novelty)
 - "The LLM never sees the secret." (true, shipped)
 - "Every action is recorded and attributable." (true, shipped)
 - "Capabilities are enforced mechanically, not by prompt." (true, shipped)
+- "By default, a sandbox sees nothing of the host except what the gateway asserts." (true, shipped — `host_fs: allow_set` is the default; exceptions are operator-approved session mount grants, recorded)
 - "An agent may read your emails; their content never reaches a remote model." (true, shipped — egress labels are gateway-enforced at the LLM chokepoint and every off-this-machine boundary; widening takes a gated, audited act. Federation/MCP sinks are phase 4, in flight — scope the claim to this machine.)
 
 **Don't say:**
+- "A better agent harness" / "a Claude Code competitor." Not the territory.
+  Say: **for interactive work under your eyes, the direct harnesses are
+  better** — this explores what agents need to run *unwatched*, delegate, and
+  self-modify under verifiable law.
+- "The bet is proven." It is a wager with a measurement plan. The left side
+  is shipped; the right side is claimed; the ways it could be lost are named.
+- "First" / "novel" about the runtime self-model. Unverifiable in a tweet and
+  invites a citation fight. Say instead: **most of the field pursues
+  self-knowledge through training or prompting; this does it mechanically, at
+  runtime** — a contrast, not a priority claim. And the honest endgame is
+  **both**: an inside sense of self anchored to an outside source of truth;
+  the outside half is what's missing, so that's what gets built.
 - "Unbreakable" / "fully secure." Say **auditable, detectable, accountable**.
   The goal is *zero silent incidents*, not zero incidents.
 - "Agents vote on the laws." Not built. Say it's the **direction** — staged
   advisory-before-binding, with standing computed from the non-repudiable
   ledger, never self-asserted.
-- "Every boundary is closed." The sandbox `allow_set` mode is shipped but
-  opt-in; the legacy whole-host bind remains the default with a deprecation
-  window (#1002, DP-1) — say "the default is being tightened," not "sandboxes
-  are sealed."
+- "Sandboxes are hermetic, period." The bubblewrap default mounts only what
+  the gateway asserts, but operator-approved session mount grants exist *by
+  design* (#1002 slice 5), and the microvm tier cannot promise network-off.
+  Say "deny by default, every exception granted and recorded," not "sealed."
 - "Replaces your IDE / your assistant." It wraps them. It doesn't replace them.
 - "The agents are aligned." Say: **the actors are law-bound, and the record
   makes deviation visible.** Alignment is a hope; attributable law is a mechanism.
@@ -448,7 +563,35 @@ inward only as fast as the people it serves keep the ability to say no.
 handshake ship; the gateway-side federation surface is still thin. Show the
 handshake, not a cross-gateway workflow, unless you've rehearsed one.
 
+**Status honesty:** if asked "is this production-ready?", the answer is the
+README's own: experimental research infrastructure. The runtime core
+self-hosts and the shipped claims are tested, but the project's value is the
+direction it explores and the bet it measures — not a support SLA.
+
 ### If asked (prepared answers)
+
+- **"Is this a bet on agents becoming conscious?"** — No. The name is from
+  cognitive science, but the claim is mechanical: an agent that is handed a
+  truthful self-model reasons better and can be held responsible
+  legitimately. Both hold regardless of your views on machine consciousness.
+- **"Isn't agent self-knowledge just a training problem?"** — That's where
+  most of the field works: introspection research, calibration, persona
+  scaffolding. The project's own position is **both/and, not either/or**: an
+  inside sense of self gives fluency, but an internal report has nothing to
+  be checked against without an outside anchor — you verify a model's
+  self-report against attested ground truth, not against the model's say-so.
+  Autonoetic builds the missing outside half: a signed per-turn attestation —
+  budget, capabilities, pending gates, the law in force — that the agent is
+  taught to trust over its own memory, because LLMs confabulate their own
+  state. As a side effect, that attestation is exactly the dataset an inside
+  self-model would one day be trained and calibrated against. Whether either
+  half yields better reasoning is part of the bet; the outside mechanism is
+  what ships today.
+- **"Why would self-knowledge make an agent more trustworthy?"** — That's
+  the bet, not a result. What exists today is the left side: the verified
+  self-model, the law both sides run under, the attribution chain. Whether
+  the right side follows is what the harness is built to find out — and the
+  ways it could fail are named and measured, not assumed away.
 
 - **"Can agents vote?"** — Not built. Direction: advisory before binding,
   standing computed from the non-repudiable ledger, never self-asserted.
@@ -460,7 +603,8 @@ handshake, not a cross-gateway workflow, unless you've rehearsed one.
   to the kill switch.
 - **"Does the law ever change?"** — Constantly, lawfully: repeated friction
   against a rule mechanically surfaces an amendment invitation; amendments
-  are proposed, reviewed, signed.
+  are proposed, reviewed, signed — and an approved proposal materializes
+  automatically into a candidate constitution version for signing (#810).
 - **"Can I branch a run?"** — Sessions fork; an agent can re-enter and branch
   its own history.
 
@@ -473,7 +617,7 @@ handshake, not a cross-gateway workflow, unless you've rehearsed one.
 | Show HN / Lobsters | "Separation of powers for AI agents" + the trace demo |
 | Security communities | The credential-isolation story, the egress label plane, the sandbox model |
 | Agent / LLM-tooling circles | Multi-agent durability, immutable revisions, model-agnostic presets |
-| Long-form (blog / talk) | "Actors as citizens" — the constitutional thesis, and why the enforcer is a bound party |
+| Long-form (blog / talk) | "The bet" — an original idea with a long goal, tested in a running harness; the constitutional thesis, and why the enforcer is a bound party |
 
 Match the use-case to the room. Security wants story 2 and 3 (plus the egress
 arc). Builders want 1 and 4. Visionaries want 5 and 6.
@@ -483,8 +627,9 @@ arc). Builders want 1 and 4. Visionaries want 5 and 6.
 ## Rollout phases
 
 1. **Soft launch.** Quickstart that works in one command. A clean README. The trace demo recorded.
-2. **The narrative.** One blog post: the problem, the split, the constitution
-   that binds both sides. Link the beginners doc (`../start/concepts.md`).
+2. **The narrative.** One blog post: the bet, the problem, the split, the
+   constitution that binds both sides. Link the beginners doc
+   (`../start/concepts.md`).
 3. **The proof.** A real overnight run, captured end to end. Show the receipts.
 4. **The invitation.** Open the door to contributors — agents and humans
    propose, the frame evolves. The amendment process is the contribution path.
@@ -501,3 +646,94 @@ bash examples/quickstart/run.sh
 
 Then read one trace. The propose-then-enforce loop is abstract until you've
 watched it once — and obvious forever after.
+
+---
+
+## Social teaser (factual, not marketing)
+
+Tone rules for these: no hype adjectives, no "excited to announce," no claim
+that isn't on the shipped left side of the bet. The status *is* the message —
+experimental research infrastructure, an original idea, a running harness,
+open for reading. Replace `[link]` with the repo.
+
+**Link placement:** keep the first tweet link-free. External links in the
+opening tweet are widely believed to depress reach (platform folklore — X has
+never documented it precisely, but it costs nothing to route around). The
+teaser's only job is to earn the "show more" click; the repo link goes in the
+closer, and optionally again in a self-reply to the teaser once the thread
+has traction.
+
+**The teaser (the one to pin):**
+
+> I've been exploring a different shape for AI agents: a runtime where agents, humans, and scripts are citizens under one signed constitution — the enforcer included.
+>
+> Not a product. Not a harness competitor. A research bet that runs. Link at the end of the thread.
+
+**Follow-ups (a short thread, in order):**
+
+> The bet: an agent that knows itself — its past, its real capabilities, its rights — and knows what every other party is owed can be a trusted community member instead of a tool that has to be watched.
+>
+> A wager, not a finding. The harness exists to test it.
+
+> What is shipped vs what is claimed is kept separate on purpose.
+>
+> Shipped: a verified self-model handed to the agent every turn, denials that name their rule, secrets the model never sees, an append-only causal chain.
+> Claimed: that this makes agents more governable. The gap is measured, not assumed.
+
+> It will not replace your interactive harness — for a model-plus-terminal under your eyes, those tools are better.
+>
+> This explores another territory: what agents need in order to run unwatched, delegate, and self-modify under verifiable law.
+
+> The constitution is signed, versioned, and honest about itself: of 221 clauses, 215 bind the enforcer and 1 binds the agent. Three clauses owed to the end user are written into the text as MISSING — the gaps are named in the law's own vocabulary.
+
+**The closer (carries the link):**
+
+> If the ideas interest you more than the code: the constitution and the design docs are the real artifact. Read one trace, and tell me where the bet breaks.
+>
+> [link]
+
+**Don't:**
+- "Game-changer," "the future of agents," "production-ready" — none of it.
+- Imply it works unattended today beyond what the demos show; the Night Shift
+  ran, and it also surfaced eight real bugs. That *is* the story if you tell
+  one.
+### The two-day version (standalone tweets, no thread)
+
+Same tone rules. The Sunday tweet is a single post, so the link goes in
+directly — the first-tweet-link concern applies to threads competing for
+reach, not to a standalone teaser you want people to act on.
+
+The two days each carry one big idea rather than repeating one: **the bet on
+Sunday** (a contemplative idea for a slow day; self-disarming because it is
+stated as a wager), **the bound-enforcer machinery on Monday** (mechanism and
+receipts for an audience in evaluation mode).
+
+**Sunday (the curious crowd — the bet, link included):**
+
+*(~280 chars — right at the limit; if the composer overflows, drop "every"
+or shorten "open and running" → "open, running". Author's edits, kept on
+purpose: "1y ago" stakes the wager; "human incl." marks the mixed community;
+the "instead of a tool that has to be watched" contrast was deliberately
+dropped — agents *will* be watched, humans too; the claim is that the runtime
+makes them **watchable**, not that watching goes away. The constitution
+enters the bet sentence itself: "enforcer incl." / "human incl." name the two
+parties usually assumed to be outside the frame. Don't re-add the contrast.)*
+
+> The bet I made 1y ago when starting Autonoetic: under one signed constitution — enforcer incl. — an agent that knows itself, and what every other party is owed, human incl., can be a trusted community member.
+>
+> Experimental harness, open and running: [link]
+
+**Monday (the working crowd — longer, the machinery):**
+
+*(~1000 chars — needs a long-post-capable account; otherwise split before
+"The move I find most interesting" into two tweets, link on the second.)*
+
+> A runtime where AI agents, humans, and scripts live under one signed constitution — the enforcer included. I just opened it.
+>
+> What the constitution buys, in plain terms: the model never sees your API keys. Every refusal names its rule. Every action lands on a tamper-evident chain you can replay. An agent paused for your approval resumes with your real answer — not a re-prompted guess.
+>
+> The move I find most interesting: instead of hoping the model knows itself, the runtime hands it a signed statement of its own state every turn — budget, capabilities, the law in force. LLMs confabulate their own state, so don't ask them to remember it. Most of the field pursues self-knowledge through training; this does it mechanically, at runtime. The endgame is likely both — an inside sense of self anchored to an outside source of truth — and the outside half is what's missing.
+>
+> It won't replace your interactive harness — for work under your eyes those tools are better. It explores what agents need to run unwatched, delegate, and self-modify under verifiable law.
+>
+> Run one trace, tell me where the bet breaks: [link]

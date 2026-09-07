@@ -181,6 +181,8 @@ fn seed_credential(store: &GatewayStore, credential_id: &str) -> anyhow::Result<
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
         label: None,
+        created_at: None,
+        updated_at: None,
     };
     store.upsert_credential(&cred)?;
     Ok(())

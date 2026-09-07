@@ -150,3 +150,24 @@ fn no_production_code_derives_the_gateway_dir_from_an_agent_dir() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn no_production_code_points_the_vault_at_agents_dir() {
+    // The vault lives in the gateway dir (config.runtime_dir), never in the
+    // ingest agents_dir. The credential split bug was exactly this: the
+    // approval handler wrote to `default_vault_path(&config.agents_dir)` while
+    // every reader (credential_check, sandbox_exec, artifact_prepare) read
+    // from the gateway dir — `ok:true` on write, `secret not found` on use.
+    let violations = scan(|code| {
+        code.contains("default_vault_path(&config.agents_dir)")
+            || code.contains("default_vault_path(config.agents_dir)")
+            || code.contains("ensure_default_key(&config.agents_dir)")
+            || code.contains("ensure_default_key(config.agents_dir)")
+    });
+    assert!(
+        violations.is_empty(),
+        "the vault is `gateway_root_dir(config)` (runtime_dir), not agents_dir — \
+         pass the gateway dir to the vault helpers:\n{}",
+        violations.join("\n")
+    );
+}

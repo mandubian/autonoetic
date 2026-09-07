@@ -38,10 +38,12 @@ fn row_to_credential(
         refresh_extract_refresh_token: row.get(13)?,
         refresh_extract_expires_in: row.get(14)?,
         label: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
-const CREDENTIAL_COLUMNS: &str = "credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, refresh_token_secret_name, refresh_url, refresh_method, refresh_headers, refresh_extract_access_token, refresh_extract_refresh_token, refresh_extract_expires_in, label";
+const CREDENTIAL_COLUMNS: &str = "credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, refresh_token_secret_name, refresh_url, refresh_method, refresh_headers, refresh_extract_access_token, refresh_extract_refresh_token, refresh_extract_expires_in, label, created_at, updated_at";
 
 impl GatewayStore {
     pub fn upsert_credential(
@@ -59,7 +61,9 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             &format!(
-                "INSERT INTO credentials ({CREDENTIAL_COLUMNS}, created_at, updated_at)
+                // CREDENTIAL_COLUMNS ends with created_at, updated_at — bound
+                // from the gateway clock below, never from the caller's struct.
+                "INSERT INTO credentials ({CREDENTIAL_COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(credential_id) DO UPDATE SET
                 service = excluded.service,

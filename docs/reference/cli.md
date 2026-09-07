@@ -234,8 +234,10 @@ until morning.
 ```bash
 autonoetic gateway deciders appoint --agent <agent_id> --scope <root_session_id> \
     [--kind approval] [--kind escalation] [--ceiling standard|high] \
-    [--expires-at <rfc3339>] [--max-gates <n>] [--appointed-by <principal>] [--json]
+    [--expires-at <rfc3339>] [--max-gates <n>] [--binding] \
+    [--appointed-by <principal>] [--json]
 autonoetic gateway deciders list [--root-session <root_session_id>] [--include-revoked] [--json]
+autonoetic gateway deciders review --root-session <root_session_id> [--json]
 autonoetic gateway deciders revoke <appointment_id> [--reason TEXT] [--revoked-by <principal>]
 ```
 
@@ -250,10 +252,21 @@ autonoetic gateway deciders revoke <appointment_id> [--reason TEXT] [--revoked-b
 Appointing an agent that lacks the capability — or holds it for `approval` but
 is appointed for `escalation` — is refused, not silently narrowed.
 
-**Advisory only, for now.** Phase 1 records the agent's verdict but still parks
-the gate for you. Both verdicts land on the record, and the agreement between
-them is what a later binding appointment will be justified by — judgment layers
-earn authority from evidence, not from assertion.
+**Advisory by default; binding is an explicit operator opt-in.** The default
+seat is advisory: the agent's verdict is recorded but the gate still parks for
+you. Passing `--binding` lifts that — the seat's terminal verdict goes through
+the standard approval machinery and resolves the gate, attributed to
+`agent:<decider>` so the chain reads as a delegated ruling, not an operator
+one. Binding is fail-closed in every failure direction: an escalation (P-2.21),
+an unparsable or motivation-less reply, a dwell-bound timeout, or a resolution
+the machinery refuses (a missing confirm phrase, a gate already decided)
+parks the gate for you with the verdict already on the ledger for review.
+
+A binding seat must carry a horizon — `--expires-at` or `--max-gates` —
+because an unbounded binding seat is a standing auto-decider. An advisory
+seat may stand unlimited. Either way you attach at your own risk; the
+appointment records who attached it, and `deciders review` (and the room
+TUI's `/decider review`) exist so the morning-after read is one command.
 
 **Risk ceiling.** Gates are classified `standard`, `high`, or `critical` from
 their action. The ceiling is the highest class the decider may rule on;
@@ -301,6 +314,26 @@ which is how an appointment still pointing at a finished run becomes visible:
 APPOINTMENT                              AGENT                  SCOPE                        CEILING   MODE       STATE
 apt_9c1e...                              nightwatch.default     root-3f2a91c4                high      advisory   active
 ```
+
+`review` is the after-action report for one run — every gate a seat was
+routed, the seat's verdict and motivation, and the gate's final status:
+
+```bash
+autonoetic gateway deciders review --root-session root-3f2a91c4
+```
+
+```
+Decider review for root-3f2a91c4
+  seat: nightwatch.default (apt_9c1e...) — advisory — ceiling high · decided 2 gate(s)
+
+GATE                     KIND       MODE       VERDICT                GATE STATUS
+apr-77a2...              approval   advisory   reject — no blast radius given   rejected
+apr-8b31...              approval   advisory   approve — scoped to the repo     approved
+```
+
+The same view lives in the room TUI as `/decider review` (and `/decider
+attach` / `/decider detach` seat and vacate from inside the room), so the
+overnight delegation can be audited where the run happened.
 
 ### `autonoetic gateway approvals interactive`
 

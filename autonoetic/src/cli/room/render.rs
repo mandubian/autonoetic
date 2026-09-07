@@ -4678,6 +4678,75 @@ mod tests {
     }
 
     #[test]
+    fn story_floor_admits_nothing_foldable_so_squash_is_a_noop() {
+        // Premise behind the TUI's unsquash feedback: the story floor admits
+        // only Attention+ events and narrative/operator/verdict tones, while
+        // folding requires Routine tier *below* Attention — so a story-filtered
+        // page never contains a collapsed run and toggling squash changes
+        // nothing. If this test starts failing, story gained foldable rows and
+        // the 's' key works there again.
+        let mk = |et: &str, alt: Altitude, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                alt,
+                payload,
+            )
+        };
+        let entries = vec![
+            mk("turn.start", Altitude::Detail, serde_json::json!({})),
+            mk(
+                "llm.round",
+                Altitude::Detail,
+                serde_json::json!({"input_tokens": 10, "output_tokens": 2}),
+            ),
+            mk(
+                "agent.reasoning",
+                Altitude::Detail,
+                serde_json::json!({"reasoning": "hmm"}),
+            ),
+            mk(
+                "tool.completed",
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": "workflow_wait" }),
+            ),
+            mk(
+                "agent.message",
+                Altitude::Normal,
+                serde_json::json!({"message": "I finished the refactor"}),
+            ),
+            mk("plan.pending", Altitude::Normal, serde_json::json!({})),
+            mk("tool.failed", Altitude::Error, serde_json::json!({})),
+        ];
+        // Same page at the detail floor: plumbing folds.
+        let detail_rows = coalesce(&entries);
+        assert!(
+            detail_rows
+                .iter()
+                .any(|r| matches!(r, RenderedRow::Collapsed { .. })),
+            "detail floor should fold the routine run; got {detail_rows:?}"
+        );
+        // The TUI's story view filter, then the same squash pass.
+        let story_visible: Vec<SessionTimelineEntry> = entries
+            .iter()
+            .filter(|e| FloorMode::Story.admits(e))
+            .cloned()
+            .collect();
+        assert!(
+            !story_visible.is_empty(),
+            "story must still admit narrative/gates/failures"
+        );
+        let story_rows = coalesce(&story_visible);
+        assert!(
+            story_rows
+                .iter()
+                .all(|r| matches!(r, RenderedRow::Line(_))),
+            "story-filtered page must hold no collapsed runs; got {story_rows:?}"
+        );
+    }
+
+    #[test]
     fn paired_tool_request_is_dropped_completion_renders_once() {
         // One call, one row: a tool.requested whose tool.completed (same
         // call_id) is on the page is dropped — the completion headline already
