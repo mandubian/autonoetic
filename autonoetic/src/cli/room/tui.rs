@@ -4797,6 +4797,126 @@ pub fn run(
                                         session_pick_list = None;
                                         wiki_request_ids = None;
                                     }
+                                    SlashCommand::DeciderAttach {
+                                        agent,
+                                        binding,
+                                        ceiling,
+                                        kinds,
+                                        expires_at,
+                                        max_gates,
+                                    } => {
+                                        // The room is the operator surface: the
+                                        // appointment is recorded against the
+                                        // current run, attributed to the operator.
+                                        let mut params = serde_json::json!({
+                                            "decider_agent": agent,
+                                            "scope_root_session": &*root_session_id,
+                                            "appointed_by": "operator:session-room",
+                                        });
+                                        if !kinds.is_empty() {
+                                            params["kinds"] = serde_json::json!(kinds);
+                                        }
+                                        if let Some(c) = ceiling.as_deref() {
+                                            params["risk_ceiling"] = serde_json::json!(c);
+                                        }
+                                        if binding {
+                                            params["binding"] = serde_json::json!(true);
+                                        }
+                                        if let Some(e) = expires_at.as_deref() {
+                                            params["expires_at"] = serde_json::json!(e);
+                                        }
+                                        if let Some(m) = max_gates {
+                                            params["max_gates"] = serde_json::json!(m);
+                                        }
+                                        match rpc(client, "deciders.appoint", params) {
+                                            Ok(v) => {
+                                                let a = &v["appointment"];
+                                                let mode = if a["advice_only"]
+                                                    .as_bool()
+                                                    .unwrap_or(true)
+                                                {
+                                                    "advisory — verdicts recorded, gates still park for you"
+                                                } else {
+                                                    "BINDING — verdicts resolve gates (fail-closed)"
+                                                };
+                                                status = Some(format!(
+                                                    "✓ seated {} for this run ({mode}) — /decider review to audit",
+                                                    a["decider_agent"].as_str().unwrap_or(agent.as_str()),
+                                                ));
+                                                force_timeline_refresh = true;
+                                            }
+                                            Err(e) => status = Some(format!("✗ deciders.appoint: {e}")),
+                                        }
+                                    }
+                                    SlashCommand::DeciderReview => {
+                                        match rpc(
+                                            client,
+                                            "deciders.review",
+                                            serde_json::json!({ "root_session_id": &*root_session_id }),
+                                        ) {
+                                            Ok(v) => {
+                                                detail = Some(DetailPane::event(
+                                                    decider_review_lines(&v),
+                                                    None,
+                                                ));
+                                                detail_scroll = 0;
+                                                detail_h_scroll = 0;
+                                                session_pick_list = None;
+                                                wiki_request_ids = None;
+                                            }
+                                            Err(e) => status = Some(format!("✗ deciders.review: {e}")),
+                                        }
+                                    }
+                                    SlashCommand::DeciderDetach { appointment_id } => {
+                                        // Without an id, vacate the most recent
+                                        // still-active appointment for this run.
+                                        let target = match appointment_id.as_deref() {
+                                            Some(id) => Some(id.to_string()),
+                                            None => rpc(
+                                                client,
+                                                "deciders.list",
+                                                serde_json::json!({ "root_session_id": &*root_session_id }),
+                                            )
+                                            .ok()
+                                            .and_then(|v| {
+                                                v["appointments"].as_array().cloned()
+                                            })
+                                            .and_then(|rows| {
+                                                rows.iter()
+                                                    .filter(|a| {
+                                                        a["revoked_at"].is_null()
+                                                            && !a["expired"].as_bool().unwrap_or(false)
+                                                    })
+                                                    .filter_map(|a| {
+                                                        a["appointment_id"].as_str().map(str::to_string)
+                                                    })
+                                                    .next()
+                                            }),
+                                        };
+                                        match target {
+                                            Some(id) => {
+                                                match rpc(
+                                                    client,
+                                                    "deciders.revoke",
+                                                    serde_json::json!({
+                                                        "appointment_id": id,
+                                                        "revoked_by": "operator:session-room",
+                                                        "reason": "detached from the room (/decider detach)",
+                                                    }),
+                                                ) {
+                                                    Ok(_) => {
+                                                        status = Some(format!("✓ detached {id} — its verdicts stay attributed"));
+                                                        force_timeline_refresh = true;
+                                                    }
+                                                    Err(e) => status = Some(format!("✗ deciders.revoke: {e}")),
+                                                }
+                                            }
+                                            None => status = Some(
+                                                "✗ no active decider seat for this session (/decider attach first)"
+                                                    .to_string(),
+                                            ),
+                                        }
+                                    }
                                     SlashCommand::ListPlans => {
                                         detail = Some(DetailPane::event(list_plans_detail(client, root_session_id), None));
                                         session_pick_list = None;
@@ -8912,11 +9032,12 @@ pub fn run(
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
-                        // Prompt-first: auto-announced gates arrive as a peek
-                        // banner, never a full-screen hijack — typing composes
-                        // straight through (see the peek punch-through); y/n act
-                        // the gate; Esc dismisses the banner entirely.
-                        peek_timeline: true,
+                        // Auto-announced gates open as the full blocking
+                        // modal when the operator is idle (empty prompt) so
+                        // approvals/clarifications never need an extra Enter
+                        // to review. Esc peeks the timeline; a non-empty
+                        // draft never gets here (see compose_yields_to_gate).
+                        peek_timeline: false,
                         inspect_lines,
                         plan_version,
                     });
@@ -10986,6 +11107,78 @@ fn approve_plan_and_wake(
         }
         Err(e) => Err(format!("✗ {e}")),
     }
+}
+
+/// Render a `deciders.review` payload into detail-pane lines: the seats that
+/// were attached to this run and, per routed gate, the seat's verdict with
+/// its motivation beside the gate's final status. The operator's after-action
+/// report for delegation review.
+fn decider_review_lines(payload: &serde_json::Value) -> Vec<String> {
+    let root = payload["root_session_id"].as_str().unwrap_or("?");
+    let appointments = payload["appointments"].as_array();
+    let routings = payload["routings"].as_array();
+    let mut lines = vec![format!("decider review — {root}")];
+    let seats = appointments.map(|a| a.len()).unwrap_or(0);
+    if seats == 0 {
+        lines.push(String::new());
+        lines.push("(no decider seat was ever attached to this run)".to_string());
+        lines.push("attach one with /decider attach — see /help".to_string());
+        return lines;
+    }
+    lines.push(String::new());
+    lines.push("Seats".to_string());
+    if let Some(rows) = appointments {
+        for a in rows {
+            let mode = if a["advice_only"].as_bool().unwrap_or(true) {
+                "advisory"
+            } else {
+                "BINDING"
+            };
+            let state = if a["revoked_at"].is_null() && !a["expired"].as_bool().unwrap_or(false) {
+                "active"
+            } else if a["revoked_at"].is_null() {
+                "expired"
+            } else {
+                "revoked"
+            };
+            lines.push(format!(
+                "  {} — {mode}, {state} · ceiling {} · decided {} gate(s)",
+                a["decider_agent"].as_str().unwrap_or("?"),
+                a["risk_ceiling"].as_str().unwrap_or("?"),
+                a["gates_decided"].as_u64().unwrap_or(0),
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Routed gates".to_string());
+    let routes = routings.map(|r| r.as_slice()).unwrap_or(&[]);
+    if routes.is_empty() {
+        lines.push("  (no gate was ever routed to a seat)".to_string());
+        return lines;
+    }
+    for r in routes {
+        let verdict = r["verdict"].as_str();
+        let mode = if r["advice_only"].as_bool().unwrap_or(true) {
+            "advisory"
+        } else {
+            "BINDING"
+        };
+        lines.push(format!(
+            "  {} [{mode}] — seat verdict: {} · gate status: {}",
+            r["gate_id"].as_str().unwrap_or("?"),
+            verdict.unwrap_or("— unanswered —"),
+            r["gate_status"].as_str().unwrap_or("pending"),
+        ));
+        if let Some(reason) = r["verdict_reason"].as_str() {
+            if !reason.is_empty() {
+                lines.push(format!("      motivation: {reason}"));
+            }
+        }
+        if let Some(at) = r["verdict_at"].as_str() {
+            lines.push(format!("      at {at}"));
+        }
+    }
+    lines
 }
 
 fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {

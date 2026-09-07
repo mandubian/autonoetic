@@ -161,18 +161,33 @@ fn critical_ceiling_is_refused_at_appointment_time() -> anyhow::Result<()> {
 }
 
 #[test]
-fn binding_appointment_is_refused_in_phase_1() -> anyhow::Result<()> {
-    // §4.4: a judgment layer earns binding authority from measured agreement,
-    // so `advice_only: false` is refused with the reason rather than silently
-    // downgraded to advisory.
+fn binding_appointment_without_a_bound_is_refused() -> anyhow::Result<()> {
+    // A binding seat resolves gates without the operator, so it must carry a
+    // horizon — `expires_at` or `max_gates`. An unbounded binding seat is a
+    // standing auto-decider, which the record deliberately cannot express.
     let f = fixture("nightwatch.default", &approval_decider())?;
     let mut req = request("nightwatch.default", "root-1");
     req.advice_only = false;
-    let err = appoint(&f.cfg, &f.store, req).expect_err("binding mode does not exist yet");
+    let err = appoint(&f.cfg, &f.store, req).expect_err("binding requires a bound");
     assert!(
-        err.to_string().contains("advisory-only"),
-        "refusal should explain the advisory stage: {err}"
+        err.to_string().to_lowercase().contains("bound"),
+        "refusal should explain the horizon requirement: {err}"
     );
+    Ok(())
+}
+
+#[test]
+fn a_bounded_binding_appointment_is_accepted() -> anyhow::Result<()> {
+    // The operator-opted phase: `--binding` plus a horizon seats a decider
+    // whose verdicts resolve gates, attributed to `agent:<id>` (see the
+    // verdict-ledger suite for the dispatch half).
+    let f = fixture("nightwatch.default", &approval_decider())?;
+    let mut req = request("nightwatch.default", "root-1");
+    req.advice_only = false;
+    req.max_gates = Some(5);
+    let a = appoint(&f.cfg, &f.store, req)?;
+    assert!(!a.advice_only, "the seat was appointed binding");
+    assert_eq!(a.max_gates, Some(5));
     Ok(())
 }
 

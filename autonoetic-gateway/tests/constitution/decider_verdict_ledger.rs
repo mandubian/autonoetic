@@ -781,3 +781,165 @@ async fn nothing_is_stored_the_rate_is_recomputed_from_the_rows() -> anyhow::Res
     assert_eq!((after.agreed, after.disagreed), (0, 1));
     Ok(())
 }
+
+// ── Binding seats: operator-opted resolution, always fail-closed ───────────
+
+/// A binding seat: `advice_only: false`, bounded by `max_gates` — the bound
+/// is mandatory at appointment time, so the fixture carries one.
+fn seat_binding(f: &Fx, scope: &str) -> anyhow::Result<String> {
+    let a = appoint(
+        &f.cfg,
+        &f.store,
+        autonoetic_gateway::decider_appointment::AppointmentRequest {
+            decider_agent: "nightwatch.default".to_string(),
+            kinds: vec!["approval".to_string()],
+            scope_root_session: scope.to_string(),
+            risk_ceiling: ApprovalRisk::High,
+            advice_only: false,
+            expires_at: None,
+            max_gates: Some(10),
+            appointed_by: "operator".to_string(),
+        },
+    )?;
+    Ok(a.appointment_id)
+}
+
+fn seed_routing_mode(
+    f: &Fx,
+    gate_id: &str,
+    appointment_id: &str,
+    advice_only: bool,
+) -> anyhow::Result<String> {
+    let routing = DeciderGateRouting {
+        routing_id: format!("rtg_{}", gate_id),
+        gate_id: gate_id.to_string(),
+        appointment_id: appointment_id.to_string(),
+        decider_agent: "nightwatch.default".to_string(),
+        decider_session: None,
+        gate_kind: "approval".to_string(),
+        gate_risk: "high".to_string(),
+        advice_only,
+        routed_at: chrono::Utc::now().to_rfc3339(),
+        verdict: None,
+        verdict_reason: None,
+        verdict_at: None,
+    };
+    f.store.insert_decider_gate_routing(&routing)?;
+    Ok(routing.routing_id)
+}
+
+#[tokio::test]
+async fn an_unbounded_binding_appointment_is_refused() {
+    let f = fx().unwrap();
+    let err = appoint(
+        &f.cfg,
+        &f.store,
+        autonoetic_gateway::decider_appointment::AppointmentRequest {
+            decider_agent: "nightwatch.default".to_string(),
+            kinds: vec!["approval".to_string()],
+            scope_root_session: "root-1".to_string(),
+            risk_ceiling: ApprovalRisk::High,
+            advice_only: false,
+            expires_at: None,
+            max_gates: None,
+            appointed_by: "operator".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("bound"),
+        "an unbounded binding seat must be refused with the horizon reason, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_binding_approve_resolves_the_gate_attributed_to_the_agent() -> anyhow::Result<()> {
+    let f = fx()?;
+    let apt = seat_binding(&f, "root-1")?;
+    seed_gate(&f, "apr-1", high_risk_exec("curl https://stooq.com", &["stooq.com"]), Some("fetch prices"))?;
+    let rid = seed_routing_mode(&f, "apr-1", &apt, false)?;
+
+    let driver = ScriptedDriver::scripted(&advised(
+        "approve",
+        "SandboxExec to stooq.com, hosts match the run's stated goal.",
+    ));
+    let outcome = f
+        .svc
+        .dispatch_decider_routing_with_driver(&rid, driver, Duration::from_secs(5))
+        .await?;
+
+    match outcome {
+        autonoetic_gateway::execution::DeciderDispatchOutcome::Resolved { verdict, .. } => {
+            assert_eq!(verdict, "approve");
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    // The gate is resolved through the standard machinery, attributed to the
+    // seat — the chain reads as a delegated ruling, not an operator one.
+    let gate = f.store.get_approval("apr-1")?.expect("gate exists");
+    assert_eq!(
+        gate.status.as_ref().map(|s| s.as_str()),
+        Some("approved"),
+        "a binding approve must resolve the gate, got {:?}",
+        gate.status
+    );
+    assert_eq!(gate.decided_by.as_deref(), Some("agent:nightwatch.default"));
+    assert!(gate.decided_at.is_some());
+    // The verdict is on the routing row for review, and the scope listing
+    // (`deciders.review`) sees it.
+    let routing = f.store.get_decider_gate_routing(&rid)?.unwrap();
+    assert_eq!(routing.verdict.as_deref(), Some("approve"));
+    assert_eq!(f.store.list_decider_routings_for_scope("root-1")?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_binding_reject_resolves_the_gate_too() -> anyhow::Result<()> {
+    let f = fx()?;
+    let apt = seat_binding(&f, "root-1")?;
+    seed_gate(&f, "apr-1", high_risk_exec("rm -rf /tmp/x", &[]), None)?;
+    let rid = seed_routing_mode(&f, "apr-1", &apt, false)?;
+
+    let driver = ScriptedDriver::scripted(&advised("reject", "hosts detected; the run claims local"));
+    let outcome = f
+        .svc
+        .dispatch_decider_routing_with_driver(&rid, driver, Duration::from_secs(5))
+        .await?;
+    let gate = f.store.get_approval("apr-1")?.unwrap();
+    assert_eq!(gate.status.as_ref().map(|s| s.as_str()), Some("rejected"));
+    assert_eq!(gate.decided_by.as_deref(), Some("agent:nightwatch.default"));
+    match outcome {
+        autonoetic_gateway::execution::DeciderDispatchOutcome::Resolved { verdict, .. } => {
+            assert_eq!(verdict, "reject");
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_binding_seat_that_escalates_parks_fail_closed() -> anyhow::Result<()> {
+    let f = fx()?;
+    let apt = seat_binding(&f, "root-1")?;
+    seed_gate(&f, "apr-1", high_risk_exec("curl https://stooq.com", &["stooq.com"]), None)?;
+    let rid = seed_routing_mode(&f, "apr-1", &apt, false)?;
+
+    let driver = ScriptedDriver::scripted(
+        "I cannot rule on the mechanical facts available.\nVERDICT: escalate",
+    );
+    let outcome = f
+        .svc
+        .dispatch_decider_routing_with_driver(&rid, driver, Duration::from_secs(5))
+        .await?;
+    assert!(
+        matches!(outcome, autonoetic_gateway::execution::DeciderDispatchOutcome::Parked { .. }),
+        "an escalation from a binding seat is a park, got {outcome:?}"
+    );
+    let gate = f.store.get_approval("apr-1")?.unwrap();
+    assert!(
+        gate.decided_at.is_none() && gate.status.is_none(),
+        "a parked gate stays undecided for the operator, got {:?}",
+        gate.status
+    );
+    Ok(())
+}

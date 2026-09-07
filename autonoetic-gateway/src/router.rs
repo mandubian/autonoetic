@@ -3876,6 +3876,11 @@ impl JsonRpcRouter {
                     risk_ceiling: Option<String>,
                     #[serde(default)]
                     advice_only: Option<bool>,
+                    /// Operator opt-in to a binding seat: the verdict resolves
+                    /// the gate (fail-closed on escalate/unparsable/timeout).
+                    /// `appoint` requires the appointment to carry a bound.
+                    #[serde(default)]
+                    binding: Option<bool>,
                     #[serde(default)]
                     expires_at: Option<String>,
                     #[serde(default)]
@@ -3936,10 +3941,14 @@ impl JsonRpcRouter {
                     kinds,
                     scope_root_session: params.scope_root_session,
                     risk_ceiling,
-                    // Phase 1 is advisory-only; `appoint` refuses false, so a
-                    // caller asking for binding gets the reason, not a silent
-                    // downgrade.
-                    advice_only: params.advice_only.unwrap_or(true),
+                    // Binding (`--binding`) is the explicit operator opt-in to
+                    // a seat that resolves gates; `appoint` requires it to
+                    // carry a bound and records the delegation either way.
+                    advice_only: if params.binding.unwrap_or(false) {
+                        false
+                    } else {
+                        params.advice_only.unwrap_or(true)
+                    },
                     expires_at: params.expires_at,
                     max_gates: params.max_gates,
                     appointed_by: params
@@ -4165,6 +4174,71 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("deciders.agreement failed: {}", e),
+                    ),
+                }
+            }
+            "deciders.review" => {
+                #[derive(Deserialize)]
+                struct ReviewParams {
+                    root_session_id: String,
+                }
+                let params: ReviewParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for deciders.review: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                // The seat's after-action report for one run: every routing
+                // (verdict, motivation, timestamp, binding or advisory) under
+                // appointments scoped to this session, beside the gate's final
+                // status. Read-only; missing store is the only failure shape.
+                let appointments =
+                    store.list_decider_appointments_for_scope(&params.root_session_id, true);
+                let routings = store.list_decider_routings_for_scope(&params.root_session_id);
+                match (appointments, routings) {
+                    (Ok(appointments), Ok(routings)) => {
+                        let routes: Vec<serde_json::Value> = routings
+                            .iter()
+                            .map(|r| {
+                                let mut row = serde_json::to_value(r)
+                                    .unwrap_or(serde_json::Value::Null);
+                                let gate = store.get_approval(&r.gate_id).ok().flatten();
+                                row["gate_status"] = serde_json::json!(
+                                    gate.as_ref()
+                                        .and_then(|a| a.status.as_ref())
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("pending")
+                                );
+                                row
+                            })
+                            .collect();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "root_session_id": params.root_session_id,
+                                "appointments": appointments,
+                                "routings": routes,
+                            }),
+                        )
+                    }
+                    (Err(e), _) | (_, Err(e)) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("deciders.review failed: {}", e),
                     ),
                 }
             }

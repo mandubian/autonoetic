@@ -637,21 +637,26 @@ impl std::fmt::Debug for ClarificationOutcome {
 
 /// Outcome of waking a decider seat for one routed gate (#1198).
 ///
-/// There are exactly two shapes, and the difference is the whole safety
+/// There are exactly three shapes, and the difference is the whole safety
 /// argument: `Advised` means a terminal verdict with a motivation was
-/// recorded on the routing row; `Parked` means nothing was recorded and the
-/// gate waits for the operator exactly as if no seat existed. Every failure
-/// mode — dead seat, dwell bound, P-2.21 escalation, unparsable reply, a
-/// human who decided first — lands in `Parked`. In phase 1 every seat is
-/// advisory, so `Advised` never resolves the gate either; the distinction
-/// still matters because it is the shape phase 2 inherits.
+/// recorded on the routing row and the gate still waits for the operator
+/// (advisory seat); `Resolved` means a **binding** seat's verdict also went
+/// through the real approval machinery — the gate is decided, attributed to
+/// `agent:<decider>`; `Parked` means nothing was decided and the gate waits
+/// for the operator exactly as if no seat existed. Every failure mode — dead
+/// seat, dwell bound, P-2.21 escalation, unparsable reply, a human who
+/// decided first, a binding resolution the machinery refused — lands in
+/// `Parked`. Fail-closed is inherited from routing and compounded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeciderDispatchOutcome {
     /// Terminal verdict recorded on the routing row. The gate itself remains
     /// parked for the operator while the seat is advisory.
     Advised { verdict: String, reason: String },
-    /// No verdict recorded; the routing row keeps its null verdict and the
-    /// gate parks for the operator.
+    /// A binding seat's terminal verdict was recorded **and** resolved the
+    /// gate through the standard approval machinery.
+    Resolved { verdict: String, reason: String },
+    /// No verdict recorded, or a binding verdict that could not be applied;
+    /// the gate parks for the operator.
     Parked { reason: String },
 }
 
@@ -659,6 +664,7 @@ impl std::fmt::Display for DeciderDispatchOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Advised { verdict, .. } => write!(f, "seat advised {verdict}"),
+            Self::Resolved { verdict, .. } => write!(f, "binding seat resolved gate: {verdict}"),
             Self::Parked { reason } => write!(f, "gate parked ({reason})"),
         }
     }
@@ -5808,10 +5814,62 @@ impl GatewayExecutionService {
                     &card_digest,
                     &decider_session,
                 );
-                Ok(DeciderDispatchOutcome::Advised {
-                    verdict: v.verdict,
-                    reason: v.reason,
-                })
+                if appointment.advice_only {
+                    return Ok(DeciderDispatchOutcome::Advised {
+                        verdict: v.verdict,
+                        reason: v.reason,
+                    });
+                }
+                // Binding seat: the verdict goes through the standard approval
+                // machinery, attributed to `agent:<decider>` — the same path an
+                // operator's y/n takes, so grants, hooks and the causal chain
+                // behave identically. The seat decides at the gate's required
+                // level: its authority to do so is the appointment, verified
+                // inside `decide_request` by the P-2.20 GateDecider check that
+                // fires on the `agent:` attribution (a non-decider is refused,
+                // never downgraded). Nothing here is fail-open: a resolution
+                // the machinery refuses (confirm phrase missing, gate already
+                // decided, vault trouble) parks the gate for the operator with
+                // the verdict already on the routing row for review.
+                let decided_by = format!("agent:{}", routing.decider_agent);
+                let hooks = self.hook_executor();
+                let options = crate::scheduler::ApproveOptions {
+                    decider_session_id: Some(decider_session.clone()),
+                    ..Default::default()
+                };
+                let resolution = if v.verdict.eq_ignore_ascii_case("approve") {
+                    crate::scheduler::approve_request_with_options(
+                        self.config().as_ref(),
+                        Some(store.as_ref()),
+                        &routing.gate_id,
+                        &decided_by,
+                        Some(v.reason.clone()),
+                        None,
+                        Some(&approval.approval_level),
+                        Some(hooks.as_ref()),
+                        options,
+                    )
+                } else {
+                    crate::scheduler::reject_request_with_options(
+                        self.config().as_ref(),
+                        Some(store.as_ref()),
+                        &routing.gate_id,
+                        &decided_by,
+                        Some(v.reason.clone()),
+                        Some(hooks.as_ref()),
+                        options,
+                    )
+                };
+                match resolution {
+                    Ok(_) => Ok(DeciderDispatchOutcome::Resolved {
+                        verdict: v.verdict,
+                        reason: v.reason,
+                    }),
+                    Err(e) => park(&format!(
+                        "binding resolution refused ({verdict}): {e}",
+                        verdict = v.verdict
+                    )),
+                }
             }
             crate::decider_dispatch::ParsedAdvisoryVerdict::Escalated => {
                 park("seat escalated (P-2.21): the gate parks for the operator")

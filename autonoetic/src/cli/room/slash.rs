@@ -113,13 +113,31 @@ pub enum SlashCommand {
     /// MCP servers; the operator confirms with one keystroke or edits. An
     /// unconfirmed proposal has no effect (Lawful-Executor §14).
     LocalIntent { intent: String },
+    /// Seat a decider agent for this session (`/decider attach [agent]
+    /// [--binding] [--ceiling X] [--expires-at X] [--max-gates N]`).
+    /// Binding is the operator's explicit risk: the seat's verdict resolves
+    /// gates, and the appointment must carry a horizon.
+    DeciderAttach {
+        agent: String,
+        binding: bool,
+        ceiling: Option<String>,
+        kinds: Vec<String>,
+        expires_at: Option<String>,
+        max_gates: Option<u32>,
+    },
+    /// After-action review of every gate routed to a seat in this session:
+    /// verdicts, motivations, and final gate status.
+    DeciderReview,
+    /// Vacate a seat for this session. Without an id, the most recent active
+    /// appointment for the session is revoked.
+    DeciderDetach { appointment_id: Option<String> },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /audit · /cron · /wiki · /test · /model · /private · /taint · /local · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /audit · /cron · /wiki · /decider · /test · /model · /private · /taint · /local · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -175,11 +193,26 @@ pub fn help_lines() -> Vec<String> {
             .to_string(),
         "  g (modal)    leave timeline peek · return to gate resolve overlay".to_string(),
         String::new(),
+        "Decider seats (gates delegated to an agent)".to_string(),
+        "  /decider review      after-action report: routings, verdicts, final gate status"
+            .to_string(),
+        "  /decider attach      seat an agent for this session (default: nightwatch.default)"
+            .to_string(),
+        "               [--binding] [--ceiling high|standard] [--kinds approval,escalation]"
+            .to_string(),
+        "               [--expires-at RFC3339] [--max-gates N]".to_string(),
+        "               --binding resolves gates as the seat rules (fail-closed) and requires"
+            .to_string(),
+        "               --expires-at or --max-gates — attach at your own risk, review later"
+            .to_string(),
+        "  /decider detach [id] vacate the seat (latest active one when no id is given)"
+            .to_string(),
+        String::new(),
         "Messaging (prompt-first)".to_string(),
         "  type         typing anywhere composes — the prompt is always live".to_string(),
         "  / (empty)    slash commands · ? (empty) opens this info pane".to_string(),
         "  i            compose — refocus the prompt (Esc blurs to nav triage)".to_string(),
-        "  gates        pending gates peek as a banner: y/n act · type composes through".to_string(),
+        "  gates        pending gates arrive as a peek banner: y/n act · type composes through".to_string(),
         "               Enter send · Shift+Enter newline".to_string(),
         "               ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy"
             .to_string(),
@@ -259,6 +292,7 @@ pub fn parse(input: &str) -> SlashCommand {
         // Read-only as well; an audit is a record, there is nothing to act on.
         "audit" => SlashCommand::EgressAudit,
         "wiki" => parse_wiki(tail),
+        "decider" => parse_decider(tail),
         "test" => {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
@@ -339,6 +373,94 @@ fn parse_cron(tail: &str) -> SlashCommand {
         SlashCommand::ListCronJobs
     } else {
         SlashCommand::Unknown(format!("cron {trimmed}"))
+    }
+}
+
+/// `/decider attach [agent] [--binding] [--ceiling high|standard]
+/// [--kinds approval,escalation] [--expires-at RFC3339] [--max-gates N]` ·
+/// `/decider review` · `/decider detach [id]`. Bare `/decider` reviews.
+///
+/// `attach` seats an agent at the operator's own risk — most explicit in the
+/// `--binding` form, where the seat's verdict resolves gates without the
+/// operator and the gateway requires a horizon (`--expires-at`/`--max-gates`).
+fn parse_decider(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("review") {
+        return SlashCommand::DeciderReview;
+    }
+    let (sub, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h.to_ascii_lowercase(), r.trim()),
+        None => (trimmed.to_ascii_lowercase(), ""),
+    };
+    match sub.as_str() {
+        "review" => SlashCommand::DeciderReview,
+        "detach" | "revoke" => SlashCommand::DeciderDetach {
+            appointment_id: (!rest.is_empty()).then(|| rest.to_string()),
+        },
+        "attach" => {
+            let mut tokens: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            // First non-flag token names the agent (the default is the one
+            // bundled agent that holds GateDecider).
+            let mut agent = "nightwatch.default".to_string();
+            if let Some(first) = tokens.first() {
+                if !first.starts_with("--") {
+                    agent = first.clone();
+                    tokens.remove(0);
+                }
+            }
+            let mut binding = false;
+            let mut ceiling: Option<String> = None;
+            let mut kinds: Vec<String> = Vec::new();
+            let mut expires_at: Option<String> = None;
+            let mut max_gates: Option<u32> = None;
+            let mut unknown: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < tokens.len() {
+                match tokens[i].as_str() {
+                    "--binding" => binding = true,
+                    "--ceiling" => {
+                        i += 1;
+                        ceiling = tokens.get(i).cloned();
+                    }
+                    "--kinds" => {
+                        i += 1;
+                        if let Some(v) = tokens.get(i) {
+                            kinds = v
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect();
+                        }
+                    }
+                    "--expires-at" => {
+                        i += 1;
+                        expires_at = tokens.get(i).cloned();
+                    }
+                    "--max-gates" => {
+                        i += 1;
+                        match tokens.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                            Some(n) => max_gates = Some(n),
+                            None => unknown.push("--max-gates".to_string()),
+                        }
+                    }
+                    other => unknown.push(other.to_string()),
+                }
+                i += 1;
+            }
+            if !unknown.is_empty() {
+                return SlashCommand::Unknown(format!("decider {}", unknown.join(" ")));
+            }
+            SlashCommand::DeciderAttach {
+                agent,
+                binding,
+                ceiling,
+                kinds,
+                expires_at,
+                max_gates,
+            }
+        }
+        other => SlashCommand::Unknown(format!("decider {other}")),
     }
 }
 
@@ -547,6 +669,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("private", "toggle room privacy · or send one local_only message"),
     ("taint", "declare a session egress rule"),
     ("local", "describe intent → gateway proposes concrete rules"),
+    ("decider", "attach a decider seat · `review` · `detach` · `attach --binding`"),
     ("estop", "emergency-stop session · optionally redirect"),
     ("test", "inject synthetic events (dev)"),
     ("quit", "exit the TUI"),
@@ -802,6 +925,7 @@ mod tests {
             "/plan approve",
             "/curate [focus notes]",
             "user.ask",
+            "/decider attach",
             "i            compose",
             "j / ↓",
             "PgDn / PgUp",
@@ -907,6 +1031,64 @@ mod tests {
             parse("/session foo bar"),
             SlashCommand::SwitchSession("foo bar".into())
         );
+    }
+
+    #[test]
+    fn parse_decider_variants() {
+        // Bare /decider reviews — the after-action report is the default.
+        assert_eq!(parse("/decider"), SlashCommand::DeciderReview);
+        assert_eq!(parse("/decider review"), SlashCommand::DeciderReview);
+        // Attach defaults: the one bundled GateDecider holder, advisory,
+        // nothing else pinned.
+        assert_eq!(
+            parse("/decider attach"),
+            SlashCommand::DeciderAttach {
+                agent: "nightwatch.default".to_string(),
+                binding: false,
+                ceiling: None,
+                kinds: vec![],
+                expires_at: None,
+                max_gates: None,
+            }
+        );
+        // Named agent + binding + bounds + ceiling + kinds.
+        assert_eq!(
+            parse("/decider attach auditor.default --binding --max-gates 5 --ceiling high --kinds approval,escalation"),
+            SlashCommand::DeciderAttach {
+                agent: "auditor.default".to_string(),
+                binding: true,
+                ceiling: Some("high".to_string()),
+                kinds: vec!["approval".to_string(), "escalation".to_string()],
+                expires_at: None,
+                max_gates: Some(5),
+            }
+        );
+        // Expiry passes through verbatim (RFC3339 has no spaces after trim).
+        assert_eq!(
+            parse("/decider attach --expires-at 2026-09-07T08:00:00Z"),
+            SlashCommand::DeciderAttach {
+                agent: "nightwatch.default".to_string(),
+                binding: false,
+                ceiling: None,
+                kinds: vec![],
+                expires_at: Some("2026-09-07T08:00:00Z".to_string()),
+                max_gates: None,
+            }
+        );
+        // Detach with and without an id.
+        assert_eq!(
+            parse("/decider detach"),
+            SlashCommand::DeciderDetach { appointment_id: None }
+        );
+        assert_eq!(
+            parse("/decider detach apt_9c1e"),
+            SlashCommand::DeciderDetach {
+                appointment_id: Some("apt_9c1e".to_string())
+            }
+        );
+        // Unknown flags/subcommands surface as Unknown, never silently dropped.
+        assert!(matches!(parse("/decider attach --wat"), SlashCommand::Unknown(_)));
+        assert!(matches!(parse("/decider bogus"), SlashCommand::Unknown(_)));
     }
 
     #[test]

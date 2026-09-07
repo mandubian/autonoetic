@@ -1278,6 +1278,14 @@ pub fn approve_request_with_options(
     // P-2.24: Dwell time enforcement. Reject if the approval was decided too
     // quickly after the request was created (operator must see the prompt
     // for a minimum time before confirming).
+    //
+    // Skipped for agent-decider attributions (`agent:<id>`): the dwell is a
+    // human-reflex guard — it protects an operator from confirming a prompt
+    // they have not actually read. A seat has no prompt on screen; its
+    // consideration is the bounded deliberation turn plus the O-1 motivation,
+    // and its authority is the appointment, re-verified by the P-2.20
+    // capability check below. Skipping the reflex timer for a verified-then
+    // ruled agent does not weaken the guard for humans.
     if let Some(min_dwell_ms) = req.min_dwell_ms {
         let multiplier = if config.approval_dwell_multiplier.is_finite()
             && config.approval_dwell_multiplier >= 0.0
@@ -1287,7 +1295,7 @@ pub fn approve_request_with_options(
             1.0
         };
         let effective_dwell = (min_dwell_ms as f64 * multiplier) as i64;
-        if effective_dwell > 0 {
+        if effective_dwell > 0 && parse_agent_decider_id(decided_by).is_none() {
             let created = chrono::DateTime::parse_from_rfc3339(&req.created_at).map_err(|e| {
                 anyhow::anyhow!(
                     "P-2.24: Cannot parse created_at '{}' for dwell-time check: {}",

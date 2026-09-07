@@ -40,10 +40,10 @@ pub struct AppointmentRequest {
 /// Seat a decider for a run.
 ///
 /// Refuses, in order: an empty scope, no kinds, an unknown kind, a `Critical`
-/// ceiling, a binding (non-advisory) appointment, a malformed expiry, and an
-/// appointee that does not already hold `GateDecider` covering every named
-/// kind. The capability check is last because it is the one that needs to
-/// touch the agent repository.
+/// ceiling, a binding appointment without a horizon (`expires_at` or
+/// `max_gates`), a malformed expiry, and an appointee that does not already
+/// hold `GateDecider` covering every named kind. The capability check is last
+/// because it is the one that needs to touch the agent repository.
 pub fn appoint(
     config: &GatewayConfig,
     store: &GatewayStore,
@@ -68,10 +68,14 @@ pub fn appoint(
         return Err(AppointmentError::CriticalNotAppointable.into());
     }
 
-    // Phase 1 is advisory-only (§4.4): a judgment layer earns binding
-    // authority from measured agreement, not from assertion at creation time.
-    if !req.advice_only {
-        return Err(AppointmentError::BindingNotYetAvailable.into());
+    // A binding seat resolves gates without the operator — that is its point,
+    // and it is an explicit operator opt-in (`advice_only: false` reaches here
+    // only from `deciders.appoint --binding`). What is *not* negotiable is the
+    // horizon: a binding seat must carry `expires_at` or `max_gates`, because
+    // an unbounded one is a standing auto-decider that outlives the operator's
+    // attention. Advisory seats may still stand unlimited.
+    if !req.advice_only && req.expires_at.is_none() && req.max_gates.is_none() {
+        return Err(AppointmentError::BindingRequiresBound.into());
     }
 
     if let Some(exp) = &req.expires_at {

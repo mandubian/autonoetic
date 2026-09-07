@@ -264,6 +264,24 @@ pub(crate) fn list_routings_for_appointment(
     Ok(out)
 }
 
+/// Every routing ever made under appointments scoped to one root session,
+/// oldest first — the operator's after-the-fact review of what the seats
+/// said and did in this run (`deciders.review`).
+pub(crate) fn list_routings_for_scope(
+    conn: &Connection,
+    scope_root_session: &str,
+) -> Result<Vec<DeciderGateRouting>> {
+    let mut stmt = conn.prepare(&format!(
+        "{ROUTING_COLS_QUALIFIED} JOIN decider_appointments a \
+         ON r.appointment_id = a.appointment_id \
+         WHERE a.scope_root_session = ?1 ORDER BY r.routed_at"
+    ))?;
+    let rows = stmt.query_map(params![scope_root_session], |row| row_to_routing(row))?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
 /// Fill a routing row's verdict. First verdict wins: the `verdict IS NULL`
 /// predicate makes a duplicate dispatch (a retried wake, a racing worker) a
 /// no-op rather than a rewrite of the recorded motivation — the same
@@ -287,6 +305,13 @@ pub(crate) fn record_routing_verdict(
 const ROUTING_COLS: &str = "SELECT routing_id, gate_id, appointment_id, decider_agent, \
      decider_session, gate_kind, gate_risk, advice_only, routed_at, verdict, verdict_reason, \
      verdict_at FROM decider_gate_routings";
+
+/// Same columns, qualified for the scope JOIN (`deciders.review`) — every
+/// column is `r.`-prefixed because `appointment_id` exists on both sides of
+/// the join and an unqualified name is a SQL error, not a shadow.
+const ROUTING_COLS_QUALIFIED: &str = "SELECT r.routing_id, r.gate_id, r.appointment_id, \
+     r.decider_agent, r.decider_session, r.gate_kind, r.gate_risk, r.advice_only, r.routed_at, \
+     r.verdict, r.verdict_reason, r.verdict_at FROM decider_gate_routings r";
 
 fn row_to_routing(row: &rusqlite::Row<'_>) -> Result<DeciderGateRouting, rusqlite::Error> {
     Ok(DeciderGateRouting {
