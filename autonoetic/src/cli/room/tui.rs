@@ -1309,6 +1309,52 @@ fn build_attention_detail_line(
     Line::from(spans)
 }
 
+/// The `[n] label` items for a gate-input prompt, each label capped at `per`
+/// display columns. Truncation is per-item, not global: on a wide terminal
+/// every choice gets room to be understood instead of a fixed 24-column
+/// stub ("Approve and create sessio…").
+fn format_choice_items(options: &[GateOption], per: usize) -> String {
+    options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, per)))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Per-choice label budget for a gate-input prompt line of `total` columns:
+/// distribute the free width across the choices. Floor keeps a crowded
+/// prompt readable; cap stops one long choice from eating the whole line.
+/// The overhead reservation covers the `[n] ` numbering, the ` · `
+/// separators, the input label + buffer, and the trailing key hint.
+fn choice_budget(total: usize, count: usize) -> usize {
+    let n = count.max(1);
+    let overhead = 32 + n * 8;
+    (total.saturating_sub(overhead) / n).clamp(12, 72)
+}
+
+/// The footer line for an active gate input: label, buffer, error, the
+/// width-adaptive choice items, and the key hint.
+fn gate_input_footer_line(gi: &GateInput, status: Option<&str>, footer_w: usize) -> Line<'static> {
+    let label = gate_input_label(gi);
+    let choices = format_choice_items(&gi.options, choice_budget(footer_w, gi.options.len()));
+    let hint = if gi.options.is_empty() {
+        "[Enter submit · Esc cancel]".to_string()
+    } else if gi.allow_freeform {
+        format!("{choices}   [number choose · or type a reply · Esc cancel]")
+    } else {
+        format!("{choices}   [Enter submit · Esc cancel]")
+    };
+    let err = status
+        .filter(|s| s.starts_with('✗') || !s.starts_with('⏳'))
+        .map(|s| format!("   {s}"))
+        .unwrap_or_default();
+    Line::from(Span::styled(
+        format!(" {label}: {}▏{err}   {hint}", rendered_input_buffer(gi)),
+        Style::default().fg(Color::Cyan),
+    ))
+}
+
 fn build_footer(
     slash: Option<&str>,
     compose: Option<&ComposeInput>,
@@ -1340,29 +1386,7 @@ fn build_footer(
             Style::default().fg(Color::Green),
         ))
     } else if let Some(gi) = input {
-        let label = gate_input_label(gi);
-        let choices = gi
-            .options
-            .iter()
-            .enumerate()
-            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 24)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let hint = if gi.options.is_empty() {
-            "[Enter submit · Esc cancel]".to_string()
-        } else if gi.allow_freeform {
-            format!("{choices}   [number choose · or type a reply · Esc cancel]")
-        } else {
-            format!("{choices}   [Enter submit · Esc cancel]")
-        };
-        let err = status
-            .filter(|s| s.starts_with('✗') || !s.starts_with('⏳'))
-            .map(|s| format!("   {s}"))
-            .unwrap_or_default();
-        Line::from(Span::styled(
-            format!(" {label}: {}▏{err}   {hint}", rendered_input_buffer(gi)),
-            Style::default().fg(Color::Cyan),
-        ))
+        gate_input_footer_line(gi, status, footer_w)
     } else if let Some(s) = status {
         let color = if s.starts_with('✗') {
             Color::Red
@@ -13152,13 +13176,10 @@ fn gate_modal_input_panel_lines(
         )));
     }
 
-    let choices = gi
-        .options
-        .iter()
-        .enumerate()
-        .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let choices = format_choice_items(
+        &gi.options,
+        choice_budget(wrap_w.max(width as usize), gi.options.len()),
+    );
     let hint = if gi.details_mode {
         "Enter submit details · Esc cancel details".to_string()
     } else if gi.options.is_empty() {
@@ -16863,4 +16884,75 @@ mod tests {
         // unlabeled rows stay column-aligned.
         assert!(joined.contains("  "), "{joined}");
     }
+}
+
+#[test]
+fn choice_budget_spreads_free_width_and_clamps() {
+    // A wide prompt with two choices gives each generous room.
+    assert_eq!(choice_budget(160, 2), 56);
+    // A narrow prompt floors instead of collapsing to nothing.
+    assert_eq!(choice_budget(40, 4), 12);
+    // The cap stops a lone choice from eating the line.
+    assert_eq!(choice_budget(400, 1), 72);
+    // Zero choices is not a division by zero.
+    assert_eq!(choice_budget(160, 0), 72);
+}
+
+#[test]
+fn choice_items_truncate_per_label_not_globally() {
+    let options = vec![
+        GateOption {
+            id: "o1".into(),
+            label: "Approve and create a session grant for the detected hosts".into(),
+        },
+        GateOption {
+            id: "o2".into(),
+            label: "short".into(),
+        },
+    ];
+    // A generous budget keeps the long label whole while the short one is
+    // untouched — per-item truncation, not a shared slice.
+    let items = format_choice_items(&options, 64);
+    assert!(items.contains("[1] Approve and create a session grant for the detected hosts"), "{items}");
+    assert!(items.contains("[2] short"), "{items}");
+    // A tight budget truncates with the ellipsis, and each item independently.
+    let tight = format_choice_items(&options, 12);
+    assert!(tight.contains("[1] Approve and…"), "{tight}");
+    assert!(tight.contains("[2] short"), "{tight}");
+}
+
+#[test]
+fn footer_gate_input_uses_the_width_adaptive_choice_budget() {
+    // The regression: choice labels were hard-capped at 24 columns, so a
+    // clarification like "Approve and create a session grant…" lost its
+    // meaning. On a 180-column terminal the full label must fit.
+    let gi = GateInput {
+        action: GateAction::Answer,
+        id: "int-1".into(),
+        buffer: String::new(),
+        options: vec![GateOption {
+            id: "o1".into(),
+            label: "Approve and create a session grant for the detected hosts".into(),
+        }],
+        allow_freeform: false,
+        details_mode: false,
+        motivation_required: false,
+        required_confirm_phrase: None,
+        acknowledged_capabilities: Vec::new(),
+        secret_fields: Vec::new(),
+        credential_allowed_hosts: Vec::new(),
+        secret_values: Vec::new(),
+        secret_phase: false,
+        opened_in_modal: false,
+    };
+    let line = gate_input_footer_line(&gi, None, 180);
+    let text: String = line
+        .spans
+        .into_iter()
+        .map(|s| s.content.to_string())
+        .collect();
+    assert!(
+        text.contains("Approve and create a session grant for the detected hosts"),
+        "the full choice label must render on a wide footer: {text}"
+    );
 }
