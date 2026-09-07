@@ -796,10 +796,21 @@ fn build_header(
     squash: bool,
     taint: Option<&str>,
     pinned: bool,
+    bound_agent: Option<&str>,
     width: u16,
 ) -> String {
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
+    // The bound planner, once it differs from the default — the visible
+    // signal that this run is in collaborative (PlanFrame) mode. `None`
+    // (no handoff and no --agent) renders nothing: absence reads as
+    // planner.default, the same convention as the taint chip.
+    if let Some(agent) = bound_agent {
+        if agent != "planner.default" {
+            let short = agent.strip_suffix(".default").unwrap_or(agent);
+            right_parts.push(format!("🤝 {short}"));
+        }
+    }
     if stats.llm_calls > 0 {
         let mut part = format!(
             "{} → {} ●{}",
@@ -4792,6 +4803,60 @@ pub fn run(
                                             }
                                         }
                                     }
+                                    SlashCommand::CollabMode { enable, note } => {
+                                        // /collab [note] · /collab off [note]:
+                                        // mode sugar over session.handoff —
+                                        // rebind the live session to the
+                                        // PlanFrame-aware planner and back.
+                                        // All the handoff guards apply (root
+                                        // session only, refused while a gate is
+                                        // pending); the note rides the
+                                        // successor's context envelope.
+                                        let target = if enable {
+                                            "planner.collaborative"
+                                        } else {
+                                            "planner.default"
+                                        };
+                                        // The note, when given, becomes the
+                                        // handoff reason; without one the
+                                        // gateway records the mode flip itself.
+                                        let reason = note.clone().unwrap_or_else(|| {
+                                            if enable {
+                                                "switching to collaborative plan mode"
+                                            } else {
+                                                "leaving collaborative plan mode"
+                                            }
+                                            .to_string()
+                                        });
+                                        let params = serde_json::json!({
+                                            "session_id": &*root_session_id,
+                                            "target_agent_id": target,
+                                            "reason": reason,
+                                        });
+                                        match rpc(client, "session.handoff", params) {
+                                            Ok(value) => {
+                                                let to = value
+                                                    .get("to_agent_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or(target)
+                                                    .to_string();
+                                                *target_agent_id = Some(to.clone());
+                                                status = Some(if enable {
+                                                    format!(
+                                                        "✓ collaborative mode — {to} is bound; send your goal, plans arrive as reviewable PlanFrames (/plan · p · y/n)"
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "✓ back to {to}; PlanFrame tools are no longer in play"
+                                                    )
+                                                });
+                                                force_timeline_refresh = true;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("✗ collab: {e}"))
+                                            }
+                                        }
+                                    }
                                     SlashCommand::ListSessions { agent } => {
                                         let (lines, ids) = list_sessions_detail(client, agent.as_deref());
                                         detail = Some(DetailPane::event(lines, None));
@@ -8281,6 +8346,7 @@ pub fn run(
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
                     current_pinned,
+                    target_agent_id.as_deref(),
                     &llm_activity,
                     run_line.as_deref(),
                 )
@@ -8365,6 +8431,7 @@ pub fn run(
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
                     current_pinned,
+                    target_agent_id.as_deref(),
                     &llm_activity,
                     run_line.as_deref(),
                 )
@@ -9204,6 +9271,7 @@ pub fn run(
                 labels_panel.as_ref(),
                 current_taint.as_deref(),
                 current_pinned,
+                target_agent_id.as_deref(),
                 &llm_activity,
                 run_line.as_deref(),
             )
@@ -10748,7 +10816,7 @@ fn switch_session(
     acted: &mut HashSet<String>,
     floor: &mut FloorMode,
     root_session_id: &mut String,
-    _target_agent_id: &mut Option<String>,
+    target_agent_id: &mut Option<String>,
     _limit: u32,
     new_id: &str,
     force_timeline_refresh: &mut bool,
@@ -10763,6 +10831,11 @@ fn switch_session(
     *follow = true;
     resolved.clear();
     acted.clear();
+    // The composer target (and the 🤝 header chip) belonged to the *previous*
+    // session's handoff. Clear it: the new session's messages follow its own
+    // binding (the binding wins at ingest), and the chip honestly reads
+    // planner.default until a handoff happens in this one.
+    *target_agent_id = None;
     *force_timeline_refresh = true;
     // Don't reset `floor` — the operator's altitude dial is a view preference,
     // not a session property. Keep the previous setting.
@@ -11817,6 +11890,7 @@ fn draw(
     labels_panel: Option<&LabelsPanel>,
     taint: Option<&str>,
     pinned: bool,
+    bound_agent: Option<&str>,
     llm_activity: &[LlmActivityRow],
     run_line: Option<&str>,
 ) {
@@ -11844,7 +11918,7 @@ fn draw(
     let footer_idx = chunks.len() - 1;
     let list_idx = if has_activity_strip { 2 } else { 1 };
 
-    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, chunks[0].width);
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, bound_agent, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -13644,6 +13718,38 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+        #[test]
+        fn header_shows_a_chip_for_the_bound_planner() {
+            // The 🤝 chip appears only when a handoff (or --agent) put a
+            // non-default planner in the room; absence reads as planner.default.
+            let with = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                Some("planner.collaborative"), 160,
+            );
+            assert!(with.contains("🤝 planner.collaborative"), "{with}");
+            // The `.default` suffix is stripped for compactness.
+            let short = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                Some("nightwatch.default"), 160,
+            );
+            assert!(short.contains("🤝 nightwatch"), "{short}");
+            // Default planner (or unknown binding) renders no chip.
+            let without = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                Some("planner.default"), 160,
+            );
+            assert!(!without.contains("🤝"), "{without}");
+            let unset = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                None, 160,
+            );
+            assert!(!unset.contains("🤝"), "{unset}");
+        }
+
     use super::*;
     use autonoetic_types::principal::Principal;
     use autonoetic_types::session_timeline::SessionRole;
@@ -16475,6 +16581,7 @@ mod tests {
             true,
             None,
             false,
+            None,
             120,
         );
         assert!(header.contains("cache 58%"), "{header}");
@@ -16491,6 +16598,7 @@ mod tests {
             true,
             None,
             false,
+            None,
             120,
         );
         assert!(!plain.contains("cache"), "{plain}");
@@ -16501,14 +16609,14 @@ mod tests {
         let stats = test_stats();
         let with_taint = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            Some("local_only"), false, 120,
+            Some("local_only"), false, None, 120,
         );
         assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
 
         // Unrestricted (None) ⇒ no chip — absence reads as "open".
         let open = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            None, false, 120,
+            None, false, None, 120,
         );
         assert!(!open.contains("🔒"), "{open}");
     }
@@ -16518,14 +16626,14 @@ mod tests {
         let stats = test_stats();
         let pinned = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            None, true, 120,
+            None, true, None, 120,
         );
         assert!(pinned.contains("📌 pinned"), "{pinned}");
 
         // Not pinned ⇒ no chip (even with a taint label from room data).
         let unpinned = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            Some("no_remote_model"), false, 120,
+            Some("no_remote_model"), false, None, 120,
         );
         assert!(!unpinned.contains("📌"), "{unpinned}");
     }

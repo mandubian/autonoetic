@@ -113,6 +113,12 @@ pub enum SlashCommand {
     /// MCP servers; the operator confirms with one keystroke or edits. An
     /// unconfirmed proposal has no effect (Lawful-Executor §14).
     LocalIntent { intent: String },
+    /// Switch the live session between `planner.default` and
+    /// `planner.collaborative` via `session.handoff` (#1088): `/collab [note]`
+    /// seats the PlanFrame-aware planner, `/collab off [note]` hands back.
+    /// Plans then arrive as reviewable PlanFrames (`/plan`, `p`, `y`/`n`).
+    /// The note rides the handoff's context envelope.
+    CollabMode { enable: bool, note: Option<String> },
     /// Seat a decider agent for this session (`/decider attach [agent]
     /// [--binding] [--ceiling X] [--expires-at X] [--max-gates N]`).
     /// Binding is the operator's explicit risk: the seat's verdict resolves
@@ -137,7 +143,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /audit · /cron · /wiki · /decider · /test · /model · /private · /taint · /local · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /collab · /return · /curate · /crystallize · /skills · /audit · /cron · /wiki · /decider · /test · /model · /private · /taint · /local · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -230,6 +236,10 @@ pub fn help_lines() -> Vec<String> {
         "  /cron  /cron list|ls       scheduled jobs for this session".to_string(),
         "  /plan  /plan list          list pending PlanFrames".to_string(),
         "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
+        "  /collab [note]             switch this session to planner.collaborative — plans arrive as"
+            .to_string(),
+        "                             reviewable PlanFrames (/plan · p · y/n)".to_string(),
+        "  /collab off [note]         hand back to planner.default".to_string(),
         "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
         "  /curate [focus notes]      run memory curation on this session now (notes steer the curator)".to_string(),
         "  /crystallize [what worked]  make it reusable — instruction, wrapper, or new skill".to_string(),
@@ -323,6 +333,9 @@ pub fn parse(input: &str) -> SlashCommand {
         "local" => SlashCommand::LocalIntent {
             intent: tail.trim().to_string(),
         },
+        // `/collab [note]` · `/collab off [note]` — flip the live session
+        // between planner.default and planner.collaborative (see the variant).
+        "collab" => parse_collab(tail),
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -554,6 +567,26 @@ fn parse_agent(tail: &str) -> SlashCommand {
     }
 }
 
+/// `/collab [note]` · `/collab off [note]` — mode sugar over `session.handoff`
+/// (#1088): `on` rebinds the live session to `planner.collaborative` (the
+/// PlanFrame-aware planner), `off` hands back to `planner.default`. The note,
+/// when given, becomes the handoff reason and rides the successor's context
+/// envelope; without one the gateway records a default motive. `off` must be
+/// a whole token — `/collab office hours` is a note that happens to start
+/// with "off", not a mode flip.
+fn parse_collab(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    let (enable, note) = match trimmed.split_once(char::is_whitespace) {
+        Some((head, rest)) if head.eq_ignore_ascii_case("off") => (false, rest.trim()),
+        _ if trimmed.eq_ignore_ascii_case("off") => (false, ""),
+        _ => (true, trimmed),
+    };
+    SlashCommand::CollabMode {
+        enable,
+        note: (!note.is_empty()).then(|| note.to_string()),
+    }
+}
+
 fn parse_session(tail: &str) -> SlashCommand {
     // `/session <id>` and `/session list [agent]` and `/session resume [agent]`
     // — split on whitespace to peel off the sub-verb, then take the rest as a
@@ -670,6 +703,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("taint", "declare a session egress rule"),
     ("local", "describe intent → gateway proposes concrete rules"),
     ("decider", "attach a decider seat · `review` · `detach` · `attach --binding`"),
+    ("collab", "switch to the PlanFrame-aware planner · `off` hands back"),
     ("estop", "emergency-stop session · optionally redirect"),
     ("test", "inject synthetic events (dev)"),
     ("quit", "exit the TUI"),
@@ -892,6 +926,52 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn parse_collab_variants() {
+        // Bare /collab seats the PlanFrame-aware planner, no note.
+        assert_eq!(
+            parse("/collab"),
+            SlashCommand::CollabMode { enable: true, note: None }
+        );
+        // A note rides the handoff's context envelope verbatim.
+        assert_eq!(
+            parse("/collab we need a reviewable plan first"),
+            SlashCommand::CollabMode {
+                enable: true,
+                note: Some("we need a reviewable plan first".to_string()),
+            }
+        );
+        // `off` hands back to planner.default; a trailing note is honoured.
+        assert_eq!(
+            parse("/collab off"),
+            SlashCommand::CollabMode { enable: false, note: None }
+        );
+        assert_eq!(
+            parse("/collab off plan approved, build it"),
+            SlashCommand::CollabMode {
+                enable: false,
+                note: Some("plan approved, build it".to_string()),
+            }
+        );
+        // "off" must be a whole token: a note that merely starts with "off"
+        // stays a note (and stays in collaborative mode).
+        assert_eq!(
+            parse("/collab office hours only"),
+            SlashCommand::CollabMode {
+                enable: true,
+                note: Some("office hours only".to_string()),
+            }
+        );
+        assert_eq!(
+            parse("/collab offplan"),
+            SlashCommand::CollabMode {
+                enable: true,
+                note: Some("offplan".to_string()),
+            }
+        );
+    }
+
 
     #[test]
     fn empty_input_is_unknown() {

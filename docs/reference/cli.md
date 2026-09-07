@@ -70,6 +70,21 @@ autonoetic run -c
 
 Uses `planner.collaborative` instead of `planner.default`. This agent has the `PlanFrameAccess` capability, which enables the full collaboration lifecycle: PlanFrame proposals, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff. The TUI will show workbench status and `/wb` commands when a workbench is active.
 
+**Switching an existing session** — you do not have to restart to get plans. From the room TUI:
+
+```text
+/collab [note]      rebind this session to planner.collaborative (session.handoff)
+/collab off [note]  hand back to planner.default
+```
+
+The note becomes the handoff reason and rides the successor's context envelope
+(topic, known facts, last exchange — the full transcript stays reachable via
+`digest_query`). Once seated, the collaborative planner proposes PlanFrames
+from your messages; they arrive as reviewable gates (`/plan`, `p` to review,
+`y`/`n` to decide), and the header shows a 🤝 chip naming the bound planner.
+The handoff refuses while a gate is pending — resolve any open decision first.
+`/agent planner.collaborative` is the same primitive without the sugar.
+
 You can also select any agent by ID as a positional argument:
 
 ```bash
