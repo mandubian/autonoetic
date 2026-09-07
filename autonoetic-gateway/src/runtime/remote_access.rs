@@ -633,29 +633,44 @@ fn observed_matches_declared(observed: &str, declared_patterns: &[String]) -> bo
 
 fn is_package_manager_command_pattern(pattern: &str) -> bool {
     let p = normalize_declared_pattern(pattern);
-    [
-        "pip install",
-        "pip3 install",
-        "npm install",
-        "yarn install",
-        "yarn add",
-        "pnpm install",
-        "bun install",
-        "go get",
-        "go mod download",
-        "cargo install",
-        "gem install",
-        "composer install",
-        "composer require",
-        "apt-get install",
-        "apt-get update",
-        "apk add",
-        "yum install",
-        "dnf install",
-        "pacman -s",
-    ]
-    .iter()
-    .any(|prefix| p.starts_with(prefix))
+    PACKAGE_MANAGER_COMMAND_PREFIXES
+        .iter()
+        .any(|prefix| p.starts_with(prefix))
+}
+
+/// The canonical package-manager command prefix list. Kept next to
+/// [`is_package_manager_command_pattern`] so the gating classifier and the
+/// P-1.9 routing hint in `PolicyEngine::explain_shell_denial` cannot drift.
+const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
+    "pip install",
+    "pip3 install",
+    "npm install",
+    "yarn install",
+    "yarn add",
+    "pnpm install",
+    "bun install",
+    "go get",
+    "go mod download",
+    "cargo install",
+    "gem install",
+    "composer install",
+    "composer require",
+    "apt-get install",
+    "apt-get update",
+    "apk add",
+    "yum install",
+    "dnf install",
+    "pacman -s",
+];
+
+/// Whether a denied shell command looks like a dependency-install attempt
+/// (`npm install …`, `pip install …`, possibly wrapped in `bash -c '…'`).
+/// Advisory only — used to make the P-1.9 denial name the right routing
+/// (`packager.default`) instead of a generic "widen your patterns" hint.
+pub(crate) fn command_looks_like_dependency_install(command: &str) -> bool {
+    command
+        .split(|c| c == '|' || c == '&' || c == ';')
+        .any(|segment| is_package_manager_command_pattern(segment))
 }
 
 /// Every declared import pattern, across languages.

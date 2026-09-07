@@ -413,9 +413,20 @@ impl NativeToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("Unknown native tool '{}'", name))?;
 
         if !tool.is_available(manifest) {
-            return Ok(ToolError::permission(
-                format!("Native tool '{}' is not available or permitted", name),
-            ).to_error_response());
+            // The tool EXISTS in the gateway registry — the agent calling it
+            // just does not satisfy its capability requirement, which is also
+            // why it never appeared in this agent's advertised tool list. Say
+            // so explicitly: a bare "not available or permitted" reads like a
+            // typo/transport problem and invites retries, when the correct
+            // move is routing the work to an agent that holds the capability.
+            return Ok(ToolError::permission(format!(
+                "Native tool '{}' exists in the gateway registry but is not available to agent '{}': \
+                 this agent's manifest does not meet the tool's capability requirement, so the tool \
+                 is not in this agent's tool list and the call is denied. \
+                 Do not retry here — delegate the work via agent_spawn to an agent that holds the required capability.",
+                name, manifest.agent.id
+            ))
+            .to_error_response());
         }
 
         tool.execute(
@@ -1687,6 +1698,103 @@ mod tests {
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
             egress: None,
         }
+    }
+
+    #[test]
+    fn skill_normalize_visible_to_skills_writer_under_core_only_child_filter() {
+        let registry = default_registry();
+        // researcher/packager-shaped manifest: skills/ WriteAccess but none of
+        // the capabilities that widen the child tier filter past Core.
+        let manifest = manifest_with_capabilities(
+            "researcher.default",
+            vec![Capability::WriteAccess {
+                scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+            }],
+        );
+        let filter = ToolTierFilter::core_only();
+        let names: Vec<String> = registry
+            .available_definitions_filtered(&manifest, Some(&filter))
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"skill_normalize".to_string()),
+            "skills/ writer must see skill_normalize under a Core-only child filter; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn skill_normalize_hidden_without_skills_write_access_or_when_excluded() {
+        let registry = default_registry();
+        let no_skills_write = manifest_with_capabilities(
+            "executor.default",
+            vec![Capability::WriteAccess {
+                scopes: vec!["self.*".to_string()],
+            }],
+        );
+        let filter = ToolTierFilter::core_only();
+        let names: Vec<String> = registry
+            .available_definitions_filtered(&no_skills_write, Some(&filter))
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(
+            !names.contains(&"skill_normalize".to_string()),
+            "capability gate must keep skill_normalize hidden without skills/ write"
+        );
+
+        // planner-shaped manifest: holds the capability but excludes the tool.
+        let mut excluded = manifest_with_capabilities(
+            "planner.default",
+            vec![Capability::WriteAccess {
+                scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+            }],
+        );
+        excluded.excluded_tools = vec!["skill_normalize".to_string()];
+        let names: Vec<String> = registry
+            .available_definitions_filtered(&excluded, Some(&filter))
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(
+            !names.contains(&"skill_normalize".to_string()),
+            "manifest excluded_tools must keep skill_normalize hidden"
+        );
+    }
+
+    #[test]
+    fn unavailable_tool_error_explains_capability_gate_and_routing() {
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "executor.default",
+            vec![Capability::WriteAccess {
+                scopes: vec!["self.*".to_string()],
+            }],
+        );
+        let policy_manifest = manifest.clone();
+        let result = registry
+            .execute(
+                "skill_normalize",
+                &manifest,
+                &crate::policy::PolicyEngine::new(policy_manifest),
+                std::path::Path::new("/tmp"),
+                None,
+                r#"{"intent":"x","content":"y","service":"z"}"#,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("execute should return a JSON error response, not panic");
+        assert!(
+            result.contains("exists in the gateway registry"),
+            "error must distinguish capability-hidden tools from unknown ones: {result}"
+        );
+        assert!(
+            result.contains("agent_spawn"),
+            "error must point at delegation as the fix: {result}"
+        );
     }
 
     #[test]

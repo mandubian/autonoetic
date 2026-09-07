@@ -1234,7 +1234,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
         let decision = policy.can_exec_shell_detailed(&effective_command);
         if !decision.is_allowed() {
-            let reason = decision.explain_shell_denial("Sandbox execution");
+            let reason = decision.explain_shell_denial("Sandbox execution", &effective_command);
             return Err(tagged::Tagged::permission_with_rules(
                 anyhow::anyhow!(reason),
                 decision

@@ -196,7 +196,11 @@ mod tests {
         assert_eq!(r.tier_for_tool("promotion_query"), ToolTier::Workflow);
         assert_eq!(r.tier_for_tool("promotion_record"), ToolTier::Specialized);
         assert_eq!(r.tier_for_tool("credential_setup"), ToolTier::Workflow);
-        assert_eq!(r.tier_for_tool("skill_normalize"), ToolTier::Workflow);
+        // skill_normalize is Core: its boundary is the skills/ WriteAccess
+        // capability gate (is_available + P-1.4), not the tier filter. Workflow
+        // hid it from Core-only child sessions of agents that legitimately hold
+        // that capability (researcher, packager).
+        assert_eq!(r.tier_for_tool("skill_normalize"), ToolTier::Core);
         assert_eq!(r.tier_for_tool("scheduler_cron_create"), ToolTier::Workflow);
         assert_eq!(r.tier_for_tool("web_search"), ToolTier::Specialized);
         assert_eq!(

@@ -42,6 +42,16 @@ rules:
   # Platform documentation — every agent can learn about the system it runs on.
   - prefix: wiki_
     tier: core
+  # Normalize third-party API docs into credential_setup-compatible skills.
+  # Core, not Workflow: the tool's real boundary is its capability gate
+  # (`is_available` requires WriteAccess covering `skills/`, plus the P-1.4
+  # write check at execution — same shape as sandbox_exec being Core while
+  # CodeExecution gates it). As a Workflow tool it was invisible to child
+  # sessions of the agents that legitimately hold that WriteAccess
+  # (researcher/packager are Core-only children), so skill extraction degraded
+  # into hand-rolled markdown parsing by agents that never saw the tool.
+  - prefix: skill_normalize
+    tier: core
 
   # Workflow tier: orchestration and approval flow.
   - prefix: agent_spawn
@@ -80,9 +90,6 @@ rules:
     tier: workflow
   # Credential onboarding is planner-first orchestration (vault-side, not web I/O).
   - prefix: credential_
-    tier: workflow
-  # Normalize third-party API docs into credential_setup-compatible skills.
-  - prefix: skill_normalize
     tier: workflow
   # Cron scheduling for durable agents the planner installs.
   - prefix: scheduler_

@@ -83,8 +83,14 @@ impl PolicyDecision {
     /// Explains a denial from [`PolicyEngine::can_exec_shell_detailed`]. Separates static security
     /// blocks from capability pattern mismatch (R‑1.9) so operators do not confuse manifest limits
     /// with missing remote-access approval (which is evaluated later in `sandbox_exec`).
-    pub fn explain_shell_denial(&self, context_label: &'static str) -> String {
-        match self.security_analysis.as_ref() {
+    ///
+    /// `command` is the denied command line: when it is dependency-install
+    /// shaped (`npm install …`, `pip install …`, …), the fix hint names the
+    /// routing (`packager.default`) instead of a generic "widen your
+    /// patterns" — the planner-facing failure that otherwise causes retry
+    /// loops on an agent that can never run the command.
+    pub fn explain_shell_denial(&self, context_label: &'static str, command: &str) -> String {
+        let base = match self.security_analysis.as_ref() {
             Some(a) if !a.threats.is_empty() => format!(
                 "{} blocked by security policy (static analysis): {}",
                 context_label,
@@ -96,6 +102,18 @@ This is not a missing operator approval step—remote/network gating runs only a
 Fix: widen the agent's CodeExecution patterns or `commands` list, wrap with an allowed prefix when appropriate (e.g. `bash -c 'curl …'`), or delegate HTTP to a gateway fetch tool / another agent.",
                 context_label
             ),
+        };
+        if crate::runtime::remote_access::command_looks_like_dependency_install(command) {
+            format!(
+                "{base} \
+Note: this looks like a dependency-install command. Dependency installation is \
+`packager.default`'s role — it holds `NetworkAccess` + `package_manager_commands` \
+and bakes the result into artifact layers. Delegate there (via the planner), or, \
+if THIS agent must install its own dependencies, declare them: add the exact \
+command to `remote_access.package_manager_commands` and widen `CodeExecution` patterns."
+            )
+        } else {
+            base
         }
     }
 }
@@ -1429,9 +1447,41 @@ mod tests {
         let policy = PolicyEngine::new(manifest);
         let decision = policy.can_exec_shell_detailed("curl -s https://example.com");
         assert!(!decision.is_allowed());
-        let msg = decision.explain_shell_denial("Sandbox execution");
+        let msg = decision.explain_shell_denial("Sandbox execution", "curl -s https://example.com");
         assert!(msg.contains("P-1.9"), "{msg}");
         assert!(msg.contains("operator approval"), "{msg}");
+        // Non-install denial must NOT carry the packager routing hint.
+        assert!(!msg.contains("packager.default"), "{msg}");
+    }
+
+    #[test]
+    fn explain_shell_denial_names_packager_for_dependency_install() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        let decision = policy.can_exec_shell_detailed("npm install axios");
+        assert!(!decision.is_allowed());
+        let msg = decision.explain_shell_denial("Sandbox execution", "npm install axios");
+        assert!(msg.contains("P-1.9"), "{msg}");
+        assert!(msg.contains("packager.default"), "{msg}");
+        assert!(msg.contains("package_manager_commands"), "{msg}");
+    }
+
+    #[test]
+    fn explain_shell_denial_names_packager_for_wrapped_dependency_install() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        // `bash -c 'npm install …'` — the install hides behind a shell wrapper.
+        let command = "bash -c 'cd /tmp/app && npm install && npm run build'";
+        let decision = policy.can_exec_shell_detailed(command);
+        assert!(!decision.is_allowed());
+        let msg = decision.explain_shell_denial("Sandbox execution", command);
+        assert!(msg.contains("packager.default"), "{msg}");
     }
 
     #[test]
