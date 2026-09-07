@@ -2610,8 +2610,8 @@ fn handle_credential_list(
         println!("No credentials found.");
     } else {
         println!(
-            "{:<36} {:<24} {:<24} {:<16} {:<20} UPDATED",
-            "CREDENTIAL ID", "SERVICE", "SECRET NAME", "INJECT AS", "EXPIRES"
+            "{:<36} {:<24} {:<24} {:<16} {:<20} {}",
+            "CREDENTIAL ID", "SERVICE", "SECRET NAME", "INJECT AS", "EXPIRES", "UPDATED"
         );
         for cred in &credentials {
             let inject = cred.inject_as.as_deref().unwrap_or("-");

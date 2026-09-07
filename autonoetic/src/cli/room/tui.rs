@@ -2499,10 +2499,11 @@ fn fetch_grant_rows(
 }
 
 /// Pending anomaly flags for the info pane (`?`): `(flag_id, severity,
-/// subject_ref)`, oldest first (gateway returns creation order). Errors are
-/// swallowed — the caller keeps the last-known snapshot rather than flashing
-/// an empty section while the gateway is briefly unreachable.
-fn fetch_info_anomalies(client: &RoomClient) -> Vec<(String, String, String)> {
+/// subject_ref)`, oldest first (gateway returns creation order). `None` on
+/// RPC error — a sentinel the caller must honour by keeping the last-known
+/// snapshot, so a transient gateway failure never overwrites a populated
+/// pane with an empty section.
+fn fetch_info_anomalies(client: &RoomClient) -> Option<Vec<(String, String, String)>> {
     let value = match rpc(
         client,
         "anomaly.list_pending",
@@ -2511,30 +2512,32 @@ fn fetch_info_anomalies(client: &RoomClient) -> Vec<(String, String, String)> {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "anomaly.list_pending failed");
-            return Vec::new();
+            return None;
         }
     };
-    value
-        .get("flags")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|f| {
-                    Some((
-                        f.get("flag_id")?.as_str()?.to_string(),
-                        f.get("severity")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        f.get("subject_ref")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    Some(
+        value
+            .get("flags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| {
+                        Some((
+                            f.get("flag_id")?.as_str()?.to_string(),
+                            f.get("severity")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            f.get("subject_ref")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// Open the session info pane (`?`) with an eager governance snapshot so it
@@ -2556,7 +2559,9 @@ fn open_info_panel(
     let (rows, taint, _) = fetch_grant_rows(client, root_session_id);
     *info_grants_rows = rows;
     *info_grants_taint = taint;
-    *info_anomaly_rows = fetch_info_anomalies(client);
+    // On a failed first read there is no last-known snapshot to keep; an
+    // empty pane section is honest until the idle poll succeeds.
+    *info_anomaly_rows = fetch_info_anomalies(client).unwrap_or_default();
     *last_info_poll = Instant::now();
     *status = Some("info: j/k scroll · Esc close".to_string());
 }
@@ -8603,27 +8608,31 @@ pub fn run(
         // Info pane (`?`) idle refresh — same poll-on-open contract: a closed
         // pane never spams `grants.list` / `anomaly.list_pending`. Plain
         // snapshot replace (no selection to preserve); any change redraws.
+        // A failed anomaly poll returns `None` and keeps the last-known
+        // snapshot — a transient gateway error never blanks the section.
         if info_panel_open
             && last_info_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
         {
             last_info_poll = Instant::now();
             let (rows, taint, _) = fetch_grant_rows(client, &root_session_id);
-            let anomalies = fetch_info_anomalies(client);
             let grants_changed = rows.len() != info_grants_rows.len()
                 || rows
                     .iter()
                     .zip(info_grants_rows.iter())
                     .any(|(a, b)| a.id != b.id || a.kind != b.kind)
                 || taint != info_grants_taint;
-            let anomalies_changed = anomalies != info_anomaly_rows;
             if grants_changed {
                 info_grants_rows = rows;
                 info_grants_taint = taint;
             }
-            if anomalies_changed {
-                info_anomaly_rows = anomalies;
+            let mut changed = grants_changed;
+            if let Some(anomalies) = fetch_info_anomalies(client) {
+                if anomalies != info_anomaly_rows {
+                    info_anomaly_rows = anomalies;
+                    changed = true;
+                }
             }
-            if grants_changed || anomalies_changed {
+            if changed {
                 needs_redraw = true;
             }
         }
