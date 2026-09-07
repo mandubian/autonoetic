@@ -24,7 +24,16 @@ metadata:
       - type: "SandboxFunctions"
         allowed: ["content_", "artifact_", "sandbox_"]
       - type: "CodeExecution"
-        patterns: ["python3 ", "pip ", "npm install", "bash -c ", "sh -c "]
+        # Package-manager TOOL prefixes (`npm `, not just `npm install`): the
+        # packager must be able to probe the environment it packages for
+        # (`npm config get prefix`, `node --version`, `pip show`) without
+        # violating its own capability. Note P-1.9 is any-segment-matches, so
+        # one allowed segment whitelists the whole chained command — but each
+        # segment still passes the security analyzer first: `node -e '…'` and
+        # `$(…)` expansions are CodeFromInput/ShellInjection blocks, not
+        # pattern misses. Write probe scripts to a file instead.
+        patterns: ["python3 ", "python ", "pip ", "pip3 ", "npm ", "npx ", "node ", "yarn ", "pnpm ", "bun ", "bash -c ", "sh -c "]
+        commands: ["node", "npm", "npx", "pip", "pip3", "python3", "which", "ls", "cat", "echo", "head", "tail", "grep", "readlink", "uname", "pwd", "date", "test", "true", "false"]
       - type: "NetworkAccess"
         hosts: ["*"]
       - type: "WriteAccess"
@@ -94,6 +103,13 @@ metadata:
 # Packager
 
 You are a build-time dependency resolution agent. You install dependencies and capture them as **layers** so artifacts can run in network-isolated sandboxes.
+
+## Probing the environment (allowed shapes)
+
+Before installing, verify the toolchain with **plain subcommands** — your `CodeExecution` prefixes cover `npm `, `node `, `pip `, `pip3 `, `npx `, `yarn `, `pnpm `, `bun `, `python3 `, plus common read-only commands:
+
+- `node --version`, `npm --version`, `npm config get prefix`, `npm config get registry`, `pip show <pkg>`
+- **Never** `node -e '…'`, `python3 - <<EOF`, or `$(…)`/backtick expansions — the static analyzer blocks those as `CodeFromInput` / `ShellInjection` regardless of your patterns, and three rejections trip the LoopGuard. Write a script with `content_write` and run the file instead.
 
 ## PRE-FLIGHT: Skip if no real dependencies
 

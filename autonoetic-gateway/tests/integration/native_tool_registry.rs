@@ -1867,6 +1867,80 @@ POST /v1/register
     assert!(written.contains("/v1/register"));
 }
 
+/// skill_normalize surfaces the doc's dependency-install steps as routing
+/// data (`dependency_installs` + `dependency_routing`) so the caller hands
+/// them to packager.default mechanically instead of by denial (observed live:
+/// an agent-browser normalization never reached packager).
+#[test]
+fn test_skill_normalize_surfaces_dependency_installs() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["skills/*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let md = r#"## agent-browser skill
+
+## Base URL
+https://agent-browser.dev
+
+## Endpoints
+GET /v1/status
+
+Install:
+
+```bash
+npm install -g agent-browser
+agent-browser install
+```
+"#;
+
+    let args = serde_json::json!({
+        "intent": "normalize skill doc that declares an npm dependency",
+        "content": md,
+        "service": "agentbrowsersvc",
+        "source_url": "https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should succeed");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed["ok"], serde_json::json!(true));
+    let installs = parsed["dependency_installs"]
+        .as_array()
+        .expect("dependency_installs array");
+    assert_eq!(
+        parsed["dependency_installs"],
+        serde_json::json!(["npm install -g agent-browser"]),
+        "the npm line must be surfaced; `agent-browser install` is not a package-manager command"
+    );
+    assert!(
+        parsed["dependency_routing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("packager.default"),
+        "routing note must name packager.default"
+    );
+}
+
 #[test]
 fn test_skill_normalize_auto_registers_discovery_record() {
     let manifest = test_manifest_with_id(

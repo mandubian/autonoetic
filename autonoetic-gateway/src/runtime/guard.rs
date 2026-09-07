@@ -122,6 +122,21 @@ pub enum LoopGuardTripReason {
         rounds: u32,
         floor: u32,
     },
+    /// Trip condition #12 — one tool has accumulated `2 ×
+    /// max_irrecoverable_repeats` gateway-side rejections across **distinct**
+    /// rejection fingerprints (security block, capability miss, approval
+    /// gate, …). The same-fingerprint trip (#718) cannot see this shape: each
+    /// distinct denial stays at count 1 forever, so an agent that flails
+    /// across different gates (`node -e` → CodeFromInput, `$(…)` →
+    /// ShellInjection, `npm config` → P-1.9) never trips anything. Observed
+    /// live: a packager session died on exactly that pattern and the trip
+    /// message misreported it as "the same rejection 3 times" because the
+    /// error fingerprint ignored the message text (fixed alongside this).
+    IrrecoverableGateFlailing {
+        tool: String,
+        occurrences: u32,
+        distinct_rejections: usize,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -147,6 +162,9 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RedundantAnnotationLoop { .. } => {
                 "redundant_annotation_loop"
             }
+            LoopGuardTripReason::IrrecoverableGateFlailing { .. } => {
+                "irrecoverable_gate_flailing"
+            }
         }
     }
 
@@ -164,6 +182,7 @@ impl LoopGuardTripReason {
     /// - `WorkflowTerminal`       → P-7.5 (deterministic tool failure)
     /// - `RecurringUnrecoverableError` → P-7.7 (no progress across different tools)
     /// - `RepeatedIrrecoverableRejection` → P-7.7 (re-asking one answered gate)
+    /// - `IrrecoverableGateFlailing` → P-7.7 (one tool, many distinct gates)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
@@ -179,6 +198,9 @@ impl LoopGuardTripReason {
             // Re-asking one gate that already gave a deterministic answer is
             // the single-tool sibling of NoMeaningfulProgress.
             LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => "P-7.7",
+            // Flailing across *distinct* irrecoverable gates is the same
+            // "no progress via retries" family — different wall, same futility.
+            LoopGuardTripReason::IrrecoverableGateFlailing { .. } => "P-7.7",
             // RFC #776 Part B.4: delegation loop — same child, same contract.
             LoopGuardTripReason::RepeatedSpawnIdentity { .. } => "P-7.19",
             // #1092: annotations-only rounds are successes with no semantic
@@ -731,12 +753,15 @@ impl LoopGuard {
     /// `(tool, normalized-error)` rejection recurs `max_irrecoverable_repeats`
     /// times the guard trips [`LoopGuardTripReason::RepeatedIrrecoverableRejection`].
     ///
-    /// Distinct rejections never accumulate together: fixing one gate and
-    /// hitting the next is progress, not a loop. The counter is keyed on the
-    /// normalized error fingerprint (volatile ids/timestamps/numbers stripped)
-    /// so cosmetic churn in the message doesn't defeat the match, and it rides
-    /// in the checkpointed guard state so a post-approval resume that re-hits
-    /// the identical rejection keeps counting across the suspend.
+    /// Distinct rejections never accumulate into that trip: fixing one gate
+    /// and hitting the next is progress, not a loop. But an agent that
+    /// flails across *different* irrecoverable gates stays invisible to the
+    /// same-fingerprint counter (each distinct denial counts 1), so the guard
+    /// additionally trips [`LoopGuardTripReason::IrrecoverableGateFlailing`]
+    /// once one tool has accumulated `2 × max_irrecoverable_repeats`
+    /// rejections over **two or more distinct** fingerprints. The counters
+    /// ride in the checkpointed guard state (`irrecoverable_repeat_counts`)
+    /// so a post-approval resume keeps counting across the suspend.
     ///
     /// No-ops when the detector is disabled (`max_irrecoverable_repeats == 0`),
     /// when the guard has already tripped, while `repair_mode` is active
@@ -757,6 +782,29 @@ impl LoopGuard {
                 tool: tool_name.to_string(),
                 error_hash: hash,
                 occurrences: *count,
+            });
+            return;
+        }
+        // Distinct-gate flailing: derive the per-tool total and distinct
+        // fingerprint count from the already-checkpointed map (the key is
+        // `{tool}\0{hash}`), so no extra checkpoint state is needed.
+        let mut total = 0u32;
+        let mut distinct = 0usize;
+        for (key, occurrences) in self.irrecoverable_repeat_counts.iter() {
+            let Some((tool, _hash)) = key.split_once('\u{0}') else {
+                continue;
+            };
+            if tool == tool_name {
+                total += *occurrences;
+                distinct += 1;
+            }
+        }
+        let flailing_floor = self.max_irrecoverable_repeats.saturating_mul(2);
+        if distinct >= 2 && total >= flailing_floor {
+            self.trip_reason = Some(LoopGuardTripReason::IrrecoverableGateFlailing {
+                tool: tool_name.to_string(),
+                occurrences: total,
+                distinct_rejections: distinct,
             });
         }
     }
@@ -1039,6 +1087,21 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
              Otherwise change what you are asking for or escalate (issue #718).",
             tool,
             occurrences
+        ),
+        LoopGuardTripReason::IrrecoverableGateFlailing {
+            tool,
+            occurrences,
+            distinct_rejections,
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: '{}' was rejected by gateway-side gates {} times \
+             across {} distinct rejections. Each individual denial is deterministic \
+             and not fixable by retrying; hitting a different one every time means \
+             the task as framed cannot proceed in this sandbox. Stop probing — name \
+             the specific blockers in your reply and escalate to the caller, or \
+             re-frame the task so no gateway gate is crossed (issue #718).",
+            tool,
+            occurrences,
+            distinct_rejections
         ),
         LoopGuardTripReason::RedundantAnnotationLoop {
             tool,
@@ -1676,6 +1739,69 @@ mod tests {
         assert!(
             guard.last_trip_reason().is_none(),
             "three DIFFERENT gates is forward progress, not a loop"
+        );
+    }
+
+    /// Regression (observed live, #718 follow-up): three DIFFERENT sandbox_exec
+    /// denials that share only `error_type: "permission"` must NOT collapse to
+    /// one fingerprint. The old extractor ignored `message` whenever
+    /// `error_type` was present, so CodeFromInput + ShellInjection + P-1.9
+    /// counted as "the same rejection ×3" and tripped on the packager's first
+    /// three probes.
+    #[test]
+    fn irrecoverable_fingerprint_includes_message_not_just_error_type() {
+        let mut guard = LoopGuard::new(100);
+        let denials = [
+            r#"{"ok":false,"error_type":"permission","message":"Sandbox execution blocked by security policy (static analysis): Command contains security threats: [CodeFromInput]"}"#,
+            r#"{"ok":false,"error_type":"permission","message":"Sandbox execution blocked by security policy (static analysis): Command contains security threats: [ShellInjection]"}"#,
+            r#"{"ok":false,"error_type":"permission","message":"Sandbox execution not permitted: this command does not match any CodeExecution pattern or allowed command (rule P-1.9)."}"#,
+        ];
+        for denial in denials {
+            guard.register_irrecoverable("sandbox_exec", denial);
+            assert!(
+                guard.last_trip_reason().is_none(),
+                "distinct denials must not count as 'the same rejection'"
+            );
+        }
+    }
+
+    /// The flailing bound: one tool amassing many DISTINCT irrecoverable
+    /// denials (each individually free under #718) trips once the total
+    /// reaches 2 × max_irrecoverable_repeats over ≥2 fingerprints.
+    #[test]
+    fn irrecoverable_gate_flailing_trips_across_distinct_gates() {
+        let mut guard = LoopGuard::new(100);
+        // Distinct in WORDS, not numbers — NUMBER_RE strips digits from the
+        // fingerprint, so "gate 1"/"gate 2" would collapse to one rejection.
+        let gates = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        for (i, gate) in gates.iter().enumerate() {
+            guard.register_irrecoverable(
+                "sandbox_exec",
+                &format!(
+                    r#"{{"ok":false,"error_type":"permission","message":"the {gate} gate denied the request"}}"#
+                ),
+            );
+            if i < gates.len() - 1 {
+                assert!(
+                    guard.last_trip_reason().is_none(),
+                    "{gate} denial is still free"
+                );
+            }
+        }
+        let err = guard.check_loop().expect_err("6th distinct denial must trip flailing");
+        assert!(err.to_string().contains("distinct rejections"), "{err}");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::IrrecoverableGateFlailing {
+                occurrences: 6,
+                distinct_rejections: 6,
+                ..
+            })
+        ));
+        assert_eq!(guard.last_trip_reason().unwrap().rule_id(), "P-7.7");
+        assert_eq!(
+            guard.last_trip_reason().unwrap().code(),
+            "irrecoverable_gate_flailing"
         );
     }
 

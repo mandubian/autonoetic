@@ -96,20 +96,19 @@ pub fn extract_error_text(result_json: &str) -> Option<String> {
         return None;
     }
 
+    // Include every salient field that is present — `error` (machine code),
+    // `error_type`, `message`, and `reason`. Historically `message`/`reason`
+    // were only consulted when the typed fields were absent, which collapsed
+    // every `permission` denial of a tool to the literal string "permission":
+    // three DIFFERENT gates (security block, shell-injection block, P-1.9
+    // capability miss) counted as "the same irrecoverable rejection" (#718,
+    // observed live on a packager session).
     let mut parts: Vec<String> = Vec::new();
-    if let Some(s) = obj.get("error").and_then(|v| v.as_str()) {
-        parts.push(s.to_string());
-    }
-    if let Some(s) = obj.get("error_type").and_then(|v| v.as_str()) {
-        parts.push(s.to_string());
-    }
-    if parts.is_empty() {
-        if let Some(s) = obj
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .or_else(|| obj.get("message").and_then(|v| v.as_str()))
-        {
-            parts.push(s.to_string());
+    for key in ["error", "error_type", "message", "reason"] {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                parts.push(s.to_string());
+            }
         }
     }
     if let Some(arr) = obj.get("failure_summary").and_then(|v| v.as_array()) {

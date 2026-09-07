@@ -641,7 +641,7 @@ fn is_package_manager_command_pattern(pattern: &str) -> bool {
 /// The canonical package-manager command prefix list. Kept next to
 /// [`is_package_manager_command_pattern`] so the gating classifier and the
 /// P-1.9 routing hint in `PolicyDecision::explain_shell_denial` cannot drift.
-const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
+pub(crate) const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
     "pip install",
     "pip3 install",
     "npm install",
@@ -669,6 +669,28 @@ const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
 /// (`packager.default`) instead of a generic "widen your patterns" hint.
 pub(crate) fn command_looks_like_dependency_install(command: &str) -> bool {
     command_looks_like_dependency_install_inner(command, 0)
+}
+
+/// Dependency-install command lines found in a document (skill markdown,
+/// README, …), normalized and de-duplicated, capped at 8. Consumers turn this
+/// into routing data: `skill_normalize` surfaces it so the caller can hand
+/// the installs to `packager.default` instead of discovering them by denial.
+pub(crate) fn scan_dependency_install_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        let t = t.strip_prefix("- ").map(str::trim).unwrap_or(t);
+        if is_package_manager_command_pattern(t) {
+            let candidate = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn command_looks_like_dependency_install_inner(command: &str, depth: u8) -> bool {
@@ -1592,6 +1614,21 @@ mod tests {
         assert!(!command_looks_like_dependency_install(
             "echo npm install is not an install"
         ));
+    }
+
+    #[test]
+    fn dependency_install_scanner_extracts_doc_lines() {
+        let md = "# Install\n\n```bash\nnpm install -g agent-browser\nnpm install -g agent-browser\n```\n\n- pip install requests\nRun `cargo install agent-browser-cli` to finish.\n";
+        let found = scan_dependency_install_lines(md);
+        assert_eq!(
+            found,
+            vec![
+                "npm install -g agent-browser".to_string(),
+                "pip install requests".to_string(),
+            ],
+            "line-start matches only (fenced blocks, list items) — prose-embedded commands are ambiguous and skipped"
+        );
+        assert!(scan_dependency_install_lines("no installs here").is_empty());
     }
 
     /// A second detector implementation — proves the #1039 seam: orchestration
