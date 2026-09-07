@@ -1476,12 +1476,17 @@ mod tests {
             commands: vec![],
         }]);
         let policy = PolicyEngine::new(manifest);
-        // `bash -c 'npm install …'` — the install hides behind a shell wrapper.
-        let command = "bash -c 'cd /tmp/app && npm install && npm run build'";
-        let decision = policy.can_exec_shell_detailed(command);
-        assert!(!decision.is_allowed());
-        let msg = decision.explain_shell_denial("Sandbox execution", command);
-        assert!(msg.contains("packager.default"), "{msg}");
+        // `bash -c 'npm install …'` — the install hides behind a shell wrapper,
+        // with no `&&`/`;` separator to split on.
+        for command in [
+            "bash -c 'cd /tmp/app && npm install && npm run build'",
+            "bash -c 'npm install express'",
+        ] {
+            let decision = policy.can_exec_shell_detailed(command);
+            assert!(!decision.is_allowed());
+            let msg = decision.explain_shell_denial("Sandbox execution", command);
+            assert!(msg.contains("packager.default"), "{command} → {msg}");
+        }
     }
 
     #[test]

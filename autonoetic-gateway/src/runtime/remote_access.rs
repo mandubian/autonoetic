@@ -640,7 +640,7 @@ fn is_package_manager_command_pattern(pattern: &str) -> bool {
 
 /// The canonical package-manager command prefix list. Kept next to
 /// [`is_package_manager_command_pattern`] so the gating classifier and the
-/// P-1.9 routing hint in `PolicyEngine::explain_shell_denial` cannot drift.
+/// P-1.9 routing hint in `PolicyDecision::explain_shell_denial` cannot drift.
 const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
     "pip install",
     "pip3 install",
@@ -668,9 +668,52 @@ const PACKAGE_MANAGER_COMMAND_PREFIXES: &[&str] = &[
 /// Advisory only — used to make the P-1.9 denial name the right routing
 /// (`packager.default`) instead of a generic "widen your patterns" hint.
 pub(crate) fn command_looks_like_dependency_install(command: &str) -> bool {
+    command_looks_like_dependency_install_inner(command, 0)
+}
+
+fn command_looks_like_dependency_install_inner(command: &str, depth: u8) -> bool {
+    if depth > 4 {
+        return false;
+    }
     command
         .split(|c| c == '|' || c == '&' || c == ';')
-        .any(|segment| is_package_manager_command_pattern(segment))
+        .any(|segment| {
+            if is_package_manager_command_pattern(segment) {
+                return true;
+            }
+            // `bash -c 'npm install …'` — the install hides inside a shell
+            // wrapper body, which may itself chain (`&&`). Recurse into the
+            // quoted body so the hint survives the most common wrapper form.
+            shell_wrapper_body(segment)
+                .map(|body| command_looks_like_dependency_install_inner(&body, depth + 1))
+                .unwrap_or(false)
+        })
+}
+
+/// Extracts the single-quoted body of a `bash -c '…'` / `sh -c "…"` segment
+/// (leading env-assignment tokens are skipped). Best-effort: returns None
+/// when the segment is not a shell wrapper or the body quoting is ambiguous.
+fn shell_wrapper_body(segment: &str) -> Option<String> {
+    let mut tokens = segment.trim_start().split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token.contains('=') {
+            continue; // FOO=bar bash -c '…'
+        }
+        let basename = token.rsplit('/').next().unwrap_or(token);
+        if !matches!(basename, "bash" | "sh" | "zsh" | "dash" | "ash" | "ksh") {
+            return None;
+        }
+        if tokens.next()? != "-c" {
+            return None;
+        }
+        break;
+    }
+    // Everything from the first quote to the last matching quote is the body.
+    let after_flag = segment.split_once("-c")?.1;
+    let open = after_flag.find(['\'', '"'])?;
+    let quote = after_flag.as_bytes()[open] as char;
+    let close = after_flag[open + 1..].rfind(quote)? + open + 1;
+    Some(after_flag[open + 1..close].to_string())
 }
 
 /// Every declared import pattern, across languages.
@@ -1530,6 +1573,26 @@ impl RemoteAccessDetector for RemoteAccessAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_install_detector_covers_wrapper_forms() {
+        assert!(command_looks_like_dependency_install("npm install axios"));
+        assert!(command_looks_like_dependency_install(
+            "bash -c 'npm install express'"
+        ));
+        assert!(command_looks_like_dependency_install(
+            "bash -c 'cd /tmp/app && npm install && npm run build'"
+        ));
+        assert!(command_looks_like_dependency_install(
+            "FOO=bar bash -c \"cd /app; pip install -r requirements.txt\""
+        ));
+        assert!(!command_looks_like_dependency_install(
+            "bash -c 'npm run build'"
+        ));
+        assert!(!command_looks_like_dependency_install(
+            "echo npm install is not an install"
+        ));
+    }
 
     /// A second detector implementation — proves the #1039 seam: orchestration
     /// can call through [`RemoteAccessDetector`] without naming

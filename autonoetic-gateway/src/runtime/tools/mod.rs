@@ -414,16 +414,19 @@ impl NativeToolRegistry {
 
         if !tool.is_available(manifest) {
             // The tool EXISTS in the gateway registry — the agent calling it
-            // just does not satisfy its capability requirement, which is also
-            // why it never appeared in this agent's advertised tool list. Say
-            // so explicitly: a bare "not available or permitted" reads like a
-            // typo/transport problem and invites retries, when the correct
-            // move is routing the work to an agent that holds the capability.
+            // just does not satisfy its availability requirement (declared
+            // capabilities, or the manifest allowlist some tools check), which
+            // is also why it never appeared in this agent's advertised tool
+            // list. Say so explicitly: a bare "not available or permitted"
+            // reads like a typo/transport problem and invites retries, when
+            // the correct move is routing the work to an agent that satisfies
+            // the requirement.
             return Ok(ToolError::permission(format!(
                 "Native tool '{}' exists in the gateway registry but is not available to agent '{}': \
-                 this agent's manifest does not meet the tool's capability requirement, so the tool \
+                 this agent's manifest does not satisfy the tool's availability requirements \
+                 (declared capabilities / tool allowlist), so the tool \
                  is not in this agent's tool list and the call is denied. \
-                 Do not retry here — delegate the work via agent_spawn to an agent that holds the required capability.",
+                 Do not retry here — delegate the work via agent_spawn to an agent that satisfies them.",
                 name, manifest.agent.id
             ))
             .to_error_response());
