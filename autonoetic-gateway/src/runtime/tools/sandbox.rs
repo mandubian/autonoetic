@@ -616,6 +616,31 @@ pub fn apply_network_isolation_failure_to_result(
     Some(network_errors)
 }
 
+/// #1321: the `network` disclosure for the `sandbox_exec` result body.
+///
+/// `share_net` is the **effective** value handed to the sandbox. A sealed-proxy
+/// manifest widens the namespace after [`crate::runtime::network_grant::decide_share_net`]
+/// so the sandbox can reach the host-loopback proxy — when that happened
+/// (`effective` true, decision false) the decision's `no_grant`/`safe_inspection`
+/// reason would contradict the disclosed namespace, so the token becomes
+/// `granted_by_sealed_proxy` instead.
+fn network_result_disclosure(
+    decision: crate::runtime::network_grant::ShareNetDecision,
+    effective_share_net: bool,
+) -> serde_json::Value {
+    use crate::runtime::network_grant::ShareNetReason;
+    let reason = if effective_share_net && !decision.share_net {
+        ShareNetReason::GrantedBySealedProxy
+    } else {
+        decision.reason
+    };
+    crate::runtime::network_grant::network_disclosure_json(
+        effective_share_net,
+        reason,
+        decision.capability_ceiling_unused,
+    )
+}
+
 /// Connectivity-only fingerprint table for script-mode failure classification.
 ///
 /// Unlike [`detect_network_errors_in_output`] — which also flags broad
@@ -968,7 +993,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Run any shell command in a secure sandbox. Execute python3 scripts, node.js, bash commands, install packages (pip install, npm install), run tests, compile code, use git, grep, awk, sed, curl (internal network), and more. The sandbox isolates your execution with a read-only host filesystem — only your agent directory is writable. Network access (outbound HTTP, sockets) triggers operator approval; retry with approval_ref after approval. Dangerous commands (sudo, rm -rf, dd, mkfs) are blocked by security policy. NOTE: large stdout/stderr is truncated to a character budget (~4000 chars) before reaching you; the JSON structure and exit_code are always preserved. Pipe verbose output to a file and use resolve to page through it if you need the full output.".to_string(),
+            description: "Run any shell command in a secure sandbox. Execute python3 scripts, node.js, bash commands, install packages (pip install, npm install), run tests, compile code, use git, grep, awk, sed, curl (internal network), and more. The sandbox isolates your execution with a read-only host filesystem — only your agent directory is writable. Network access (outbound HTTP, sockets) triggers operator approval; retry with approval_ref after approval. Dangerous commands (sudo, rm -rf, dd, mkfs) are blocked by security policy. The result carries a `network` object: `share_net` tells you whether THIS exec had host-network access and `reason` why not. A command that raised no network signal runs isolated — if `share_net` is false, connection/DNS failures in your output are your sandbox's isolation, not an outage; re-issue as a command that declares its network need. NOTE: large stdout/stderr is truncated to a character budget (~4000 chars) before reaching you; the JSON structure and exit_code are always preserved. Pipe verbose output to a file and use resolve to page through it if you need the full output.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2952,6 +2977,15 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             "mount_set": mount_set
         });
 
+        // #1321: disclose the effective network-namespace state. Without this a
+        // net-less exec is indistinguishable from a DNS/egress outage — a
+        // pre-flight probe (`getent hosts`, `npm config …`) observes its own
+        // isolation and reports it as broken infrastructure. The agent branches
+        // on `network.share_net`/`reason` instead of interpreting empty probe
+        // output. See `runtime::network_grant` and the packager SKILL contract.
+        body["network"] =
+            network_result_disclosure(network_decision, overrides.share_net);
+
         // § 3.6 — Network error detection for agents running without network access.
         // When the sandbox ran with network isolated (share_net=false) and the output
         // contains network error patterns, surface a clear warning instead of letting
@@ -3409,6 +3443,67 @@ mod network_error_detection_tests {
         let diag = super::classify_script_network_failure("", stderr, true, true).unwrap();
         assert!(diag.contains("P-3.10"), "{diag}");
         assert!(diag.contains("Mock all external services"), "{diag}");
+    }
+}
+
+#[cfg(test)]
+mod network_disclosure_tests {
+    use super::network_result_disclosure;
+    use crate::runtime::network_grant::{decide_share_net, ShareNetInputs};
+    use serde_json::json;
+
+    fn decision(approval_validated: bool) -> crate::runtime::network_grant::ShareNetDecision {
+        decide_share_net(ShareNetInputs {
+            capability_allows_network: true,
+            approval_validated,
+            safe_inspection_bypass: false,
+            network_sink_excluded: false,
+            network_declassified: false,
+            force_network_off: false,
+        })
+    }
+
+    /// The #1321 shape: a network-capable agent's ungranted probe exec must
+    /// carry the net-less state in the result so the agent cannot misread its
+    /// own isolation as a DNS/egress outage.
+    #[test]
+    fn ungranted_exec_discloses_net_less_no_grant() {
+        let d = decision(false);
+        assert!(!d.share_net);
+        let v = network_result_disclosure(d, false);
+        assert_eq!(
+            v,
+            json!({
+                "share_net": false,
+                "reason": "no_grant",
+                "capability_ceiling_unused": true,
+            })
+        );
+    }
+
+    #[test]
+    fn granted_exec_discloses_the_grant() {
+        let d = decision(true);
+        assert!(d.share_net);
+        let v = network_result_disclosure(d, true);
+        assert_eq!(
+            v,
+            json!({
+                "share_net": true,
+                "reason": "granted_by_approval",
+                "capability_ceiling_unused": false,
+            })
+        );
+    }
+
+    /// A sealed-network proxy widens the namespace after the decision; the
+    /// disclosed reason must not contradict the effective share_net.
+    #[test]
+    fn proxy_widened_exec_is_disclosed_as_sealed_proxy_not_no_grant() {
+        let d = decision(false);
+        let v = network_result_disclosure(d, true);
+        assert_eq!(v["share_net"], json!(true));
+        assert_eq!(v["reason"], json!("granted_by_sealed_proxy"));
     }
 }
 

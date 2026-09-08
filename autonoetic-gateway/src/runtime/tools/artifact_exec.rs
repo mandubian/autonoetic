@@ -1162,6 +1162,33 @@ impl NativeTool for ArtifactExecTool {
             "mount_set": mount_set,
         });
 
+        // #1321: disclose the effective network-namespace state, same contract
+        // as sandbox_exec. This path is capability-driven *by design* (see
+        // docs/internals/sandbox/network-grant.md), so the reason vocabulary
+        // differs — the capability is the grant here — but a net-less run is
+        // equally indistinguishable from a DNS/egress outage without it.
+        let promotion_isolated = manifest_may_record_promotion_verdicts(manifest);
+        let network_reason = if overrides.share_net {
+            if promotion_isolated {
+                crate::runtime::network_grant::ShareNetReason::GrantedBySealedProxy
+            } else if approval_validated_for_command {
+                crate::runtime::network_grant::ShareNetReason::GrantedByApproval
+            } else {
+                crate::runtime::network_grant::ShareNetReason::GrantedByCapability
+            }
+        } else if promotion_isolated {
+            crate::runtime::network_grant::ShareNetReason::ForcedOff
+        } else {
+            crate::runtime::network_grant::ShareNetReason::NoGrant
+        };
+        body["network"] = crate::runtime::network_grant::network_disclosure_json(
+            overrides.share_net,
+            network_reason,
+            // The capability IS the grant on this path — a ceiling is never
+            // "unused" here.
+            false,
+        );
+
         // Informational only: on the network-isolated promotion-gate path the
         // detected remote-access patterns are NOT a block — the run already
         // happened offline. Surface them so the verdict role can reason about
@@ -1577,6 +1604,26 @@ fn execute_with_ticket(
         "deployment_ticket": args.deployment_ticket,
         "mount_set": mount_set,
     });
+
+    // #1321: same disclosure contract as the execute() path. The ticket's
+    // operator-approved domains are the grant here (`share_net =
+    // !approved_domains.is_empty()`); a sealed-proxy widening after that shows
+    // as granted_by_sealed_proxy.
+    let ticket_grants_network = !ticket.approved_domains.is_empty();
+    let network_reason = if overrides.share_net {
+        if ticket_grants_network {
+            crate::runtime::network_grant::ShareNetReason::GrantedByApproval
+        } else {
+            crate::runtime::network_grant::ShareNetReason::GrantedBySealedProxy
+        }
+    } else {
+        crate::runtime::network_grant::ShareNetReason::NoGrant
+    };
+    body["network"] = crate::runtime::network_grant::network_disclosure_json(
+        overrides.share_net,
+        network_reason,
+        false,
+    );
 
     if !overrides.share_net {
         let has_network_cap = manifest

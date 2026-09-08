@@ -93,6 +93,16 @@ pub enum ShareNetReason {
     TaintNotDeclassified,
     /// An explicit per-exec grant enabled the network namespace.
     GrantedByApproval,
+    /// Capability-driven sibling paths (`artifact_exec` ordinary runs, script
+    /// mode): the declared `NetworkAccess` capability *is* the grant there by
+    /// design (see `docs/internals/sandbox/network-grant.md`). Never produced by
+    /// [`decide_share_net`]; exists so the #1321 result disclosure speaks one
+    /// reason vocabulary across exec paths.
+    GrantedByCapability,
+    /// A `sandbox_network: sealed`/`recording` proxy opened the namespace after
+    /// the decision so the sandbox can reach the host-loopback proxy
+    /// (`setup_sealed_proxy_for_exec`). Never produced by [`decide_share_net`].
+    GrantedBySealedProxy,
     /// Fail-closed default: no per-exec grant (#1022). Includes the case where
     /// the capability ceiling would have permitted network but static analysis
     /// surfaced nothing for the gate to ask about.
@@ -107,6 +117,8 @@ impl ShareNetReason {
             Self::SafeInspection => "safe_inspection",
             Self::TaintNotDeclassified => "taint_not_declassified",
             Self::GrantedByApproval => "granted_by_approval",
+            Self::GrantedByCapability => "granted_by_capability",
+            Self::GrantedBySealedProxy => "granted_by_sealed_proxy",
             Self::NoGrant => "no_grant",
         }
     }
@@ -158,6 +170,39 @@ pub fn decide_share_net(inputs: ShareNetInputs) -> ShareNetDecision {
         reason,
         capability_ceiling_unused: !share_net && inputs.capability_allows_network,
     }
+}
+
+/// The `network` object embedded in `sandbox_exec` / `artifact_exec` result
+/// bodies (#1321).
+///
+/// A net-less exec is indistinguishable from a DNS/egress outage from stdout
+/// alone: `getent hosts` returning empty in a namespace that was never given
+/// the network reads exactly like "DNS is broken" (observed live: a packager
+/// pre-flight probe failed its task and filed an egress anomaly that was an
+/// artifact of its own isolation). Disclosing the namespace state in the
+/// result lets an agent branch on it mechanically:
+///
+/// - `share_net: false` — the command ran without the network. Any connection
+///   failure it reports is a grant gap, not an outage.
+/// - `reason` — the [`ShareNetReason`] token for *why*, including the
+///   capability-driven sibling-path tokens.
+/// - `capability_ceiling_unused` — the agent holds `NetworkAccess` but this
+///   exec had no grant (the #1022 shape; only meaningful on the
+///   operator-gated `sandbox_exec` path, always `false` elsewhere).
+///
+/// `share_net` is the **effective** state: a sealed-network proxy widens the
+/// namespace after [`decide_share_net`], so callers pass the override value
+/// actually handed to the sandbox, with the corresponding reason token.
+pub fn network_disclosure_json(
+    share_net: bool,
+    reason: ShareNetReason,
+    capability_ceiling_unused: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "share_net": share_net,
+        "reason": reason.as_str(),
+        "capability_ceiling_unused": capability_ceiling_unused,
+    })
 }
 
 #[cfg(test)]
@@ -279,6 +324,76 @@ mod tests {
         });
         assert!(!d.share_net);
         assert_eq!(d.reason, ShareNetReason::NoGrant);
+    }
+
+    /// #1321: the result disclosure for the observed failure shape — a net-less
+    /// exec whose empty probe output looked like a DNS outage must be
+    /// machine-recognisable as a grant gap instead.
+    #[test]
+    fn disclosure_names_the_grant_gap() {
+        let d = decide_share_net(ShareNetInputs {
+            approval_validated: false,
+            ..granted()
+        });
+        let disclosure = network_disclosure_json(
+            d.share_net,
+            d.reason,
+            d.capability_ceiling_unused,
+        );
+        assert_eq!(
+            disclosure,
+            serde_json::json!({
+                "share_net": false,
+                "reason": "no_grant",
+                "capability_ceiling_unused": true,
+            })
+        );
+    }
+
+    /// A granted exec discloses the positive state too, so "the network worked
+    /// because it was granted" is distinguishable from "no field, who knows".
+    #[test]
+    fn disclosure_names_the_grant() {
+        let d = decide_share_net(granted());
+        let disclosure = network_disclosure_json(
+            d.share_net,
+            d.reason,
+            d.capability_ceiling_unused,
+        );
+        assert_eq!(
+            disclosure,
+            serde_json::json!({
+                "share_net": true,
+                "reason": "granted_by_approval",
+                "capability_ceiling_unused": false,
+            })
+        );
+    }
+
+    /// The sibling-path tokens stay stable snake_case wire strings — the same
+    /// closed-vocabulary contract as the decision reasons.
+    #[test]
+    fn sibling_path_reason_tokens_are_stable() {
+        assert_eq!(ShareNetReason::GrantedByCapability.as_str(), "granted_by_capability");
+        assert_eq!(
+            ShareNetReason::GrantedBySealedProxy.as_str(),
+            "granted_by_sealed_proxy"
+        );
+        // Never produced by the decision itself: the capability is not a grant
+        // on the operator-gated path, and the proxy acts after the decision.
+        for bits in 0u8..64 {
+            let inputs = ShareNetInputs {
+                capability_allows_network: bits & 1 != 0,
+                approval_validated: bits & 2 != 0,
+                safe_inspection_bypass: bits & 4 != 0,
+                network_sink_excluded: bits & 8 != 0,
+                network_declassified: bits & 16 != 0,
+                force_network_off: bits & 32 != 0,
+            };
+            let d = decide_share_net(inputs);
+            assert_ne!(d.reason, ShareNetReason::GrantedByCapability);
+            assert_ne!(d.reason, ShareNetReason::GrantedBySealedProxy);
+        }
     }
 
     /// The invariant, exhaustively: over every input combination, `share_net` is
