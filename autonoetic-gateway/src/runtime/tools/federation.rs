@@ -57,7 +57,10 @@ federation_escalate({\n\
 ```\n\n\
 Returns `{approval_request_id, status: \"pending\"}` and **gates `agent_spawn` for the whole session until \
 resolved** — surface the id and the resolution command, then end your turn. Do not open a second channel \
-with `user_ask`; it is a separate artifact and will not resolve the gate."
+with `user_ask`; it is a separate artifact and will not resolve the gate.\n\n\
+**After approval.** Promote the candidate (`agent_revision_promote`); re-seeding over recorded evidence \
+is refused — a truly wrong candidate means a corrected **artifact** plus fresh roles. Declared-host \
+superfluity warnings are advisory after verdicts: no correction delegation."
             .to_string(),
     }
 }

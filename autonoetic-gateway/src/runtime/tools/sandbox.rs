@@ -1028,7 +1028,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     },
                     "capture_paths": {
                         "type": "array",
-                        "description": "Paths inside the sandbox to capture as layers after execution completes. Each path is archived as a separate layer with its content-addressed digest. Use this to capture installed dependencies (e.g., venv/, site-packages/, node_modules/). Explicitly captured files are ALSO registered as session content — readable by sibling sessions under the same root: each captured_layers entry carries content_files with cnt_ refs you can resolve (include=content) or pass to artifact_build as inputs, the only way to read your own sandbox output back. Content names keep the capture directory as a prefix ('/tmp/out/SKILL.md' → 'out/SKILL.md'), and artifact_build records an input string verbatim as the artifact's filename — so if the artifact needs a root-level name, resolve the file and write it back under that name first.",
+                        "description": "Paths inside the sandbox to capture after execution completes. A directory is archived as a layer with its content-addressed digest (use this for installed dependencies, e.g. venv/, site-packages/, node_modules/); a single file cannot be a layer and is registered as session content only. Explicitly captured files are ALSO registered as session content — readable by sibling sessions under the same root: each captured_layers entry carries content_files with cnt_ refs you can resolve (include=content) or pass to artifact_build as inputs, the only way to read your own sandbox output back. Content names keep the capture directory as a prefix ('/tmp/out/SKILL.md' → 'out/SKILL.md'; a bare file keeps its own name, '/tmp/probe.txt' → 'probe.txt'), and artifact_build records an input string verbatim as the artifact's filename — so if the artifact needs a root-level name, resolve the file and write it back under that name first.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -3685,6 +3685,34 @@ fn capture_layers_from_paths(
             continue;
         }
 
+        // A bare file cannot be a layer (`create_from_dir` needs a directory);
+        // register it as session content directly so its bytes are still
+        // resolvable via `resolve`. Without this branch the capture reports
+        // nothing at all and the agent burns turns re-running the command that
+        // wrote the file (session-ddaec1f5: envfinal.txt, ab_inspect.txt).
+        if host_path.is_file() {
+            let content_files = match (content_egress, egress_budget.as_mut()) {
+                (Some((gw_dir, session_key)), Some(budget)) => {
+                    register_captured_file_as_content(
+                        gw_dir,
+                        session_key,
+                        &host_path,
+                        &cap.path,
+                        budget,
+                    )
+                }
+                _ => Vec::new(),
+            };
+            captured.push(serde_json::json!({
+                "path": cap.path,
+                "mount_as": cap.mount_as,
+                "kind": "file",
+                "layer_id": serde_json::Value::Null,
+                "content_files": content_files,
+            }));
+            continue;
+        }
+
         match layer_store.create_from_dir(
             &host_path,
             &cap.path,
@@ -3822,6 +3850,44 @@ impl ContentEgressBudget {
     }
 }
 
+/// Sanitize a sandbox capture path into a content-name prefix.
+///
+/// Content names allow alphanumerics, '_', '-', '.', '/'; the leading `/tmp`
+/// is workspace framing, not part of the name (`/tmp/wrapper-out` →
+/// `wrapper-out`, `/tmp/envfinal.txt` → `envfinal.txt`). Returns `None` when
+/// the sanitized prefix is unsafe — `validate_capture_path` already refused
+/// `.`/`..` before the command ran; this is the same guard at the site that
+/// actually joins the name onto a host directory, so the invariant does not
+/// depend on a caller staying correct. Sanitizing keeps '.' and '/', so it
+/// cannot make a name safe.
+fn capture_content_name_prefix(sandbox_path: &str) -> Option<String> {
+    let stripped = sandbox_path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .strip_prefix("tmp/")
+        .unwrap_or_else(|| sandbox_path.trim_start_matches('/').trim_end_matches('/'));
+    let prefix: String = stripped
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if !crate::runtime::content_store::safe_relative_path(&prefix) {
+        tracing::warn!(
+            target: "sandbox",
+            path = %sandbox_path,
+            %prefix,
+            "Refusing capture content registration: unsafe content-name prefix"
+        );
+        return None;
+    }
+    Some(prefix)
+}
+
 /// Register every file under a captured directory as session content.
 /// Returns one `{path, name, ref, bytes}` descriptor per registered file so
 /// the tool result can hand the agent resolvable handles.
@@ -3840,39 +3906,9 @@ fn register_captured_files_as_content(
 ) -> Vec<serde_json::Value> {
     use crate::runtime::content_store::{ContentStore, ContentVisibility};
 
-    // Content names allow alphanumerics, '_', '-', '.', '/'; sanitize the
-    // sandbox path into a deterministic prefix (`/tmp/wrapper-out` →
-    // `wrapper-out`). The sandbox workspace root IS `/tmp`, and content
-    // mounts back at `/tmp/<name>` — so the leading `tmp/` component is
-    // workspace framing, not part of the name.
-    let stripped = sandbox_path
-        .trim_start_matches('/')
-        .trim_end_matches('/')
-        .strip_prefix("tmp/")
-        .unwrap_or_else(|| sandbox_path.trim_start_matches('/').trim_end_matches('/'));
-    let prefix: String = stripped
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // `validate_capture_path` already refused `.`/`..` before the command ran;
-    // this is the same guard at the site that actually joins the name onto a
-    // host directory, so the invariant does not depend on a caller staying
-    // correct. Sanitizing keeps '.' and '/', so it cannot make a name safe.
-    if !crate::runtime::content_store::safe_relative_path(&prefix) {
-        tracing::warn!(
-            target: "sandbox",
-            path = %sandbox_path,
-            %prefix,
-            "Refusing capture content registration: unsafe content-name prefix"
-        );
+    let Some(prefix) = capture_content_name_prefix(sandbox_path) else {
         return Vec::new();
-    }
+    };
 
     let Ok(store) = ContentStore::new(gw_dir) else {
         return Vec::new();
@@ -3954,6 +3990,75 @@ fn register_captured_files_as_content(
         }));
     }
     registered
+}
+
+/// Register one captured bare file as session content. Mirror of
+/// `register_captured_files_as_content` for the single-file case: the content
+/// name is the sanitized file path itself (`/tmp/envfinal.txt` →
+/// `envfinal.txt`), which is exactly the name an agent reaches for when it
+/// tries to `resolve` the file it just wrote. Shares the caller's per-exec
+/// budget — a registered name is re-materialized into every later exec of the
+/// session regardless of how it was registered.
+fn register_captured_file_as_content(
+    gw_dir: &Path,
+    session_key: &str,
+    host_file: &Path,
+    sandbox_path: &str,
+    budget: &mut ContentEgressBudget,
+) -> Vec<serde_json::Value> {
+    use crate::runtime::content_store::{ContentStore, ContentVisibility};
+
+    let Some(name) = capture_content_name_prefix(sandbox_path) else {
+        return Vec::new();
+    };
+    if budget.files == 0 {
+        tracing::warn!(
+            target: "sandbox",
+            path = %sandbox_path,
+            "Capture content registration hit the file budget; file stays unregistered"
+        );
+        return Vec::new();
+    }
+    // Size-gate BEFORE reading: a multi-GB /tmp file must not be pulled into
+    // memory just to be rejected by the budget check.
+    let file_len = match std::fs::metadata(host_file) {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+    if file_len > budget.bytes as u64 {
+        tracing::warn!(
+            target: "sandbox",
+            path = %sandbox_path,
+            file_bytes = file_len,
+            budget_bytes = budget.bytes,
+            "Capture content registration hit the byte budget; file stays unregistered"
+        );
+        return Vec::new();
+    }
+    let Ok(bytes) = std::fs::read(host_file) else {
+        return Vec::new();
+    };
+    let Ok(store) = ContentStore::new(gw_dir) else {
+        return Vec::new();
+    };
+    let Ok(handle) = store.write(&bytes) else {
+        return Vec::new();
+    };
+    if store
+        .register_name_with_visibility(session_key, &name, &handle, ContentVisibility::Session)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    budget.files -= 1;
+    budget.bytes -= bytes.len();
+    let alias = ContentStore::get_short_alias(&handle);
+    vec![serde_json::json!({
+        "path": name,
+        "name": name,
+        "ref": format!("cnt_{}", alias),
+        "bytes": bytes.len(),
+    })]
 }
 
 /// Detect package install commands that deposit files into a known directory
@@ -4177,7 +4282,10 @@ mod approval_ref_binding_tests {
 
 #[cfg(test)]
 mod capture_content_tests {
-    use super::{register_captured_files_as_content, validate_capture_path, ContentEgressBudget};
+    use super::{
+        capture_layers_from_paths, register_captured_file_as_content,
+        register_captured_files_as_content, validate_capture_path, ContentEgressBudget,
+    };
 
     #[test]
     fn registers_captured_files_as_resolvable_session_content() {
@@ -4365,6 +4473,96 @@ mod capture_content_tests {
             &mut ContentEgressBudget::full(),
         );
         assert_eq!(registered.len(), super::CAPTURE_CONTENT_MAX_FILES);
+    }
+
+    #[test]
+    fn bare_file_capture_registers_under_its_own_name() {
+        // The session-ddaec1f5 failure mode: the agent wrote /tmp/envfinal.txt
+        // in one exec and tried to `resolve envfinal.txt` in the next — the
+        // file must land in the content store under exactly that name.
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let capture = tempfile::tempdir().expect("capture tempdir");
+        let file = capture.path().join("envfinal.txt");
+        std::fs::write(&file, b"ENV=probe").unwrap();
+
+        let registered = register_captured_file_as_content(
+            gw.path(),
+            "session-test/session-file",
+            &file,
+            "/tmp/envfinal.txt",
+            &mut ContentEgressBudget::full(),
+        );
+        assert_eq!(registered.len(), 1, "{registered:?}");
+        assert_eq!(
+            registered[0].get("name").and_then(|n| n.as_str()),
+            Some("envfinal.txt")
+        );
+        assert!(registered[0]
+            .get("ref")
+            .and_then(|r| r.as_str())
+            .unwrap()
+            .starts_with("cnt_"));
+
+        let store =
+            crate::runtime::content_store::ContentStore::new(gw.path()).expect("content store");
+        let bytes = store
+            .read_by_name("session-test/session-file", "envfinal.txt")
+            .expect("registered file must be resolvable by name");
+        assert_eq!(bytes, b"ENV=probe");
+    }
+
+    #[test]
+    fn bare_file_capture_respects_the_shared_exec_budget() {
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let capture = tempfile::tempdir().expect("capture tempdir");
+        let file = capture.path().join("big.txt");
+        std::fs::write(&file, vec![b'x'; super::CAPTURE_CONTENT_MAX_TOTAL_BYTES + 1]).unwrap();
+
+        let registered = register_captured_file_as_content(
+            gw.path(),
+            "session-test/session-file2",
+            &file,
+            "/tmp/big.txt",
+            &mut ContentEgressBudget::full(),
+        );
+        assert!(registered.is_empty(), "over-budget file: {registered:?}");
+    }
+
+    #[test]
+    fn capture_loop_reports_bare_file_without_a_layer() {
+        // End to end through capture_layers_from_paths: a file path yields a
+        // `kind: "file"` entry with no layer_id and a resolvable content ref.
+        let gw = tempfile::tempdir().expect("gw tempdir");
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        std::fs::write(agent_dir.path().join("probe.txt"), b"probe-bytes").unwrap();
+        let layer_store =
+            crate::layer_store::LayerStore::new(gw.path(), Default::default()).expect("layer store");
+
+        let captured = capture_layers_from_paths(
+            &layer_store,
+            &[crate::runtime::tools::CapturePath {
+                path: "/tmp/probe.txt".to_string(),
+                mount_as: "/opt/probe.txt".to_string(),
+            }],
+            agent_dir.path(),
+            None,
+            Some((gw.path(), "session-test/session-file3")),
+        );
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert_eq!(
+            captured[0].get("kind").and_then(|k| k.as_str()),
+            Some("file")
+        );
+        assert!(captured[0].get("layer_id").unwrap().is_null());
+        let content_files = captured[0]
+            .get("content_files")
+            .and_then(|c| c.as_array())
+            .unwrap();
+        assert_eq!(content_files.len(), 1, "{content_files:?}");
+        assert_eq!(
+            content_files[0].get("name").and_then(|n| n.as_str()),
+            Some("probe.txt")
+        );
     }
 }
 
