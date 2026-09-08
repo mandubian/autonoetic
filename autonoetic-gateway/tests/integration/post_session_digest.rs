@@ -74,6 +74,75 @@ impl LlmDriver for FixedJsonDigestDriver {
     }
 }
 
+/// Captures the `prompt_cache_key` of the request it sees — the field the
+/// OpenAI driver derives `x-opencode-session` from.
+struct CaptureCacheKeyDriver(std::sync::Mutex<Option<String>>);
+
+#[async_trait::async_trait]
+impl LlmDriver for CaptureCacheKeyDriver {
+    async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        *self.0.lock().unwrap() = req.prompt_cache_key.clone();
+        Ok(CompletionResponse {
+            text: serde_json::json!({"narrative": "ok", "memories": []}).to_string(),
+            tool_calls: vec![],
+            reasoning_content: None,
+            reasoning_details: None,
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn digest_request_carries_session_prompt_cache_key() -> anyhow::Result<()> {
+    // OpenCode Go requires `x-opencode-session` on every request and the
+    // OpenAI driver derives it from `prompt_cache_key`. Session-ddaec1f5 lost
+    // every post-session digest to a 400 MissingSessionID because the digest
+    // request carried none — pin it to the session being digested.
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+
+    let session_id = "digest-cache-key-session";
+    let digest_llm = LlmConfig {
+        provider: "openai".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        temperature: 0.0,
+        fallback_provider: None,
+        fallback_model: None,
+        chat_only: true,
+        context_window_tokens: None,
+        max_tokens: None,
+        base_url: None,
+        api_key_env: None,
+        routing_preset: None,
+        thinking: None,
+        egress_class: None,
+        request_timeout_secs: None,
+        ttfb_timeout_secs: None,
+    };
+    let driver = CaptureCacheKeyDriver(std::sync::Mutex::new(None));
+    run_post_session_digest_with_driver(
+        &gateway_dir,
+        &store,
+        session_id,
+        "digest.agent",
+        &digest_llm,
+        &driver,
+    )
+    .await?;
+
+    let key = driver.0.into_inner().unwrap();
+    assert_eq!(
+        key.as_deref(),
+        Some(session_id),
+        "digest request must carry the session prompt_cache_key (x-opencode-session carrier)"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<()> {
     let temp = tempdir()?;

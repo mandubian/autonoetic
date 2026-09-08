@@ -2322,6 +2322,29 @@ async fn spawn_task_execution(
         let mut next_warn_secs = warn_after_secs;
         loop {
             interval.tick().await;
+            // The task row may already be terminal: the P-7.16 orphan reaper
+            // (and the approval-cancellation path) mark it Cancelled and abort
+            // the *turn* handle, but this heartbeat loop is a separate task
+            // the abort never touches. Without this check a reaped task keeps
+            // its claim "fresh" for the whole hard-timeout window — pure
+            // stuck-warn noise ending in a refused Cancelled→Failed
+            // transition (session-ddaec1f5 task-6797da0a: 30 min of warnings
+            // after the reap, then an illegal-transition ERROR).
+            let terminal = match workflow_store::load_task_run(
+                &heartbeat_cfg,
+                None,
+                &heartbeat_wf_id,
+                &heartbeat_task_id,
+            ) {
+                Ok(Some(t)) => t.status.is_terminal(),
+                // Row gone — nothing left to heartbeat for.
+                Ok(None) => true,
+                // Read failed: keep heartbeating rather than strand a live turn.
+                Err(_) => false,
+            };
+            if terminal {
+                break;
+            }
             // The claim heartbeat proves the gateway process is alive, not that
             // the turn is progressing. A turn hung inside a single tool call
             // (e.g. a blocking HTTP client entered on the async runtime) keeps

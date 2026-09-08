@@ -511,6 +511,11 @@ async fn run_post_session_digest_inner(
     if digest_llm.temperature > 0.0 {
         req.temperature = Some(digest_llm.temperature as f32);
     }
+    // OpenCode Go requires `x-opencode-session` on every request (400
+    // MissingSessionID otherwise); the driver only attaches it when a
+    // prompt_cache_key is present. Pin the digest to the session it digests,
+    // same value as the main loop (lifecycle.rs).
+    req.prompt_cache_key = Some(session_id.to_string());
 
     let resp = driver.complete(&req).await?;
     if !resp.tool_calls.is_empty() {
