@@ -3142,8 +3142,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // Auto-capture: if the agent ran a package install command without
         // capture_paths, infer the target directory and capture it anyway.
         if args.capture_paths.as_ref().map_or(true, |p| p.is_empty()) {
+            let workspace_dir = driver.workspace_dir();
             if let Some(inferred) =
-                infer_capture_paths_from_command(&args.command, &driver.workspace_dir())
+                infer_capture_paths_from_command(&args.command, &workspace_dir)
             {
                 if let Some(gw_dir) = gateway_dir {
                     let capture_approval_scope: Option<LayerApprovalScope> = if overrides.share_net

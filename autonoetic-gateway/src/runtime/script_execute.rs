@@ -236,11 +236,11 @@ pub(crate) async fn execute_script_in_sandbox(
         }
         None => normalized_input,
     };
-    let invocation_files =
-        write_script_invocation_files(&driver.workspace_dir(), agent_dir, &normalized_input, metadata)?;
     // #1127: the guest workspace path is the selected driver's, not a global —
     // a `sandbox: "docker"` agent's entrypoint lives at `/workspace/…`.
     let workspace_dir = driver.workspace_dir();
+    let invocation_files =
+        write_script_invocation_files(&workspace_dir, agent_dir, &normalized_input, metadata)?;
     let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
         Ok(relative) => format!("{}/{}", workspace_dir, relative.to_string_lossy()),
         Err(_) => script_path.to_string_lossy().to_string(),
