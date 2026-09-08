@@ -120,7 +120,18 @@ The exec result tells you which world you ran in. Branch on the `network` object
 - `"network": { "share_net": true }` — the exec had the host network namespace. A connection/DNS failure here is real egress trouble: file `anomaly_flag` (severity `high`) with the execution trace as evidence.
 - `"network": { "share_net": false }` — the command ran without network. This is a **grant gap, not an outage**: do not file an anomaly, do not fail the task. Re-issue the work as a recognised install command (Step 1 below) so it is detected + preapproved and gets the network.
 
-Connectivity is verified **by the real install itself**: `npm install` / `pip install` are in your declared `package_manager_commands`, so that exec is preapproved and runs with `share_net: true`. If it completes, the network works — no separate probe is needed or allowed. Spell the subcommand in full: `npm install -g <pkg>`, never `npm i` — `npm i` matches neither the analyzer nor the preapproval prefix, so it would run net-less and fail the same way a probe does.
+Connectivity is verified **by the real install itself** — no separate probe is needed or allowed. A `sandbox_exec` command that contains one of your declared `package_manager_commands` prefixes **verbatim** is detected + preapproved and runs with `share_net: true`. This works the same for every ecosystem you package. But spell the declared prefix exactly — abbreviations and near-synonyms match nothing and run net-less, failing exactly like a probe does:
+
+| Ecosystem | Granted (contains a declared prefix) | NOT matched — runs net-less |
+|---|---|---|
+| Python | `pip install -r /tmp/requirements.txt --target /tmp/venv`, `pip3 install`, `uv pip install` | `pipenv install` |
+| Node.js | `npm install`, `npm install -g <pkg>`, `yarn add`, `pnpm install`, `bun install` | `npm i`, `pnpm add`, `bun add` |
+| Rust | `cargo install <crate>` | `cargo add <dep>` |
+| Go | `go get <module>`, `go mod download` | `go install <module>` |
+| Ruby / PHP | `gem install`, `composer install`, `composer require` | `bundle install` |
+| System | `apt-get install`, `apt-get update`, `apk add`, `yum install`, `dnf install`, `pacman -S` | `apt install` |
+
+If the result still comes back with `"network": { "share_net": false }`, the command shape did not match a declared prefix — fix the spelling to the table above, never re-run it as-is and never conclude the network is broken.
 
 ## PRE-FLIGHT: Skip if no real dependencies
 
