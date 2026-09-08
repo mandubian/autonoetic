@@ -481,6 +481,81 @@ Agents declare optional `io.accepts` (input) and `io.returns` (output) JSON Sche
 | Semi-structured | `required: ["status"]`, optional properties | Output carries a status plus variable extras | Agent-factory, specialized_builder, coder, packager |
 | Variable | `{type: "object"}` with no required fields | Output is too context-dependent for any fixed fields | Planner, researcher, debugger, executor |
 
+### Examples (from the shipped agents)
+
+**Structured tier** — `agents/specialists/static_evaluator.default/SKILL.md`: the verdict shape is deterministic, so every field is required and the caller (the promotion federation) can rely on `evaluator_pass: boolean` existing:
+
+```yaml
+io:
+  returns:
+    type: object
+    required: ["status", "evaluator_pass", "findings", "summary"]
+    properties:
+      status:
+        type: string
+        enum: ["pass", "fail"]
+      evaluator_pass:
+        type: boolean
+      findings:
+        type: array
+      summary:
+        type: string
+  output_policy:
+    max_reply_length_chars: 8000
+```
+
+**Semi-structured tier** — `agents/specialists/coder.default/SKILL.md`: only `status` is required; everything else is optional and may be absent on any given run:
+
+```yaml
+io:
+  returns:
+    type: object
+    required: ["status"]
+    properties:
+      status:
+        type: string
+        enum: ["ok", "needs_packager", "clarification_needed", "failed"]
+      artifact_ref:
+        type: string
+      clarification_request:
+        type: object
+      reason:
+        type: string
+      dependency_files:
+        type: array
+        items:
+          type: string
+  output_policy:
+    min_artifact_builds: 1
+    repair:
+      auto: true
+      max_attempts: 2
+```
+
+**Input schema (`io.accepts`)** — `agents/specialists/watchdog-fast.default/SKILL.md`: the rare case where ingress validation is useful, because the caller is expected to send a structured payload rather than free text:
+
+```yaml
+io:
+  accepts:
+    type: object
+    required: [target_session_id]
+    properties:
+      target_session_id:
+        type: string
+        description: "Session ID being reviewed (informational; the full overview is in the kickoff message)."
+  returns:
+    type: object
+    required: ["verdict", "justification"]
+    properties:
+      verdict:
+        type: string
+        enum: ["healthy", "watching", "diverging", "critical"]
+      justification:
+        type: string
+```
+
+**What the gateway does with these:** on ingress, an `agent.spawn` message that fails `io.accepts` is rejected with the `expected_schema`, per-field errors, and a repair hint — the calling LLM reads the error and retries with a corrected payload. On egress, a reply that fails `io.returns` triggers a bounded auto-repair loop (`repair.max_attempts`) instead of silently passing malformed output back to the spawner. Script agents never enter the repair loop — schema violations there fail fast and must be fixed in code.
+
 ---
 
 ## Memory Architecture
