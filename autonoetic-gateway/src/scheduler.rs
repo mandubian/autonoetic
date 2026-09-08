@@ -2340,7 +2340,16 @@ async fn spawn_task_execution(
                 // Row gone — nothing left to heartbeat for.
                 Ok(None) => true,
                 // Read failed: keep heartbeating rather than strand a live turn.
-                Err(_) => false,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "workflow",
+                        task_id = %heartbeat_task_id,
+                        workflow_id = %heartbeat_wf_id,
+                        error = %e,
+                        "terminal-status check failed; heartbeat loop keeps running"
+                    );
+                    false
+                }
             };
             if terminal {
                 break;

@@ -3847,15 +3847,6 @@ impl ContentEgressBudget {
     }
 }
 
-/// Register every file under a captured directory as session content.
-/// Returns one `{path, name, ref, bytes}` descriptor per registered file so
-/// the tool result can hand the agent resolvable handles.
-///
-/// Names are prefixed with the capture directory (`/tmp/wrapper-out/SKILL.md`
-/// → `wrapper-out/SKILL.md`) so two captures cannot collide on a bare
-/// filename. `artifact_build` records an input string verbatim as the
-/// artifact's filename, so a bundle that needs a root-level `SKILL.md` has to
-/// be re-written under the clean name first — the schema says so.
 /// Sanitize a sandbox capture path into a content-name prefix.
 ///
 /// Content names allow alphanumerics, '_', '-', '.', '/'; the leading `/tmp`
@@ -3894,7 +3885,15 @@ fn capture_content_name_prefix(sandbox_path: &str) -> Option<String> {
     Some(prefix)
 }
 
-/// Register a captured directory as session content.
+/// Register every file under a captured directory as session content.
+/// Returns one `{path, name, ref, bytes}` descriptor per registered file so
+/// the tool result can hand the agent resolvable handles.
+///
+/// Names are prefixed with the capture directory (`/tmp/wrapper-out/SKILL.md`
+/// → `wrapper-out/SKILL.md`) so two captures cannot collide on a bare
+/// filename. `artifact_build` records an input string verbatim as the
+/// artifact's filename, so a bundle that needs a root-level `SKILL.md` has to
+/// be re-written under the clean name first — the schema says so.
 fn register_captured_files_as_content(
     gw_dir: &Path,
     session_key: &str,
@@ -4017,17 +4016,25 @@ fn register_captured_file_as_content(
         );
         return Vec::new();
     }
-    let Ok(bytes) = std::fs::read(host_file) else {
-        return Vec::new();
+    // Size-gate BEFORE reading: a multi-GB /tmp file must not be pulled into
+    // memory just to be rejected by the budget check.
+    let file_len = match std::fs::metadata(host_file) {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
     };
-    if bytes.len() > budget.bytes {
+    if file_len > budget.bytes as u64 {
         tracing::warn!(
             target: "sandbox",
             path = %sandbox_path,
+            file_bytes = file_len,
+            budget_bytes = budget.bytes,
             "Capture content registration hit the byte budget; file stays unregistered"
         );
         return Vec::new();
     }
+    let Ok(bytes) = std::fs::read(host_file) else {
+        return Vec::new();
+    };
     let Ok(store) = ContentStore::new(gw_dir) else {
         return Vec::new();
     };
