@@ -22,18 +22,20 @@ impl ScriptInvocationFiles {
     }
 }
 
-pub(crate) fn sandbox_workspace_path(agent_dir: &Path, host_path: &Path) -> String {
+/// Map a host path under `agent_dir` to its in-sandbox location: the driver
+/// mounts the workspace at *its* guest directory (`SandboxDriver::workspace_dir`,
+/// #1127) — bubblewrap/wasm at `/tmp`, docker at `/workspace` — so no caller
+/// may assume one driver's path. Paths outside the agent dir pass through
+/// unchanged (they are not workspace-relative).
+pub(crate) fn sandbox_workspace_path(workspace_dir: &str, agent_dir: &Path, host_path: &Path) -> String {
     match host_path.strip_prefix(agent_dir) {
-        Ok(relative) => format!(
-            "{}/{}",
-            crate::sandbox::BWRAP_WORKSPACE_DIR,
-            relative.to_string_lossy()
-        ),
+        Ok(relative) => format!("{}/{}", workspace_dir, relative.to_string_lossy()),
         Err(_) => host_path.to_string_lossy().to_string(),
     }
 }
 
 pub(crate) fn write_script_invocation_files(
+    workspace_dir: &str,
     agent_dir: &Path,
     input_payload: &str,
     metadata: Option<&serde_json::Value>,
@@ -48,14 +50,14 @@ pub(crate) fn write_script_invocation_files(
     let meta_path_sandbox = if let Some(meta) = metadata {
         let meta_path_host = runtime_dir_host.join("meta.json");
         std::fs::write(&meta_path_host, meta.to_string())?;
-        Some(sandbox_workspace_path(agent_dir, &meta_path_host))
+        Some(sandbox_workspace_path(workspace_dir, agent_dir, &meta_path_host))
     } else {
         None
     };
 
     Ok(ScriptInvocationFiles {
         runtime_dir_host,
-        input_path_sandbox: sandbox_workspace_path(agent_dir, &input_path_host),
+        input_path_sandbox: sandbox_workspace_path(workspace_dir, agent_dir, &input_path_host),
         meta_path_sandbox,
     })
 }
@@ -234,13 +236,13 @@ pub(crate) async fn execute_script_in_sandbox(
         }
         None => normalized_input,
     };
-    let invocation_files = write_script_invocation_files(agent_dir, &normalized_input, metadata)?;
+    // #1127: the guest workspace path is the selected driver's, not a global —
+    // a `sandbox: "docker"` agent's entrypoint lives at `/workspace/…`.
+    let workspace_dir = driver.workspace_dir();
+    let invocation_files =
+        write_script_invocation_files(&workspace_dir, agent_dir, &normalized_input, metadata)?;
     let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
-        Ok(relative) => format!(
-            "{}/{}",
-            crate::sandbox::BWRAP_WORKSPACE_DIR,
-            relative.to_string_lossy()
-        ),
+        Ok(relative) => format!("{}/{}", workspace_dir, relative.to_string_lossy()),
         Err(_) => script_path.to_string_lossy().to_string(),
     };
 
@@ -288,7 +290,7 @@ pub(crate) async fn execute_script_in_sandbox(
 
     // WASM tier runs in-process, not via the POSIX spawn path: route it through
     // the unified `run_to_output` entry. The entry must be the workspace-relative
-    // path (the backend joins it onto `agent_dir`), not the `BWRAP_WORKSPACE_DIR`-
+    // path (the backend joins it onto `agent_dir`), not the guest-workspace-
     // prefixed path the process backend renders into a shell line.
     if driver.runs_in_process() {
         let entry_relative = script_path
@@ -1057,6 +1059,39 @@ pub(crate) fn resolve_credential_env_with_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1127: in-sandbox paths are workspace-relative to the *selected
+    /// driver's* guest directory. Bubblewrap/wasm mount at `/tmp`; a docker
+    /// script agent's entrypoint, input payload, and metadata live under
+    /// `/workspace` — the old global constant sent docker to `/tmp/main.py`,
+    /// where nothing is.
+    #[test]
+    fn workspace_paths_follow_the_driver_workspace_dir() {
+        let agent_dir = Path::new("/hosts/agent");
+        let entry = Path::new("/hosts/agent/main.py");
+        let nested = Path::new("/hosts/agent/.autonoetic_runtime/1-abc/input.json");
+
+        assert_eq!(
+            sandbox_workspace_path("/tmp", agent_dir, entry),
+            "/tmp/main.py"
+        );
+        assert_eq!(
+            sandbox_workspace_path("/workspace", agent_dir, entry),
+            "/workspace/main.py",
+            "docker script agents resolve under /workspace"
+        );
+        assert_eq!(
+            sandbox_workspace_path("/workspace", agent_dir, nested),
+            "/workspace/.autonoetic_runtime/1-abc/input.json",
+            "input/meta payload paths are workspace-relative too"
+        );
+        // Paths outside the agent dir are not workspace-relative — they pass
+        // through unchanged for every driver.
+        assert_eq!(
+            sandbox_workspace_path("/workspace", agent_dir, Path::new("/etc/hosts")),
+            "/etc/hosts"
+        );
+    }
 
     #[test]
     fn normalize_script_input_payload_strips_delegation_suffix() {

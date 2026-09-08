@@ -25,6 +25,13 @@ pub const DOCKER_SDK_SOCKET_PATH: &str = "/run/autonoetic-sdk.sock";
 /// images are separate, so the SDK is mounted in.)
 pub const DOCKER_SDK_PYTHONPATH: &str = "/opt/autonoetic-sdk";
 
+/// Guest-side directory the agent dir is mounted at (`--volume …:/workspace`,
+/// `--workdir /workspace`) and the entrypoint runs from (#1127). Everything
+/// the gateway builds as an *in-sandbox* workspace path — script entrypoint,
+/// `AUTONOETIC_INPUT_PATH`/`AUTONOETIC_META_PATH`, default install-capture
+/// dirs — must use this, not bubblewrap's `/tmp`.
+pub const DOCKER_WORKSPACE_DIR: &str = "/workspace";
+
 pub struct DockerDriver;
 
 impl SandboxDriver for DockerDriver {
@@ -43,6 +50,10 @@ impl SandboxDriver for DockerDriver {
     /// Always offline — [`docker_command`] hardcodes `--network none`.
     fn guarantees_network_off(&self, _overrides: &BwrapIsolationOverrides) -> bool {
         true
+    }
+
+    fn workspace_dir(&self) -> &str {
+        DOCKER_WORKSPACE_DIR
     }
 
     fn sdk_socket_path(&self, _socket_name: &str) -> Option<String> {
@@ -110,9 +121,9 @@ fn docker_command(
         "--network".to_string(),
         "none".to_string(),
         "--volume".to_string(),
-        format!("{}:/workspace", agent_dir),
+        format!("{}:{}", agent_dir, DOCKER_WORKSPACE_DIR),
         "--workdir".to_string(),
-        "/workspace".to_string(),
+        DOCKER_WORKSPACE_DIR.to_string(),
     ];
     for (host, container, readonly) in volumes {
         argv.push("--volume".to_string());
@@ -198,6 +209,10 @@ mod tests {
             docker_command("/tmp/agent", "python main.py", &volumes, &env).expect("docker command");
         assert_eq!(program, "docker");
         let joined = argv.join(" ");
+        // The agent dir binds at the workspace and the workdir is pinned to it
+        // (#1127) — the entrypoint and any workspace-relative path live there.
+        assert!(joined.contains(&format!("--volume /tmp/agent:{}", DOCKER_WORKSPACE_DIR)));
+        assert!(joined.contains(&format!("--workdir {}", DOCKER_WORKSPACE_DIR)));
         // socket mounted read-write, SDK source read-only
         assert!(joined.contains(&format!("/tmp/autonoetic-abc.sock:{}", DOCKER_SDK_SOCKET_PATH)));
         assert!(joined.contains(&format!("/host/sdk:{}:ro", DOCKER_SDK_PYTHONPATH)));

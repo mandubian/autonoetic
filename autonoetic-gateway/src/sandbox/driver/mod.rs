@@ -92,6 +92,18 @@ impl SandboxDriverKind {
             .map(|d| d.guarantees_network_off(overrides))
             .unwrap_or(false)
     }
+
+    /// Guest-side directory this driver mounts the agent workspace at (#1127).
+    /// Resolved through the registered driver so callers never hardcode one
+    /// driver's path; an unregistered kind falls back to `/tmp`, the
+    /// historical convention (this is a path convention, not a security
+    /// boundary — unlike [`Self::guarantees_network_off`], there is no
+    /// fail-closed answer).
+    pub fn workspace_dir(self) -> String {
+        self.driver()
+            .map(|d| d.workspace_dir().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string())
+    }
 }
 
 /// Everything a process-tier driver needs to build one execution.
@@ -153,6 +165,28 @@ pub trait SandboxDriver: Send + Sync {
     /// Conservative default: a driver that has not reasoned about it says `false`.
     fn guarantees_network_off(&self, _overrides: &BwrapIsolationOverrides) -> bool {
         false
+    }
+
+    /// Guest-side directory the agent workspace (`agent_dir`) is mounted at
+    /// (#1127). The gateway builds *in-sandbox* paths against this — the
+    /// script entrypoint, `AUTONOETIC_INPUT_PATH`/`AUTONOETIC_META_PATH`, and
+    /// the default dependency-install capture dirs — so a driver that lands
+    /// the workspace anywhere but the default must override.
+    ///
+    /// Default `/tmp`: the POSIX convention bubblewrap and the wasm tier
+    /// (which mirrors it deliberately) share. Docker overrides to
+    /// `/workspace` (`--volume …:/workspace --workdir /workspace`); microvm
+    /// is operator-defined via its `--config-file` and keeps the default as a
+    /// documented best-effort until P5 threads the real path.
+    ///
+    /// Note the boundary: session-content mounts pin their destinations to
+    /// `/tmp/<name>` for **every** driver (see `load_session_content_mounts`)
+    /// — that is a gateway-wide mount convention the content tools advertise
+    /// in tool results (`content_write` cannot know which driver a *later*
+    /// exec will select), not an agent-dir-relative path, so it does not
+    /// follow this method.
+    fn workspace_dir(&self) -> &str {
+        "/tmp"
     }
 
     /// `Err` when this driver cannot honour a dependency-install plan.
@@ -394,6 +428,40 @@ mod tests {
         let wasm = SandboxDriverKind::Wasm.driver().expect("wasm");
         assert!(wasm.sdk_socket_path("s.sock").is_none());
         assert!(!wasm.runs_sdk_bridge());
+    }
+
+    /// #1127: the guest workspace path is per driver — docker lands the agent
+    /// dir at `/workspace`, everything else at `/tmp` (bubblewrap's bind, wasm's
+    /// deliberate mirror, microvm's documented best-effort). Every caller that
+    /// builds an in-sandbox workspace path resolves through here instead of a
+    /// driver-specific constant.
+    #[test]
+    fn test_workspace_dir_per_driver() {
+        assert_eq!(
+            SandboxDriverKind::Bubblewrap.workspace_dir(),
+            bubblewrap::BWRAP_WORKSPACE_DIR,
+            "bubblewrap keeps its workspace constant as the single source"
+        );
+        assert_eq!(SandboxDriverKind::Bubblewrap.workspace_dir(), "/tmp");
+        assert_eq!(
+            SandboxDriverKind::Docker.workspace_dir(),
+            docker::DOCKER_WORKSPACE_DIR
+        );
+        assert_eq!(
+            SandboxDriverKind::Docker.workspace_dir(),
+            "/workspace",
+            "docker's agent dir mounts at /workspace (--volume + --workdir)"
+        );
+        assert_eq!(
+            SandboxDriverKind::Wasm.workspace_dir(),
+            SandboxDriverKind::Bubblewrap.workspace_dir(),
+            "the wasm tier mirrors bubblewrap so env-built paths resolve on both"
+        );
+        assert_eq!(
+            SandboxDriverKind::MicroVm.workspace_dir(),
+            "/tmp",
+            "microvm's real workspace is operator-defined; /tmp is the documented best-effort"
+        );
     }
 
     /// Tier is what callers branch on instead of comparing to a variant.
