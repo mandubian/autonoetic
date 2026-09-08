@@ -28,6 +28,51 @@ fn asks_for_secret(args: &Args) -> bool {
     })
 }
 
+/// Returns true when `question` is placeholder/template debris rather than a
+/// real question. Weak models sometimes feel compelled to clarify but have
+/// nothing to ask, and stuff the required `question` field with a dummy
+/// literal ("placeholder", "...", a schema-description echo). Gating those
+/// saves the operator a meaningless round-trip and hands the model a repair
+/// hint it can act on. Only exact vacuous literals are blocked — short but
+/// real questions ("Proceed?", "Which one?") must pass.
+fn looks_vacuous_question(question: &str) -> bool {
+    let normalized: String = question
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation())
+        .trim()
+        .to_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+    // Runs of dots/dashes ("...", "…", "---") survive the punctuation trim
+    // when they use non-ASCII glyphs.
+    if normalized
+        .chars()
+        .all(|c| matches!(c, '.' | '…' | '-' | '–' | '_'))
+    {
+        return true;
+    }
+    const VACUOUS: &[&str] = &[
+        "placeholder",
+        "question",
+        "the question",
+        "your question",
+        "the question to ask the user",
+        "ask the user",
+        "ask user",
+        "insert question here",
+        "example question",
+        "sample question",
+        "test question",
+        "n/a",
+        "na",
+        "tbd",
+        "todo",
+        "lorem ipsum",
+    ];
+    VACUOUS.contains(&normalized.as_str())
+}
+
 #[derive(Deserialize)]
 struct Args {
     #[serde(default = "default_kind")]
@@ -64,7 +109,7 @@ impl NativeTool for UserAskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Ask the user a question. Execution suspends until the user answers. Use this for clarifications, decisions, proposals, and confirmations.".to_string(),
+            description: "Ask the user a question. Execution suspends until the user answers. Use this only when you have a specific clarification, decision, proposal, or confirmation the operator must supply. Never call it with placeholder or template text in `question` — if you have nothing specific to ask, reply directly instead of calling this tool.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -76,7 +121,7 @@ impl NativeTool for UserAskTool {
                     },
                     "question": {
                         "type": "string",
-                        "description": "The question to ask the user"
+                        "description": "The full, concrete question to ask the user (what you need and why). Vacuous text like 'placeholder', '...', or a schema echo is rejected."
                     },
                     "context": {
                         "type": "string",
@@ -132,6 +177,18 @@ impl NativeTool for UserAskTool {
                 Some("Use credential_setup with user_prompt steps so secrets stay in gateway vault-backed channels."),
             )
             .with_code("secret_collection_not_allowed")
+            .to_error_response());
+        }
+
+        if looks_vacuous_question(&args.question) {
+            return Ok(ToolError::validation(
+                format!(
+                    "user_ask question is placeholder text, not a real question (got {:?}).",
+                    args.question
+                ),
+                Some("If there is nothing specific the operator must answer, do not call user_ask — reply to the user directly or end your turn with your final message. Otherwise retry with the actual question spelled out: what you need to know, and why it changes your next step."),
+            )
+            .with_code("vacuous_question")
             .to_error_response());
         }
 
@@ -435,6 +492,51 @@ impl NativeTool for UserInteractionStatusTool {
             )
             .with_code("interaction_read_failed")
             .to_error_response()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_vacuous_question;
+
+    #[test]
+    fn vacuous_placeholder_literals_are_rejected() {
+        for q in [
+            "placeholder",
+            "Placeholder",
+            "placeholder?",
+            "PLACEHOLDER.",
+            "...",
+            "…",
+            "---",
+            "<question>",
+            "{{question}}",
+            "question",
+            "The question to ask the user",
+            "your question",
+            "ask user",
+            "n/a",
+            "TBD",
+            "   ",
+            "",
+        ] {
+            assert!(looks_vacuous_question(q), "should reject: {q:?}");
+        }
+    }
+
+    #[test]
+    fn short_but_real_questions_pass() {
+        for q in [
+            "Ready to proceed?",
+            "Continue?",
+            "Which one?",
+            "Which database should I use — SQLite or Postgres?",
+            "ok to delete the cache?",
+            "To do X or Y?",
+            "NA for now, right?",
+        ] {
+            assert!(!looks_vacuous_question(q), "should allow: {q:?}");
         }
     }
 }

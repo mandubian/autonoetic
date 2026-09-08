@@ -641,3 +641,112 @@ async fn test_duplicate_resume_claim_guard_skips_second_caller_body() -> anyhow:
 
     Ok(())
 }
+
+/// A weak model that stuffs the required `question` field with a dummy
+/// literal ("placeholder") must NOT open a UserInput gate: the tool returns a
+/// `vacuous_question` validation error, the turn continues, and no
+/// interaction row is created.
+#[serial_test::serial]
+#[test]
+fn test_user_ask_rejects_vacuous_placeholder_question() -> anyhow::Result<()> {
+    crate::support::run_with_big_stack(test_user_ask_rejects_vacuous_placeholder_question_body)
+}
+
+async fn test_user_ask_rejects_vacuous_placeholder_question_body() -> anyhow::Result<()> {
+    ensure_constitution_runtime();
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let agent_id = "ask-agent-vacuous";
+    install_ask_agent(&workspace.agents_dir, agent_id)?;
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
+
+    let responses = Arc::new(Mutex::new(stub_user_ask_then_text(
+        serde_json::json!({"question": "placeholder"}).to_string(),
+        "Understood — nothing to ask, replying directly.",
+    )));
+    let responses_clone = Arc::clone(&responses);
+
+    let stub = OpenAiStub::spawn(move |_raw, _body| {
+        let responses = Arc::clone(&responses_clone);
+        async move {
+            let mut q = responses.lock().unwrap();
+            if q.is_empty() {
+                serde_json::json!({
+                    "choices": [{"message": {"content": "extra stub call"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                })
+            } else {
+                q.remove(0)
+            }
+        }
+    })
+    .await?;
+
+    let _base = EnvGuard::set(LLM_BASE_URL_ENV, stub.completion_url());
+    let _key = EnvGuard::set(LLM_API_KEY_ENV, "test-key");
+
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let session_id = "session-user-ask-vacuous";
+
+    let first = execution
+        .spawn_agent_once(
+            agent_id,
+            "ihello",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        &[],
+        )
+        .await?;
+
+    // The gate never opened: the turn completed with the follow-up reply.
+    let reply = first
+        .assistant_reply
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("expected assistant reply — vacuous user_ask must not suspend"))?;
+    assert!(
+        reply.contains("Understood"),
+        "unexpected reply: {}",
+        reply
+    );
+
+    // No interaction row may exist for this session.
+    let pending = store.get_pending_interactions_for_root_session(session_id)?;
+    assert!(
+        pending.is_empty(),
+        "vacuous user_ask must not create a user interaction, got {:?}",
+        pending
+    );
+
+    // And no UserInputRequired checkpoint may have been written.
+    let cp = load_latest_checkpoint(&config, session_id)?;
+    assert!(
+        !matches!(
+            cp.as_ref().map(|c| &c.yield_reason),
+            Some(YieldReason::UserInputRequired { .. })
+        ),
+        "vacuous user_ask must not checkpoint as UserInputRequired, got {:?}",
+        cp.as_ref().map(|c| &c.yield_reason)
+    );
+
+    Ok(())
+}
