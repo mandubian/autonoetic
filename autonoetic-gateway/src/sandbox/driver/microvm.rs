@@ -33,6 +33,14 @@ impl SandboxDriver for MicroVmDriver {
         false
     }
 
+    /// The guest workspace is operator-defined via `--config-file` (the
+    /// gateway passes only that file and cannot see the VM's mount table), so
+    /// the real path is deferred with the rest of the P5 support. The `/tmp`
+    /// default is a documented best-effort, not an assertion.
+    fn workspace_dir(&self) -> &str {
+        "/tmp"
+    }
+
     fn check_dependency_support(&self, _plan: &DependencyPlan) -> anyhow::Result<()> {
         anyhow::bail!("MicroVM dependency bootstrap is not implemented yet")
     }

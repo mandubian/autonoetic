@@ -3142,7 +3142,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // Auto-capture: if the agent ran a package install command without
         // capture_paths, infer the target directory and capture it anyway.
         if args.capture_paths.as_ref().map_or(true, |p| p.is_empty()) {
-            if let Some(inferred) = infer_capture_paths_from_command(&args.command) {
+            if let Some(inferred) =
+                infer_capture_paths_from_command(&args.command, &driver.workspace_dir())
+            {
                 if let Some(gw_dir) = gateway_dir {
                     let capture_approval_scope: Option<LayerApprovalScope> = if overrides.share_net
                     {
@@ -3956,8 +3958,15 @@ fn register_captured_files_as_content(
 /// Detect package install commands that deposit files into a known directory
 /// but were called without explicit `capture_paths`. Returns inferred
 /// `CapturePath` entries for each detected target directory.
+///
+/// `workspace_dir` is the selected driver's guest workspace (#1127): a bare
+/// `npm install` (no `--prefix`) deposits into the *working directory's*
+/// `node_modules`, which is the workspace — `/tmp` under bubblewrap/wasm,
+/// `/workspace` under docker. Inferring bubblewrap's path for every driver
+/// would capture nothing (and mount the layer from nowhere) on the others.
 fn infer_capture_paths_from_command(
     command: &str,
+    workspace_dir: &str,
 ) -> Option<Vec<crate::runtime::tools::CapturePath>> {
     let cmd = command.trim();
     let lower = cmd.to_ascii_lowercase();
@@ -3991,7 +4000,7 @@ fn infer_capture_paths_from_command(
         let prefix_dir = extract_flag_value(cmd, "--prefix");
         let node_modules_path = prefix_dir
             .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
-            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+            .unwrap_or_else(|| format!("{}/node_modules", workspace_dir));
         return Some(vec![crate::runtime::tools::CapturePath {
             path: node_modules_path.clone(),
             mount_as: node_modules_path,
@@ -4003,7 +4012,7 @@ fn infer_capture_paths_from_command(
         let cwd_dir = extract_flag_value(cmd, "--cwd");
         let node_modules_path = cwd_dir
             .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
-            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+            .unwrap_or_else(|| format!("{}/node_modules", workspace_dir));
         return Some(vec![crate::runtime::tools::CapturePath {
             path: node_modules_path.clone(),
             mount_as: node_modules_path,
@@ -4015,7 +4024,7 @@ fn infer_capture_paths_from_command(
         let dir = extract_flag_value(cmd, "--dir");
         let node_modules_path = dir
             .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
-            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+            .unwrap_or_else(|| format!("{}/node_modules", workspace_dir));
         return Some(vec![crate::runtime::tools::CapturePath {
             path: node_modules_path.clone(),
             mount_as: node_modules_path,
@@ -4024,7 +4033,8 @@ fn infer_capture_paths_from_command(
 
     // go mod download [-modcacherw]
     if lower.starts_with("go mod download") {
-        let gopath = std::env::var("GOPATH").unwrap_or_else(|_| "/tmp/go".to_string());
+        let gopath =
+            std::env::var("GOPATH").unwrap_or_else(|_| format!("{}/go", workspace_dir));
         let go_cache = format!("{}/pkg/mod", gopath);
         return Some(vec![crate::runtime::tools::CapturePath {
             path: go_cache.clone(),
@@ -4034,8 +4044,8 @@ fn infer_capture_paths_from_command(
 
     // cargo fetch / cargo build (captures registry + target)
     if lower.starts_with("cargo fetch") || lower.starts_with("cargo build") {
-        let cargo_home =
-            std::env::var("CARGO_HOME").unwrap_or_else(|_| "/tmp/cargo_registry".to_string());
+        let cargo_home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| format!("{}/cargo_registry", workspace_dir));
         return Some(vec![crate::runtime::tools::CapturePath {
             path: cargo_home.clone(),
             mount_as: cargo_home,
@@ -4354,6 +4364,74 @@ mod capture_content_tests {
             &mut ContentEgressBudget::full(),
         );
         assert_eq!(registered.len(), super::CAPTURE_CONTENT_MAX_FILES);
+    }
+}
+
+/// #1127: install-capture inference defaults to the *driver's* workspace —
+/// the default deposit dirs are workspace-relative, so a docker exec must not
+/// be told to capture bubblewrap's `/tmp`.
+#[cfg(test)]
+mod capture_inference_tests {
+    use super::infer_capture_paths_from_command;
+
+    #[test]
+    fn bare_installs_default_to_the_driver_workspace() {
+        for (cmd, sub) in [
+            ("npm install left-pad", "node_modules"),
+            ("npm i left-pad", "node_modules"),
+            ("yarn add left-pad", "node_modules"),
+            ("pnpm install left-pad", "node_modules"),
+        ] {
+            let bwrap =
+                infer_capture_paths_from_command(cmd, "/tmp").expect("inferred for bubblewrap");
+            assert_eq!(bwrap[0].path, format!("/tmp/{sub}"), "{cmd}");
+            let docker = infer_capture_paths_from_command(cmd, "/workspace")
+                .expect("inferred for docker");
+            assert_eq!(docker[0].path, format!("/workspace/{sub}"), "{cmd}");
+        }
+    }
+
+    /// The go/cargo defaults only apply when the gateway env does not pin
+    /// GOPATH/CARGO_HOME — clear them so the workspace fallback is the thing
+    /// under test regardless of the host.
+    #[test]
+    #[serial_test::serial] // mutates GOPATH/CARGO_HOME (process-global)
+    fn go_and_cargo_defaults_are_workspace_relative_without_env() {
+        let saved_gopath = std::env::var("GOPATH").ok();
+        let saved_cargo = std::env::var("CARGO_HOME").ok();
+        std::env::remove_var("GOPATH");
+        std::env::remove_var("CARGO_HOME");
+        let go = infer_capture_paths_from_command("go mod download", "/workspace")
+            .expect("inferred go mod download");
+        assert_eq!(go[0].path, "/workspace/go/pkg/mod");
+        let cargo = infer_capture_paths_from_command("cargo fetch", "/tmp")
+            .expect("inferred cargo fetch");
+        assert_eq!(cargo[0].path, "/tmp/cargo_registry");
+        match saved_gopath {
+            Some(v) => std::env::set_var("GOPATH", v),
+            None => std::env::remove_var("GOPATH"),
+        }
+        match saved_cargo {
+            Some(v) => std::env::set_var("CARGO_HOME", v),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
+    }
+
+    #[test]
+    fn explicit_flag_paths_win_over_the_workspace_default() {
+        let r = infer_capture_paths_from_command("npm install --prefix /tmp/app", "/workspace")
+            .expect("inferred");
+        assert_eq!(r[0].path, "/tmp/app/node_modules");
+        let r =
+            infer_capture_paths_from_command("pip install -r req.txt --target /tmp/venv", "/tmp")
+                .expect("inferred");
+        assert_eq!(r[0].path, "/tmp/venv");
+    }
+
+    #[test]
+    fn non_install_commands_infer_nothing() {
+        assert!(infer_capture_paths_from_command("echo hello", "/tmp").is_none());
+        assert!(infer_capture_paths_from_command("ls -la", "/workspace").is_none());
     }
 }
 

@@ -7,6 +7,7 @@
 //! only the execution body is behind the `wasm-tier` feature, which turns a
 //! missing feature into a clear error instead of an unknown-driver one.
 
+use super::bubblewrap::BWRAP_WORKSPACE_DIR;
 use super::{DriverTier, InProcessRequest, SandboxDriver, SandboxDriverKind};
 use crate::sandbox::{BwrapIsolationOverrides, ExecOutput};
 
@@ -55,6 +56,13 @@ impl SandboxDriver for WasmDriver {
     fn run_in_process(&self, req: &InProcessRequest<'_>) -> anyhow::Result<ExecOutput> {
         run_wasm_request(req)
     }
+
+    /// Mirrors bubblewrap's workspace deliberately: the WASI preopen binds the
+    /// agent dir at the same guest path the process tiers build env vars
+    /// against, so one path convention holds across both tiers (#1127).
+    fn workspace_dir(&self) -> &str {
+        BWRAP_WORKSPACE_DIR
+    }
 }
 
 /// Run a request on the WASM tier (`wasm-tier` feature): resolve the `Code`
@@ -64,7 +72,6 @@ impl SandboxDriver for WasmDriver {
 #[cfg(feature = "wasm-tier")]
 fn run_wasm_request(req: &InProcessRequest<'_>) -> anyhow::Result<ExecOutput> {
     use crate::exec_request::{CodeSource, ExecutionKind};
-    use crate::sandbox::driver::bubblewrap::BWRAP_WORKSPACE_DIR;
     use std::path::Path;
 
     let (entry, args) = match req.request {
@@ -98,7 +105,8 @@ fn run_wasm_request(req: &InProcessRequest<'_>) -> anyhow::Result<ExecOutput> {
         &wasm,
         Path::new(req.agent_dir),
         // Same guest workspace path the process tiers use, so input-file env
-        // vars (built against BWRAP_WORKSPACE_DIR) resolve inside the module too.
+        // vars (built against the driver workspace_dir) resolve inside the
+        // module too.
         BWRAP_WORKSPACE_DIR,
         &args,
         req.extra_env,

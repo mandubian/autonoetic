@@ -114,6 +114,12 @@ impl SandboxDriver for BubblewrapDriver {
         overrides.force_network_off
     }
 
+    /// The workspace bind *is* `BWRAP_WORKSPACE_DIR` — one source of truth so
+    /// the trait surface and the argv cannot drift.
+    fn workspace_dir(&self) -> &str {
+        BWRAP_WORKSPACE_DIR
+    }
+
     fn sdk_socket_path(&self, socket_name: &str) -> Option<String> {
         Some(format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name))
     }

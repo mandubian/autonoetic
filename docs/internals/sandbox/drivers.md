@@ -55,6 +55,32 @@ a second in-process backend would not need those call sites touched.
 `SandboxRunner::spawn_*` is the process-only path, and it refuses an in-process
 driver with a message pointing at `run_to_output`.
 
+## The guest workspace path (#1127)
+
+Each driver declares where the agent dir lands *inside* the sandbox via
+`SandboxDriver::workspace_dir()`:
+
+| Driver | `workspace_dir()` | Why |
+|---|---|---|
+| bubblewrap | `/tmp` | `--bind <agent_dir> /tmp` (the historical convention) |
+| docker | `/workspace` | `--volume <agent_dir>:/workspace --workdir /workspace` |
+| wasm | `/tmp` | mirrors bubblewrap deliberately, so env-built paths resolve on both tiers |
+| microvm | `/tmp` (best-effort) | the real path is operator-defined via `--config-file`; deferred with the rest of P5 |
+
+Everything the gateway builds as an *in-sandbox workspace path* resolves
+through it: the script-mode entrypoint, `AUTONOETIC_INPUT_PATH` /
+`AUTONOETIC_META_PATH`, and the default dependency-install capture dirs (a
+bare `npm install` deposits into the workspace's `node_modules`, wherever the
+workspace is). Before #1127 every caller hardcoded bubblewrap's `/tmp`, so a
+`sandbox: "docker"` script agent looked for its entrypoint at `/tmp/main.py`
+— a file that does not exist.
+
+One deliberate boundary: **session-content mounts stay at `/tmp/<name>` for
+every driver**. That is a gateway-wide mount convention the content tools
+advertise in their results (`content_write` reports `sandbox_path: /tmp/<name>`
+without knowing which driver a *later* exec will select), not an
+agent-dir-relative path, so it does not follow the driver's workspace.
+
 ## Network guarantees
 
 `guarantees_network_off` is the single source of truth for "is this execution
