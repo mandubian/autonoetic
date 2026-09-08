@@ -2004,15 +2004,16 @@ pub fn produced_artifact_id_in_result(result_json: &str) -> Option<String> {
 /// result, not agent-supplied arguments — and the caller must lift it only
 /// for the executors that compose mounts (the `MOUNT_SET_REPORTING_TOOLS`
 /// gate), because the field is only gateway-asserted there. A result without
-/// a non-empty `mount_set` array yields `None`.
+/// a non-empty `mount_set` array — or whose array carries any non-string
+/// element — yields `None`: a partially-parsed set would silently shrink the
+/// gateway-asserted visibility this scan treats as fact.
 pub fn mount_set_in_result(result_json: &str) -> Option<Vec<String>> {
     let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
-    let entries: Vec<String> = v
-        .get("mount_set")?
-        .as_array()?
-        .iter()
-        .filter_map(|e| e.as_str().map(str::to_string))
-        .collect();
+    let arr = v.get("mount_set")?.as_array()?;
+    let mut entries = Vec::with_capacity(arr.len());
+    for e in arr {
+        entries.push(e.as_str()?.to_string());
+    }
     (!entries.is_empty()).then_some(entries)
 }
 
@@ -3552,6 +3553,13 @@ mod tests {
         assert_eq!(mount_set_in_result(r#"{"mount_set":[]}"#), None);
         assert_eq!(mount_set_in_result(r#"{"mount_set":"ro:/etc"}"#), None);
         assert_eq!(mount_set_in_result(r#"{"mount_set":[1,2]}"#), None);
+        // Fail closed on a partially-typed array too: silently dropping the
+        // non-string entries would shrink the gateway-asserted set the
+        // labeling ratchet is built from (Copilot review, #1323).
+        assert_eq!(
+            mount_set_in_result(r#"{"mount_set":["rw:/tmp/a",42,"ro:/etc"]}"#),
+            None,
+        );
     }
 
     // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────

@@ -537,6 +537,9 @@ pub fn match_mounts_with_home(
             matched.push(pat.pattern.clone());
         }
     }
+    // Dedup while preserving order — two rules may share a path.
+    let mut seen = std::collections::HashSet::new();
+    matched.retain(|p| seen.insert(p.clone()));
     matched
 }
 
@@ -848,6 +851,25 @@ for msg in mb:
             None,
         );
         assert_eq!(r, vec!["/home/alice/mail/**"]);
+    }
+
+    /// Two rules may share a path; the fired-patterns list stays deduplicated
+    /// in pattern order, like `analyze_sources` (Copilot review, #1323).
+    #[test]
+    fn duplicate_pattern_rules_dedup_in_order() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/mail"]),
+            &pats(&["/home/alice/mail/**", "/home/alice/mail/**", "~/notes/**", "/home/alice/mail/**"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail/**"]);
+        // Distinct patterns keep their relative order.
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/mail"]),
+            &pats(&["/home/alice/mail/**", "/home/alice/mail", "/home/alice/mail/**"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail/**", "/home/alice/mail"]);
     }
 
     #[test]
