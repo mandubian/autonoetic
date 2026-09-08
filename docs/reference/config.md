@@ -973,7 +973,7 @@ The rest of the §5.4 ladder — `mode`, `provider_constraint`, `indication_verb
 
 ### Traceability
 
-Every restricting decision emits an `egress.envelope_labeled` causal event carrying the complete input set of the resolution — envelope id, tool call id, tool name, resulting label, the rules that matched **and whether each came from global config or the session**, the matched path patterns, the default in force, whether the bundle-declared floor contributed (`bundle_floor_applied`), and parent envelope ids for argument taint (`parent_envelope_ids`, `taint_applied`). "Why is this envelope labeled?" is answerable from the chain alone (RFC §9.1). Unrestricted results emit nothing, so the causal chain stays quiet on the common case.
+Every restricting decision emits an `egress.envelope_labeled` causal event carrying the complete input set of the resolution — envelope id, tool call id, tool name, resulting label, the rules that matched **and whether each came from global config or the session**, the matched path patterns, which of those fired mechanically via the exec's mount set (`mount_triggers_applied`), the default in force, whether the bundle-declared floor contributed (`bundle_floor_applied`), and parent envelope ids for argument taint (`parent_envelope_ids`, `taint_applied`). "Why is this envelope labeled?" is answerable from the chain alone (RFC §9.1). Unrestricted results emit nothing, so the causal chain stays quiet on the common case.
 
 > **Phase status.** Source rules label content at the tool-result boundary (phase 1c) and the LLM chokepoint withholds labeled content from ineligible providers (phase 1b). Bundle-declared floors and argument taint are implemented (#907 slice 1). Still to come: taint-following routing (#907), memory and stored-content surfaces (#908), federation/MCP/sandbox composition and declassification (#909).
 
@@ -1000,6 +1000,20 @@ A tool called with an argument that references a prior labeled result inherits t
 2. **Verbatim content** — a bounded snippet (≤512 chars) of a prior labeled result's content appears verbatim in the arguments. Bounded tripwire, not a proof (defeated by paraphrase/encoding).
 
 When either signal fires, the prior result's label is intersected into the output label, and the prior envelope ids are recorded in `parent_envelope_ids` on the `egress.envelope_labeled` event — so derivation lineage is always answerable from the causal chain.
+
+### Exec mount-set trigger (#1002 / RFC §8)
+
+Path-scoped rules match an exec two ways. The **advisory** scan (RFC §4.2) reads the command line, inline script, and dependency sources — a guess from text, defeated by indirection (RFC §11). The **mechanical** trigger reads the exec's **mount set** — the gateway-asserted record of what the exec can actually see (`sandbox.host_fs` allow-set, §8 of the [sandbox mount RFC](../archived/sandbox-mount-allow-set.md)):
+
+- When a rule's `path` pattern overlaps a mounted host path — the mount *is* the labeled root, lies beneath it, or exposes it from a broader mount — the rule fires outright, even if the command never mentions the path. Mounting `~/mail` read-only into an exec whose operator rules label `~/mail/**` labels that exec's result, because the exec can *see* the mail.
+- A trigger restricts like any rule match: it intersects into the result label and tightens the agent's durable workspace label. It never widens anything.
+- `~`-prefixed rule patterns are resolved against `$HOME` (the same expansion mount declarations get), so they overlap the canonical absolute mount paths.
+- The `ro:host_root` sentinel (legacy blanket bind) and `truncated:+N` cap marker name no specific path and fire nothing.
+- The trigger is lifted only from `sandbox_exec` / `artifact_exec` results — the two gateway-owned executors that compose mounts — never from agent-controlled tool output (#1160).
+
+The `egress.envelope_labeled` event records which matched patterns fired mechanically in `mount_triggers_applied`, so an operator auditing "why is this labeled?" sees gateway-asserted fact and heuristic separately.
+
+Example: with a session rule `sandbox.exec:~/mail/**=local_only` and an exec whose approved mount grant exposes `/home/alice/mail`, every result of that exec is `local_only` — no matter how innocuous the command looks.
 
 Example:
 

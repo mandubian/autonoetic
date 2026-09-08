@@ -328,7 +328,18 @@ impl<'a> ToolCallProcessor<'a> {
         } else {
             None
         };
-        if let Some(outcome) = egress_labeler.label_tool_result(
+        // RFC sandbox-mount-allow-set §8 (#1296 item 3): the exec's
+        // gateway-asserted mount set is the mechanical half of the labeled-path
+        // scan. Lifted from the tool's own result — the same gateway-owned
+        // source the durable trace records — and only for the two executors
+        // that compose mounts (#1160: agent-controlled results must never
+        // assert visibility).
+        let mount_set = if MOUNT_SET_REPORTING_TOOLS.contains(&canonical_tool) {
+            crate::runtime::egress_labeler::mount_set_in_result(res)
+        } else {
+            None
+        };
+        if let Some(outcome) = egress_labeler.label_tool_result_with_mounts(
             &crate::runtime::egress_labeler::LabelRequest {
                 tool: canonical_tool,
                 arguments_json: &tc.arguments,
@@ -341,6 +352,7 @@ impl<'a> ToolCallProcessor<'a> {
             self.turn_id.as_deref(),
             self.gateway_store.as_ref(),
             &self.egress_results,
+            mount_set.as_deref(),
         ) {
             // Store a bounded content snippet for future verbatim taint
             // detection (RFC §4.1 path 3) — a tripwire, not a proof.
@@ -2303,6 +2315,81 @@ mod tests {
         assert!(MOUNT_SET_REPORTING_TOOLS
             .iter()
             .all(|t| *t == canonical_tool_name(t)));
+    }
+
+    /// RFC sandbox-mount-allow-set §8 (#1296 item 3): the gateway-asserted
+    /// `mount_set` on a `sandbox_exec` result is the mechanical half of the
+    /// labeled-path scan — a path-scoped rule fires without the command text
+    /// ever referencing the path, and the label lands in the turn's egress
+    /// map (the chokepoint's input).
+    #[tokio::test]
+    async fn test_process_tool_calls_mount_set_triggers_path_rule() {
+        use autonoetic_types::egress::{EgressConfig, EgressRule, NamedEgressLabel};
+
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let config = autonoetic_types::config::GatewayConfig {
+            egress: EgressConfig {
+                rules: vec![EgressRule {
+                    source: "sandbox.exec".to_string(),
+                    path: Some("/tmp/agent/**".to_string()),
+                    label: NamedEgressLabel::LocalOnly.to_label(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceMountSetTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(
+            Some("mount-egress-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "sandbox_exec".to_string(),
+            // No labeled path in the command text — and `intent` so the call
+            // passes the sandbox gate and the tool body (mount_set) runs.
+            arguments: r#"{"command":"python3 parse.py","intent":"parse the file"}"#.to_string(),
+        }];
+
+        let _ = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let labels = processor.take_egress_labels();
+        assert_eq!(
+            labels.get("tc1"),
+            Some(&autonoetic_types::egress::EgressLabel::local_only()),
+            "the gateway-asserted mount overlap must mechanically restrict the result"
+        );
     }
 
     #[tokio::test]
