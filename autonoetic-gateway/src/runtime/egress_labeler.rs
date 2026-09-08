@@ -12,6 +12,10 @@
 //!    `path` via static analysis of the command **and its dependency sources**
 //!    — the artifact bundle it runs, the workspace scripts it names (sibling of
 //!    `RemoteAccessAnalyzer`) — see [`crate::runtime::egress_path_matcher`].
+//!    Since #1002 the scan has a **mechanical** second input: the exec's
+//!    gateway-asserted mount set. A labeled path in the mount set fires its
+//!    rule outright (RFC sandbox-mount-allow-set §8); a labeled path merely
+//!    *referenced* in the command stays the advisory heuristic.
 //! 3. Mints an envelope id (`env_<id>`), builds provenance (tool, args digest,
 //!    matched rule names), and emits an `egress.envelope_labeled` causal event
 //!    carrying every resolution input, so "why is this labeled?" is always
@@ -123,6 +127,13 @@ pub struct Resolution {
     /// design (RFC §9); the pattern is operator-authored, so it is safe to
     /// record and is what actually explains the decision.
     pub paths: Vec<String>,
+    /// The subset of [`Self::paths`] that fired **mechanically** — the exec's
+    /// gateway-asserted mount set (#1002, RFC sandbox-mount-allow-set §8)
+    /// exposes a labeled path, so the rule fires whether or not the command
+    /// text mentions it. Distinct from the advisory command/script scan that
+    /// fills the rest of `paths`; recorded separately so "why is this
+    /// labeled?" distinguishes gateway-asserted fact from heuristic.
+    pub mount_triggers_applied: Vec<String>,
     /// Whether the bundle-declared floor (RFC §4.1 path 2) contributed to this
     /// resolution. Recorded for the audit event so "why is this labeled?" is
     /// answerable when the floor was the only restricting input.
@@ -334,6 +345,7 @@ impl EgressLabeler {
             label,
             matched,
             paths,
+            mount_triggers_applied: Vec::new(),
             bundle_floor_applied,
             taint_applied: false,
             artifact_labels_applied: Vec::new(),
@@ -371,6 +383,40 @@ impl EgressLabeler {
         store: Option<&Arc<GatewayStore>>,
         prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
     ) -> Option<LabelOutcome> {
+        self.label_tool_result_with_mounts(
+            req,
+            exec_ctx,
+            session_id,
+            agent_id,
+            turn_id,
+            store,
+            prior_labels,
+            None,
+        )
+    }
+
+    /// [`Self::label_tool_result`] with the exec's gateway-asserted mount set
+    /// (RFC sandbox-mount-allow-set §8, #1296 item 3).
+    ///
+    /// `mount_set` is the `mount_set` array the exec-shaped tool's own *result*
+    /// carries (`mount_set_in_result`, composed by
+    /// `crate::sandbox::compose_mount_set`) — never agent-controlled input.
+    /// For exec-shaped calls it is the **mechanical** input to the path scan:
+    /// a labeled path pattern overlapping a mount fires its rule regardless of
+    /// what the command text references. `None` (or a non-exec tool) keeps the
+    /// advisory-only behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn label_tool_result_with_mounts(
+        &self,
+        req: &LabelRequest<'_>,
+        exec_ctx: Option<&ExecSourceContext<'_>>,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+        store: Option<&Arc<GatewayStore>>,
+        prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+        mount_set: Option<&[String]>,
+    ) -> Option<LabelOutcome> {
         // Exec-shaped calls escape the inert fast-path (RFC §11, #1001): the
         // workspace label is *dynamic* store state, invisible to the static
         // `inert` computation, and an agent workspace can carry a taint long
@@ -388,7 +434,7 @@ impl EgressLabeler {
         // against labeled path patterns (RFC §4.2). For other tools, path comes
         // from a structured argument.
         let mut resolution = if is_exec_shaped(req.tool) {
-            self.resolve_exec_label(req, exec_ctx)
+            self.resolve_exec_label(req, exec_ctx, mount_set)
         } else {
             // Structured tools: extract a `path` argument (common shapes) so
             // path-scoped rules can match. Unknown shapes → None (rule still
@@ -524,10 +570,16 @@ impl EgressLabeler {
     /// `fs.read` rule must not label a `sandbox.exec` result just because the
     /// command touched the same path. The static analyzer is source-agnostic;
     /// source filtering belongs here.
+    ///
+    /// `mount_set` (when present) is the mechanical half of the scan (RFC
+    /// sandbox-mount-allow-set §8): patterns overlapping a gateway-asserted
+    /// mount fire their rules without any command-text reference. The
+    /// advisory command/dependency-source scan fills the rest.
     fn resolve_exec_label(
         &self,
         req: &LabelRequest<'_>,
         exec_ctx: Option<&ExecSourceContext<'_>>,
+        mount_set: Option<&[String]>,
     ) -> Resolution {
         let (cmd, inline_script) = extract_sandbox_command(req.arguments_json);
         let applicable: Vec<&ScopedRule> = self
@@ -550,6 +602,13 @@ impl EgressLabeler {
             return self.resolve_label(req.tool, None);
         }
 
+        // Mechanical trigger first (#1002, RFC §8): the gateway asserted what
+        // this exec can see, so a labeled path in the mount set fires its rule
+        // outright — no command text required.
+        let mount_triggers: Vec<String> = mount_set
+            .map(|mounts| crate::runtime::egress_path_matcher::match_mounts(mounts, &patterns))
+            .unwrap_or_default();
+
         // Gather everything the exec will actually run: the command, any inline
         // script in the arguments, and — the dependency half of RFC §4.2 — the
         // artifact bundle and workspace scripts it names. Only reached when a
@@ -565,7 +624,15 @@ impl EgressLabeler {
         let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
 
         let m = EgressPathMatcher::analyze_sources(&cmd, &source_refs, &patterns);
-        if !m.matched() {
+
+        // Advisory matches plus mechanical triggers, deduped in scan order.
+        let mut fired = m.matched_patterns;
+        for t in &mount_triggers {
+            if !fired.iter().any(|p| p == t) {
+                fired.push(t.clone());
+            }
+        }
+        if fired.is_empty() {
             return self.resolve_label(req.tool, None);
         }
 
@@ -578,8 +645,9 @@ impl EgressLabeler {
             let fires = match &scoped.rule.path {
                 // Source-only rule (no path) — always applies.
                 None => true,
-                // A path-bearing rule fires iff its pattern matched.
-                Some(rule_path) => m.matched_patterns.iter().any(|mp| mp == rule_path),
+                // A path-bearing rule fires iff its pattern matched —
+                // advisory scan or mechanical mount trigger alike.
+                Some(rule_path) => fired.iter().any(|mp| mp == rule_path),
             };
             if fires {
                 label = label.restrict(&scoped.rule.label);
@@ -601,7 +669,8 @@ impl EgressLabeler {
         Resolution {
             label,
             matched,
-            paths: m.matched_patterns,
+            paths: fired,
+            mount_triggers_applied: mount_triggers,
             bundle_floor_applied,
             taint_applied: false,
             artifact_labels_applied: Vec::new(),
@@ -645,6 +714,12 @@ impl EgressLabeler {
                 .map(|m| serde_json::json!({ "rule": m.key, "scope": m.scope.as_str() }))
                 .collect::<Vec<_>>(),
             "matched_paths": resolution.paths,
+            // Mechanical mount-set triggers (RFC sandbox-mount-allow-set §8):
+            // which of `matched_paths` fired because the gateway asserted the
+            // exec can see the path (a mount), not because the command text
+            // referenced it (the advisory scan). Absent entries mean the
+            // resolution is advisory-only.
+            "mount_triggers_applied": resolution.mount_triggers_applied,
             "args_digest": provenance.args_digest,
             // The floor every resolution intersects against, and whether the
             // session narrowed it — without these, a label produced by the
@@ -1917,6 +1992,28 @@ pub fn produced_artifact_id_in_result(result_json: &str) -> Option<String> {
     v.get("artifact_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// The gateway-asserted mount set an exec *result* carries (#1002 slice 1) —
+/// the `mount_set` array `sandbox_exec` / `artifact_exec` compose via
+/// `crate::sandbox::compose_mount_set` and the tool-call processor lifts into
+/// the durable trace. This is the second input of the exec path scan (RFC
+/// sandbox-mount-allow-set §8, `match_mounts`).
+///
+/// Like [`produced_artifact_id_in_result`], the source is the tool's own
+/// result, not agent-supplied arguments — and the caller must lift it only
+/// for the executors that compose mounts (the `MOUNT_SET_REPORTING_TOOLS`
+/// gate), because the field is only gateway-asserted there. A result without
+/// a non-empty `mount_set` array yields `None`.
+pub fn mount_set_in_result(result_json: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    let entries: Vec<String> = v
+        .get("mount_set")?
+        .as_array()?
+        .iter()
+        .filter_map(|e| e.as_str().map(str::to_string))
+        .collect();
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// Intersect the stored labels of every artifact named in `arguments_json`.
@@ -3238,6 +3335,223 @@ mod tests {
             Some(EgressLabel::no_remote_model()),
             "structured tools never write the workspace label"
         );
+    }
+
+    // ── Exec mount-set trigger (#1002 / RFC sandbox-mount-allow-set §8) ──
+
+    fn mount_set(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The mechanical trigger: the gateway asserted (via the exec's
+    /// `mount_set`) that the exec can see a labeled path — the rule fires even
+    /// though the command text never references it.
+    #[test]
+    fn mount_set_triggers_path_rule_without_command_reference() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("/home/alice/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"python3 /tmp/w/parse.py"}"#,
+            tool_call_id: "tc_mount",
+            artifact_id: None,
+        };
+        let ms = mount_set(&["rw:/tmp/w", "ro:/home/alice/mail"]);
+        let out = l
+            .label_tool_result_with_mounts(
+                &req,
+                None,
+                "sess",
+                "coder.abc",
+                None,
+                None,
+                &no_prior(),
+                Some(&ms),
+            )
+            .expect("mount-set trigger must restrict");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(
+            out.provenance.matched_rules,
+            vec!["sandbox.exec:/home/alice/mail/**"],
+        );
+    }
+
+    /// The same exec without a mount set stays on the advisory heuristic —
+    /// no command/script reference, no label.
+    #[test]
+    fn same_exec_without_mount_set_stays_unlabeled() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("/home/alice/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"python3 /tmp/w/parse.py"}"#,
+            tool_call_id: "tc_mount0",
+            artifact_id: None,
+        };
+        assert!(
+            l.label_tool_result(&req, None, "sess", "coder.abc", None, None, &no_prior())
+                .is_none(),
+            "without a mount overlap the advisory scan finds nothing"
+        );
+    }
+
+    /// The resolution records which patterns fired mechanically (mount set)
+    /// versus via the advisory scan, so the audit distinguishes gateway-
+    /// asserted fact from heuristic.
+    #[test]
+    fn mount_trigger_is_recorded_separately_from_the_advisory_scan() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("/home/alice/mail/**"), NamedEgressLabel::LocalOnly),
+            rule("sandbox.exec", Some("/tmp/w/**"), NamedEgressLabel::NoRemoteModel),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            // The command text references `/tmp/w` (advisory); the mail root
+            // is only visible via the mount (mechanical).
+            arguments_json: r#"{"command":"python3 /tmp/w/parse.py"}"#,
+            tool_call_id: "tc_mount2",
+            artifact_id: None,
+        };
+        let ms = mount_set(&["ro:/home/alice/mail"]);
+        let r = l.resolve_exec_label(&req, None, Some(&ms));
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert!(r.paths.contains(&"/home/alice/mail/**".to_string()));
+        assert!(r.paths.contains(&"/tmp/w/**".to_string()));
+        assert_eq!(
+            r.mount_triggers_applied,
+            vec!["/home/alice/mail/**"],
+            "only the mount-overlapping pattern is a mechanical trigger"
+        );
+        // No mount set → no mechanical triggers recorded.
+        let r = l.resolve_exec_label(&req, None, None);
+        assert_eq!(r.mount_triggers_applied, Vec::<String>::new());
+    }
+
+    /// A mechanical trigger participates in the workspace ratchet like any
+    /// restricted exec: content from the mounted, labeled path is now in the
+    /// workspace.
+    #[test]
+    fn mount_trigger_narrows_the_durable_workspace_label() {
+        let (_tmp, store) = ws_store();
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("/home/alice/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"python3 parse.py"}"#,
+            tool_call_id: "tc_mount3",
+            artifact_id: None,
+        };
+        let ms = mount_set(&["ro:/home/alice/mail"]);
+        let out = l
+            .label_tool_result_with_mounts(
+                &req,
+                None,
+                "sess",
+                "coder.abc",
+                None,
+                Some(&store),
+                &no_prior(),
+                Some(&ms),
+            )
+            .expect("mount trigger restricts");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(
+            store.get_workspace_egress_label("coder.abc").unwrap(),
+            Some(EgressLabel::local_only()),
+            "the mechanical trigger tightens the workspace like any restricted exec"
+        );
+    }
+
+    /// `ro:host_root` (the legacy blanket bind) and `truncated:+N` name no
+    /// specific host path, so neither mechanically fires a path rule.
+    #[test]
+    fn host_root_sentinel_and_marker_never_trigger() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("/home/alice/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"echo hi"}"#,
+            tool_call_id: "tc_mount4",
+            artifact_id: None,
+        };
+        let ms = mount_set(&["ro:host_root", "truncated:+2"]);
+        assert!(
+            l.label_tool_result_with_mounts(
+                &req, None, "sess", "coder.abc", None, None, &no_prior(), Some(&ms),
+            )
+            .is_none(),
+            "the legacy sentinel must not blanket-fire path rules"
+        );
+    }
+
+    /// artifact_exec composes mounts too, so it gets the same mechanical
+    /// feed; structured tools never do.
+    #[test]
+    fn artifact_exec_gets_the_mount_feed_but_structured_tools_do_not() {
+        let rules = vec![rule(
+            "artifact.exec",
+            Some("/home/alice/dataset/**"),
+            NamedEgressLabel::LocalOnly,
+        )];
+        let l = EgressLabeler::from_config(&cfg(rules));
+        let req = LabelRequest {
+            tool: "artifact_exec",
+            arguments_json: r#"{"artifact_ref":"ar.ds"}"#,
+            tool_call_id: "tc_mount5",
+            artifact_id: None,
+        };
+        let ms = mount_set(&["ro:/home/alice/dataset"]);
+        assert_eq!(
+            l.label_tool_result_with_mounts(
+                &req, None, "sess", "coder.abc", None, None, &no_prior(), Some(&ms),
+            )
+            .expect("artifact_exec mount trigger restricts")
+            .label,
+            EgressLabel::local_only()
+        );
+
+        let l2 = EgressLabeler::from_config(&cfg(vec![rule(
+            "fs.read",
+            Some("/home/alice/dataset/**"),
+            NamedEgressLabel::LocalOnly,
+        )]));
+        let req2 = LabelRequest {
+            tool: "fs.read",
+            arguments_json: r#"{"path":"/etc/hosts"}"#,
+            tool_call_id: "tc_mount6",
+            artifact_id: None,
+        };
+        assert!(
+            l2.label_tool_result_with_mounts(
+                &req2, None, "sess", "coder.abc", None, None, &no_prior(), Some(&ms),
+            )
+            .is_none(),
+            "a structured tool's mount set must be ignored"
+        );
+    }
+
+    /// The result-side lifter: parses the gateway-composed `mount_set` array
+    /// and refuses everything that is not one.
+    #[test]
+    fn mount_set_in_result_parses_gateway_composed_arrays() {
+        assert_eq!(
+            mount_set_in_result(r#"{"ok":true,"mount_set":["ro:host_root","rw:/tmp/a","ro:/home/alice/mail"]}"#),
+            Some(vec![
+                "ro:host_root".to_string(),
+                "rw:/tmp/a".to_string(),
+                "ro:/home/alice/mail".to_string(),
+            ]),
+        );
+        // Sandbox output is not JSON — no exec result can fake a mount set.
+        assert_eq!(mount_set_in_result("unzip: done"), None);
+        assert_eq!(mount_set_in_result(r#"{"ok":true}"#), None);
+        assert_eq!(mount_set_in_result(r#"{"mount_set":[]}"#), None);
+        assert_eq!(mount_set_in_result(r#"{"mount_set":"ro:/etc"}"#), None);
+        assert_eq!(mount_set_in_result(r#"{"mount_set":[1,2]}"#), None);
     }
 
     // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────

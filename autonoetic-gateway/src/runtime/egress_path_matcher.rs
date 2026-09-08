@@ -12,6 +12,15 @@
 //! script body touches `~/mail/**` produces a labeled result envelope even
 //! though no `fs.read` was ever called.
 //!
+//! ## The mechanical half: the mount set (#1002, RFC sandbox-mount-allow-set §8)
+//!
+//! The command/script scan above is an *advisory heuristic* — it guesses what
+//! the exec might read from the text it can see. The gateway also asserts a
+//! **fact**: the exec's mount set (`compose_mount_set`, lifted from the tool
+//! result into the durable trace). A labeled path **in the mount set** is a
+//! mechanical trigger via [`match_mounts`] — the exec can see it whether or
+//! not any command text mentions it — so the scan needs no second guess.
+//!
 //! ## Honest limits (RFC §11)
 //!
 //! Static path matching is defeated by indirection (symlinks, env vars,
@@ -442,6 +451,103 @@ pub fn normalize_home(pattern_or_token: &str, home: Option<&Path>) -> String {
     pattern_or_token.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Mount-set matching — the mechanical trigger (RFC sandbox-mount-allow-set §8)
+// ---------------------------------------------------------------------------
+
+/// Split one `compose_mount_set` entry into the host path it exposes.
+///
+/// Entries are `ro:<path>` / `rw:<path>`. Returns `None` for entries that name
+/// no specific host path: the `ro:host_root` sentinel (the legacy blanket
+/// bind — it asserts "everything", which the operator's path rules already
+/// speak to via their own semantics, not via a path to overlap) and the
+/// `truncated:+N` cap marker.
+fn mount_entry_path(entry: &str) -> Option<&str> {
+    let (mode, path) = entry.split_once(':')?;
+    match mode {
+        "ro" | "rw" if !path.is_empty() && path != "host_root" => Some(path),
+        _ => None,
+    }
+}
+
+/// Normalize a path for directory-overlap comparison: strip the trailing
+/// slash so `/home/u/mail/` and `/home/u/mail` are the same directory.
+fn dir_path(p: &str) -> &str {
+    match p.trim_end_matches('/') {
+        "" if p.starts_with('/') => "/",
+        "" => p,
+        t => t,
+    }
+}
+
+/// Does the mount expose the labeled path (or vice versa)?
+///
+/// A directory mount exposes the directory itself **and everything beneath
+/// it**, so the two relate iff one is the other or one lies beneath the other:
+/// - mount `/home/u/mail` vs labeled `/home/u/mail/**` → visible (the mount
+///   *is* the labeled root),
+/// - mount `/home/u` vs labeled `/home/u/mail` → visible (a broad mount
+///   exposes the narrower labeled path),
+/// - mount `/home/u/mail/inbox` vs labeled `/home/u/mail` → visible (the
+///   prefix semantics of `/**` cover the mounted subtree),
+/// - mount `/home/u/other` vs labeled `/home/u/mail` → not related.
+fn mount_exposes(mount: &str, labeled: &str) -> bool {
+    let m = dir_path(mount);
+    let l = dir_path(labeled);
+    if m == "/" || l == "/" {
+        // Root — one side claims the whole filesystem.
+        return true;
+    }
+    m == l || m.starts_with(&format!("{l}/")) || l.starts_with(&format!("{m}/"))
+}
+
+/// Match an exec's gateway-asserted mount set against labeled path patterns
+/// (RFC sandbox-mount-allow-set §8, #1296 item 3).
+///
+/// This is the **mechanical** half of the exec path scan: the gateway itself
+/// composed the mount set (`crate::sandbox::compose_mount_set`), so a pattern
+/// whose path overlaps a mount is a fact about visibility, not a guess from
+/// command text. [`EgressPathMatcher::analyze_sources`] remains the advisory
+/// half (a labeled path merely *referenced* in the command/script).
+///
+/// `~`-prefixed patterns are resolved against `home` — the same expansion
+/// `resolve_declared_mounts` applies to declarations — because mount entries
+/// are canonical absolute paths. Unresolvable `~` patterns simply never match
+/// a mount (the advisory scan still handles the literal-token case).
+///
+/// Returns the patterns that fired, in pattern order, deduplicated.
+pub fn match_mounts_with_home(
+    mount_entries: &[String],
+    patterns: &[LabeledPathPattern],
+    home: Option<&Path>,
+) -> Vec<String> {
+    let mounts: Vec<&str> = mount_entries.iter().filter_map(|e| mount_entry_path(e)).collect();
+    let mut matched: Vec<String> = Vec::new();
+    for pat in patterns {
+        let expanded = normalize_home(&pat.pattern, home);
+        let wildcard = expanded.ends_with('*');
+        let prefix = expanded.trim_end_matches('*');
+        let fires = if wildcard && prefix.is_empty() {
+            // `*` / `**` — any mount makes a pathlike view exist.
+            !mounts.is_empty()
+        } else {
+            mounts.iter().any(|m| mount_exposes(m, prefix))
+        };
+        if fires {
+            matched.push(pat.pattern.clone());
+        }
+    }
+    matched
+}
+
+/// [`match_mounts_with_home`] with the home dir read from the environment —
+/// the same `HOME` resolution `resolve_declared_mounts` uses for `~`-declared
+/// mounts, so the two sides of the comparison expand identically.
+pub fn match_mounts(mount_entries: &[String], patterns: &[LabeledPathPattern]) -> Vec<String> {
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    match_mounts_with_home(mount_entries, patterns, home.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +832,122 @@ for msg in mb:
         let sources =
             collect_exec_dependency_sources(r#"{"artifact_ref":"ar.mailparse"}"#, "", &ctx);
         assert!(sources.is_empty());
+    }
+
+    // ── mount-set matching (RFC sandbox-mount-allow-set §8) ───────────────
+
+    fn mounts(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn mount_at_the_labeled_root_triggers() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/mail"]),
+            &pats(&["/home/alice/mail/**"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail/**"]);
+    }
+
+    #[test]
+    fn mount_beneath_the_labeled_pattern_triggers() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/mail/inbox"]),
+            &pats(&["/home/alice/mail/**"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail/**"]);
+    }
+
+    #[test]
+    fn broad_mount_exposes_the_exact_labeled_path() {
+        let r = match_mounts_with_home(
+            &mounts(&["rw:/home/alice"]),
+            &pats(&["/home/alice/mail"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail"]);
+    }
+
+    #[test]
+    fn sibling_mount_does_not_trigger() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/other"]),
+            &pats(&["/home/alice/mail"]),
+            None,
+        );
+        assert!(r.is_empty());
+        // Same-prefix lookalikes must not overlap either.
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/home/alice/mail2"]),
+            &pats(&["/home/alice/mail"]),
+            None,
+        );
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn unrelated_mount_does_not_trigger() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:/var/log", "rw:/tmp/agent"]),
+            &pats(&["/home/alice/mail/**"]),
+            None,
+        );
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn host_root_sentinel_and_truncated_marker_are_ignored() {
+        let r = match_mounts_with_home(
+            &mounts(&["ro:host_root", "truncated:+3", "rw:/tmp/agent"]),
+            &pats(&["/etc/**", "/tmp/agent/**"]),
+            None,
+        );
+        // Only the concrete `rw` entry participates — the legacy blanket bind
+        // and the cap marker name no specific host path.
+        assert_eq!(r, vec!["/tmp/agent/**"]);
+    }
+
+    #[test]
+    fn tilde_pattern_resolves_against_home() {
+        let home = Path::new("/home/alice");
+        let r = match_mounts_with_home(&mounts(&["ro:/home/alice/mail"]), &pats(&["~/mail/**"]), Some(home));
+        assert_eq!(r, vec!["~/mail/**"]);
+        // Without a home dir the `~` pattern cannot overlap an absolute mount.
+        let r = match_mounts_with_home(&mounts(&["ro:/home/alice/mail"]), &pats(&["~/mail/**"]), None);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn trailing_slash_forms_are_equivalent() {
+        let r = match_mounts_with_home(
+            &mounts(&["rw:/home/alice/mail/"]),
+            &pats(&["/home/alice/mail/**"]),
+            None,
+        );
+        assert_eq!(r, vec!["/home/alice/mail/**"]);
+    }
+
+    #[test]
+    fn root_pattern_matches_any_mount() {
+        let r = match_mounts_with_home(&mounts(&["ro:/var/log"]), &pats(&["/**"]), None);
+        assert_eq!(r, vec!["/**"]);
+    }
+
+    #[test]
+    fn malformed_entries_are_skipped() {
+        let r = match_mounts_with_home(
+            &mounts(&["garbage", "ro:", "rw:", ":", "ro"]),
+            &pats(&["/**"]),
+            None,
+        );
+        assert!(r.is_empty(), "entries without a concrete path never fire");
+    }
+
+    #[test]
+    fn empty_mount_set_matches_nothing() {
+        let r = match_mounts_with_home(&mounts(&[]), &pats(&["/**", "/home/**"]), None);
+        assert!(r.is_empty());
     }
 }

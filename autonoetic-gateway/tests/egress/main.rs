@@ -24,6 +24,7 @@ mod grants_list_rpc;
 mod label_listing_rpc;
 mod lineage_rpc;
 mod mixed_session_e2e;
+mod mount_set_trigger;
 mod operator_message_label;
 mod phase4_boundaries;
 mod phase4_capsule;
