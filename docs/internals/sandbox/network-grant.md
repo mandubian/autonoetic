@@ -1,6 +1,6 @@
 # Sandbox network reachability: ceiling vs grant
 
-**Issue:** #1022 (audit) · **Umbrella:** #1025 · **Date:** 2026-08-03
+**Issue:** #1022 (audit) · **Umbrella:** #1025 · **Disclosure follow-up:** #1321 · **Date:** 2026-08-03
 
 This documents the audit #1022 asked for — *when the remote-access analyzer
 detects nothing at all, does a `NetworkAccess`-capable agent still gate, or does
@@ -172,6 +172,46 @@ target: sandbox_exec
  the network namespace unshared"  reason=no_grant  pattern_count=0
 ```
 
+### In the result body (#1321)
+
+Logs are not enough: a live packager session ran a `getent hosts` pre-flight
+probe, the exec had no grant (nothing in `getent hosts` was a detected network
+signal then), and the empty output was misread as "DNS/egress is broken" — the
+task failed and a false egress anomaly was filed. Every `sandbox_exec` and
+`artifact_exec` result body therefore now carries a `network` object
+(`network_grant::network_disclosure_json`), so an agent can branch on the
+namespace state instead of interpreting its own isolation:
+
+```json
+"network": {
+  "share_net": false,
+  "reason": "no_grant",
+  "capability_ceiling_unused": true
+}
+```
+
+`share_net` is the **effective** state handed to the sandbox (a sealed-network
+proxy widens the namespace after the decision, disclosed as
+`granted_by_sealed_proxy`). `reason` uses the `ShareNetReason` wire tokens:
+
+| token | meaning |
+|---|---|
+| `forced_off` | offline by exec class — `Evaluation` capability / promotion gate |
+| `safe_inspection` | local-inspection command; bypassed the gate, needs no network |
+| `taint_not_declassified` | session taint excludes `Sink::Network`, no declassification grant |
+| `granted_by_approval` | explicit per-exec grant (approval, cleared gate, preapproval, cache, ticket) |
+| `granted_by_capability` | capability-driven sibling paths (`artifact_exec` ordinary runs, script mode) where the ceiling *is* the grant by design |
+| `granted_by_sealed_proxy` | a `sandbox_network: sealed`/`recording` proxy opened the namespace after the decision (host-loopback proxy only) |
+| `no_grant` | fail-closed default (#1022) — no per-exec grant |
+
+`capability_ceiling_unused` is `true` only when the agent holds `NetworkAccess`
+and this exec had no approval-derived grant — the #1022 shape. It is always
+`false` on the capability-driven paths, where the ceiling is the grant.
+
+The `network` disclosure pairs with `apply_network_isolation_failure_to_result`
+(below): the disclosure is always present; the failure annotation only fires
+when the output itself carries connectivity-failure fingerprints.
+
 And when such an exec then fails on a connection error,
 `apply_network_isolation_failure_to_result` turns it into an `ok=false` /
 `error_type: network_isolated` result whose message names the likely cause and
@@ -179,6 +219,11 @@ the fix — make the target visible (a literal URL/host, listed in
 `metadata.autonoetic.remote_access.targets`) and retry so the operator can
 approve it. This is what keeps the new fail-closed failures diagnosable instead
 of looking like a broken sandbox.
+
+DNS resolution probes (`getent hosts`, `dig`, `nslookup`, `host`) are now in
+the analyzer's network-command vocabulary (#1321), so a probe gates — and, for
+a preapproved agent, earns its grant — exactly like `curl`/`wget` instead of
+running net-less unnoticed.
 
 ## Detector seam (#1039)
 
@@ -204,7 +249,10 @@ and an optional `GrantAdvice` side-channel remain follow-ups on #1039.
 
 - `autonoetic-gateway/src/runtime/network_grant.rs` (unit) — the decision matrix,
   including an exhaustive sweep of all 64 input combinations asserting
-  `share_net ⇒ a valid grant`.
+  `share_net ⇒ a valid grant`, plus the #1321 disclosure shape.
+- `autonoetic-gateway/src/runtime/tools/sandbox.rs` (`network_disclosure_tests`,
+  unit) — the result-body disclosure: net-less `no_grant`, granted, and the
+  sealed-proxy-widened case.
 - `autonoetic-gateway/tests/constitution/sandbox_network_grant_fail_closed.rs` —
   each link of the chain above, then the composed regression pin (network-capable
   agent + untainted session + zero signals ⇒ no `--share-net` in the bwrap argv),

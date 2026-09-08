@@ -1380,6 +1380,22 @@ impl RemoteAccessAnalyzer {
                 "dnf install downloads packages from the network",
             ),
             ("pacman -S", "pacman -S downloads packages from the network"),
+            // DNS resolution probes (#1321). These reach the resolver over the
+            // network exactly like curl/wget, so a probe must gate the same way
+            // — an undetected probe ran net-less, observed its own isolation,
+            // and its empty output was misread as "DNS is broken". The `host `
+            // form can false-positive on `--host 0.0.0.0`-style flags; that
+            // costs a prompt, not reachability (detection only raises gates).
+            (
+                "getent hosts",
+                "getent hosts performs DNS resolution over the network",
+            ),
+            ("dig ", "dig performs DNS queries over the network"),
+            (
+                "nslookup ",
+                "nslookup performs DNS queries over the network",
+            ),
+            ("host ", "host performs DNS lookups over the network"),
             // VCS network operations
             (
                 "git clone",
@@ -2560,6 +2576,56 @@ print(json.dumps({"usage": USAGE}))
             .detected_patterns
             .iter()
             .any(|p| p.category == "network_command" && p.pattern.contains("wget")));
+    }
+
+    /// #1321: DNS probes are network commands. The observed misfire — a
+    /// packager's `getent hosts` pre-flight probe ran in a net-less namespace
+    /// because detection missed it, then reported the empty output as a DNS
+    /// outage. Detection is what raises the gate (and, for a preapproved
+    /// agent, what earns the grant).
+    #[test]
+    fn test_dns_probes_detected_as_network_commands() {
+        for (code, expected) in [
+            ("getent hosts registry.npmjs.org", "getent hosts"),
+            ("dig +short registry.npmjs.org", "dig"),
+            ("nslookup registry.npmjs.org", "nslookup"),
+            ("host registry.npmjs.org", "host"),
+        ] {
+            let analysis = RemoteAccessAnalyzer::analyze_code(code);
+            assert!(
+                analysis.requires_approval,
+                "{code} must require the network gate"
+            );
+            assert!(
+                analysis
+                    .detected_patterns
+                    .iter()
+                    .any(|p| p.category == "network_command" && p.pattern == expected),
+                "{code} must detect the `{expected}` network command; got {:?}",
+                analysis.detected_patterns
+            );
+        }
+    }
+
+    /// Local package-environment reads stay out of the network vocabulary —
+    /// `npm config get prefix` is exactly the probe shape from #1321 and must
+    /// not gate (it genuinely needs no network). Its isolation is disclosed in
+    /// the exec result (`network.share_net`), not inferred from output.
+    #[test]
+    fn test_local_package_env_reads_not_detected() {
+        for code in [
+            "npm config get prefix",
+            "npm config get registry",
+            "node --version",
+            "pip show requests",
+        ] {
+            let analysis = RemoteAccessAnalyzer::analyze_code(code);
+            assert!(
+                !analysis.requires_approval,
+                "{code} must not raise the network gate; got {:?}",
+                analysis.detected_patterns
+            );
+        }
     }
 
     #[test]

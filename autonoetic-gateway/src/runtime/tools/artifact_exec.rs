@@ -1077,6 +1077,10 @@ impl NativeTool for ArtifactExecTool {
         // enforcing seal (netns + nftables transparent redirect) is a
         // future scope (5.2c-enforcing). Until then, raw-socket clients
         // escape.
+        // #1321: capture the pre-proxy state so the result disclosure can
+        // attribute an effective share_net=true to the proxy when (and only
+        // when) the proxy is what widened it.
+        let share_net_before_sealed_proxy = overrides.share_net;
         let sealed_proxy = crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
             manifest.sandbox_network,
             temp_base.clone(),
@@ -1162,6 +1166,27 @@ impl NativeTool for ArtifactExecTool {
             "mount_set": mount_set,
         });
 
+        // #1321: disclose the effective network-namespace state, same contract
+        // as sandbox_exec. This path is capability-driven *by design* (see
+        // docs/internals/sandbox/network-grant.md), so the reason vocabulary
+        // differs — the capability is the grant here — but a net-less run is
+        // equally indistinguishable from a DNS/egress outage without it.
+        let network_reason = capability_path_network_reason(
+            overrides.share_net,
+            // The proxy is the granter only when it is what widened the
+            // namespace; otherwise the pre-proxy state speaks.
+            share_net_before_sealed_proxy,
+            approval_validated_for_command,
+            manifest_may_record_promotion_verdicts(manifest),
+        );
+        body["network"] = crate::runtime::network_grant::network_disclosure_json(
+            overrides.share_net,
+            network_reason,
+            // The capability IS the grant on this path — a ceiling is never
+            // "unused" here.
+            false,
+        );
+
         // Informational only: on the network-isolated promotion-gate path the
         // detected remote-access patterns are NOT a block — the run already
         // happened offline. Surface them so the verdict role can reason about
@@ -1240,6 +1265,43 @@ pub fn promotion_run_is_network_isolated(manifest: &AgentManifest) -> bool {
                 )
             })
             .unwrap_or(false)
+}
+
+/// #1321: the disclosure reason for the capability-driven `artifact_exec`
+/// paths (`execute()` and the deployment-ticket path).
+///
+/// `effective_share_net` is the value handed to the sandbox;
+/// `share_net_before_sealed_proxy` is what the path's own grant logic produced
+/// before `setup_sealed_proxy_for_exec` could widen it. When the proxy is what
+/// widened the namespace, the reason is `granted_by_sealed_proxy`; otherwise an
+/// effective grant is attributed to the path's approval source
+/// (`approval_granted`: a validated approval_ref / cleared gate on execute(),
+/// the operator-approved ticket domains on the ticket path) or, failing that,
+/// to the capability — which *is* the grant by design on these paths. A
+/// net-less promotion-gate run is `forced_off`; any other net-less run is
+/// `no_grant`.
+fn capability_path_network_reason(
+    effective_share_net: bool,
+    share_net_before_sealed_proxy: bool,
+    approval_granted: bool,
+    promotion_isolated: bool,
+) -> crate::runtime::network_grant::ShareNetReason {
+    use crate::runtime::network_grant::ShareNetReason;
+    if effective_share_net {
+        if share_net_before_sealed_proxy {
+            if approval_granted {
+                ShareNetReason::GrantedByApproval
+            } else {
+                ShareNetReason::GrantedByCapability
+            }
+        } else {
+            ShareNetReason::GrantedBySealedProxy
+        }
+    } else if promotion_isolated {
+        ShareNetReason::ForcedOff
+    } else {
+        ShareNetReason::NoGrant
+    }
 }
 
 /// The artifact's declared script input mode, read from its SKILL.md
@@ -1508,6 +1570,8 @@ fn execute_with_ticket(
     // RFC scope 5.2c-advisory: see the matching block in the main
     // `artifact_exec` execute() path. Same wiring on the
     // execute_with_ticket path (used for resumed approval flows).
+    // #1321: capture the pre-proxy state for the same disclosure attribution.
+    let share_net_before_sealed_proxy = overrides.share_net;
     let sealed_proxy = crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
         manifest.sandbox_network,
         temp_base.clone(),
@@ -1578,6 +1642,24 @@ fn execute_with_ticket(
         "mount_set": mount_set,
     });
 
+    // #1321: same disclosure contract as the execute() path. The ticket's
+    // operator-approved domains are the grant here (`share_net =
+    // !approved_domains.is_empty()`); a sealed-proxy widening after that shows
+    // as granted_by_sealed_proxy.
+    let network_reason = capability_path_network_reason(
+        overrides.share_net,
+        share_net_before_sealed_proxy,
+        !ticket.approved_domains.is_empty(),
+        // The ticket path has no promotion-gate branch: overrides come from
+        // from_capabilities + the ticket grant only.
+        false,
+    );
+    body["network"] = crate::runtime::network_grant::network_disclosure_json(
+        overrides.share_net,
+        network_reason,
+        false,
+    );
+
     if !overrides.share_net {
         let has_network_cap = manifest
             .capabilities
@@ -1622,13 +1704,62 @@ fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
 mod tests {
     use super::{
         artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
-        artifact_script_input_mode, promotion_gate_artifact_command_decision, ArtifactExecArgs,
-        ArtifactExecTool,
+        artifact_script_input_mode, capability_path_network_reason,
+        promotion_gate_artifact_command_decision, ArtifactExecArgs, ArtifactExecTool,
     };
+    use crate::runtime::network_grant::ShareNetReason;
     use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
     use crate::runtime::tools::NativeTool;
     use autonoetic_types::agent::ScriptInputMode;
     use autonoetic_types::capability::Capability;
+
+    /// #1321 review fix: the sealed proxy must be named as the granter only
+    /// when it is what widened the namespace — keyed off the before/after
+    /// share_net capture, never off the promotion-role check.
+    #[test]
+    fn disclosure_reason_tracks_the_actual_widening_source() {
+        use ShareNetReason::{
+            ForcedOff, GrantedByApproval, GrantedByCapability, GrantedBySealedProxy, NoGrant,
+        };
+        // Capability is the grant (the by-design default on this path).
+        assert_eq!(
+            capability_path_network_reason(true, true, false, false),
+            GrantedByCapability
+        );
+        // An approval/cleared gate outranks the capability attribution.
+        assert_eq!(
+            capability_path_network_reason(true, true, true, false),
+            GrantedByApproval
+        );
+        // The Copilot-flagged mislabel: no capability, no approval, share_net
+        // flipped on only by the proxy → granted_by_sealed_proxy, NOT
+        // granted_by_capability.
+        assert_eq!(
+            capability_path_network_reason(true, false, false, false),
+            GrantedBySealedProxy
+        );
+        // A promotion-role manifest widened by the proxy (defensive: the gate
+        // skips proxy setup under force_network_off today) still names the
+        // proxy, not the capability.
+        assert_eq!(
+            capability_path_network_reason(true, false, true, true),
+            GrantedBySealedProxy
+        );
+        // Net-less: the promotion gate is forced off; anything else is a
+        // plain no-grant.
+        assert_eq!(
+            capability_path_network_reason(false, false, false, true),
+            ForcedOff
+        );
+        assert_eq!(
+            capability_path_network_reason(false, false, false, false),
+            NoGrant
+        );
+        assert_eq!(
+            capability_path_network_reason(false, false, true, false),
+            NoGrant
+        );
+    }
 
     #[test]
     fn artifact_exec_args_accepts_optional_intent() {
