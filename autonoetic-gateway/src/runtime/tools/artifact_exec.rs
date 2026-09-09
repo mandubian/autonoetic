@@ -885,6 +885,7 @@ impl NativeTool for ArtifactExecTool {
         let mut mounts = Vec::new();
         let mut layer_python_paths: Vec<String> = Vec::new();
         let mut layer_node_paths: Vec<String> = Vec::new();
+        let mut layer_bin_paths: Vec<String> = Vec::new();
         let temp_base = std::env::temp_dir()
             .join("autonoetic_artifact")
             .join(artifact_id.replace('/', "_"));
@@ -920,6 +921,7 @@ impl NativeTool for ArtifactExecTool {
                 &mut mounts,
                 &mut layer_python_paths,
                 &mut layer_node_paths,
+                &mut layer_bin_paths,
             )?;
         }
 
@@ -1016,6 +1018,25 @@ impl NativeTool for ArtifactExecTool {
                 }
                 None => {
                     extra_env.push(("NODE_PATH".to_string(), layer_np));
+                }
+            }
+        }
+        // Layer executables on PATH — see `extract_and_mount_layers`.
+        if !layer_bin_paths.is_empty() {
+            let layer_bp = layer_bin_paths.join(":");
+            match extra_env.iter().position(|(k, _)| k == "PATH") {
+                Some(idx) => {
+                    let existing = std::mem::take(&mut extra_env[idx].1);
+                    extra_env[idx].1 = format!("{layer_bp}:{existing}");
+                }
+                None => {
+                    let inherited = std::env::var("PATH").unwrap_or_default();
+                    let prefixed = if inherited.is_empty() {
+                        layer_bp
+                    } else {
+                        format!("{layer_bp}:{inherited}")
+                    };
+                    extra_env.push(("PATH".to_string(), prefixed));
                 }
             }
         }
@@ -1406,6 +1427,7 @@ fn execute_with_ticket(
     let mut mounts = Vec::new();
     let mut layer_python_paths: Vec<String> = Vec::new();
     let mut layer_node_paths: Vec<String> = Vec::new();
+    let mut layer_bin_paths: Vec<String> = Vec::new();
     let temp_base = std::env::temp_dir()
         .join("autonoetic_artifact")
         .join(args.artifact_ref.replace('/', "_"));
@@ -1441,6 +1463,7 @@ fn execute_with_ticket(
             &mut mounts,
             &mut layer_python_paths,
             &mut layer_node_paths,
+            &mut layer_bin_paths,
         )?;
     }
 
@@ -1529,6 +1552,25 @@ fn execute_with_ticket(
             }
             None => {
                 extra_env.push(("NODE_PATH".to_string(), layer_np));
+            }
+        }
+    }
+    // Layer executables on PATH — see `extract_and_mount_layers`.
+    if !layer_bin_paths.is_empty() {
+        let layer_bp = layer_bin_paths.join(":");
+        match extra_env.iter().position(|(k, _)| k == "PATH") {
+            Some(idx) => {
+                let existing = std::mem::take(&mut extra_env[idx].1);
+                extra_env[idx].1 = format!("{layer_bp}:{existing}");
+            }
+            None => {
+                let inherited = std::env::var("PATH").unwrap_or_default();
+                let prefixed = if inherited.is_empty() {
+                    layer_bp
+                } else {
+                    format!("{layer_bp}:{inherited}")
+                };
+                extra_env.push(("PATH".to_string(), prefixed));
             }
         }
     }

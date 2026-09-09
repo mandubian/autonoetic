@@ -63,6 +63,7 @@ pub fn extract_and_mount_layers(
     mounts: &mut Vec<SandboxMount>,
     python_paths: &mut Vec<String>,
     node_paths: &mut Vec<String>,
+    bin_paths: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
     for layer in layers {
@@ -120,6 +121,32 @@ pub fn extract_and_mount_layers(
             let node_mount = std::path::Path::new(&layer.mount_path).join("node_modules");
             if node_mount.has_root() {
                 node_paths.push(node_mount.to_string_lossy().to_string());
+            }
+        }
+
+        // Discover executable directories inside the layer.
+        //
+        // `PYTHONPATH`/`NODE_PATH` make a layer's *libraries* importable but
+        // leave its *executables* unreachable: `NODE_PATH` feeds `require()`,
+        // not `PATH`. Installing a CLI tool is exactly the case that breaks —
+        // in session-eb6abde5 the gateway had mounted node at `/tmp/nodejs`
+        // and the package at `/tmp/node_modules`, knew both paths, and the
+        // smoke-test agent still spent 8 execs blind-searching `/`, `/tmp`
+        // and `~` for its own dependency because `agent-browser` and `node`
+        // were not on `PATH`.
+        //
+        // `<mount>/bin` covers an unpacked runtime tarball and a Python venv;
+        // `<mount>/node_modules/.bin` covers npm-installed CLIs.
+        for (probe, rel) in [
+            (layer_temp_base.join("bin"), "bin"),
+            (node_modules_temp.join(".bin"), "node_modules/.bin"),
+        ] {
+            if !probe.is_dir() {
+                continue;
+            }
+            let mounted = std::path::Path::new(&layer.mount_path).join(rel);
+            if mounted.has_root() {
+                bin_paths.push(mounted.to_string_lossy().to_string());
             }
         }
     }
@@ -2315,6 +2342,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
         let mut layer_python_paths: Vec<String> = Vec::new();
         let mut layer_node_paths: Vec<String> = Vec::new();
+        let mut layer_bin_paths: Vec<String> = Vec::new();
         let mut artifact_fixture_root: Option<std::path::PathBuf> = None;
         let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
@@ -2364,6 +2392,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     &mut mounts,
                     &mut layer_python_paths,
                     &mut layer_node_paths,
+                    &mut layer_bin_paths,
                 )?;
             }
 
@@ -2399,6 +2428,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     &mut runtime_lock_mounts,
                     &mut layer_python_paths,
                     &mut layer_node_paths,
+                    &mut layer_bin_paths,
                 )?;
 
                 tracing::info!(
@@ -2472,6 +2502,18 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         }
         if !layer_node_path_str.is_empty() {
             extra_env.push(("NODE_PATH".to_string(), layer_node_path_str));
+        }
+        // Layer executables go on PATH ahead of the inherited entries, so a
+        // packager-installed CLI is invocable by name instead of by absolute
+        // path the agent has to go find.
+        if !layer_bin_paths.is_empty() {
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            let prefixed = if inherited.is_empty() {
+                layer_bin_paths.join(":")
+            } else {
+                format!("{}:{}", layer_bin_paths.join(":"), inherited)
+            };
+            extra_env.push(("PATH".to_string(), prefixed));
         }
 
         // First-class `input` parameter → AUTONOETIC_INPUT env var. Mirrors
@@ -4277,6 +4319,92 @@ mod approval_ref_binding_tests {
         let decision = decision("coder.default", "root/coder.default-1", "root");
         validate_approval_ref_context(&decision, "coder.default", Some("root/coder.default-1"))
             .expect("same agent + same root should be accepted");
+    }
+}
+
+#[cfg(test)]
+mod layer_bin_path_tests {
+    use super::*;
+
+    /// A layer's executables must be discoverable on PATH, not just its
+    /// libraries on NODE_PATH/PYTHONPATH. session-eb6abde5: node was mounted
+    /// at /tmp/nodejs and agent-browser at /tmp/node_modules, and the agent
+    /// still spent 8 execs hunting for them because neither was on PATH.
+    #[test]
+    fn layer_bin_dirs_are_discovered_for_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gw_dir = tmp.path();
+        let store = crate::layer_store::LayerStore::new(gw_dir, Default::default())
+            .expect("layer store");
+
+        // A node-tarball-shaped layer: bin/ plus node_modules/.bin/.
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        std::fs::write(src.join("bin").join("node"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(src.join("node_modules").join(".bin")).unwrap();
+        std::fs::write(
+            src.join("node_modules").join(".bin").join("agent-browser"),
+            b"#!/bin/sh\n",
+        )
+        .unwrap();
+
+        let manifest = store
+            .create_from_dir(&src, "test-layer", "/tmp/nodejs", None)
+            .expect("create layer");
+
+        let layers = vec![LayerMount {
+            layer_id: manifest.layer_id.clone(),
+            mount_path: "/tmp/nodejs".to_string(),
+        }];
+        let mut mounts = Vec::new();
+        let mut python_paths = Vec::new();
+        let mut node_paths = Vec::new();
+        let mut bin_paths = Vec::new();
+        extract_and_mount_layers(
+            &layers,
+            gw_dir,
+            "test",
+            &mut mounts,
+            &mut python_paths,
+            &mut node_paths,
+            &mut bin_paths,
+        )
+        .expect("mount layers");
+
+        assert!(
+            bin_paths.contains(&"/tmp/nodejs/bin".to_string()),
+            "runtime bin dir must be on PATH: {bin_paths:?}"
+        );
+        assert!(
+            bin_paths.contains(&"/tmp/nodejs/node_modules/.bin".to_string()),
+            "npm CLI shim dir must be on PATH: {bin_paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_layer_without_executables_contributes_no_path_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gw_dir = tmp.path();
+        let store = crate::layer_store::LayerStore::new(gw_dir, Default::default())
+            .expect("layer store");
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("lib")).unwrap();
+        std::fs::write(src.join("lib").join("mod.py"), b"x = 1\n").unwrap();
+        let manifest = store
+            .create_from_dir(&src, "libs-only", "/tmp/libs", None)
+            .expect("create layer");
+
+        let layers = vec![LayerMount {
+            layer_id: manifest.layer_id.clone(),
+            mount_path: "/tmp/libs".to_string(),
+        }];
+        let (mut mounts, mut pp, mut np, mut bp) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        extract_and_mount_layers(
+            &layers, gw_dir, "test", &mut mounts, &mut pp, &mut np, &mut bp,
+        )
+        .expect("mount layers");
+        assert!(bp.is_empty(), "no bin dirs to add: {bp:?}");
     }
 }
 
