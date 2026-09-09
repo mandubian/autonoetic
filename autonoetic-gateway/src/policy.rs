@@ -104,7 +104,7 @@ impl PolicyDecision {
                         SecurityThreat::CodeFromInput =>
                             "write the code to a file first (content_write), then run it (`python3 file.py`, `node file.js`) — `-c`/stdin/exec-string code is rejected as code-from-input",
                         SecurityThreat::ShellInjection =>
-                            "remove `$(...)`, backticks and unquoted expansions from the command — compute values in a separate step or inside a script file",
+                            "a command substitution here runs something that is itself refused, or whose command name is not statically visible (`$($CMD)`) — run the inner command directly to see which check it trips, or compute the value in a separate step",
                         SecurityThreat::EnvironmentDisclosure =>
                             "read the specific environment variables you need inside your script instead of dumping `env`/`printenv`",
                         SecurityThreat::Destructive
@@ -198,6 +198,58 @@ fn is_shell_wrapper_command(cmd: &str) -> bool {
     false
 }
 
+/// Resolve a command-substitution body starting at `start` (just past the
+/// opening delimiter) and ending at the matching `close` byte.
+///
+/// Returns `(body, index_just_past_close)`, or `None` when the construct is
+/// unbalanced. Tracks quotes so a `)` inside `'...'`/`"..."` does not close
+/// the substitution, and nests on `$(` so `$(a $(b) c)` resolves as one body.
+/// For backticks (`close == b'`'`), which do not nest, the body runs to the
+/// next unescaped backtick.
+fn extract_substitution_body(cmd: &str, start: usize, close: u8) -> Option<(&str, usize)> {
+    let bytes = cmd.as_bytes();
+    let mut i = start;
+    let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && i + 1 < bytes.len() {
+            // Escaped byte: never a delimiter.
+            i += 2;
+            continue;
+        }
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if c == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double {
+            if close == b')' && c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+                depth += 1;
+                i += 2;
+                continue;
+            }
+            if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    // Guard against a multi-byte char boundary split.
+                    return cmd.get(start..i).map(|body| (body, i + 1));
+                }
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Analyzes shell commands for security threats.
 pub struct SecurityAnalyzer;
 
@@ -205,6 +257,12 @@ impl SecurityAnalyzer {
     /// Analyze a command for security threats.
     /// Returns Analysis with threats found and whether it's safe to execute.
     pub fn analyze_command(command: &str) -> SecurityAnalysis {
+        Self::analyze_command_at_depth(command, 0)
+    }
+
+    /// `analyze_command`, carrying the command-substitution nesting depth so a
+    /// recursive body scan cannot loop forever on pathological input.
+    fn analyze_command_at_depth(command: &str, depth: usize) -> SecurityAnalysis {
         let mut threats = Vec::new();
 
         // Split command by shell separators to analyze each part
@@ -258,7 +316,7 @@ impl SecurityAnalyzer {
         }
 
         // ShellInjection scan against the full command — see note above.
-        if Self::is_shell_injection(command) {
+        if Self::is_shell_injection_at_depth(command, depth) {
             threats.push(SecurityThreat::ShellInjection);
         }
 
@@ -401,13 +459,36 @@ impl SecurityAnalyzer {
     /// repeatedly blocked the researcher agent until `LoopGuard` killed the
     /// session (surfacing as `RepeatedIrrecoverableRejection`).
     fn is_shell_injection(cmd: &str) -> bool {
+        Self::is_shell_injection_at_depth(cmd, 0)
+    }
+
+    /// Maximum command-substitution nesting the analyzer will descend into
+    /// before refusing. Bodies nested deeper than this are treated as
+    /// unanalyzable rather than assumed safe.
+    const MAX_SUBSTITUTION_DEPTH: usize = 3;
+
+    fn is_shell_injection_at_depth(cmd: &str, depth: usize) -> bool {
         let single_quote_body_is_shell = is_shell_wrapper_command(cmd);
         let bytes = cmd.as_bytes();
         let mut in_single = false;
         let mut in_double = false;
         let mut i = 0;
+        // Command position must be statically visible at EVERY level, outer
+        // included. Without this, `$(echo cm0gLXJm | base64 -d) -rf /` clears:
+        // the body (`echo … | base64 -d`) is benign and the dangerous string
+        // only exists after expansion, so the command name is runtime-chosen.
+        // Tracked inside this quote-aware walk rather than over a naive
+        // separator split — splitting on `;` shreds quoted regions, which is
+        // the false-positive class documented at the segment loop above.
+        let mut at_command_position = true;
         while i < bytes.len() {
             let c = bytes[i];
+            let expandable = !in_single || single_quote_body_is_shell;
+            if expandable && matches!(c, b'|' | b'&' | b';') {
+                at_command_position = true;
+                i += 1;
+                continue;
+            }
             if c == b'\'' && !in_double {
                 in_single = !in_single;
                 i += 1;
@@ -428,20 +509,55 @@ impl SecurityAnalyzer {
                 continue;
             }
             if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
-                // `$(...)` command substitution in a context bash would
-                // expand. Allow a small allowlist of safe, common
-                // substitutions.
-                let tail = &cmd[i..];
-                let safe_patterns = ["$(pwd)", "$(dirname", "$(basename"];
-                if !safe_patterns.iter().any(|p| tail.starts_with(p)) {
+                if at_command_position {
                     return true;
                 }
-                i += 2;
-                continue;
+                // `$(...)` command substitution in a context bash would
+                // expand. Resolve the BODY and analyze it, rather than
+                // rejecting the syntax: the risk a substitution carries is
+                // not privilege (the sandbox is the boundary) but *analyzer
+                // evasion* — hiding a payload from the destructive /
+                // privilege-escalation / sandbox-escape checks, as in
+                // `$(echo cm0gLXJmCg== | base64 -d)`. Reading the body keeps
+                // that protection while letting the benign majority through.
+                //
+                // The prior fixed allowlist (`$(pwd)`, `$(dirname`,
+                // `$(basename`) blocked `echo "node=$(node --version)"` with
+                // `do_not_retry` + `requires_human` on a version probe
+                // (session-eb6abde5, packager) and put every other harmless
+                // form on a pattern treadmill — the failure mode
+                // `docs/internals/sandbox/sink-detection.md` rejects for
+                // network sinks. It was also prefix-matched, so the
+                // no-closing-paren entries admitted arbitrary trailing body.
+                match extract_substitution_body(cmd, i + 2, b')') {
+                    Some((body, end)) => {
+                        if Self::substitution_body_is_unsafe(body, depth) {
+                            return true;
+                        }
+                        i = end;
+                        continue;
+                    }
+                    // Unbalanced `$(` — the body cannot be resolved, so it
+                    // cannot be cleared. Fail closed.
+                    None => return true,
+                }
             }
             if c == b'`' {
-                // Backtick command substitution in an expanded region.
-                return true;
+                if at_command_position {
+                    return true;
+                }
+                // Backtick substitution: same rule as `$(...)`. Backticks do
+                // not nest, so the body runs to the next unescaped backtick.
+                match extract_substitution_body(cmd, i + 1, b'`') {
+                    Some((body, end)) => {
+                        if Self::substitution_body_is_unsafe(body, depth) {
+                            return true;
+                        }
+                        i = end;
+                        continue;
+                    }
+                    None => return true,
+                }
             }
             if c == b'e' && cmd[i..].starts_with("eval ") {
                 // `eval ` invocation in an expanded region. Inside a Python
@@ -449,9 +565,42 @@ impl SecurityAnalyzer {
                 // shell construct, so it is no longer flagged there.
                 return true;
             }
+            if !c.is_ascii_whitespace() {
+                at_command_position = false;
+            }
             i += 1;
         }
         false
+    }
+
+    /// True when a command-substitution body cannot be cleared.
+    ///
+    /// A body is unsafe when it is *unanalyzable* — the command it runs is not
+    /// visible statically, so no check can speak to it — or when analyzing it
+    /// trips any threat check. This is what preserves the evasion protection
+    /// the old blanket rejection provided: `$(rm -rf /)` still fails (the
+    /// recursive scan reports `Destructive`), and `$($CMD)` still fails
+    /// (unanalyzable command position).
+    fn substitution_body_is_unsafe(body: &str, depth: usize) -> bool {
+        if depth >= Self::MAX_SUBSTITUTION_DEPTH {
+            return true;
+        }
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            // `$()` expands to nothing and runs nothing.
+            return false;
+        }
+        // The command position must be a literal. A `$`- or backtick-derived
+        // command name is chosen at runtime and defeats every static check.
+        let first_token = trimmed.split_whitespace().next().unwrap_or("");
+        if first_token.contains('$') || first_token.contains('`') {
+            return true;
+        }
+        // Recursively apply the full threat scan to the body. Any threat —
+        // destructive, privilege escalation, sandbox escape, a nested
+        // substitution that itself fails — disqualifies the substitution.
+        let inner = Self::analyze_command_at_depth(trimmed, depth + 1);
+        !inner.is_safe
     }
 
     /// Check for code execution from string input (high risk).
@@ -1297,43 +1446,175 @@ mod tests {
         // `python3 -c \"...$(...)...\"` — outer double quotes mean bash
         // expands `$(...)` before python sees it. That both corrupts the
         // script and is a real injection vector — must still be flagged.
-        let analysis = SecurityAnalyzer::analyze_command(
+        // Bash expands it before python sees it, so the body is analyzed as
+        // shell — benign clears, refused does not.
+        let clean = SecurityAnalyzer::analyze_command(
             "python3 -c \"print('$(whoami)')\"",
         );
         assert!(
+            !clean.threats.contains(&SecurityThreat::ShellInjection),
+            "benign body in a double-quoted python arg must clear: {:?}",
+            clean.threats
+        );
+        let dirty = SecurityAnalyzer::analyze_command(
+            "python3 -c \"print('$(rm -rf /)')\"",
+        );
+        assert!(
+            !dirty.is_safe,
+            "double-quoted body with a refused substitution must trip: {:?}",
+            dirty.threats
+        );
+    }
+
+    #[test]
+    fn dollar_paren_with_a_benign_body_is_allowed() {
+        // Policy: a substitution is judged by WHAT IT RUNS. `whoami` is
+        // permitted as a bare command, so `$(whoami)` grants nothing new.
+        // Previously any `$(` was refused with `do_not_retry` +
+        // `requires_human`, which cost the packager a turn on
+        // `echo "node=$(node --version)"` (session-eb6abde5).
+        for cmd in [
+            "echo $(whoami)",
+            "echo \"node=$(node --version) npm=$(npm --version)\"",
+            "readlink -f $(command -v node)",
+            "tar -xf x.tar -C $(mktemp -d)",
+        ] {
+            let analysis = SecurityAnalyzer::analyze_command(cmd);
+            assert!(
+                !analysis.threats.contains(&SecurityThreat::ShellInjection),
+                "benign substitution body must clear: {cmd} -> {:?}",
+                analysis.threats
+            );
+        }
+    }
+
+    #[test]
+    #[test]
+    fn dollar_paren_hiding_a_refused_command_is_still_flagged() {
+        // The reason to inspect substitutions at all: they can hide a payload
+        // from the destructive / privilege-escalation / sandbox-escape checks.
+        // Recursing into the body is what keeps that protection.
+        for cmd in [
+            "echo $(rm -rf /)",
+            "x=$(sudo cat /etc/shadow)",
+            "echo $(dd if=/dev/zero of=/dev/sda)",
+        ] {
+            let analysis = SecurityAnalyzer::analyze_command(cmd);
+            assert!(
+                !analysis.is_safe,
+                "substitution hiding a refused command must not clear: {cmd} -> {:?}",
+                analysis.threats
+            );
+        }
+    }
+
+    #[test]
+    fn dollar_paren_with_an_unanalyzable_command_position_is_flagged() {
+        // A runtime-chosen command name defeats every static check, so it is
+        // refused rather than assumed safe.
+        for cmd in [
+            "echo $($CMD)",
+            "echo $(`echo rm` -rf /)",
+            "echo $(${TOOL} --version)",
+        ] {
+            let analysis = SecurityAnalyzer::analyze_command(cmd);
+            assert!(
+                analysis.threats.contains(&SecurityThreat::ShellInjection),
+                "unanalyzable command position must be flagged: {cmd} -> {:?}",
+                analysis.threats
+            );
+        }
+    }
+
+    #[test]
+    fn substitution_in_command_position_is_flagged_at_the_outer_level_too() {
+        // The evasion the body scan alone would miss: the payload does not
+        // exist until after expansion, so the command name is runtime-chosen.
+        for cmd in [
+            "$(echo cm0gLXJm | base64 -d) -rf /",
+            "`echo rm` -rf /",
+            "cat f.txt | $(echo c2g= | base64 -d)",
+        ] {
+            let analysis = SecurityAnalyzer::analyze_command(cmd);
+            assert!(
+                analysis.threats.contains(&SecurityThreat::ShellInjection),
+                "substitution in command position must be flagged: {cmd} -> {:?}",
+                analysis.threats
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_substitution_fails_closed() {
+        // The body cannot be resolved, so it cannot be cleared.
+        let analysis = SecurityAnalyzer::analyze_command("echo $(whoami");
+        assert!(
             analysis.threats.contains(&SecurityThreat::ShellInjection),
-            "double-quoted body with $(...) must trip ShellInjection: {:?}",
+            "unbalanced `$(` must fail closed: {:?}",
             analysis.threats
         );
     }
 
     #[test]
-    fn test_shell_injection_dollar_paren_unquoted_is_flagged() {
-        let analysis = SecurityAnalyzer::analyze_command("echo $(whoami)");
-        assert!(analysis.threats.contains(&SecurityThreat::ShellInjection));
+    fn nested_substitution_recurses_to_the_inner_body() {
+        let clean = SecurityAnalyzer::analyze_command("echo $(dirname $(command -v node))");
+        assert!(
+            !clean.threats.contains(&SecurityThreat::ShellInjection),
+            "clean nested bodies must clear: {:?}",
+            clean.threats
+        );
+        let dirty = SecurityAnalyzer::analyze_command("echo $(dirname $(sudo id))");
+        assert!(
+            !dirty.is_safe,
+            "a refused command nested two deep must still be caught: {:?}",
+            dirty.threats
+        );
     }
 
     #[test]
-    fn test_shell_injection_backtick_unquoted_is_flagged() {
-        let analysis = SecurityAnalyzer::analyze_command("echo `whoami`");
-        assert!(analysis.threats.contains(&SecurityThreat::ShellInjection));
+    fn backtick_substitution_follows_the_same_body_rule() {
+        let clean = SecurityAnalyzer::analyze_command("echo `whoami`");
+        assert!(
+            !clean.threats.contains(&SecurityThreat::ShellInjection),
+            "benign backtick body must clear: {:?}",
+            clean.threats
+        );
+        let dirty = SecurityAnalyzer::analyze_command("echo `rm -rf /`");
+        assert!(
+            !dirty.is_safe,
+            "backtick body hiding a refused command must not clear: {:?}",
+            dirty.threats
+        );
+        let unbalanced = SecurityAnalyzer::analyze_command("echo `whoami");
+        assert!(
+            unbalanced.threats.contains(&SecurityThreat::ShellInjection),
+            "unbalanced backtick must fail closed: {:?}",
+            unbalanced.threats
+        );
     }
 
     #[test]
     fn test_shell_injection_dollar_paren_in_bash_c_single_quoted_is_flagged() {
         // `bash -c '...'` — the single-quoted body is re-parsed as shell,
         // so `$(...)` inside IS a real command substitution.
-        let analysis = SecurityAnalyzer::analyze_command("bash -c 'echo $(whoami)'");
+        // The body rule applies there too: benign clears, refused does not.
+        let clean = SecurityAnalyzer::analyze_command("bash -c 'echo $(whoami)'");
         assert!(
-            analysis.threats.contains(&SecurityThreat::ShellInjection),
-            "bash -c single-quoted body is shell — $(...) must trip: {:?}",
-            analysis.threats
+            !clean.threats.contains(&SecurityThreat::ShellInjection),
+            "benign body inside bash -c must clear: {:?}",
+            clean.threats
+        );
+        let dirty = SecurityAnalyzer::analyze_command("bash -c 'echo $(sudo id)'");
+        assert!(
+            !dirty.is_safe,
+            "bash -c single-quoted body is shell — a refused substitution must trip: {:?}",
+            dirty.threats
         );
     }
 
     #[test]
     fn test_shell_injection_safe_allowlist_still_works_unquoted() {
-        // $(pwd) / $(dirname ...) / $(basename ...) remain in the allowlist.
+        // Formerly the entire allowlist; now just an instance of the body rule.
         let analysis = SecurityAnalyzer::analyze_command("echo $(pwd)");
         assert!(
             !analysis.threats.contains(&SecurityThreat::ShellInjection),
@@ -1527,13 +1808,13 @@ mod tests {
             commands: vec![],
         }]);
         let policy = PolicyEngine::new(manifest);
-        let command = "npm config get prefix; npm config get registry; readlink -f $(command -v node)";
+        let command = "npm config get prefix; npm config get registry; readlink -f $(sudo id)";
         let decision = policy.can_exec_shell_detailed(command);
         assert!(!decision.is_allowed());
         let msg = decision.explain_shell_denial("Sandbox execution", command);
         assert!(
-            msg.contains("$(...)") || msg.contains("expansions"),
-            "ShellInjection denial must name the expansion fix: {msg}"
+            msg.contains("command substitution") || msg.contains("statically visible"),
+            "ShellInjection denial must explain the body rule: {msg}"
         );
     }
 
