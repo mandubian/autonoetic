@@ -570,7 +570,24 @@ pub fn append_bwrap_isolation_flags(
         argv.push("--share-net".to_string());
     }
 
-    match bwrap_dev_mode() {
+    // `dev_mode: legacy` means "emit no /dev override" — which was only ever
+    // safe because `host_fs: legacy` ro-binds the host `/` and carries /dev in
+    // with it. Under `host_fs: allow_set` (the DP-1 default) the root is a bare
+    // `--tmpfs /` plus an explicit bind list that has no /dev, so the pair of
+    // defaults leaves the sandbox with no /dev/null at all and every
+    // `2>/dev/null` in an ordinary install script dies at
+    // `sh: cannot create /dev/null: Directory nonexistent` (session-eb6abde5).
+    // Same regression class as the #1174 SDK-path fix on the line above the
+    // allow-set bind loop; /dev is `--proc /proc`'s sibling and was missed.
+    // Legacy-with-allow-set therefore resolves to Minimal: bwrap's own
+    // devtmpfs (null/zero/full/random/urandom/tty), no host device exposure.
+    let dev_mode = match bwrap_dev_mode() {
+        BwrapDevMode::Legacy if host_fs_mode(overrides) == HostFsMode::AllowSet => {
+            BwrapDevMode::Minimal
+        }
+        other => other,
+    };
+    match dev_mode {
         BwrapDevMode::Legacy => {}
         BwrapDevMode::Minimal => {
             argv.push("--dev".to_string());
@@ -741,6 +758,54 @@ fn bwrap_deny_path_flags(gateway_dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allow_set_provides_dev_even_when_dev_mode_is_legacy() {
+        // The defect: `dev_mode: legacy` (no /dev override) paired with
+        // `host_fs: allow_set` (bare `--tmpfs /`, no host root bind) left the
+        // sandbox with no /dev at all, so every `2>/dev/null` died with
+        // `sh: cannot create /dev/null: Directory nonexistent`.
+        let mut argv = Vec::new();
+        append_bwrap_isolation_flags(
+            &mut argv,
+            Some(&BwrapIsolationOverrides {
+                share_net: false,
+                force_network_off: true,
+                host_fs_allow_set: true,
+            }),
+        );
+        let dev_idx = argv.iter().position(|a| a == "--dev");
+        assert!(
+            dev_idx.is_some(),
+            "allow_set must provision /dev even under dev_mode: legacy: {argv:?}"
+        );
+        assert_eq!(argv[dev_idx.unwrap() + 1], "/dev");
+        // Minimal, not host-bind: no host device passthrough.
+        assert!(
+            !argv.iter().any(|a| a == "--dev-bind"),
+            "must be bwrap's own devtmpfs, not a host bind: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_host_fs_keeps_legacy_dev_mode_untouched() {
+        // Under `host_fs: legacy` the ro-bind of `/` already supplies /dev, so
+        // legacy must stay a no-op there — this fix is scoped to the pair of
+        // defaults that actually broke.
+        let mut argv = Vec::new();
+        append_bwrap_isolation_flags(
+            &mut argv,
+            Some(&BwrapIsolationOverrides {
+                share_net: false,
+                force_network_off: true,
+                host_fs_allow_set: false,
+            }),
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--dev" || a == "--dev-bind"),
+            "legacy host_fs must not gain a /dev override: {argv:?}"
+        );
+    }
 
     #[test]
     fn allow_set_binds_host_tls_trust_store() {

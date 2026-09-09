@@ -65,7 +65,10 @@ constitution:
 # Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
 sandbox:
   share_net: false
-  dev_mode: legacy   # legacy | minimal | host-bind
+  # legacy | minimal | host-bind. Under host_fs: allow_set (the default),
+  # legacy resolves to minimal — allow_set's root has no /dev, and without it
+  # every `2>/dev/null` in a dependency-install script fails.
+  dev_mode: legacy
   # Operator allowlist granting declared agent mounts (#1002): a manifest's
   # runtime.mounts entry is honored iff its canonical path is at/under one of
   # these roots. Empty denies every declared mount, loudly.
