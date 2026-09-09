@@ -356,17 +356,46 @@ impl NativeTool for ArtifactBuildTool {
             && !bundle.files.iter().any(|f| f.name == "SKILL.md")
         {
             let available: Vec<&str> = bundle.files.iter().map(|f| f.name.as_str()).collect();
+            // A SKILL.md under a directory prefix is the common near-miss, and
+            // it is not the builder's fault: `capture_paths` documents that
+            // captured content keeps its capture directory as a prefix
+            // ('/tmp/out/SKILL.md' -> 'out/SKILL.md'), and artifact_build
+            // records an input name verbatim. The old hint said "re-include
+            // SKILL.md", which reads as "you forgot it" when the file is right
+            // there — the packager in session-eb6abde5 had built
+            // ["agent-browser/SKILL.md"] and had to guess. The guard itself
+            // stays exact: install and capsule import both look the manifest
+            // up by the exact key "SKILL.md" (bootstrap.rs, capsule/import.rs),
+            // so accepting a prefixed name here would only move the failure.
+            let prefixed: Vec<&str> = bundle
+                .files
+                .iter()
+                .map(|f| f.name.as_str())
+                .filter(|n| n.ends_with("/SKILL.md"))
+                .collect();
+            let hint = if prefixed.is_empty() {
+                "Re-include SKILL.md in inputs. When rebuilding an existing artifact, carry \
+                 over every file you did not modify: resolve(ref=<source artifact>, \
+                 include=\"content\", file=\"SKILL.md\") then content_write it into your \
+                 session before calling artifact_build."
+                    .to_string()
+            } else {
+                format!(
+                    "The manifest IS present but under a directory prefix ({}). The name must be \
+                     exactly \"SKILL.md\" at the artifact root — install resolves it by that key. \
+                     Captured content keeps its capture directory as a prefix, so re-register it \
+                     at the root name first: resolve(ref=\"{}\", include=\"content\") then \
+                     content_write(name=\"SKILL.md\") and pass that as the input.",
+                    prefixed.join(", "),
+                    prefixed[0],
+                )
+            };
             return Ok(ToolError::validation(
                 format!(
                     "agent_bundle artifact is missing SKILL.md — it cannot be installed or \
                      federation-reviewed without an agent manifest. Built files: {available:?}."
                 ),
-                Some(
-                    "Re-include SKILL.md in inputs. When rebuilding an existing artifact, carry \
-                     over every file you did not modify: resolve(ref=<source artifact>, \
-                     include=\"content\", file=\"SKILL.md\") then content_write it into your \
-                     session before calling artifact_build.",
-                ),
+                Some(hint),
             )
             .to_error_response());
         }

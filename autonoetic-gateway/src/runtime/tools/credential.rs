@@ -2755,7 +2755,7 @@ fn execute_steps(
                     "ok": false,
                     "error_type": "conflict",
                     "message": message,
-                    "repair_hint": "Ask the user the question, collect values for var_name, then call credential_setup with credential_id + resume_vars. If user_ask returns workflow_tasks_active, complete/cancel child tasks before retrying (never blind-retry in a loop). This step is for NON-secret questions only — collect secrets via a user_prompt step instead.",
+                    "repair_hint": "Ask the user the question, collect values for var_name, then call credential_setup with credential_id + resume_vars. If user_ask returns workflow_tasks_active, read the ids it names: a task you own can be completed or cancelled, but a PARENT awaiting you cannot — return the question to your caller and end your turn instead of blind-retrying. This step is for NON-secret questions only — collect secrets via a user_prompt step instead.",
                     "suspended_for_user_input": true,
                     "credential_id": credential_id,
                     "question": resolved_question,
