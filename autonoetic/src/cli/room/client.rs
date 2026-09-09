@@ -167,6 +167,17 @@ impl RoomClient {
 fn decode_response(method: &str, line: &str) -> anyhow::Result<serde_json::Value> {
     let response: JsonRpcResponse = serde_json::from_str(line.trim_end())?;
     if let Some(err) = response.error {
+        // An auth mismatch otherwise reads as a generic method failure, and
+        // in the TUI it lands as a bare status line. Name the fix: the room
+        // sends this shell's AUTONOETIC_SHARED_SECRET, so a rejection means
+        // this shell's value differs from the gateway's (stale export, or a
+        // gateway restarted with a fresh ephemeral secret).
+        if err.message.contains("Unauthorized") {
+            anyhow::bail!(
+                "{method} failed: {} — gateway rejected this shell's AUTONOETIC_SHARED_SECRET; export the same secret the gateway was started with and restart the room",
+                err.message
+            );
+        }
         anyhow::bail!("{method} failed: {}", err.message);
     }
     Ok(response.result.unwrap_or(serde_json::Value::Null))
@@ -189,4 +200,43 @@ fn is_transport_error(err: &anyhow::Error) -> bool {
         || msg.contains("gateway closed the connection")
         || msg.contains("timed out")
         || msg.contains("connection")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unauthorized_response_names_the_secret_fix() {
+        // A token mismatch otherwise surfaces as a bare "… failed:
+        // Unauthorized JSON-RPC request" status line — a dead end. The room
+        // must point at the env var it actually sent.
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "room-1",
+            "error": { "code": -32001, "message": "Unauthorized JSON-RPC request" },
+        })
+        .to_string();
+        let err = decode_response("session.timeline.list", &line).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AUTONOETIC_SHARED_SECRET"),
+            "unauthorized error must name the fix: {msg}"
+        );
+    }
+
+    #[test]
+    fn ordinary_method_error_passes_through_unchanged() {
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "room-1",
+            "error": { "code": -32000, "message": "event.ingest routing failed: boom" },
+        })
+        .to_string();
+        let err = decode_response("event.ingest", &line).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "event.ingest failed: event.ingest routing failed: boom"
+        );
+    }
 }

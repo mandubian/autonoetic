@@ -199,6 +199,12 @@ digest-signed bytes). These live in the **lib/bin** targets because PR CI runs
     --run-ignored ignored-only --nocapture
   ```
   Its CI-safe decision counterpart (no sandbox) is `promotion/gate_network_isolation_decision.rs`.
+- `autonoetic-gateway/tests/sandbox/dev_null_under_allow_set_e2e.rs` (module in the `sandbox` domain binary) — proves the default flag pair (`host_fs: allow_set` + `dev_mode: legacy`) yields a usable `/dev/null`, and that a root without the `/dev` provision fails the same shell redirection the packager hit. Run with:
+  ```bash
+  cargo nextest run -p autonoetic-gateway --test sandbox dev_null_under_allow_set \
+    --run-ignored ignored-only --nocapture
+  ```
+  Its CI-safe argv counterpart is the `allow_set_provides_dev_even_when_dev_mode_is_legacy` unit test.
 
 ## Key Documentation
 

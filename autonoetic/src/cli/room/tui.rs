@@ -1374,10 +1374,32 @@ fn build_footer(
             Style::default().fg(Color::Magenta),
         ))
     } else if compose.is_some() {
-        Line::from(Span::styled(
-            " Enter send · Shift+Enter newline · / commands · ? info · Esc nav · ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy",
-            Style::default().fg(Color::Green),
-        ))
+        // The composer is the resting state (focused even right after Send),
+        // so a status that only renders in nav mode would never be seen —
+        // send errors looked like swallowed messages with cleared input and
+        // no feedback. Render the status first, then the hint.
+        match status {
+            Some(s) => {
+                let color = if s.starts_with('✗') {
+                    Color::Red
+                } else if s.starts_with('✓') {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                };
+                Line::from(vec![
+                    Span::styled(format!(" {s}"), Style::default().fg(color)),
+                    Span::styled(
+                        " · Enter send · Shift+Enter newline · Esc nav",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])
+            }
+            None => Line::from(Span::styled(
+                " Enter send · Shift+Enter newline · / commands · ? info · Esc nav · ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy",
+                Style::default().fg(Color::Green),
+            )),
+        }
     } else if let Some(gi) = input {
         gate_input_footer_line(gi, status, footer_w)
     } else if let Some(s) = status {
@@ -9893,7 +9915,17 @@ fn send_message(
     }
     match rpc(client, "event.ingest", params) {
         Ok(_) => "✓ sent".to_string(),
-        Err(e) => format!("✗ {e}"),
+        Err(e) => {
+            let e = e.to_string();
+            // Fail-closed routing: a session with no agent binding yet (fresh
+            // id, or arrived via /session) needs an explicit addressee. Name
+            // the fix — the raw gateway error alone reads as a dead end.
+            if target_agent_id.is_none() && e.contains("explicit target_agent_id") {
+                format!("✗ {e} — no agent bound to this session yet; use /agent <id> (e.g. /agent planner.default)")
+            } else {
+                format!("✗ {e}")
+            }
+        }
     }
 }
 
@@ -12092,6 +12124,13 @@ fn draw(
                 _ => None,
             });
             let detail_status = format!("{action_hint} · q quit (2×){scroll_hint}");
+            // The detail pane hides the composer, but typing still goes to
+            // it — a send from behind the pane must stay visible here too,
+            // otherwise Enter looks like it does nothing.
+            let detail_status = match status {
+                Some(s) => format!("{detail_status} · {s}"),
+                None => detail_status,
+            };
             let footer = build_footer(
                 None,
                 None,
@@ -17108,6 +17147,53 @@ fn footer_gate_input_uses_the_width_adaptive_choice_budget() {
     assert!(
         text.contains("Approve and create a session grant for the detected hosts"),
         "the full choice label must render on a wide footer: {text}"
+    );
+}
+
+#[test]
+fn footer_compose_focused_still_shows_send_status() {
+    // The regression: with the composer focused (the resting state, kept
+    // focused across Send) the footer rendered only the static hint, so a
+    // send error looked like a swallowed message — input cleared, no
+    // feedback, nothing on the timeline.
+    use ratatui::{Terminal, backend::TestBackend};
+    let render_footer_line1 = |status: Option<&str>| -> String {
+        let compose = ComposeInput::new();
+        let mut term = Terminal::new(TestBackend::new(120, 4)).unwrap();
+        term.draw(|f| {
+            let footer = build_footer(
+                None,
+                Some(&compose),
+                None,
+                status,
+                None,
+                &[],
+                120,
+                None,
+                None,
+                None,
+            );
+            f.render_widget(footer, f.area());
+        })
+        .unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let shown = render_footer_line1(Some("✗ event.ingest routing failed: boom"));
+    assert!(
+        shown.contains("✗ event.ingest routing failed: boom"),
+        "compose-focused footer must surface the send status: {shown}"
+    );
+    // The plain hint still renders when there is no status to show.
+    let idle = render_footer_line1(None);
+    assert!(
+        idle.contains("Enter send"),
+        "compose hint must render when idle: {idle}"
     );
 }
 

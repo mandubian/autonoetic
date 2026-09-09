@@ -5,4 +5,5 @@
 //! no singletons (safe to cohabit one process under cargo test and
 //! nextest).
 
+mod dev_null_under_allow_set_e2e;
 mod sandbox_network_grant_bwrap_e2e;

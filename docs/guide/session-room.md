@@ -257,6 +257,13 @@ flow (`artifact_project` → edit → `workbench_reconcile`) instead.
 
 - **“Missing AUTONOETIC_SHARED_SECRET …”** — export the same secret the gateway
   was started with.
+- **“Unauthorized JSON-RPC request”** — your shell *has* a secret, but it
+  doesn't match the gateway's (stale export, or the gateway was restarted
+  with a fresh ephemeral secret — `autonoetic run` generates one in-process
+  that other terminals never see). Export the gateway's current secret in
+  the room's shell and restart the room. To avoid this entirely, start the
+  gateway with an explicit secret (`export AUTONOETIC_SHARED_SECRET=…`
+  before `gateway start`) and reuse that value everywhere.
 - **“cannot reach gateway at 127.0.0.1:PORT”** — the gateway isn't running, or
   is on a different port; check `autonoetic gateway status` and your `config.yaml`.
 - **Empty / “(no activity …)”** — nothing has happened at or above the floor for
