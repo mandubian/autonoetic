@@ -153,7 +153,7 @@ fn test_checkpoint_pruning() {
     }
 
     // Prune, keeping last 3
-    prune_checkpoints(&config, session_id, 3).unwrap();
+    prune_checkpoints(&config, session_id, Some(3)).unwrap();
 
     let remaining = list_checkpoints(&config, session_id).unwrap();
     assert_eq!(remaining.len(), 3);

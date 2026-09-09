@@ -43,6 +43,21 @@ checkpoint is rejected with an error that lists the forkable turns. This is a
 deliberate efficiency choice — checkpointing every turn would multiply storage
 and I/O for little benefit.
 
+### Retention bounds how far back you can fork
+
+Yield frequency is not the only limit. Checkpoints are pruned per session to
+`retention.session_checkpoints` (default 20, `0` = keep all), newest first, when
+a session completes and on lifecycle transitions. **A pruned checkpoint is a
+fork point that no longer exists**, so a long session that yielded many times
+still offers only the most recent few once it has finished.
+
+Raise the key if you fork routinely; the default is a compromise between keeping
+history forkable and bounding ~120–150 KB per checkpoint. Before this was
+configurable it was two hardcoded literals — keep 2 on completion, keep 3 on
+lifecycle transitions — sized for crash recovery, which needs only the latest
+plus a fallback. Forking wants history, so completed sessions were routinely
+left with a single fork point.
+
 ## How a fork is made runnable
 
 `SessionFork::fork_from_checkpoint` does three things:

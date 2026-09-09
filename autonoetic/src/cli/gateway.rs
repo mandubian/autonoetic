@@ -179,8 +179,14 @@ pub async fn handle_gateway_start(
     // sandbox builder; this covers the config file at its actual load path.
     autonoetic_gateway::sandbox::init_sandbox_host_deny_paths(vec![config_path.to_path_buf()]);
     let _mcp_runtime = mcp_runtime;
+    // Surface bind/runtime failures to the caller instead of swallowing
+    // them: `gateway start` then exits non-zero, and `run`'s spawned task
+    // prints "Gateway error". The old log-and-Ok left a second instance
+    // silently dead on an occupied port while its room talked to the first
+    // gateway with the wrong secret (every RPC Unauthorized).
     if let Err(e) = server.run().await {
         tracing::error!("Gateway server error: {:?}", e);
+        return Err(e);
     }
 
     Ok(())

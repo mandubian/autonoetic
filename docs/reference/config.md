@@ -1121,6 +1121,7 @@ Controls pruning of historical data. Values are in days; `0` means retain foreve
 | `retention.causal_events_days` | u32 | `90` | Days to retain `causal_events` (hash-chained audit trail in SQLite). |
 | `retention.approvals_days` | u32 | `90` | Days to retain **decided** `approvals`. Pending gates are never pruned at any age — an unanswered approval is outstanding work, not stale data. Bounds how long a raw `action_payload` survives; see the note below. |
 | `retention.post_promotion_reviews_days` | u32 | `90` | Days to retain `post_promotion_reviews`. Matches `causal_events_days`: these rows *are* the drift trend derived from those events, so outliving their evidence would leave unauditable numbers behind. |
+| `retention.session_checkpoints` | u32 | `20` | Session checkpoints kept per session, newest first. `0` = keep all. Counted rather than dated, because checkpoints are written per *yield point* (hibernation, approval, budget exhaustion, user input, escalation, emergency stop) rather than per turn — their rate follows how often a session suspends, not elapsed time. This bounds how far back `autonoetic trace fork` can reach: a pruned checkpoint is a fork point that no longer exists. Previously two hardcoded literals (keep 2 on completion, keep 3 on lifecycle transitions) sized for crash recovery, which needs only the latest plus a fallback. |
 
 > **Why `approvals` needs a retention bound at all (#1213).** An approval's
 > `action_payload` is the *raw proposed action* — it is the scheduler's
@@ -1143,6 +1144,7 @@ retention:
   causal_events_days: 90
   approvals_days: 90
   post_promotion_reviews_days: 90
+  session_checkpoints: 20
 ```
 
 ---
@@ -1708,6 +1710,7 @@ retention:
   execution_traces_days: 30
   causal_events_days: 90
   post_promotion_reviews_days: 90
+  session_checkpoints: 20
 
 digest_agent:
   enabled: true

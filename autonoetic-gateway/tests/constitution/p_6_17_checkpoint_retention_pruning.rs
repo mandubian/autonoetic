@@ -70,7 +70,7 @@ fn p_6_17_prune_checkpoints_respects_keep_last() -> anyhow::Result<()> {
     save_checkpoint(&config, &make_checkpoint(session_id, 2))?;
     save_checkpoint(&config, &make_checkpoint(session_id, 3))?;
 
-    prune_checkpoints(&config, session_id, 2)?;
+    prune_checkpoints(&config, session_id, Some(2))?;
     let remaining = list_checkpoints(&config, session_id)?;
 
     assert_eq!(

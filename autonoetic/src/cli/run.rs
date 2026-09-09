@@ -656,9 +656,20 @@ pub async fn handle_run(
 
     let gateway_config = autonoetic_gateway::config::load_config(&config_path)?;
     let gateway_port = gateway_config.port;
-    let ready = wait_for_gateway_ready(gateway_port, std::time::Duration::from_secs(30)).await;
-    if !ready {
-        eprintln!("Warning: gateway did not become ready within timeout. Chat may fail to connect.");
+    match wait_for_gateway_ready(gateway_port, std::time::Duration::from_secs(30)).await {
+        GatewayReadiness::Ready => {}
+        GatewayReadiness::ForeignGateway => {
+            anyhow::bail!(
+                "port {gateway_port} is already owned by another gateway that rejects this \
+                 session's secret (its timeline/sends would all fail Unauthorized). Stop the \
+                 other instance first, or attach to it instead with `autonoetic room \
+                 <session> --tui` using its AUTONOETIC_SHARED_SECRET. See `autonoetic \
+                 gateway status`."
+            );
+        }
+        GatewayReadiness::TimedOut => {
+            eprintln!("Warning: gateway did not become ready within timeout. Chat may fail to connect.");
+        }
     }
 
     if args.collaborative {
@@ -705,25 +716,47 @@ pub async fn handle_run(
     result
 }
 
-async fn wait_for_gateway_ready(port: u16, timeout: std::time::Duration) -> bool {
+/// Readiness of the gateway `run` expects on the configured port.
+/// `ForeignGateway` is the port-collision case: something answers, but it
+/// rejects our secret — i.e. another instance owns the port (each `run`
+/// without an exported secret generates its own ephemeral one). Waiting out
+/// the timeout there is pointless and the room would then fail every RPC
+/// with Unauthorized, so the caller bails fast.
+#[derive(PartialEq, Eq)]
+enum GatewayReadiness {
+    Ready,
+    TimedOut,
+    ForeignGateway,
+}
+
+async fn wait_for_gateway_ready(port: u16, timeout: std::time::Duration) -> GatewayReadiness {
     let deadline = tokio::time::Instant::now() + timeout;
     let addr = format!("127.0.0.1:{port}");
     let secret = std::env::var("AUTONOETIC_SHARED_SECRET").ok();
     while tokio::time::Instant::now() < deadline {
-        if gateway_ping(&addr, secret.as_deref()).await {
-            return true;
+        match gateway_probe(&addr, secret.as_deref()).await {
+            GatewayProbe::Ready => return GatewayReadiness::Ready,
+            GatewayProbe::ForeignGateway => return GatewayReadiness::ForeignGateway,
+            GatewayProbe::NotUpYet => {}
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    false
+    GatewayReadiness::TimedOut
 }
 
-async fn gateway_ping(addr: &str, secret: Option<&str>) -> bool {
+#[derive(PartialEq, Eq)]
+enum GatewayProbe {
+    Ready,
+    NotUpYet,
+    ForeignGateway,
+}
+
+async fn gateway_probe(addr: &str, secret: Option<&str>) -> GatewayProbe {
     use autonoetic_gateway::router::JsonRpcResponse;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
-        return false;
+        return GatewayProbe::NotUpYet;
     };
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -733,24 +766,36 @@ async fn gateway_ping(addr: &str, secret: Option<&str>) -> bool {
         "auth_token": secret,
     });
     let Ok(encoded) = serde_json::to_string(&req) else {
-        return false;
+        return GatewayProbe::NotUpYet;
     };
     if stream.write_all(encoded.as_bytes()).await.is_err() {
-        return false;
+        return GatewayProbe::NotUpYet;
     }
     if stream.write_all(b"\n").await.is_err() {
-        return false;
+        return GatewayProbe::NotUpYet;
     }
     if stream.flush().await.is_err() {
-        return false;
+        return GatewayProbe::NotUpYet;
     }
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).await.is_err() {
-        return false;
+        return GatewayProbe::NotUpYet;
     }
     let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line.trim_end()) else {
-        return false;
+        return GatewayProbe::NotUpYet;
     };
-    response.error.is_none() && response.result == Some(serde_json::json!("pong"))
+    if response.error.is_none() && response.result == Some(serde_json::json!("pong")) {
+        return GatewayProbe::Ready;
+    }
+    // The port answers but rejects our token: it belongs to another gateway
+    // instance (different secret), not to the one this process just spawned.
+    if response
+        .error
+        .as_ref()
+        .is_some_and(|e| e.message.contains("Unauthorized"))
+    {
+        return GatewayProbe::ForeignGateway;
+    }
+    GatewayProbe::NotUpYet
 }

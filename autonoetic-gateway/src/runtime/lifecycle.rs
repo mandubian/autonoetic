@@ -6,7 +6,7 @@ use crate::llm::{CompletionRequest, LlmDriver, Message, StopReason, ToolCall, To
 use crate::policy::PolicyEngine;
 use crate::runtime::artifact::extract_artifacts_from_text;
 use crate::runtime::checkpoint::{
-    prune_checkpoints, save_checkpoint, LlmConfigSnapshot, PendingToolCall, PendingToolState,
+    checkpoint_retention, prune_checkpoints, save_checkpoint, LlmConfigSnapshot, PendingToolCall, PendingToolState,
     SessionCheckpoint, YieldReason,
 };
 use crate::runtime::context::{
@@ -2301,7 +2301,7 @@ impl AgentExecutor {
         );
         let _ = self.save_yield_checkpoint(history, turn_id, turn_yield_reason, None);
         if let Some(config) = self.config.as_ref() {
-            let _ = prune_checkpoints(config, session_id, 3);
+            let _ = prune_checkpoints(config, session_id, checkpoint_retention(config));
         }
 
         let _ = tracer.end_digest_turn();
@@ -5010,7 +5010,7 @@ impl AgentExecutor {
                     let _ = self.save_yield_checkpoint(history, &turn_id, turn_yield_reason, None);
                     if let Some(config) = self.config.as_ref() {
                         // Prune old checkpoints, keep last 3
-                        let _ = prune_checkpoints(config, &session_id, 3);
+                        let _ = prune_checkpoints(config, &session_id, checkpoint_retention(config));
                     }
 
                     let _ = tracer.end_digest_turn();
@@ -5088,7 +5088,7 @@ impl AgentExecutor {
                                 None,
                             );
                             if let Some(config) = self.config.as_ref() {
-                                let _ = prune_checkpoints(config, &session_id, 3);
+                                let _ = prune_checkpoints(config, &session_id, checkpoint_retention(config));
                             }
                             end_turn_waiting_for_child = true;
                         }

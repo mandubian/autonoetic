@@ -22,6 +22,7 @@ fn p_8_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 0,
+        session_checkpoints: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -67,6 +68,7 @@ fn p_8_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
         execution_traces_days: 0,
         causal_events_days: 1,
         post_promotion_reviews_days: 0,
+        session_checkpoints: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -136,6 +138,7 @@ fn p_8_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
         execution_traces_days: 0,
         causal_events_days: 1,
         post_promotion_reviews_days: 0,
+        session_checkpoints: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -187,6 +190,7 @@ fn p_8_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 0,
+        session_checkpoints: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -223,6 +227,7 @@ fn p_8_17_post_promotion_reviews_are_pruned_and_reported() -> anyhow::Result<()>
         execution_traces_days: 0,
         causal_events_days: 0,
         post_promotion_reviews_days: 90,
+        session_checkpoints: 0,
     };
     store.apply_retention_policy(&retention)?;
 

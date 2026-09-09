@@ -2271,6 +2271,21 @@ pub struct RetentionConfig {
     /// would leave unauditable numbers behind.
     #[serde(default = "default_retention_post_promotion_reviews_days")]
     pub post_promotion_reviews_days: u32,
+    /// Session checkpoints to retain per session, newest first. 0 = keep all.
+    /// Default: 20.
+    ///
+    /// Counted, not dated, because checkpoints are written per *yield point*
+    /// rather than per turn — their rate is driven by how often a session
+    /// suspends, not by elapsed time.
+    ///
+    /// This governs how far back `trace fork` can reach. It was previously two
+    /// hardcoded literals (keep 2 on completion, keep 3 on lifecycle
+    /// transitions) tuned for crash recovery, which needs only the latest plus
+    /// a fallback. Forking wants history, so a completed session was left with
+    /// one or two fork points no matter how often it had yielded, and the
+    /// operator had no key to raise.
+    #[serde(default = "default_retention_session_checkpoints")]
+    pub session_checkpoints: u32,
 }
 
 impl Default for RetentionConfig {
@@ -2280,8 +2295,13 @@ impl Default for RetentionConfig {
             execution_traces_days: 30,
             causal_events_days: 90,
             post_promotion_reviews_days: 90,
+            session_checkpoints: default_retention_session_checkpoints(),
         }
     }
+}
+
+fn default_retention_session_checkpoints() -> u32 {
+    20
 }
 
 fn default_retention_execution_traces_days() -> u32 {

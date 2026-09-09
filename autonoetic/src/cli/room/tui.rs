@@ -185,6 +185,69 @@ fn step_cursor_line(
     )
 }
 
+/// Shift a viewport top by `delta` text lines, clamped so the window stays
+/// inside the content (`[0, total - list_height]`). An empty list or a
+/// zero-height window yields `(0, 0)`.
+fn step_viewport_top(
+    row_heights: &[usize],
+    row: usize,
+    inner: usize,
+    list_height: usize,
+    delta: i64,
+) -> (usize, usize) {
+    if row_heights.is_empty() || list_height == 0 {
+        return (0, 0);
+    }
+    let total: usize = row_heights.iter().map(|h| (*h).max(1)).sum();
+    let max_top = total.saturating_sub(list_height) as i64;
+    let cur = abs_line_index(row_heights, row, inner) as i64;
+    locate_abs_line(
+        row_heights,
+        cur.saturating_add(delta).max(0).min(max_top) as usize,
+    )
+}
+
+/// Viewport-led scroll for wheel/arrows/pages: shift the visible window by
+/// `delta` text lines *and* step the cursor by the same amount, keeping the
+/// cursor inside the moved window.
+///
+/// The frame's viewport derivation (`compute_line_viewport_top`) otherwise
+/// keeps a stable top while the cursor roams inside it — so from a follow
+/// position the first screenful of wheel notches moved only the invisible
+/// cursor and the screen appeared stuck ("scroll a lot for one line"), then
+/// jumped to 1:1 once the cursor hit the edge. Moving both together makes
+/// every notch visibly scroll while preserving selection-follows-keys
+/// (the cursor still steps by exactly `delta`, clamped at the ends).
+fn scroll_timeline_by(
+    row_heights: &[usize],
+    cursor: (usize, usize),
+    viewport: (usize, usize),
+    list_height: usize,
+    delta: i64,
+) -> ((usize, usize), (usize, usize)) {
+    let cursor = step_cursor_line(row_heights, cursor.0, cursor.1, delta);
+    // No measured window yet (before the first frame): move the cursor
+    // alone rather than re-seating a viewport that has no geometry.
+    if list_height == 0 {
+        return (cursor, viewport);
+    }
+    let viewport = step_viewport_top(row_heights, viewport.0, viewport.1, list_height, delta);
+    // Clamp drift: at the content edges one side clamps before the other,
+    // so re-seat the cursor inside the moved window. The frame then keeps
+    // the shifted top instead of snapping back.
+    let top_abs = abs_line_index(row_heights, viewport.0, viewport.1);
+    let cur_abs = abs_line_index(row_heights, cursor.0, cursor.1);
+    let vis = list_height.max(1);
+    let cursor = if cur_abs < top_abs {
+        locate_abs_line(row_heights, top_abs)
+    } else if cur_abs >= top_abs + vis {
+        locate_abs_line(row_heights, top_abs + vis - 1)
+    } else {
+        cursor
+    };
+    (cursor, viewport)
+}
+
 /// Line-granular viewport: absolute index of the top visible text line.
 ///
 /// Keeps the cursor line visible with an otherwise stable viewport — the
@@ -7993,16 +8056,21 @@ pub fn run(
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
                                 // Line scroll: one text line per press; the
-                                // highlighted row follows the cursor line.
-                                // Any press pauses follow, even at the edge
-                                // (same as the old row step).
+                                // highlighted row follows the cursor line, and
+                                // the viewport travels with it (no dead zone
+                                // where the cursor roams invisibly inside a
+                                // stable window). Any press pauses follow,
+                                // even at the edge (same as the old row step).
                                 follow = false;
-                                (selected, selected_inner) = step_cursor_line(
-                                    &view_row_heights,
-                                    selected,
-                                    selected_inner,
-                                    1,
-                                );
+                                ((selected, selected_inner),
+                                 (view_viewport_offset, view_viewport_inner)) =
+                                    scroll_timeline_by(
+                                        &view_row_heights,
+                                        (selected, selected_inner),
+                                        (view_viewport_offset, view_viewport_inner),
+                                        view_list_height,
+                                        1,
+                                    );
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -8021,12 +8089,15 @@ pub fn run(
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
                                 follow = false;
-                                (selected, selected_inner) = step_cursor_line(
-                                    &view_row_heights,
-                                    selected,
-                                    selected_inner,
-                                    -1,
-                                );
+                                ((selected, selected_inner),
+                                 (view_viewport_offset, view_viewport_inner)) =
+                                    scroll_timeline_by(
+                                        &view_row_heights,
+                                        (selected, selected_inner),
+                                        (view_viewport_offset, view_viewport_inner),
+                                        view_list_height,
+                                        -1,
+                                    );
                             }
                         }
                         KeyCode::PageDown => {
@@ -8039,12 +8110,15 @@ pub fn run(
                                 // Page by visible text lines, not rows.
                                 follow = false;
                                 let step = view_list_height.max(1) as i64;
-                                (selected, selected_inner) = step_cursor_line(
-                                    &view_row_heights,
-                                    selected,
-                                    selected_inner,
-                                    step,
-                                );
+                                ((selected, selected_inner),
+                                 (view_viewport_offset, view_viewport_inner)) =
+                                    scroll_timeline_by(
+                                        &view_row_heights,
+                                        (selected, selected_inner),
+                                        (view_viewport_offset, view_viewport_inner),
+                                        view_list_height,
+                                        step,
+                                    );
                             }
                         }
                         KeyCode::PageUp => {
@@ -8056,12 +8130,15 @@ pub fn run(
                             } else {
                                 follow = false;
                                 let step = view_list_height.max(1) as i64;
-                                (selected, selected_inner) = step_cursor_line(
-                                    &view_row_heights,
-                                    selected,
-                                    selected_inner,
-                                    -step,
-                                );
+                                ((selected, selected_inner),
+                                 (view_viewport_offset, view_viewport_inner)) =
+                                    scroll_timeline_by(
+                                        &view_row_heights,
+                                        (selected, selected_inner),
+                                        (view_viewport_offset, view_viewport_inner),
+                                        view_list_height,
+                                        -step,
+                                    );
                             }
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
@@ -8110,15 +8187,20 @@ pub fn run(
                             if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
-                                let (row, inner) = step_cursor_line(
+                                let ((row, inner), (vrow, vinner)) = scroll_timeline_by(
                                     &view_row_heights,
-                                    selected,
-                                    selected_inner,
+                                    (selected, selected_inner),
+                                    (view_viewport_offset, view_viewport_inner),
+                                    view_list_height,
                                     -1,
                                 );
-                                if (row, inner) != (selected, selected_inner) {
+                                if (row, inner, vrow, vinner)
+                                    != (selected, selected_inner, view_viewport_offset, view_viewport_inner)
+                                {
                                     selected = row;
                                     selected_inner = inner;
+                                    view_viewport_offset = vrow;
+                                    view_viewport_inner = vinner;
                                     follow = false;
                                 }
                             }
@@ -8127,15 +8209,20 @@ pub fn run(
                             if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
-                                let (row, inner) = step_cursor_line(
+                                let ((row, inner), (vrow, vinner)) = scroll_timeline_by(
                                     &view_row_heights,
-                                    selected,
-                                    selected_inner,
+                                    (selected, selected_inner),
+                                    (view_viewport_offset, view_viewport_inner),
+                                    view_list_height,
                                     1,
                                 );
-                                if (row, inner) != (selected, selected_inner) {
+                                if (row, inner, vrow, vinner)
+                                    != (selected, selected_inner, view_viewport_offset, view_viewport_inner)
+                                {
                                     selected = row;
                                     selected_inner = inner;
+                                    view_viewport_offset = vrow;
+                                    view_viewport_inner = vinner;
                                     follow = false;
                                 }
                             }
@@ -14778,6 +14865,61 @@ mod tests {
         // Multi-line jumps (pages) land on exact lines.
         assert_eq!(step_cursor_line(&h, 0, 0, 4), (1, 2));
         assert_eq!(step_cursor_line(&h, 2, 0, -5), (0, 0));
+    }
+
+    #[test]
+    fn viewport_top_steps_and_clamps_to_content_window() {
+        // 10 single-line rows, 5 visible: the window top roams [0, 5].
+        let h = vec![1usize; 10];
+        assert_eq!(step_viewport_top(&h, 2, 0, 5, -1), (1, 0));
+        assert_eq!(step_viewport_top(&h, 2, 0, 5, 1), (3, 0));
+        assert_eq!(step_viewport_top(&h, 0, 0, 5, -1), (0, 0));
+        assert_eq!(step_viewport_top(&h, 5, 0, 5, 1), (5, 0));
+        assert_eq!(step_viewport_top(&h, 5, 0, 5, 99), (5, 0));
+        // Multi-line rows: the top can sit mid-row.
+        let m = vec![2usize, 3, 1];
+        assert_eq!(step_viewport_top(&m, 0, 0, 2, 1), (0, 1));
+        // Degenerate inputs never panic or wander.
+        assert_eq!(step_viewport_top(&[], 0, 0, 5, 1), (0, 0));
+        assert_eq!(step_viewport_top(&h, 2, 0, 0, 1), (0, 0));
+    }
+
+    #[test]
+    fn scroll_moves_viewport_and_cursor_together() {
+        // The wheel/arrow dead-zone regression: from a follow position
+        // (cursor on the last line, window bottom-pinned) a single step up
+        // must move the *window*, not just the invisible cursor.
+        let h = vec![1usize; 10];
+        let ((cr, ci), (vr, vi)) = scroll_timeline_by(&h, (9, 0), (5, 0), 5, -1);
+        assert_eq!((vr, vi), (4, 0), "viewport must travel on the first notch");
+        assert_eq!((cr, ci), (8, 0), "cursor keeps stepping too");
+        // Repeated steps stay 1:1 all the way to the top edge.
+        let ((cr, ci), (vr, vi)) = scroll_timeline_by(&h, (8, 0), (4, 0), 5, -4);
+        assert_eq!((vr, vi), (0, 0));
+        assert_eq!((cr, ci), (4, 0));
+        // Clamped at the top: further steps are a no-op for both.
+        assert_eq!(
+            scroll_timeline_by(&h, (0, 0), (0, 0), 5, -1),
+            ((0, 0), (0, 0))
+        );
+        // Scrolling down re-pins at the bottom without overshoot.
+        assert_eq!(
+            scroll_timeline_by(&h, (9, 0), (5, 0), 5, 1),
+            ((9, 0), (5, 0))
+        );
+        // A cursor that would leave the moved window is re-seated inside,
+        // so the frame keeps the shifted top instead of snapping back.
+        // Here both travel together and the cursor stays put relatively.
+        assert_eq!(
+            scroll_timeline_by(&h, (0, 0), (0, 0), 5, 5),
+            ((5, 0), (5, 0))
+        );
+        // At the bottom edge the cursor clamps while the window bottom-pins;
+        // the cursor stays visible inside it.
+        assert_eq!(
+            scroll_timeline_by(&h, (8, 0), (0, 0), 5, 5),
+            ((9, 0), (5, 0))
+        );
     }
 
     #[test]

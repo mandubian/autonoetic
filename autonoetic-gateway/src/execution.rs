@@ -3238,7 +3238,7 @@ impl GatewayExecutionService {
             if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
                 self.config.as_ref(),
                 &session_id,
-                2,
+                crate::runtime::checkpoint::checkpoint_retention(self.config.as_ref()),
             ) {
                 tracing::debug!(
                     target: "checkpoint",

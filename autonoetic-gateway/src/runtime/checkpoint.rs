@@ -898,12 +898,31 @@ pub fn reap_orphan_checkpoints(
     Ok(reaped)
 }
 
+/// How many checkpoints a session keeps, from `retention.session_checkpoints`.
+///
+/// `0` means keep all. Callers use this instead of a literal so completion and
+/// lifecycle transitions cannot drift apart again — they previously kept 2 and
+/// 3 respectively, for the same concept.
+pub fn checkpoint_retention(config: &GatewayConfig) -> Option<usize> {
+    match config.retention.session_checkpoints {
+        0 => None,
+        n => Some(n as usize),
+    }
+}
+
 /// Prune old checkpoints for a session, keeping the last N.
+///
+/// `keep_last` of `None` keeps everything. This is what bounds how far back
+/// `trace fork` can reach, so it is operator-configurable rather than a
+/// recovery-tuned constant — see `RetentionConfig::session_checkpoints`.
 pub fn prune_checkpoints(
     config: &GatewayConfig,
     session_id: &str,
-    keep_last: usize,
+    keep_last: Option<usize>,
 ) -> anyhow::Result<()> {
+    let Some(keep_last) = keep_last else {
+        return Ok(());
+    };
     let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
     if !dir.is_dir() {
         return Ok(());
@@ -1630,6 +1649,24 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_retention_reads_the_config_and_treats_zero_as_keep_all() {
+        let mut config = GatewayConfig::default();
+        assert_eq!(
+            checkpoint_retention(&config),
+            Some(20),
+            "default must be generous enough for forking, not tuned for crash recovery"
+        );
+        config.retention.session_checkpoints = 5;
+        assert_eq!(checkpoint_retention(&config), Some(5));
+        config.retention.session_checkpoints = 0;
+        assert_eq!(
+            checkpoint_retention(&config),
+            None,
+            "0 keeps every checkpoint"
+        );
+    }
+
+    #[test]
     fn test_prune_checkpoints() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let config = test_config(&temp);
@@ -1689,7 +1726,17 @@ mod tests {
             save_checkpoint(&config, &checkpoint).unwrap();
         }
 
-        prune_checkpoints(&config, session_id, 3).unwrap();
+        // `None` must be a real no-op, not "keep zero" — inverting that would
+        // delete every fork point for an operator who set
+        // `retention.session_checkpoints: 0` to opt out of pruning.
+        prune_checkpoints(&config, session_id, None).unwrap();
+        assert_eq!(
+            list_checkpoints(&config, session_id).unwrap().len(),
+            5,
+            "no limit must keep every checkpoint"
+        );
+
+        prune_checkpoints(&config, session_id, Some(3)).unwrap();
 
         let remaining = list_checkpoints(&config, session_id).unwrap();
         assert_eq!(remaining.len(), 3);
