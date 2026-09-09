@@ -181,13 +181,23 @@ impl LayerStore {
         let digest = format!("sha256:{:x}", hasher.finalize());
 
         // Check for existing layer with same digest (dedup)
-        let layer_id = {
+        let existing_id = {
             let index = self.index.lock().unwrap();
-            if let Some(existing_id) = index.entries.get(&digest) {
+            index.entries.get(&digest).cloned()
+        };
+        let layer_id = match existing_id {
+            Some(existing_id) => {
                 tracing::info!(target: "layer_store", digest = %digest, layer_id = %existing_id, "Reusing existing layer (dedup)");
-                return self.captured_from_manifest(existing_id, &name, &mount_path);
+                // Dedup returns before the provenance scan below, so a layer
+                // captured by an older scanner keeps its empty package set
+                // forever — re-installing the identical tree hits the digest
+                // and short-circuits. Backfill so an existing store benefits
+                // from a scanner that has learned a new ecosystem, without
+                // anyone having to delete layers.
+                self.backfill_resolved_packages(&existing_id, &source_dir);
+                return self.captured_from_manifest(&existing_id, &name, &mount_path);
             }
-            Self::compute_layer_id(&digest)
+            None => Self::compute_layer_id(&digest),
         };
 
         // Persist archive
@@ -245,6 +255,50 @@ impl LayerStore {
             approval_scope,
             resolved_packages,
         })
+    }
+
+    /// Refresh a deduped layer's package provenance when the stored manifest
+    /// records none and a scan of the tree now finds some.
+    ///
+    /// Safe because the digest matched: the tree being scanned is byte-identical
+    /// to the archived one, so the result describes the stored layer exactly.
+    /// Only the empty case is filled — an existing non-empty set is never
+    /// rewritten, so a later capture cannot revise recorded provenance. Scope is
+    /// deliberately untouched: `approval_scope` describes the *build session*,
+    /// not the content, and legitimately differs between captures of the same
+    /// tree.
+    ///
+    /// Best-effort: a failure here must never fail the capture.
+    fn backfill_resolved_packages(&self, layer_id: &str, source_dir: &Path) {
+        let Ok(mut manifest) = self.inspect(layer_id) else {
+            return;
+        };
+        if !manifest.resolved_packages.is_empty() {
+            return;
+        }
+        let found = Self::scan_resolved_packages(source_dir);
+        if found.is_empty() {
+            return;
+        }
+        let count = found.len();
+        manifest.resolved_packages = found;
+        let Ok(json) = serde_json::to_string_pretty(&manifest) else {
+            return;
+        };
+        match fs::write(self.manifest_path(layer_id), json) {
+            Ok(()) => tracing::info!(
+                target: "layer_store",
+                layer_id = %layer_id,
+                packages = count,
+                "Backfilled resolved-package provenance on a deduped layer"
+            ),
+            Err(e) => tracing::warn!(
+                target: "layer_store",
+                layer_id = %layer_id,
+                error = %e,
+                "Failed to backfill resolved-package provenance"
+            ),
+        }
     }
 
     fn captured_from_manifest(
@@ -913,6 +967,113 @@ mod tests {
             vec!["lodash@3.10.1", "lodash@4.17.21"],
             "both versions must be visible — the sandbox can only reach one"
         );
+    }
+
+    /// The scenario this exists for: a layer captured before the scanner knew
+    /// npm keeps an empty package set forever, because re-capturing the same
+    /// tree hits the digest and returns before the scan.
+    #[test]
+    fn dedup_backfills_provenance_a_stale_manifest_is_missing() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let src = temp.path().join("node_modules");
+        fs::create_dir_all(&src).unwrap();
+        write_npm_pkg(&src, "left-pad", "left-pad", "1.3.0");
+
+        let captured = store
+            .create_from_dir(&src, "deps", "/tmp/node_modules", None)
+            .unwrap();
+        // Simulate a manifest written by the old Python-only scanner.
+        let mut manifest = store.inspect(&captured.layer_id).unwrap();
+        manifest.resolved_packages.clear();
+        fs::write(
+            store.manifest_path(&captured.layer_id),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(store.inspect(&captured.layer_id).unwrap().resolved_packages.is_empty());
+
+        // Re-capturing the identical tree dedups — and now backfills.
+        let again = store
+            .create_from_dir(&src, "deps", "/tmp/node_modules", None)
+            .unwrap();
+        assert_eq!(again.layer_id, captured.layer_id, "still deduped");
+        let refreshed = store.inspect(&captured.layer_id).unwrap();
+        assert_eq!(
+            refreshed
+                .resolved_packages
+                .iter()
+                .map(|p| format!("{}@{}", p.name, p.version))
+                .collect::<Vec<_>>(),
+            vec!["left-pad@1.3.0"],
+            "provenance backfilled without deleting the layer"
+        );
+        assert_eq!(refreshed.digest, captured.digest, "digest untouched");
+    }
+
+    /// Recorded provenance is never revised — only the empty case is filled.
+    #[test]
+    fn dedup_never_overwrites_existing_provenance() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let src = temp.path().join("node_modules");
+        fs::create_dir_all(&src).unwrap();
+        write_npm_pkg(&src, "left-pad", "left-pad", "1.3.0");
+        let captured = store
+            .create_from_dir(&src, "deps", "/tmp/node_modules", None)
+            .unwrap();
+
+        // Pin a deliberately different recorded set.
+        let mut manifest = store.inspect(&captured.layer_id).unwrap();
+        manifest.resolved_packages = vec![autonoetic_types::layer::ResolvedPackage {
+            name: "recorded-at-capture".to_string(),
+            version: "9.9.9".to_string(),
+        }];
+        fs::write(
+            store.manifest_path(&captured.layer_id),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        store
+            .create_from_dir(&src, "deps", "/tmp/node_modules", None)
+            .unwrap();
+        let after = store.inspect(&captured.layer_id).unwrap();
+        assert_eq!(
+            after.resolved_packages.len(),
+            1,
+            "an existing set must not be revised by a later capture"
+        );
+        assert_eq!(after.resolved_packages[0].name, "recorded-at-capture");
+    }
+
+    /// A layer with genuinely nothing to resolve (compiled output, conda) must
+    /// not be rewritten on every dedup hit.
+    #[test]
+    fn dedup_leaves_a_legitimately_empty_layer_alone() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let src = temp.path().join("compiled");
+        fs::create_dir_all(src.join("bin")).unwrap();
+        fs::write(src.join("bin").join("tool"), b"ELF").unwrap();
+        let captured = store
+            .create_from_dir(&src, "compiled", "/tmp/compiled", None)
+            .unwrap();
+        let before = fs::metadata(store.manifest_path(&captured.layer_id))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        store
+            .create_from_dir(&src, "compiled", "/tmp/compiled", None)
+            .unwrap();
+        let after_manifest = store.inspect(&captured.layer_id).unwrap();
+        assert!(after_manifest.resolved_packages.is_empty());
+        let after = fs::metadata(store.manifest_path(&captured.layer_id))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "manifest must not be rewritten with nothing to add");
     }
 
     #[test]
