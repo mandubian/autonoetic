@@ -123,141 +123,130 @@ fn disarm_estop(armed_until: &mut Option<Instant>, status: &mut Option<String>) 
     }
 }
 
-/// Rows visible in the main timeline list for the current terminal height.
-fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
-    let chrome = 1 + FOOTER_HEIGHT + if compose_open { COMPOSE_PANEL_HEIGHT } else { 0 };
-    terminal_height.saturating_sub(chrome).max(1) as usize
+/// Line-granular timeline scrolling.
+///
+/// A timeline row can be many terminal lines tall, so the scroll cursor and
+/// the viewport are addressed as `(row, inner)` — the row plus the text-line
+/// index inside it. `j`/`k` move one text line; the highlighted row is the
+/// one holding the cursor line, and row jumps (`g`, `[`, `e`, search, …)
+/// land on the row's first line.
+
+/// Clamp a `(row, inner)` cursor to valid rows/lines for the current heights.
+/// Every rendered row is at least 1 line; a 0-height entry (should not
+/// happen) clamps its line to 0.
+fn clamp_cursor_line(row_heights: &[usize], row: usize, inner: usize) -> (usize, usize) {
+    if row_heights.is_empty() {
+        return (0, 0);
+    }
+    let r = row.min(row_heights.len() - 1);
+    (r, inner.min(row_heights[r].max(1) - 1))
 }
 
-/// Compute the scroll offset for the timeline list so the selected row stays
-/// visible AND the last row of the list does not scroll off the bottom of the
-/// viewport when the cursor moves up from the end.
-///
-/// Takes `row_heights` (one entry per rendered row, in terminal lines) so
-/// multi-line rows (title + preview) are accounted for — a single multi-line
-/// row at the bottom can take 2–24 lines, so a row-count-based offset would
-/// either hide the last row or leave blank lines at the bottom.
-///
-/// Pinned-to-bottom rule: the viewport is anchored to the last row, with as
-/// many preceding rows as fit packed in above. The cursor is free to move
-/// within this window. The moment the cursor moves above the window, the
-/// viewport scrolls up to follow, with the cursor as far down in the new
-/// window as possible (i.e. the most-recent rows visible alongside it).
-///
-/// When `prev_offset` is `Some`, the function first checks whether the
-/// selected row is already visible in the previous viewport. If so, the
-/// viewport stays fixed — the cursor moves freely within it. This avoids
-/// re-pinning the cursor to the top of the viewport on every incremental
-/// down-arrow move after scrolling up.
-fn compute_viewport_offset(
-    selected: usize,
-    list_height: usize,
+/// Absolute flattened text-line index of a `(row, inner)` cursor.
+fn abs_line_index(row_heights: &[usize], row: usize, inner: usize) -> usize {
+    let (r, i) = clamp_cursor_line(row_heights, row, inner);
+    row_heights.iter().take(r).map(|h| (*h).max(1)).sum::<usize>() + i
+}
+
+/// Inverse of [`abs_line_index`]: which `(row, inner)` holds absolute line
+/// `abs`. Past-the-end (or empty) clamps to the last line of the last row.
+fn locate_abs_line(row_heights: &[usize], abs: usize) -> (usize, usize) {
+    let mut acc = 0usize;
+    for (r, h) in row_heights.iter().enumerate() {
+        let h = (*h).max(1);
+        if abs < acc + h {
+            return (r, abs - acc);
+        }
+        acc += h;
+    }
+    if row_heights.is_empty() {
+        (0, 0)
+    } else {
+        let r = row_heights.len() - 1;
+        (r, row_heights[r].max(1) - 1)
+    }
+}
+
+/// Move a cursor by `delta` text lines, clamped to the first/last line.
+fn step_cursor_line(
     row_heights: &[usize],
-    prev_offset: Option<usize>,
-) -> usize {
-    if list_height == 0 || row_heights.is_empty() {
-        return 0;
+    row: usize,
+    inner: usize,
+    delta: i64,
+) -> (usize, usize) {
+    if row_heights.is_empty() {
+        return (0, 0);
     }
-    let row_count = row_heights.len();
-    let total_height: usize = row_heights.iter().sum();
-    if total_height <= list_height {
-        return 0;
-    }
-
-    // When a previous viewport exists, edge-scroll from it in either
-    // direction instead of always starting from the bottom. This keeps the
-    // viewport stable as the cursor moves within it — no more re-pinning
-    // the cursor to the top of the window on every down-arrow.
-    if let Some(mut offset) = prev_offset {
-        if offset < row_count {
-            let mut height = 0usize;
-            let mut end = offset;
-            while end < row_count && height + row_heights[end] <= list_height {
-                height += row_heights[end];
-                end += 1;
-            }
-
-            // Cursor still inside the previous viewport — nothing to do.
-            if selected >= offset && selected < end {
-                return offset;
-            }
-
-            // Edge-scroll upward (cursor moved above the viewport).
-            while selected < offset && offset > 0 {
-                offset -= 1;
-                height += row_heights[offset];
-                while height > list_height {
-                    end -= 1;
-                    height -= row_heights[end];
-                }
-            }
-
-            // Edge-scroll downward (cursor moved below the viewport).
-            while selected >= end && end < row_count {
-                height += row_heights[end];
-                end += 1;
-                while height > list_height {
-                    height -= row_heights[offset];
-                    offset += 1;
-                }
-            }
-
-            return offset;
-        }
-    }
-
-    // Fallback — bottom-anchored window then edge-scroll up. Used when there
-    // is no previous viewport (follow mode, first frame, invalidated state).
-    let mut offset = row_count;
-    let mut height = 0usize;
-    for i in (0..row_count).rev() {
-        if height + row_heights[i] > list_height {
-            break;
-        }
-        height += row_heights[i];
-        offset = i;
-    }
-    let mut end = row_count;
-
-    while selected < offset && offset > 0 {
-        offset -= 1;
-        height += row_heights[offset];
-        while height > list_height {
-            end -= 1;
-            height -= row_heights[end];
-        }
-    }
-
-    offset
+    let total: usize = row_heights.iter().map(|h| (*h).max(1)).sum();
+    let cur = abs_line_index(row_heights, row, inner) as i64;
+    locate_abs_line(
+        row_heights,
+        cur.saturating_add(delta).max(0).min(total as i64) as usize,
+    )
 }
 
-/// Map a mouse click's terminal row to a timeline row index.
+/// Line-granular viewport: absolute index of the top visible text line.
+///
+/// Keeps the cursor line visible with an otherwise stable viewport — the
+/// cursor roams freely inside it, and only crossing an edge scrolls, by
+/// exactly the crossed distance (one line per `j`/`k` press).
+fn compute_line_viewport_top(
+    cursor_abs: usize,
+    list_height: usize,
+    total_lines: usize,
+    prev_top: Option<usize>,
+) -> usize {
+    if list_height == 0 || total_lines == 0 {
+        return 0;
+    }
+    if total_lines <= list_height {
+        return 0;
+    }
+    let max_top = total_lines - list_height;
+    let cursor = cursor_abs.min(total_lines - 1);
+    match prev_top {
+        Some(top) => {
+            let top = top.min(max_top);
+            if cursor < top {
+                cursor
+            } else if cursor >= top + list_height {
+                cursor + 1 - list_height
+            } else {
+                top
+            }
+        }
+        // No previous viewport (follow snap): pin to the bottom so the
+        // newest line is visible.
+        None => max_top,
+    }
+}
+
+/// Map a mouse click's terminal row to a `(row, inner)` timeline cursor.
 /// Returns `None` if the click is outside the list area.
-fn click_to_row_index(
+fn click_to_line_index(
     click_y: u16,
     list_area_y: u16,
     list_height: usize,
     viewport_offset: usize,
+    viewport_inner: usize,
     row_heights: &[usize],
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     if click_y < list_area_y {
         return None;
     }
     let rel_y = (click_y - list_area_y) as usize;
-    if rel_y >= list_height {
+    if rel_y >= list_height || row_heights.is_empty() {
         return None;
     }
-    let mut acc = 0usize;
-    let mut i = viewport_offset;
-    while i < row_heights.len() {
-        let h = row_heights[i];
-        if acc + h > rel_y {
-            return Some(i);
-        }
-        acc += h;
-        i += 1;
+    let (_, inner) = clamp_cursor_line(row_heights, viewport_offset, viewport_inner);
+    let top_abs = abs_line_index(row_heights, viewport_offset, inner);
+    let total: usize = row_heights.iter().map(|h| (*h).max(1)).sum();
+    // Clicks past the last content line (padding below a short list) hit
+    // nothing, as before.
+    if top_abs + rel_y >= total {
+        return None;
     }
-    None
+    Some(locate_abs_line(row_heights, top_abs + rel_y))
 }
 
 /// Milliseconds within which two left-clicks on the same row count as a double-click.
@@ -4406,6 +4395,9 @@ pub fn run(
     let mut squash = saved_prefs.as_ref().map(|p| p.squash).unwrap_or(true);
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
+    // Text-line index inside the cursor row — the timeline scrolls one
+    // text line per `j`/`k`, and `selected` is the row holding this line.
+    let mut selected_inner: usize = 0;
     // View-row indices (into the squashed `rows` vec) that are first-class
     // checkpoints (plan/approval/escalation/operator/session boundaries).
     // Recomputed each frame after coalescing; the `[` / `]` keys jump across.
@@ -4536,6 +4528,7 @@ pub fn run(
     let mut view_row_count = 0usize;
     let mut view_row_heights: Vec<usize> = Vec::new();
     let mut view_viewport_offset = 0usize;
+    let mut view_viewport_inner = 0usize;
     let mut view_list_height = 0usize;
     let mut view_turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
     // Idle-frame optimization: only rebuild and redraw when something changed.
@@ -4629,7 +4622,7 @@ pub fn run(
                                 compose = None;
                                 compose_comment = None;
                                 status = Some(
-                                    "nav — j/k scroll · y/n gates · i prompt · / commands · ? info"
+                                    "nav — j/k scroll · y/n gates · p pause · i prompt · / commands · ? info"
                                         .to_string(),
                                 );
                             }
@@ -4778,6 +4771,7 @@ pub fn run(
                                                 &mut entries,
                                                 &mut cursor,
                                                 &mut selected,
+                                                &mut selected_inner,
                                                 &mut detail,
                                                 &mut follow,
                                                 &mut resolved,
@@ -5101,8 +5095,9 @@ pub fn run(
                                                     client,
                                                     &mut entries,
                                                     &mut cursor,
-                                                    &mut selected,
-                                                    &mut detail,
+                                                     &mut selected,
+                                                     &mut selected_inner,
+                                                     &mut detail,
                                                     &mut follow,
                                                     &mut resolved,
                                                     &mut acted,
@@ -5134,8 +5129,9 @@ pub fn run(
                                                     client,
                                                     &mut entries,
                                                     &mut cursor,
-                                                    &mut selected,
-                                                    &mut detail,
+                                                     &mut selected,
+                                                     &mut selected_inner,
+                                                     &mut detail,
                                                     &mut follow,
                                                     &mut resolved,
                                                     &mut acted,
@@ -6823,6 +6819,7 @@ pub fn run(
                                             &mut entries,
                                             &mut cursor,
                                             &mut selected,
+                                            &mut selected_inner,
                                             &mut detail,
                                             &mut follow,
                                             &mut resolved,
@@ -6865,6 +6862,7 @@ pub fn run(
                             } else {
                                 search_current = (search_current + 1) % search_matches.len();
                                 selected = search_matches[search_current];
+                                selected_inner = 0;
                                 follow = false;
                             }
                         }
@@ -6875,6 +6873,7 @@ pub fn run(
                                 search_current = (search_current + search_matches.len() - 1)
                                     % search_matches.len();
                                 selected = search_matches[search_current];
+                                selected_inner = 0;
                                 follow = false;
                             }
                         }
@@ -7101,6 +7100,7 @@ pub fn run(
                             match boundary {
                                 Some(at) => {
                                     selected = at.min(view_row_count.saturating_sub(1));
+                                    selected_inner = 0;
                                     status = Some(format!(
                                         "{} new rows since you scrolled — G to resume following",
                                         render::compact_count(unread_count)
@@ -7302,8 +7302,10 @@ pub fn run(
                                     checkpoint_rows.iter().rev().find(|&&r| r < selected)
                                 {
                                     selected = p;
+                                    selected_inner = 0;
                                 } else if let Some(&last) = checkpoint_rows.last() {
                                     selected = last; // wrap to the end
+                                    selected_inner = 0;
                                 }
                             }
                         }
@@ -7314,8 +7316,10 @@ pub fn run(
                                     checkpoint_rows.iter().find(|&&r| r > selected)
                                 {
                                     selected = n;
+                                    selected_inner = 0;
                                 } else if let Some(&first) = checkpoint_rows.first() {
                                     selected = first; // wrap to the start
+                                    selected_inner = 0;
                                 }
                             }
                         }
@@ -7334,6 +7338,7 @@ pub fn run(
                                         .find(|&&r| r > selected)
                                         .copied()
                                         .unwrap_or_else(|| attention_rows[0]); // wrap to start
+                                    selected_inner = 0;
                                 }
                             }
                         }
@@ -7349,6 +7354,7 @@ pub fn run(
                                         .find(|&&r| r < selected)
                                         .copied()
                                         .unwrap_or_else(|| *attention_rows.last().unwrap()); // wrap to end
+                                    selected_inner = 0;
                                 }
                             }
                         }
@@ -7378,6 +7384,7 @@ pub fn run(
                                                 &mut entries,
                                                 &mut cursor,
                                                 &mut selected,
+                                                &mut selected_inner,
                                                 &mut detail,
                                                 &mut follow,
                                                 &mut resolved,
@@ -7963,9 +7970,17 @@ pub fn run(
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
+                                // Line scroll: one text line per press; the
+                                // highlighted row follows the cursor line.
+                                // Any press pauses follow, even at the edge
+                                // (same as the old row step).
                                 follow = false;
-                                selected =
-                                    (selected + 1).min(view_rows.len().saturating_sub(1));
+                                (selected, selected_inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    1,
+                                );
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -7984,7 +7999,12 @@ pub fn run(
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
                                 follow = false;
-                                selected = selected.saturating_sub(1);
+                                (selected, selected_inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    -1,
+                                );
                             }
                         }
                         KeyCode::PageDown => {
@@ -7994,12 +8014,15 @@ pub fn run(
                                     detail_scroll = detail_scroll.saturating_add(step);
                                 }
                             } else {
+                                // Page by visible text lines, not rows.
                                 follow = false;
-                                if let Ok(size) = terminal.size() {
-                                    let step = main_list_page_step(size.height, compose.is_some());
-                                    selected = (selected + step)
-                                        .min(view_rows.len().saturating_sub(1));
-                                }
+                                let step = view_list_height.max(1) as i64;
+                                (selected, selected_inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    step,
+                                );
                             }
                         }
                         KeyCode::PageUp => {
@@ -8010,10 +8033,13 @@ pub fn run(
                                 }
                             } else {
                                 follow = false;
-                                if let Ok(size) = terminal.size() {
-                                    let step = main_list_page_step(size.height, compose.is_some());
-                                    selected = selected.saturating_sub(step);
-                                }
+                                let step = view_list_height.max(1) as i64;
+                                (selected, selected_inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    -step,
+                                );
                             }
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
@@ -8030,6 +8056,7 @@ pub fn run(
                             follow = false;
                             detail = None;
                             selected = 0;
+                            selected_inner = 0;
                         }
                         // End only: `G` is owned by the grants panel arm above,
                         // which matches first, so listing it here never fired.
@@ -8060,30 +8087,49 @@ pub fn run(
                         MouseEventKind::ScrollUp => {
                             if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
-                            } else if selected > 0 {
-                                selected = selected.saturating_sub(1);
-                                follow = false;
+                            } else {
+                                let (row, inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    -1,
+                                );
+                                if (row, inner) != (selected, selected_inner) {
+                                    selected = row;
+                                    selected_inner = inner;
+                                    follow = false;
+                                }
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
-                            } else if selected < view_row_count.saturating_sub(1) {
-                                selected =
-                                    (selected + 1).min(view_row_count.saturating_sub(1));
-                                follow = false;
+                            } else {
+                                let (row, inner) = step_cursor_line(
+                                    &view_row_heights,
+                                    selected,
+                                    selected_inner,
+                                    1,
+                                );
+                                if (row, inner) != (selected, selected_inner) {
+                                    selected = row;
+                                    selected_inner = inner;
+                                    follow = false;
+                                }
                             }
                         }
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                            let click_row = click_to_row_index(
+                            let click_line = click_to_line_index(
                                 mouse.row,
                                 1u16,
                                 view_list_height,
                                 view_viewport_offset,
+                                view_viewport_inner,
                                 &view_row_heights,
                             );
-                            if let Some(idx) = click_row {
+                            if let Some((idx, inner)) = click_line {
                                 selected = idx;
+                                selected_inner = inner;
                                 follow = false;
                                 if detail.is_some() {
                                     clear_detail(
@@ -8273,10 +8319,12 @@ pub fn run(
             // frame will. Without this, arriving at the bottom via End/G
             // paints the highlight at the stale position for a frame and
             // then jumps — the "displayed twice, cursor moved" flicker.
-            let early_selected = if follow {
-                view_rows.len().saturating_sub(1)
+            let (early_selected, early_inner) = if follow {
+                let r = view_rows.len().saturating_sub(1);
+                let h = view_row_heights.get(r).copied().unwrap_or(1).max(1);
+                (r, h - 1)
             } else {
-                selected
+                clamp_cursor_line(&view_row_heights, selected, selected_inner)
             };
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             // Mirror the full refresh's unread marker (`unread_marker` below)
@@ -8338,9 +8386,14 @@ pub fn run(
                     floor,
                     squash,
                     follow,
-                    if follow { None } else { Some(view_viewport_offset) },
+                    if follow {
+                        None
+                    } else {
+                        Some((view_viewport_offset, view_viewport_inner))
+                    },
                     &view_rows,
                     early_selected,
+                    early_inner,
                     detail.as_ref(),
                     detail_scroll,
                     detail_h_scroll,
@@ -8423,9 +8476,14 @@ pub fn run(
                     floor,
                     squash,
                     follow,
-                    if follow { None } else { Some(view_viewport_offset) },
+                    if follow {
+                        None
+                    } else {
+                        Some((view_viewport_offset, view_viewport_inner))
+                    },
                     &view_rows,
                     selected,
+                    selected_inner,
                     detail.as_ref(),
                     detail_scroll,
                     detail_h_scroll,
@@ -9024,6 +9082,7 @@ pub fn run(
                 if search_needs_jump {
                     search_current = 0;
                     selected = search_matches[0];
+                    selected_inner = 0;
                     follow = false;
                     search_needs_jump = false;
                 }
@@ -9067,6 +9126,7 @@ pub fn run(
             if last_announced_plan_event.as_deref() != Some(event_id.as_str()) {
                 last_announced_plan_event = Some(event_id);
                 selected = row_idx;
+                selected_inner = 0;
                 follow = false;
                 // Plans are critical gates and use the blocking GateModal (handled
                 // below). Keep the status hint so the operator knows why the modal
@@ -9078,10 +9138,12 @@ pub fn run(
                 }
             } else if follow {
                 // Already announced and the operator explicitly re-followed
-                // (End/f) since: keep the cursor pinned to the newest row.
+                // (End/f) since: keep the cursor pinned to the newest line.
                 // Otherwise any row-count change (unsquash, new events) leaves
                 // the cursor stranded mid-list while the viewport stays pinned
                 // to the bottom, and the next j/k resumes from the stale spot.
+                // The exact last-line snap happens centrally once row heights
+                // are known (below); the row is enough to mark intent here.
                 selected = rows.len().saturating_sub(1);
             }
         } else if follow {
@@ -9121,6 +9183,7 @@ pub fn run(
                         &gate_ref,
                     ) {
                         selected = row_idx;
+                        selected_inner = 0;
                         follow = false;
                     }
                     detail = None;
@@ -9221,15 +9284,34 @@ pub fn run(
                 .collect()
         };
         let row_count = rows.len();
-        let safe_selected = selected.min(row_count.saturating_sub(1));
+        // Follow pins the cursor to the newest text line (not just the last
+        // row) so a tall final row still shows its end, not its top.
+        if follow && row_count > 0 {
+            selected = row_count - 1;
+            selected_inner = row_heights
+                .get(selected)
+                .copied()
+                .unwrap_or(1)
+                .max(1)
+                - 1;
+        }
+        let (safe_row, safe_inner) = clamp_cursor_line(&row_heights, selected, selected_inner);
+        selected = safe_row;
+        selected_inner = safe_inner;
+        let total_lines: usize = row_heights.iter().map(|h| (*h).max(1)).sum();
+        let cursor_abs = abs_line_index(&row_heights, selected, selected_inner);
+        let prev_top_abs =
+            abs_line_index(&row_heights, view_viewport_offset, view_viewport_inner);
+        let top_abs = compute_line_viewport_top(
+            cursor_abs,
+            list_height,
+            total_lines,
+            if follow { None } else { Some(prev_top_abs) },
+        );
+        let (viewport_offset, viewport_inner) = locate_abs_line(&row_heights, top_abs);
         let selected_spawn_agent = indexed
-            .get(safe_selected)
+            .get(selected)
             .and_then(|(_, src)| spawn_agent_for_row_source(&visible, *src));
-        let viewport_offset = if follow {
-            compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights, None)
-        } else {
-            compute_viewport_offset(safe_selected, list_height, &row_heights, Some(view_viewport_offset))
-        };
         let gate_count = count_active_gates(&entries, &resolved, &acted);
         let approval_rows = collect_approval_rows(&entries, &resolved, &acted);
         let info_panel = if info_panel_open {
@@ -9263,9 +9345,14 @@ pub fn run(
                 floor,
                 squash,
                 follow,
-                if follow { None } else { Some(view_viewport_offset) },
+                if follow {
+                    None
+                } else {
+                    Some((view_viewport_offset, view_viewport_inner))
+                },
                 &rows,
                 selected,
+                selected_inner,
                 detail.as_ref(),
                 detail_scroll,
                 detail_h_scroll,
@@ -9312,6 +9399,7 @@ pub fn run(
         view_row_count = row_count;
         view_row_heights = row_heights;
         view_viewport_offset = viewport_offset;
+        view_viewport_inner = viewport_inner;
         view_list_height = list_height;
         view_turn_boundaries = turn_boundaries;
         needs_redraw = false;
@@ -10838,6 +10926,7 @@ fn switch_session(
     entries: &mut Vec<SessionTimelineEntry>,
     cursor: &mut Option<String>,
     selected: &mut usize,
+    selected_inner: &mut usize,
     detail: &mut Option<DetailPane>,
     follow: &mut bool,
     resolved: &mut HashSet<String>,
@@ -10855,6 +10944,7 @@ fn switch_session(
     spawn_lineage.clear();
     *cursor = None;
     *selected = 0;
+    *selected_inner = 0;
     *detail = None;
     *follow = true;
     resolved.clear();
@@ -11884,9 +11974,10 @@ fn draw(
     floor: FloorMode,
     squash: bool,
     follow: bool,
-    prev_viewport_offset: Option<usize>,
+    prev_viewport: Option<(usize, usize)>,
     rows: &[RenderedRow],
     selected: usize,
+    selected_inner: usize,
     detail: Option<&DetailPane>,
     detail_scroll: u16,
     detail_h_scroll: u16,
@@ -12037,9 +12128,8 @@ fn draw(
     let list_area = chunks[list_idx];
     let list_height = list_area.height as usize;
     let row_count = rows.len();
-    let safe_selected = selected.min(row_count.saturating_sub(1));
-    // In follow mode the viewport is pinned to the bottom of the list;
-    // compute the per-row heights first so the offset is height-aware.
+    // Compute the per-row heights first: the line-granular viewport below
+    // is addressed in flattened text lines.
     let row_heights: Vec<usize> = (0..row_count)
         .map(|i| match &rows[i] {
             RenderedRow::Line(spec) => {
@@ -12061,16 +12151,25 @@ fn draw(
             RenderedRow::Collapsed { .. } => 1,
         })
         .collect();
-    let viewport_offset = if follow {
-        // Pin to the bottom; if the last row is multi-line, the offset
-        // adjusts to keep the last row fully visible.
-        compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights, None)
-    } else {
-        compute_viewport_offset(safe_selected, list_height, &row_heights, prev_viewport_offset)
-    };
+    // Line-granular viewport: the cursor is a text line, the top of the
+    // viewport is a text line, and the first row may start mid-row.
+    let (safe_row, _) = clamp_cursor_line(&row_heights, selected, selected_inner);
+    let total_lines: usize = row_heights.iter().map(|h| (*h).max(1)).sum();
+    let cursor_abs = abs_line_index(&row_heights, selected, selected_inner);
+    let prev_top_abs = prev_viewport
+        .map(|(r, inner)| abs_line_index(&row_heights, r, inner));
+    let top_abs = compute_line_viewport_top(
+        cursor_abs,
+        list_height,
+        total_lines,
+        if follow { None } else { prev_top_abs },
+    );
+    let (viewport_offset, viewport_inner) = locate_abs_line(&row_heights, top_abs);
     let mut y: u16 = list_area.y;
     let list_end_y = list_area.y.saturating_add(list_area.height);
     let mut i = viewport_offset;
+    // Skip the hidden leading lines when the viewport starts mid-row.
+    let mut skip = viewport_inner;
     while (y as usize) < (list_end_y as usize) && i < row_count {
         let remaining = (list_end_y - y) as usize;
         let (lines, line_count) = match &rows[i] {
@@ -12086,7 +12185,7 @@ fn draw(
                     label_w,
                     spinner_glyph,
                     show_reasoning,
-                    i == safe_selected,
+                    i == safe_row,
                 );
                 let n = lines.len();
                 (lines, n)
@@ -12100,21 +12199,42 @@ fn draw(
                 (vec![line], 1usize)
             }
         };
-        // Defensive: if the multi-line row's height exceeds what's left in
-        // the viewport, stop here. With the height-aware offset above this
-        // should not happen, but guard against any future code that shifts
-        // the offset out of sync with the row heights.
-        if line_count == 0 || line_count > remaining {
+        // A row below the top always starts at its first line; only the
+        // top row may be cut. Clamp defensively — heights are freshly
+        // computed, so `skip` fits, but never panic on a 0-line row.
+        let skip_here = skip.min(line_count.saturating_sub(1));
+        skip = 0;
+        // A row taller than the remaining space renders truncated (its
+        // first visible lines) instead of being skipped: skipping leaves
+        // a blank hole at the bottom whenever the next row is taller
+        // than the row that just scrolled off.
+        if line_count == 0 || skip_here >= line_count {
+            i += 1;
+            continue;
+        }
+        let visible = line_count - skip_here;
+        if visible > remaining {
+            let truncated: Vec<ratatui::text::Line> =
+                lines.into_iter().skip(skip_here).take(remaining).collect();
+            let row_area = Rect {
+                x: list_area.x,
+                y,
+                width: list_area.width,
+                height: remaining as u16,
+            };
+            f.render_widget(Paragraph::new(truncated), row_area);
             break;
         }
+        let shown: Vec<ratatui::text::Line> =
+            lines.into_iter().skip(skip_here).collect();
         let row_area = Rect {
             x: list_area.x,
             y,
             width: list_area.width,
-            height: line_count as u16,
+            height: visible as u16,
         };
-        f.render_widget(Paragraph::new(lines), row_area);
-        y = y.saturating_add(line_count as u16);
+        f.render_widget(Paragraph::new(shown), row_area);
+        y = y.saturating_add(visible as u16);
         i += 1;
     }
 
@@ -12125,7 +12245,7 @@ fn draw(
         draw_compose_input(f, c, chunks[chunks.len() - 2], taint);
     }
 
-    let turn_hint = rows.get(safe_selected).and_then(|r| match r {
+    let turn_hint = rows.get(safe_row).and_then(|r| match r {
         RenderedRow::Line(s) => s
             .turn_label
             .as_deref()
@@ -14463,14 +14583,6 @@ mod tests {
     }
 
     #[test]
-    fn main_list_page_step_accounts_for_chrome() {
-        // header (1) + footer (4); compose adds its panel when open.
-        assert_eq!(main_list_page_step(24, false), 19);
-        assert_eq!(main_list_page_step(24, true), 12);
-        assert_eq!(main_list_page_step(1, false), 1);
-    }
-
-    #[test]
     fn attention_strip_line_shows_pending_count_and_summaries() {
         let rows = vec![
             ApprovalRow {
@@ -14587,78 +14699,119 @@ mod tests {
     }
 
     #[test]
-    fn viewport_offset_pins_to_bottom_when_cursor_near_end() {
-        // 7 single-line rows, 5 visible. With edge-scrolling the viewport only
-        // moves when the cursor crosses the viewport edge, so the cursor stays
-        // inside the window while ↑/↓ move line-by-line.
-        let h = vec![1usize; 7];
-        assert_eq!(compute_viewport_offset(0, 5, &h, None), 0);
-        assert_eq!(compute_viewport_offset(1, 5, &h, None), 1);
-        assert_eq!(compute_viewport_offset(2, 5, &h, None), 2);
-        assert_eq!(compute_viewport_offset(3, 5, &h, None), 2);
-        assert_eq!(compute_viewport_offset(4, 5, &h, None), 2);
-        assert_eq!(compute_viewport_offset(5, 5, &h, None), 2);
-        assert_eq!(compute_viewport_offset(6, 5, &h, None), 2);
+    fn line_cursor_clamps_to_valid_rows_and_lines() {
+        assert_eq!(clamp_cursor_line(&[], 5, 3), (0, 0));
+        assert_eq!(clamp_cursor_line(&[1, 1, 1], 9, 0), (2, 0));
+        // Inner line clamps to the row's last line.
+        assert_eq!(clamp_cursor_line(&[1, 4, 1], 1, 99), (1, 3));
+        assert_eq!(clamp_cursor_line(&[1, 4, 1], 1, 2), (1, 2));
     }
 
     #[test]
-    fn viewport_offset_returns_zero_when_list_fits() {
-        assert_eq!(compute_viewport_offset(0, 5, &[], None), 0);
-        assert_eq!(compute_viewport_offset(0, 5, &[1, 1, 1, 1, 1], None), 0);
-        assert_eq!(compute_viewport_offset(2, 5, &[1, 1, 1], None), 0);
+    fn line_cursor_abs_and_locate_roundtrip() {
+        // Rows of 2, 3, 1 lines: absolute lines 0..6.
+        let h = vec![2usize, 3, 1];
+        assert_eq!(abs_line_index(&h, 0, 0), 0);
+        assert_eq!(abs_line_index(&h, 0, 1), 1);
+        assert_eq!(abs_line_index(&h, 1, 0), 2);
+        assert_eq!(abs_line_index(&h, 1, 2), 4);
+        assert_eq!(abs_line_index(&h, 2, 0), 5);
+        for abs in 0..6 {
+            let (r, i) = locate_abs_line(&h, abs);
+            assert_eq!(abs_line_index(&h, r, i), abs, "roundtrip {abs}");
+        }
+        // Past the end clamps to the last line.
+        assert_eq!(locate_abs_line(&h, 99), (2, 0));
+        assert_eq!(locate_abs_line(&[], 0), (0, 0));
     }
 
     #[test]
-    fn viewport_offset_keeps_multiline_last_row_visible() {
-        // 7 rows, last two are 2 lines tall, viewport 5 lines tall.
-        // Bottom window: row 4 (1) + row 5 (2) + row 6 (2) = 5 → fits.
-        // Last row (6) stays visible as the cursor moves inside the bottom
-        // window. Moving above it scrolls up one row at a time.
-        let h = vec![1usize, 1, 1, 1, 1, 2, 2];
-        assert_eq!(compute_viewport_offset(4, 5, &h, None), 4);
-        assert_eq!(compute_viewport_offset(5, 5, &h, None), 4);
-        assert_eq!(compute_viewport_offset(6, 5, &h, None), 4);
-        // selected=3 leaves the bottom window; viewport scrolls up by one row
-        // so row 3 is at the top instead of snapping a whole page.
-        assert_eq!(compute_viewport_offset(3, 5, &h, None), 3);
+    fn line_cursor_steps_one_text_line() {
+        // One `j` moves a single text line, crossing row boundaries.
+        let h = vec![2usize, 3, 1];
+        assert_eq!(step_cursor_line(&h, 0, 0, 1), (0, 1));
+        assert_eq!(step_cursor_line(&h, 0, 1, 1), (1, 0));
+        assert_eq!(step_cursor_line(&h, 1, 2, 1), (2, 0));
+        // Clamps at both ends instead of wrapping or panicking.
+        assert_eq!(step_cursor_line(&h, 2, 0, 1), (2, 0));
+        assert_eq!(step_cursor_line(&h, 0, 0, -1), (0, 0));
+        assert_eq!(step_cursor_line(&h, 1, 0, -1), (0, 1));
+        // Multi-line jumps (pages) land on exact lines.
+        assert_eq!(step_cursor_line(&h, 0, 0, 4), (1, 2));
+        assert_eq!(step_cursor_line(&h, 2, 0, -5), (0, 0));
     }
 
     #[test]
-    fn viewport_offset_stable_when_cursor_within_prev_viewport() {
-        // 10 single-line rows, 5 visible. Starting from prev_offset=2,
-        // the cursor should be able to move freely within [2, 7) without
-        // changing the viewport. Only edge-crossings should scroll.
-        let h = vec![1usize; 10];
+    fn line_viewport_stable_until_cursor_crosses_edge() {
+        // 10 single-line rows, 5 visible: the cursor roams freely inside
+        // [2, 7) and the viewport only moves on edge crossings — by exactly
+        // the crossed distance, one line per step.
+        let total = 10;
         let prev = Some(2);
-        // Cursor within: [2, 7)
-        assert_eq!(compute_viewport_offset(2, 5, &h, prev), 2);
-        assert_eq!(compute_viewport_offset(3, 5, &h, prev), 2);
-        assert_eq!(compute_viewport_offset(4, 5, &h, prev), 2);
-        assert_eq!(compute_viewport_offset(5, 5, &h, prev), 2);
-        assert_eq!(compute_viewport_offset(6, 5, &h, prev), 2);
-        // Cursor above: edge-scroll up
-        assert_eq!(compute_viewport_offset(1, 5, &h, prev), 1);
-        assert_eq!(compute_viewport_offset(0, 5, &h, prev), 0);
-        // Cursor below: edge-scroll down
-        assert_eq!(compute_viewport_offset(7, 5, &h, prev), 3);
-        assert_eq!(compute_viewport_offset(8, 5, &h, prev), 4);
-        // Cursor to bottom: re-pin with edge-scroll
-        assert_eq!(compute_viewport_offset(9, 5, &h, prev), 5);
+        for cursor in 2..7 {
+            assert_eq!(compute_line_viewport_top(cursor, 5, total, prev), 2);
+        }
+        assert_eq!(compute_line_viewport_top(1, 5, total, prev), 1);
+        assert_eq!(compute_line_viewport_top(0, 5, total, prev), 0);
+        assert_eq!(compute_line_viewport_top(7, 5, total, prev), 3);
+        assert_eq!(compute_line_viewport_top(9, 5, total, prev), 5);
     }
 
     #[test]
-    fn viewport_offset_follow_mode_empty_timeline_does_not_underflow() {
-        // Fresh session: row_count == 0 → follow uses saturating_sub(1) == 0.
-        assert_eq!(compute_viewport_offset(0, 10, &[], None), 0);
+    fn line_viewport_returns_zero_when_list_fits() {
+        assert_eq!(compute_line_viewport_top(0, 5, 0, None), 0);
+        assert_eq!(compute_line_viewport_top(0, 5, 0, Some(3)), 0);
+        assert_eq!(compute_line_viewport_top(4, 5, 5, None), 0);
+        assert_eq!(compute_line_viewport_top(2, 5, 3, Some(0)), 0);
     }
 
     #[test]
-    fn viewport_offset_anchors_to_bottom_in_follow_mode_with_multiline() {
-        // 5 rows, last one is 3 lines tall, viewport 4 tall.
-        // bottom window: row 2 (1) + row 3 (1) + row 4 (3) = 5 > 4, can't fit.
-        // shrink: row 3 (1) + row 4 (3) = 4 → fits, offset=3.
-        let h = vec![1usize, 1, 1, 1, 3];
-        assert_eq!(compute_viewport_offset(4, 4, &h, None), 3);
+    fn line_viewport_follow_pins_to_bottom() {
+        // Follow (`None` prev) pins the newest line to the bottom, even when
+        // the last row alone is taller than the viewport.
+        assert_eq!(compute_line_viewport_top(6, 5, 7, None), 2);
+        assert_eq!(compute_line_viewport_top(4, 4, 7, None), 3);
+        assert_eq!(compute_line_viewport_top(0, 10, 0, None), 0);
+    }
+
+    #[test]
+    fn line_viewport_oversized_rows_never_blank() {
+        // A row taller than the viewport fills the screen on its own; the
+        // top stays inside bounds and the cursor stays visible.
+        for (heights, cursor_abs, prev) in [
+            (vec![20usize], 0, None),
+            (vec![20usize], 0, Some(0)),
+            (vec![20usize], 19, None),
+            (vec![1usize, 1, 20], 21, None),
+            (vec![20usize, 20, 1], 0, Some(20)),
+            (vec![20usize, 1, 1], 20, Some(0)),
+        ] {
+            let total: usize = heights.iter().sum();
+            let top = compute_line_viewport_top(cursor_abs, 10, total, prev);
+            assert!(
+                top + 10 >= total || (cursor_abs >= top && cursor_abs < top + 10),
+                "cursor {cursor_abs} not visible under top {top}"
+            );
+            let (r, i) = locate_abs_line(&heights, top);
+            assert!(r < heights.len(), "top row {r} out of bounds");
+            assert!(i < heights[r], "top inner {i} out of bounds");
+        }
+    }
+
+    #[test]
+    fn click_maps_to_exact_cursor_line() {
+        // Rows of 3, 1, 2 lines; viewport starts mid-first-row (inner 1).
+        let h = vec![3usize, 1, 2];
+        // rel 0 → row 0 line 1 (the visible top), rel 1 → row 0 line 2,
+        // rel 2 → row 1, rel 3 → row 2 line 0.
+        assert_eq!(click_to_line_index(1, 1, 5, 0, 1, &h), Some((0, 1)));
+        assert_eq!(click_to_line_index(2, 1, 5, 0, 1, &h), Some((0, 2)));
+        assert_eq!(click_to_line_index(3, 1, 5, 0, 1, &h), Some((1, 0)));
+        assert_eq!(click_to_line_index(4, 1, 5, 0, 1, &h), Some((2, 0)));
+        // Outside the list area, or past the last content line: nothing.
+        assert_eq!(click_to_line_index(0, 1, 5, 0, 1, &h), None);
+        assert_eq!(click_to_line_index(6, 1, 5, 0, 1, &h), None);
+        assert_eq!(click_to_line_index(1, 1, 5, 0, 0, &[]), None);
     }
 
     #[test]
