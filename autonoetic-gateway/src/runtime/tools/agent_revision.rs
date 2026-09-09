@@ -2917,12 +2917,11 @@ impl NativeTool for AgentRevisionPromoteTool {
 returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
 `request_id`/`approval_ref` to your caller and end your turn. When the operator approves, the gateway \
 **re-executes the approved promote for you** and resumes your session with the real result already in \
-hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. If it returns \
-`interaction_required: true` (`smoke_test_confirmation_pending`, operator-directed smoke class), the \
-operator has been asked directly — end your turn and wait; when answered, run the smoke test via \
-`agent_spawn(revision_id=...)` with the confirmed input as the message, then retry with \
-`smoke_test_workflow_id` + `smoke_test_task_id` (`smoke_test_input` resolves automatically from the \
-answered confirmation — never fabricate it). A locked \
+hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. On \
+`interaction_required: true` (`smoke_test_confirmation_pending`) the operator has been asked — end \
+your turn; once answered, smoke-test via `agent_spawn(revision_id=...)` with the confirmed input, then \
+retry with both evidence ids (`smoke_test_input` resolves from the confirmation — never fabricate it). \
+A locked \
 session capability envelope (PromoteWith) \
 pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
 On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
@@ -2950,8 +2949,8 @@ do not re-issue."
                     "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
                     "smoke_test_task_id": { "type": "string", "description": "Task id of a successful smoke-test run for this candidate revision. Required for new capability-bearing agents (NetworkAccess or CodeExecution)." },
                     "smoke_test_workflow_id": { "type": "string", "description": "Workflow id containing the smoke-test task. Required alongside smoke_test_task_id for new capability-bearing agents." },
-                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required when the candidate declares credential_services or external WriteAccess scopes (operator-directed class). May be omitted once the operator has confirmed an input via the gate's confirmation interaction — the confirmed input is resolved from the store automatically." },
-                    "proposed_smoke_test_input": { "type": "string", "description": "Your proposed representative smoke-test input, shown to the operator when the gate asks for confirmation (operator-directed class). Optional but recommended: a concrete proposal lets the operator confirm with one click." }
+                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required for the operator-directed class (credential_services or external WriteAccess), but omit it once the gate's confirmation interaction is answered — it resolves from the store." },
+                    "proposed_smoke_test_input": { "type": "string", "description": "Your proposed smoke-test input, shown to the operator when the gate asks. Recommended: a concrete proposal is one click to confirm." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -5584,7 +5583,16 @@ fn ensure_smoke_input_confirmation_interaction(
     };
 
     // Reuse a still-pending confirmation for this same revision.
-    for pending in store.get_pending_interactions_for_session(session_id)? {
+    //
+    // Scoped to the ROOT session, not this child session, to match
+    // `find_smoke_input_confirmation`'s lookup scope. A session-scoped dedup
+    // asymmetry is a live bug in the very scenario this gate exists for: when
+    // the orchestrator is re-spawned (session-eb6abde5 re-ran agent-factory as
+    // a fresh child), the promote retry runs in a NEW child session, finds no
+    // pending confirmation of its own, and asks the operator a second time —
+    // while the answered-lookup would have accepted the first answer.
+    let dedup_root = crate::runtime::content_store::root_session_id(session_id).to_string();
+    for pending in store.get_pending_interactions_for_root_session(&dedup_root)? {
         let Some(ctx) = pending.context.as_deref() else {
             continue;
         };

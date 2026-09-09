@@ -109,7 +109,7 @@ impl NativeTool for UserAskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Ask the user a question. Execution suspends until the user answers. Use this only when you have a specific clarification, decision, proposal, or confirmation the operator must supply. Never call it with placeholder or template text in `question` — if you have nothing specific to ask, reply directly instead of calling this tool. Availability: refused with `workflow_tasks_active` while any OTHER task in your workflow is still active (your own task never blocks you — a depth-1 orchestrator whose children have all completed CAN ask), and with `gates_pending` while any approval or interaction is pending under your root session; both errors name what is blocking so you can complete/cancel it or escalate to a level with a free channel.".to_string(),
+            description: "Ask the user a question; execution suspends until they answer. Only for a specific clarification, decision, proposal or confirmation the operator must supply — never placeholder or template text. Nothing specific to ask? Reply directly instead. Refusals name what blocks the call.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
