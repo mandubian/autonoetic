@@ -132,12 +132,14 @@ documents `Hermetic` as embedding artifact content *and layers*, but the export
 path hardcodes an empty list, and the archive layout notes mark the `layers/`
 directory as hermetic-only future work.
 
-The practical effect is that every capsule is thin with respect to layers: it
-ships a `runtime.lock` referencing layer digests the receiving gateway must
-already hold. There is also an inconsistency to resolve — hermetic and replay
-export refuse an agent whose lock declares runtime-installed pip dependencies,
-telling the operator to bake them into pinned layers first, and then exports no
-layers even once they are baked.
+`included_artifacts` is empty too, and import never reads either field — so the
+embedding that defines those modes is entirely unbuilt, not merely missing its
+layer half.
+
+Hermetic and Replay export therefore **refuse** rather than emit a capsule that
+declares a closure it does not carry. Thin and Headless are defined as
+reference-carrying and are what works today: the receiving gateway resolves the
+artifacts and layers the `runtime.lock` names, so it must already hold them.
 
 ## Where the code is
 

@@ -67,20 +67,83 @@ pub fn extract_and_mount_layers(
 ) -> anyhow::Result<()> {
     let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
     for layer in layers {
-        let layer_temp_base = std::env::temp_dir()
-            .join("autonoetic_layer")
-            .join(&layer.layer_id);
-        std::fs::create_dir_all(&layer_temp_base)?;
+        let layer_base = std::env::temp_dir().join("autonoetic_layer");
+        let layer_temp_base = layer_base.join(&layer.layer_id);
+        std::fs::create_dir_all(&layer_base)?;
 
-        if let Err(e) = layer_store.extract_to(&layer.layer_id, &layer_temp_base) {
-            tracing::warn!(
-                target: "sandbox",
-                layer_id = %layer.layer_id,
-                source = source_label,
-                error = %e,
-                "Failed to extract layer for sandbox mounting"
+        // Extraction is cached across execs, sessions and agents. Without this
+        // every exec re-read the whole archive to verify its digest and then
+        // unpacked it again — for a Node runtime layer that is a full
+        // redeployment of a Node distribution (229 package.json files alone)
+        // on every single command.
+        //
+        // The cache is content-keyed: `layer_id` is derived from the digest, so
+        // a populated directory is the right content by construction. The
+        // marker records the full digest (the id truncates it) and lives
+        // BESIDE the directory, never inside it, so it cannot appear in the
+        // mount the agent sees. A directory with no marker predates this cache
+        // — or was left by an interrupted unpack — so it is re-extracted once.
+        let expected_digest = layer_store.inspect(&layer.layer_id).map(|m| m.digest).ok();
+        let marker = layer_base.join(format!("{}.complete", layer.layer_id));
+        let cached = match (&expected_digest, std::fs::read_to_string(&marker)) {
+            (Some(digest), Ok(recorded)) => {
+                recorded.trim() == digest && layer_temp_base.is_dir()
+            }
+            _ => false,
+        };
+
+        if !cached {
+            // Unpack into a staging directory and move it into place, so a
+            // concurrent exec never mounts a half-extracted tree — the previous
+            // unconditional unpack-over-existing could, and also produced
+            // duplicate-entry errors against its own earlier output.
+            let unique = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
             );
-            continue;
+            let staging = layer_base.join(format!(".staging-{}-{unique}", layer.layer_id));
+            let _ = std::fs::remove_dir_all(&staging);
+            std::fs::create_dir_all(&staging)?;
+
+            if let Err(e) = layer_store.extract_to(&layer.layer_id, &staging) {
+                tracing::warn!(
+                    target: "sandbox",
+                    layer_id = %layer.layer_id,
+                    source = source_label,
+                    error = %e,
+                    "Failed to extract layer for sandbox mounting"
+                );
+                let _ = std::fs::remove_dir_all(&staging);
+                continue;
+            }
+
+            let _ = std::fs::remove_dir_all(&layer_temp_base);
+            match std::fs::rename(&staging, &layer_temp_base) {
+                Ok(()) => {
+                    if let Some(digest) = &expected_digest {
+                        let _ = std::fs::write(&marker, digest);
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    if !layer_temp_base.is_dir() {
+                        tracing::warn!(
+                            target: "sandbox",
+                            layer_id = %layer.layer_id,
+                            source = source_label,
+                            error = %e,
+                            "Failed to place extracted layer for sandbox mounting"
+                        );
+                        continue;
+                    }
+                    // A concurrent exec won the race and published the same
+                    // content-addressed tree — use theirs.
+                }
+            }
         }
 
         tracing::info!(
@@ -151,6 +214,38 @@ pub fn extract_and_mount_layers(
         }
     }
     Ok(())
+}
+
+/// Layers whose `node_modules` the Node ESM resolver cannot reach.
+///
+/// ESM never consults `NODE_PATH` — it resolves a bare specifier only by
+/// walking `node_modules` up the directory tree from the importing file. A deps
+/// layer therefore works only when it sits on that walk: `<workspace>/node_modules`
+/// is reachable from any script in the workspace, `<workspace>/deps/node_modules`
+/// is reachable from nothing outside `<workspace>/deps`.
+///
+/// Nothing about the mount looks wrong in that second case — the layer is
+/// mounted, present, and on `NODE_PATH` — so the only symptom is
+/// `ERR_MODULE_NOT_FOUND` at import time, which reads as a missing dependency
+/// rather than a misplaced mount. The gateway knows the mount set and the
+/// workspace, so it can say so instead.
+///
+/// A nested `node_modules` inside a runtime layer (`/tmp/nodejs`, whose
+/// `lib/node_modules` holds npm's own tree) is not a dependency mount and is
+/// not reported.
+fn unreachable_esm_layer_mounts(mount_paths: &[String], workspace_dir: &str) -> Vec<String> {
+    let workspace = workspace_dir.trim_end_matches('/');
+    mount_paths
+        .iter()
+        .filter(|p| {
+            let p = p.trim_end_matches('/');
+            let Some(parent) = p.strip_suffix("/node_modules") else {
+                return false;
+            };
+            !parent.is_empty() && parent != workspace
+        })
+        .cloned()
+        .collect()
 }
 
 /// True if `pattern` matches a package manager install command.
@@ -2951,6 +3046,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // intentionally not listed — it is a gateway-internal socket, not host
         // filesystem reach). Bubblewrap ro-binds the whole host `/` today
         // (legacy mode); docker/microvm/wasm do not.
+        // Captured before `all_mounts` is moved into the runner.
+        let layer_mount_paths: Vec<String> = all_mounts.iter().map(|m| m.dest.clone()).collect();
+
         let mount_set = crate::sandbox::compose_mount_set(
             driver,
             agent_dir_str,
@@ -3018,6 +3116,35 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             "stderr": stderr,
             "mount_set": mount_set
         });
+
+        // Node ESM reachability advisory — see `unreachable_esm_layer_mounts`.
+        {
+            let ws = driver.workspace_dir();
+            let unreachable = unreachable_esm_layer_mounts(&layer_mount_paths, &ws);
+            if !unreachable.is_empty() {
+                tracing::warn!(
+                    target: "sandbox",
+                    workspace = %ws,
+                    mounts = ?unreachable,
+                    "node_modules layer is off the ESM resolution walk; `import` will not find it"
+                );
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert(
+                        "esm_unreachable_layers".to_string(),
+                        serde_json::json!({
+                            "mount_paths": unreachable,
+                            "workspace_dir": ws,
+                            "note": "These node_modules are mounted and on NODE_PATH, but Node's \
+                                     ESM resolver ignores NODE_PATH and only walks node_modules up \
+                                     from the importing file. `import` will fail with \
+                                     ERR_MODULE_NOT_FOUND; `require` still works. Mount deps at \
+                                     <workspace>/node_modules, or run the script from inside the \
+                                     layer's own directory.",
+                        }),
+                    );
+                }
+            }
+        }
 
         // #1321: disclose the effective network-namespace state. Without this a
         // net-less exec is indistinguishable from a DNS/egress outage — a
@@ -4323,6 +4450,53 @@ mod approval_ref_binding_tests {
 }
 
 #[cfg(test)]
+mod esm_reachability_tests {
+    use super::unreachable_esm_layer_mounts;
+
+    #[test]
+    fn deps_at_the_workspace_root_are_reachable() {
+        let mounts = vec!["/tmp/node_modules".to_string()];
+        assert!(unreachable_esm_layer_mounts(&mounts, "/tmp").is_empty());
+        // Trailing slash on either side must not change the verdict.
+        assert!(unreachable_esm_layer_mounts(&mounts, "/tmp/").is_empty());
+    }
+
+    #[test]
+    fn deps_off_the_walk_are_reported() {
+        let mounts = vec![
+            "/tmp/deps/node_modules".to_string(),
+            "/tmp/second/node_modules".to_string(),
+        ];
+        let got = unreachable_esm_layer_mounts(&mounts, "/tmp");
+        assert_eq!(got, mounts, "both are invisible to the ESM resolver");
+    }
+
+    #[test]
+    fn non_dependency_mounts_are_not_reported() {
+        // A runtime layer (its lib/node_modules is npm's own tree, not the
+        // agent's deps) and ordinary content mounts must stay quiet.
+        let mounts = vec![
+            "/tmp/nodejs".to_string(),
+            "/tmp/autonoetic_content/session-x/SKILL.md".to_string(),
+            "/tmp".to_string(),
+        ];
+        assert!(unreachable_esm_layer_mounts(&mounts, "/tmp").is_empty());
+    }
+
+    #[test]
+    fn a_non_default_driver_workspace_is_honoured() {
+        // #1127: the workspace is the selected driver's, not a hardcoded /tmp.
+        let mounts = vec!["/workspace/node_modules".to_string()];
+        assert!(unreachable_esm_layer_mounts(&mounts, "/workspace").is_empty());
+        assert_eq!(
+            unreachable_esm_layer_mounts(&mounts, "/tmp"),
+            mounts,
+            "reachable under one workspace root is unreachable under another"
+        );
+    }
+}
+
+#[cfg(test)]
 mod layer_bin_path_tests {
     use super::*;
 
@@ -4378,6 +4552,74 @@ mod layer_bin_path_tests {
         assert!(
             bin_paths.contains(&"/tmp/nodejs/node_modules/.bin".to_string()),
             "npm CLI shim dir must be on PATH: {bin_paths:?}"
+        );
+    }
+
+    /// Extraction is cached across execs. Observable via a sentinel written
+    /// into the extracted tree: a re-extract stages a fresh directory and
+    /// renames it into place, which would destroy the sentinel.
+    #[test]
+    fn a_second_mount_of_the_same_layer_reuses_the_extraction() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gw_dir = tmp.path();
+        let store = crate::layer_store::LayerStore::new(gw_dir, Default::default())
+            .expect("layer store");
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        std::fs::write(src.join("bin").join("tool"), b"#!/bin/sh\n").unwrap();
+        // Unique content so this test cannot collide with a layer another test
+        // left in the shared /tmp/autonoetic_layer cache.
+        std::fs::write(
+            src.join("nonce"),
+            format!("{:?}", std::time::SystemTime::now()).as_bytes(),
+        )
+        .unwrap();
+        let manifest = store
+            .create_from_dir(&src, "cached", "/tmp/cached", None)
+            .expect("create layer");
+
+        let layers = vec![LayerMount {
+            layer_id: manifest.layer_id.clone(),
+            mount_path: "/tmp/cached".to_string(),
+        }];
+        let mount_once = || {
+            let (mut m, mut p, mut n, mut b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            extract_and_mount_layers(&layers, gw_dir, "test", &mut m, &mut p, &mut n, &mut b)
+                .expect("mount layers");
+            m
+        };
+
+        let first = mount_once();
+        let extracted = first[0].source.clone();
+        let sentinel = extracted.join(".reuse-probe");
+        std::fs::write(&sentinel, b"kept").unwrap();
+
+        let second = mount_once();
+        assert_eq!(second[0].source, extracted, "same cache directory");
+        assert!(
+            sentinel.exists(),
+            "second mount must reuse the extraction, not re-unpack it"
+        );
+
+        // The completion marker lives beside the tree, never inside it — it
+        // must not show up in the mount the agent sees.
+        let marker = extracted
+            .parent()
+            .unwrap()
+            .join(format!("{}.complete", manifest.layer_id));
+        assert!(marker.is_file(), "completion marker recorded");
+        assert!(
+            !extracted.join(format!("{}.complete", manifest.layer_id)).exists(),
+            "marker must not be inside the mounted tree"
+        );
+
+        // A marker that does not match the layer digest forces a re-extract.
+        std::fs::write(&marker, "sha256:stale").unwrap();
+        let third = mount_once();
+        assert_eq!(third[0].source, extracted);
+        assert!(
+            !sentinel.exists(),
+            "a stale marker must force a fresh extraction"
         );
     }
 
