@@ -269,22 +269,80 @@ fn mark_json_truncated(value: &mut serde_json::Value) {
 ///
 /// The budget is split evenly across all string values, after reserving
 /// overhead for the JSON structure itself.
+/// Maximum elements kept in a long string array before it collapses to a
+/// head plus an elision marker.
+const MAX_ARRAY_ELEMENTS: usize = 6;
+
+/// Collapse long arrays of strings to a bounded head plus a count marker.
+///
+/// Runs BEFORE the per-field divisor is computed, because the divisor is
+/// `string_budget / string_count` — so a big array does not merely take its
+/// own share, it shrinks *every other field's* share too. Measured on a
+/// `sandbox_exec` result in session-eb6abde5: 27 `mount_set` entries of ~130
+/// chars each, ~3.5k chars of pure diagnostics against a 4000-char ceiling,
+/// drove `per_field_budget` to ~75 — so `stdout` reached the model cut to 75
+/// characters, and each mount path was middle-truncated to 75 as well. The
+/// metadata destroyed the payload and made itself unreadable doing it.
+///
+/// Only whole-string arrays are collapsed: an array of objects is structured
+/// data whose elements are addressed individually.
+fn collapse_long_string_arrays(value: &mut serde_json::Value) {
+    let mut stack: Vec<&mut serde_json::Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (k, child) in map.iter_mut() {
+                    if TRUNCATION_EXEMPT_KEYS.contains(&k.as_str()) {
+                        continue;
+                    }
+                    stack.push(child);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                let all_strings = arr.iter().all(|e| e.is_string());
+                if all_strings && arr.len() > MAX_ARRAY_ELEMENTS {
+                    let dropped = arr.len() - MAX_ARRAY_ELEMENTS;
+                    arr.truncate(MAX_ARRAY_ELEMENTS);
+                    arr.push(serde_json::Value::String(format!(
+                        "… {dropped} more (elided to keep the result budget for payload fields)"
+                    )));
+                } else if !all_strings {
+                    stack.extend(arr.iter_mut());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usize) {
     // Budget only the NON-exempt strings: exempt content (routing directives,
     // `gateway_note`) is delivered verbatim and must not starve the fields it
     // shares the result with. A 4k-token `gateway_note` next to a 100-char
     // output would otherwise shrink the per-field budget to nothing.
-    let (total_string_chars, string_count) = non_exempt_string_metrics(value);
+    let (total_string_chars, _) = non_exempt_string_metrics(value);
     if total_string_chars <= max_chars {
         return;
     }
+    // Bound diagnostic arrays before dividing, so they cannot starve payload
+    // fields like `stdout` out of the budget.
+    collapse_long_string_arrays(value);
 
     // Reserve space for JSON structural overhead (keys, braces, commas,
     // quotes, colons). A rough estimate: 40% of the budget goes to structure,
     // capped so we never starve the string budget below ~25%.
     let struct_overhead = (max_chars * 2 / 5).min(max_chars * 3 / 4);
     let string_budget = max_chars.saturating_sub(struct_overhead);
-    let per_field_budget = string_budget / string_count.max(1);
+
+    // Max-min fair allocation, not a flat `budget / count` divisor. A flat
+    // divisor caps the ONE field that needs room at the same number every
+    // short field is handed and then wastes — with a collapsed 7-entry
+    // `mount_set` of ~130 chars each it still cut an 840-char `stdout` to 300,
+    // because `stdout` got a 300-char slot while seven 130-char paths left
+    // ~1.2k of the budget unclaimed. Fair-share hands each field the smaller
+    // of its own length and an even split, then redistributes the surplus, so
+    // short metadata fields survive intact AND the payload keeps the rest.
+    let per_field_budget = fair_share_cap(non_exempt_string_lengths(value), string_budget);
 
     truncate_json_strings_iterative(value, per_field_budget);
 }
@@ -309,6 +367,55 @@ const TRUNCATION_EXEMPT_KEYS: &[&str] = &[
     // it must survive the JSON-aware truncator verbatim.
     "gateway_note",
 ];
+
+/// The largest per-field cap `c` such that `sum(min(len_i, c)) <= budget`.
+///
+/// Classic max-min fair share: walk the lengths ascending, and as long as the
+/// shortest remaining field fits inside an even split of what is left, give it
+/// its full length and redistribute the remainder across the rest. The first
+/// field that does not fit sets the cap for every field above it.
+/// `usize::MAX` means everything fits untruncated.
+fn fair_share_cap(mut lengths: Vec<usize>, budget: usize) -> usize {
+    lengths.sort_unstable();
+    let n = lengths.len();
+    let mut remaining = budget;
+    for (i, &len) in lengths.iter().enumerate() {
+        let slots = n - i;
+        let even = remaining / slots;
+        if len <= even {
+            remaining -= len;
+        } else {
+            return even;
+        }
+    }
+    usize::MAX
+}
+
+/// Lengths (in chars) of every non-exempt string value, for `fair_share_cap`.
+fn non_exempt_string_lengths(value: &serde_json::Value) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(&serde_json::Value, bool)> = vec![(value, false)];
+    while let Some((v, exempt)) = stack.pop() {
+        match v {
+            serde_json::Value::String(sv) => {
+                if !exempt {
+                    out.push(sv.chars().count());
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (k, child) in map.iter() {
+                    let child_exempt = exempt || TRUNCATION_EXEMPT_KEYS.contains(&k.as_str());
+                    stack.push((child, child_exempt));
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                stack.extend(arr.iter().map(|e| (e, exempt)));
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 fn truncate_json_strings_iterative(value: &mut serde_json::Value, per_field_budget: usize) {
     // `exempt` propagates down subtrees rooted at an exempt top-level key
@@ -922,6 +1029,51 @@ impl BudgetEnforcementStrategy for DemoteToolsStrategy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_long_mount_set_no_longer_starves_stdout() {
+        // Reproduces the measured session-eb6abde5 shape: 27 mount paths of
+        // ~130 chars against the 4000-char ceiling drove per_field_budget to
+        // ~75, cutting stdout to 75 characters.
+        let mounts: Vec<String> = (0..27)
+            .map(|i| {
+                format!(
+                    "rw:/tmp/autonoetic_content/session-eb6abde5_agent-factory.default-e063ec5a_agent-browser-ced59c7c/agent_reply.{i:03}.json"
+                )
+            })
+            .collect();
+        let stdout = "agent-browser 0.27.0\n".repeat(40);
+        let result = serde_json::json!({
+            "ok": true,
+            "exit_code": 0,
+            "stdout": stdout,
+            "mount_set": mounts,
+        });
+        let truncated = super::truncate_tool_result(&result.to_string(), 4000);
+        let parsed: serde_json::Value = serde_json::from_str(&truncated)
+            .expect("truncated result must stay valid JSON");
+        let out = parsed["stdout"].as_str().unwrap_or("");
+        assert!(
+            out.len() > 400,
+            "stdout must keep a usable share of the budget, got {} chars: {out:?}",
+            out.len()
+        );
+        let arr = parsed["mount_set"].as_array().expect("mount_set stays an array");
+        assert!(
+            arr.len() <= super::MAX_ARRAY_ELEMENTS + 1,
+            "mount_set must collapse, got {} entries",
+            arr.len()
+        );
+        assert!(
+            arr.last().and_then(|v| v.as_str()).unwrap_or("").contains("more"),
+            "collapse must say how many were elided: {arr:?}"
+        );
+        assert!(
+            truncated.chars().count() <= 4000,
+            "still within budget: {} chars",
+            truncated.chars().count()
+        );
+    }
+
     use super::*;
     use crate::llm::ToolCall;
 
