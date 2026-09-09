@@ -3272,7 +3272,11 @@ pub async fn process_runnable_workflow_tasks(
             .unwrap_or(false);
             let message = if is_child_wait_wake {
                 "[gateway child state notification] All spawned child tasks have resolved. \
-                 Continue and produce your final result."
+                 This does NOT mean your task is complete: if your objective has outstanding \
+                 steps (reading a child's result, running follow-up work, finishing a multi-step \
+                 procedure), take the next action NOW with tool calls — do not end your turn on \
+                 intent alone, and do not re-issue a wait on already-resolved tasks. Produce your \
+                 final result only when the delegated objective itself is actually satisfied."
                     .to_string()
             } else {
                 task.message

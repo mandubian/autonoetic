@@ -109,7 +109,7 @@ impl NativeTool for UserAskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Ask the user a question. Execution suspends until the user answers. Use this only when you have a specific clarification, decision, proposal, or confirmation the operator must supply. Never call it with placeholder or template text in `question` — if you have nothing specific to ask, reply directly instead of calling this tool.".to_string(),
+            description: "Ask the user a question. Execution suspends until the user answers. Use this only when you have a specific clarification, decision, proposal, or confirmation the operator must supply. Never call it with placeholder or template text in `question` — if you have nothing specific to ask, reply directly instead of calling this tool. Availability: refused with `workflow_tasks_active` while any OTHER task in your workflow is still active (your own task never blocks you — a depth-1 orchestrator whose children have all completed CAN ask), and with `gates_pending` while any approval or interaction is pending under your root session; both errors name what is blocking so you can complete/cancel it or escalate to a level with a free channel.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -207,24 +207,33 @@ impl NativeTool for UserAskTool {
                     wf_id,
                 )
                 .unwrap_or_default();
-                let has_active_children = task_runs.iter().any(|t| {
-                    if let Some(sid) = session_id {
-                        if t.session_id == sid {
-                            return false;
+                let active_children: Vec<String> = task_runs
+                    .iter()
+                    .filter(|t| {
+                        if let Some(sid) = session_id {
+                            if t.session_id == sid {
+                                return false;
+                            }
                         }
-                    }
-                    matches!(
-                        t.status,
-                        autonoetic_types::workflow::TaskRunStatus::Pending
-                            | autonoetic_types::workflow::TaskRunStatus::Runnable
-                            | autonoetic_types::workflow::TaskRunStatus::Running
-                            | autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
-                            | autonoetic_types::workflow::TaskRunStatus::Paused
-                    )
-                });
-                if has_active_children {
+                        matches!(
+                            t.status,
+                            autonoetic_types::workflow::TaskRunStatus::Pending
+                                | autonoetic_types::workflow::TaskRunStatus::Runnable
+                                | autonoetic_types::workflow::TaskRunStatus::Running
+                                | autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                                | autonoetic_types::workflow::TaskRunStatus::Paused
+                        )
+                    })
+                    .map(|t| format!("{} ({}, {:?})", t.task_id, t.agent_id, t.status))
+                    .collect();
+                if !active_children.is_empty() {
                     return Ok(ToolError::conflict(
-                        "user_ask is not available while workflow tasks are active. Complete or cancel child tasks first.",
+                        format!(
+                            "user_ask is not available while workflow tasks are active: [{}]. \
+                             Your own task does not block you — these are sibling/parent tasks. \
+                             Complete or cancel them first, or ask at a level with no active children.",
+                            active_children.join(", ")
+                        ),
                         Some("Call workflow_wait until child tasks complete, then retry."),
                     )
                     .with_code("workflow_tasks_active")
@@ -239,8 +248,21 @@ impl NativeTool for UserAskTool {
                 .get_pending_interactions_for_root_session(&root_session_id)
                 .unwrap_or_default();
             if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
+                let blocking: Vec<String> = pending_approvals
+                    .iter()
+                    .map(|a| format!("approval:{}", a.request_id))
+                    .chain(
+                        pending_interactions
+                            .iter()
+                            .map(|i| format!("interaction:{}", i.interaction_id)),
+                    )
+                    .collect();
                 return Ok(ToolError::conflict(
-                    "user_ask is not available while gates are pending. Resolve or wait for pending gates, then retry.",
+                    format!(
+                        "user_ask is not available while gates are pending under your root session: [{}]. \
+                         Resolve them (approve/reject/answer) or wait, then retry.",
+                        blocking.join(", ")
+                    ),
                     Some("Resolve or wait for pending gates, then retry."),
                 )
                 .with_code("gates_pending")

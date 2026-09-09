@@ -2825,8 +2825,17 @@ struct RevisionPromoteArgs {
     smoke_test_workflow_id: Option<String>,
     /// Operator-confirmed input used for the smoke test. Required when the
     /// candidate is classified operator-directed (credentials or external WriteAccess).
+    /// May be omitted when the operator already confirmed an input via the
+    /// gate's confirmation interaction — the confirmed input is then resolved
+    /// from the store automatically.
     #[serde(default)]
     smoke_test_input: Option<String>,
+    /// Caller's proposed representative smoke-test input, surfaced to the
+    /// operator when the gate asks for confirmation (operator-directed class).
+    /// Optional but strongly recommended: a concrete proposal lets the
+    /// operator confirm with one click instead of composing an input.
+    #[serde(default)]
+    proposed_smoke_test_input: Option<String>,
 }
 
 /// Best-effort ledger write for a terminal promotion-attempt outcome
@@ -2908,7 +2917,12 @@ impl NativeTool for AgentRevisionPromoteTool {
 returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
 `request_id`/`approval_ref` to your caller and end your turn. When the operator approves, the gateway \
 **re-executes the approved promote for you** and resumes your session with the real result already in \
-hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. A locked \
+hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. If it returns \
+`interaction_required: true` (`smoke_test_confirmation_pending`, operator-directed smoke class), the \
+operator has been asked directly — end your turn and wait; when answered, run the smoke test via \
+`agent_spawn(revision_id=...)` with the confirmed input as the message, then retry with \
+`smoke_test_workflow_id` + `smoke_test_task_id` (`smoke_test_input` resolves automatically from the \
+answered confirmation — never fabricate it). A locked \
 session capability envelope (PromoteWith) \
 pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
 On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
@@ -2936,7 +2950,8 @@ do not re-issue."
                     "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
                     "smoke_test_task_id": { "type": "string", "description": "Task id of a successful smoke-test run for this candidate revision. Required for new capability-bearing agents (NetworkAccess or CodeExecution)." },
                     "smoke_test_workflow_id": { "type": "string", "description": "Workflow id containing the smoke-test task. Required alongside smoke_test_task_id for new capability-bearing agents." },
-                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required when the candidate declares credential_services or external WriteAccess scopes." }
+                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required when the candidate declares credential_services or external WriteAccess scopes (operator-directed class). May be omitted once the operator has confirmed an input via the gate's confirmation interaction — the confirmed input is resolved from the store automatically." },
+                    "proposed_smoke_test_input": { "type": "string", "description": "Your proposed representative smoke-test input, shown to the operator when the gate asks for confirmation (operator-directed class). Optional but recommended: a concrete proposal lets the operator confirm with one click." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -4435,6 +4450,136 @@ do not re-issue."
         let smoke_required = (is_new_agent || shape_changed)
             && smoke_involvement != crate::runtime::smoke_test_gate::SmokeTestInvolvement::NotRequired;
 
+        // Operator-directed class (P-2.28): the smoke-test input must be
+        // operator-confirmed. Resolve the effective input — explicit arg, else
+        // the operator's answer to the gate's confirmation interaction. When
+        // no decision exists yet, create (or reuse) the interaction and
+        // suspend: a real gate the operator can answer, in place of the old
+        // bare validation error that created nothing and stranded the
+        // pipeline (session-eb6abde5: the confirmation depended on the LLM
+        // carrying exact text across hibernation, and never arrived).
+        let mut effective_smoke_test_input = args.smoke_test_input.clone();
+        if smoke_required
+            && smoke_involvement
+                == crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected
+            && effective_smoke_test_input
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            let sid = session_id.unwrap_or("");
+            if sid.is_empty() {
+                // No session to park a gate on — keep the legacy loud refusal.
+                if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_input_required")) {
+                    return Ok(rejection.to_tool_error().to_string());
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_input_required",
+                    "message": format!(
+                        "Agent '{}' requires operator-directed smoke test input (credential_services or external WriteAccess declared).",
+                        args.agent_id
+                    ),
+                    "smoke_test_involvement": "operator_directed",
+                    "repair_hint": "Propose a representative test input via proposed_smoke_test_input so the gate can ask the operator, then retry.",
+                })
+                .to_string());
+            }
+            let root_sid = crate::runtime::content_store::root_session_id(sid).to_string();
+            match find_smoke_input_confirmation(
+                &gateway_store,
+                &root_sid,
+                &args.agent_id,
+                &args.revision_id,
+            )? {
+                Some(SmokeInputConfirmation::Confirmed(input)) => {
+                    tracing::info!(
+                        target: "promotion",
+                        agent_id = %args.agent_id,
+                        revision_id = %args.revision_id,
+                        "Operator-directed smoke test input resolved from answered confirmation interaction"
+                    );
+                    effective_smoke_test_input = Some(input);
+                }
+                Some(SmokeInputConfirmation::Rejected) => {
+                    if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_input_rejected")) {
+                        return Ok(rejection.to_tool_error().to_string());
+                    }
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "error": "smoke_test_input_rejected",
+                        "message": format!(
+                            "The operator rejected the smoke-test input confirmation for agent '{}' revision '{}'. \
+                             Do not retry promotion of this revision without a new operator decision.",
+                            args.agent_id, args.revision_id
+                        ),
+                        "smoke_test_involvement": "operator_directed",
+                        "repair_hint": "Surface the rejection to the orchestrator; re-ask only with a materially different proposal.",
+                    })
+                    .to_string());
+                }
+                None => {
+                    let proposed = args
+                        .proposed_smoke_test_input
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(
+                            "Run the agent's primary function once with a representative benign \
+                             input and verify it behaves as its SKILL.md describes.",
+                        )
+                        .to_string();
+                    let question = format!(
+                        "Promotion of agent '{}' revision '{}' requires an operator-confirmed \
+                         smoke-test input (P-2.28: the candidate declares credential services or \
+                         external WriteAccess). Proposed input: {}\n\nApprove the proposal, \
+                         provide a different input as free text, or reject the promotion.",
+                        args.agent_id, args.revision_id, proposed
+                    );
+                    let interaction_id = ensure_smoke_input_confirmation_interaction(
+                        &gateway_store,
+                        manifest,
+                        sid,
+                        turn_id,
+                        config,
+                        run_context,
+                        &args.agent_id,
+                        &args.revision_id,
+                        &proposed,
+                        &question,
+                    )?;
+                    record_attempt(
+                        "approval_required",
+                        Some("smoke_test"),
+                        Some("smoke_test_confirmation_pending"),
+                    );
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "error": "smoke_test_confirmation_pending",
+                        "interaction_required": true,
+                        "interaction_id": interaction_id,
+                        "status": "awaiting_user",
+                        "message": format!(
+                            "Agent '{}' requires an operator-confirmed smoke-test input (operator-directed class). \
+                             The operator has been asked (interaction {}); when answered, run the smoke test via \
+                             agent_spawn(revision_id=...) with the confirmed input as the message, then retry promote \
+                             with smoke_test_workflow_id + smoke_test_task_id — smoke_test_input resolves automatically \
+                             from the answered confirmation.",
+                            args.agent_id, interaction_id
+                        ),
+                        "smoke_test_involvement": "operator_directed",
+                        "proposed_smoke_test_input": proposed,
+                        "repair_hint": "Wait for the operator's answer (do not end the delegation as failed), then run the smoke test with the confirmed input and retry with the evidence ids.",
+                    })
+                    .to_string());
+                }
+            }
+        }
+
         // (A) Verify any caller-supplied evidence. If either id is present, both
         // must be, and the referenced task must have succeeded against this
         // candidate revision. This runs even for an unchanged existing agent.
@@ -4474,7 +4619,7 @@ do not re-issue."
                 task_id,
                 &args.agent_id,
                 &args.revision_id,
-                args.smoke_test_input.as_deref(),
+                effective_smoke_test_input.as_deref(),
             ) {
                 if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_failed_or_mismatched")) {
                     return Ok(rejection.to_tool_error().to_string());
@@ -4497,29 +4642,6 @@ do not re-issue."
         // (B) Require evidence for new agents and shape-changing replacements.
         //     (If evidence was supplied it was already verified by rule A above.)
         if smoke_required {
-            if smoke_involvement
-                == crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected
-            {
-                let input = args.smoke_test_input.as_deref().unwrap_or("").trim();
-                if input.is_empty() {
-                    if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_input_required")) {
-                        return Ok(rejection.to_tool_error().to_string());
-                    }
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error_type": "validation",
-                        "error": "smoke_test_input_required",
-                        "message": format!(
-                            "Agent '{}' requires operator-directed smoke test input (credential_services or external WriteAccess declared).",
-                            args.agent_id
-                        ),
-                        "smoke_test_involvement": "operator_directed",
-                        "repair_hint": "Propose a representative test input, confirm it with the operator via user_ask, run agent_spawn(revision_id=...) with that message, then retry promotion with smoke_test_input plus smoke_test_workflow_id and smoke_test_task_id.",
-                    })
-                    .to_string());
-                }
-            }
-
             let has_evidence =
                 args.smoke_test_workflow_id.is_some() && args.smoke_test_task_id.is_some();
             if !has_evidence {
@@ -5362,6 +5484,180 @@ fn approval_execution_context(
 ///       if it has, a fresh promote attempt must produce a new approval
 ///       against the new baseline (otherwise an unrelated revision flip
 ///       between approval-mint and retry could let unacknowledged caps through).
+// =============================================================================
+// Operator-directed smoke-test input confirmation (P-2.28).
+//
+// When the candidate declares credential services or external WriteAccess, the
+// smoke gate requires an operator-confirmed `smoke_test_input`. The
+// confirmation is a REAL gate: the promote call creates a user interaction
+// (suspending the session) instead of returning a bare validation error that
+// leaves the operator with nothing to answer. The operator's decision is
+// durably stored, so a promote retry — possibly from a different child session
+// after an orchestrator re-spawn — recovers the confirmed input from the store
+// instead of depending on the LLM carrying exact text across hibernation.
+// =============================================================================
+
+/// Context-marker key identifying a user interaction as the smoke-test-input
+/// confirmation for a specific revision. Stored in `UserInteraction.context`.
+const SMOKE_INPUT_CONFIRM_CONTEXT_KEY: &str = "autonoetic_smoke_input_confirmation";
+
+/// Option id that declines the promotion on the confirmation interaction. Any
+/// other answer (the approve option, or freeform text) confirms an input.
+const SMOKE_INPUT_REJECT_OPTION_ID: &str = "reject_smoke_test";
+
+enum SmokeInputConfirmation {
+    Confirmed(String),
+    Rejected,
+}
+
+/// Recover the operator's decision on a previously created smoke-test-input
+/// confirmation for this revision. Scans answered interactions under the root
+/// session (newest first) for the context marker naming this
+/// `(agent_id, revision_id)`. A freeform answer text overrides the proposed
+/// input; approving without text confirms the proposal; the reject option
+/// declines the promotion.
+fn find_smoke_input_confirmation(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    revision_id: &str,
+) -> anyhow::Result<Option<SmokeInputConfirmation>> {
+    let answered = store.get_answered_interactions_for_root_session(root_session_id)?;
+    for interaction in &answered {
+        let Some(ctx) = interaction.context.as_deref() else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(ctx) else {
+            continue;
+        };
+        let Some(marker) = v.get(SMOKE_INPUT_CONFIRM_CONTEXT_KEY) else {
+            continue;
+        };
+        if marker.get("agent_id").and_then(|x| x.as_str()) != Some(agent_id)
+            || marker.get("revision_id").and_then(|x| x.as_str()) != Some(revision_id)
+        {
+            continue;
+        }
+        if interaction.answer_option_id.as_deref() == Some(SMOKE_INPUT_REJECT_OPTION_ID) {
+            return Ok(Some(SmokeInputConfirmation::Rejected));
+        }
+        let confirmed = interaction
+            .answer_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                marker
+                    .get("proposed_input")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(input) = confirmed {
+            return Ok(Some(SmokeInputConfirmation::Confirmed(input)));
+        }
+    }
+    Ok(None)
+}
+
+/// Create (or reuse) the operator confirmation interaction for an
+/// operator-directed smoke-test input. Returns the interaction id.
+///
+/// Marker-aware dedup: a still-pending confirmation for THIS revision is
+/// reused; an unrelated pending interaction on the session does not block
+/// asking — the gate owns this question (unlike the `user_ask` tool, whose
+/// session-level dedup and workflow/gate guards stay conservative).
+fn ensure_smoke_input_confirmation_interaction(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    manifest: &AgentManifest,
+    session_id: &str,
+    turn_id: Option<&str>,
+    config: Option<&GatewayConfig>,
+    run_context: Option<&NativeToolRunContext>,
+    agent_id: &str,
+    revision_id: &str,
+    proposed_input: &str,
+    question: &str,
+) -> anyhow::Result<String> {
+    use autonoetic_types::background::{
+        UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
+    };
+
+    // Reuse a still-pending confirmation for this same revision.
+    for pending in store.get_pending_interactions_for_session(session_id)? {
+        let Some(ctx) = pending.context.as_deref() else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(ctx) else {
+            continue;
+        };
+        let Some(m) = v.get(SMOKE_INPUT_CONFIRM_CONTEXT_KEY) else {
+            continue;
+        };
+        if m.get("agent_id").and_then(|x| x.as_str()) == Some(agent_id)
+            && m.get("revision_id").and_then(|x| x.as_str()) == Some(revision_id)
+        {
+            return Ok(pending.interaction_id);
+        }
+    }
+
+    let interaction_id = autonoetic_types::id_format::short_random_id("ui-");
+    let (root_session_id, workflow_id, task_id) =
+        approval_execution_context(run_context, Some(session_id));
+    let expires_at = config.and_then(|c| {
+        let ttl = c.interaction_timeout_secs;
+        if ttl == 0 {
+            None
+        } else {
+            Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+        }
+    });
+    let context = serde_json::json!({
+        SMOKE_INPUT_CONFIRM_CONTEXT_KEY: {
+            "agent_id": agent_id,
+            "revision_id": revision_id,
+            "proposed_input": proposed_input,
+        }
+    })
+    .to_string();
+
+    let interaction = UserInteraction {
+        interaction_id: interaction_id.clone(),
+        session_id: session_id.to_string(),
+        root_session_id: root_session_id.unwrap_or_default(),
+        agent_id: manifest.agent.id.clone(),
+        turn_id: turn_id.unwrap_or("unknown").to_string(),
+        kind: UserInteractionKind::Confirmation,
+        question: question.to_string(),
+        context: Some(context),
+        options: vec![
+            UserInteractionOption {
+                id: "approve_proposed".to_string(),
+                label: "Approve the proposed smoke-test input".to_string(),
+                value: proposed_input.to_string(),
+            },
+            UserInteractionOption {
+                id: SMOKE_INPUT_REJECT_OPTION_ID.to_string(),
+                label: "Reject this promotion".to_string(),
+                value: "reject".to_string(),
+            },
+        ],
+        allow_freeform: true,
+        status: UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        answered_at: None,
+        expires_at,
+        workflow_id,
+        task_id,
+        checkpoint_turn_id: turn_id.map(|t| t.to_string()),
+    };
+    store.create_user_interaction(&interaction)?;
+    Ok(interaction_id)
+}
+
 /// Verify that a smoke-test task ran the candidate revision successfully.
 ///
 /// Returns `Ok(())` if the task exists, reached `Succeeded` status, and its

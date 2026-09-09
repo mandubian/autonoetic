@@ -11,7 +11,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
-use autonoetic_types::background::ApprovalLevel;
+use autonoetic_types::background::{ApprovalLevel, UserInteractionAnswer, UserInteractionStatus};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::principal::PrincipalKind;
@@ -354,6 +354,38 @@ fn invoke_promote(
     serde_json::from_str(&raw).expect("response is JSON")
 }
 
+/// Invoke promote carrying only a `proposed_smoke_test_input` (no evidence) —
+/// the shape an orchestrator issues when it expects the operator-directed gate
+/// to ask for confirmation.
+fn invoke_promote_with_proposal(h: &Harness, proposed: Option<&str>) -> serde_json::Value {
+    let manifest = manifest_with_revision_cap(AGENT_ID);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let mut args = serde_json::json!({
+        "agent_id": AGENT_ID,
+        "revision_id": REVISION_ID,
+    });
+    if let Some(p) = proposed {
+        args["proposed_smoke_test_input"] = serde_json::json!(p);
+    }
+    let raw = registry
+        .execute(
+            "agent_revision_promote",
+            &manifest,
+            &policy,
+            &h.agent_dir,
+            Some(&h.gateway_dir),
+            &args.to_string(),
+            Some("test-session"),
+            Some("turn-000001"),
+            Some(&h.config),
+            Some(h.store.clone()),
+            None,
+        )
+        .expect("execute should not error for normal cases");
+    serde_json::from_str(&raw).expect("response is JSON")
+}
+
 #[test]
 fn capability_bearing_new_agent_blocks_without_smoke_test() {
     let h = setup_harness(true, false, false);
@@ -557,19 +589,125 @@ fn shape_changing_replacement_of_executable_agent_requires_smoke_test() {
 }
 
 #[test]
-fn operator_directed_requires_smoke_test_input() {
+fn operator_directed_creates_confirmation_gate_instead_of_bare_error() {
     let h = setup_harness(true, true, false);
+    let proposal = "buy 1 share of AAPL";
+    let result = invoke_promote_with_proposal(&h, Some(proposal));
+
+    // The gate must suspend on a REAL interaction the operator can answer —
+    // not a bare validation error that leaves nothing to act on.
+    assert_eq!(result["ok"], false, "unexpected: {:?}", result);
+    assert_eq!(result["error"], "smoke_test_confirmation_pending");
+    assert_eq!(result["interaction_required"], true);
+    let iid = result["interaction_id"]
+        .as_str()
+        .expect("gate returns the interaction id")
+        .to_string();
+
+    let interaction = h
+        .store
+        .get_user_interaction(&iid)
+        .unwrap()
+        .expect("interaction row exists");
+    assert_eq!(interaction.status, UserInteractionStatus::Pending);
+    let ctx = interaction.context.clone().unwrap_or_default();
+    assert!(
+        ctx.contains("autonoetic_smoke_input_confirmation"),
+        "context carries the smoke-confirmation marker: {ctx}"
+    );
+    assert!(ctx.contains(REVISION_ID), "marker names the revision: {ctx}");
+    assert!(ctx.contains(proposal), "marker carries the proposal: {ctx}");
+    // The operator sees the proposal as a one-click option plus a reject path.
+    assert!(interaction.options.iter().any(|o| o.id == "approve_proposed"));
+    assert!(interaction.options.iter().any(|o| o.id == "reject_smoke_test"));
+
+    // A retry while the question is still pending reuses the same interaction —
+    // no duplicate card.
+    let again = invoke_promote(&h, None, None, None);
+    assert_eq!(again["error"], "smoke_test_confirmation_pending");
+    assert_eq!(again["interaction_id"].as_str().unwrap(), iid);
+}
+
+#[test]
+fn operator_directed_promotes_after_gate_confirmation_without_input_arg() {
+    let h = setup_harness(true, true, false);
+    let proposal = "buy 1 share of AAPL";
+    let pending = invoke_promote_with_proposal(&h, Some(proposal));
+    let iid = pending["interaction_id"].as_str().unwrap().to_string();
+
+    // Operator approves the proposed input.
+    h.store
+        .answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: iid,
+            answer_option_id: Some("approve_proposed".to_string()),
+            answer_text: None,
+            answered_by: "operator".to_string(),
+        })
+        .unwrap();
+
+    // The smoke test ran with the confirmed input; the promote retry passes NO
+    // smoke_test_input — the gate resolves it from the answered confirmation.
     let wf_id = create_smoke_test_task(
         &h,
-        "smoke-cred-001",
+        "smoke-cred-gate",
         TaskRunStatus::Succeeded,
-        Some("buy 1 share"),
+        Some(proposal),
         None,
     );
-    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-cred-001"), None);
+    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-cred-gate"), None);
+    assert_eq!(result["ok"], true, "unexpected: {:?}", result);
+    assert_eq!(result["status"], "promoted");
+}
 
+#[test]
+fn operator_directed_freeform_answer_overrides_proposal() {
+    let h = setup_harness(true, true, false);
+    let pending = invoke_promote_with_proposal(&h, Some("original proposal"));
+    let iid = pending["interaction_id"].as_str().unwrap().to_string();
+
+    // Operator overrides the proposal with a freeform input.
+    let override_input = "sell 2 shares of TSLA instead";
+    h.store
+        .answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: iid,
+            answer_option_id: None,
+            answer_text: Some(override_input.to_string()),
+            answered_by: "operator".to_string(),
+        })
+        .unwrap();
+
+    // The smoke test ran with the OVERRIDE text; verification must compare
+    // against the operator's words, not the original proposal.
+    let wf_id = create_smoke_test_task(
+        &h,
+        "smoke-cred-override",
+        TaskRunStatus::Succeeded,
+        Some(override_input),
+        None,
+    );
+    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-cred-override"), None);
+    assert_eq!(result["ok"], true, "unexpected: {:?}", result);
+    assert_eq!(result["status"], "promoted");
+}
+
+#[test]
+fn operator_directed_operator_reject_blocks_promotion() {
+    let h = setup_harness(true, true, false);
+    let pending = invoke_promote_with_proposal(&h, Some("buy 1 share"));
+    let iid = pending["interaction_id"].as_str().unwrap().to_string();
+
+    h.store
+        .answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: iid,
+            answer_option_id: Some("reject_smoke_test".to_string()),
+            answer_text: None,
+            answered_by: "operator".to_string(),
+        })
+        .unwrap();
+
+    let result = invoke_promote(&h, None, None, None);
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
-    assert_eq!(result["error"], "smoke_test_input_required");
+    assert_eq!(result["error"], "smoke_test_input_rejected");
 }
 
 #[test]

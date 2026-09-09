@@ -403,6 +403,35 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Answered interactions under a root session, newest first. Used by the
+    /// operator-directed smoke-test gate to recover an operator-confirmed
+    /// `smoke_test_input` on a promote retry — possibly from a different
+    /// child session than the one that asked (orchestrator re-spawn).
+    pub fn get_answered_interactions_for_root_session(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<UserInteraction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT interaction_id FROM user_interactions \
+             WHERE root_session_id = ?1 AND status = 'answered' \
+             ORDER BY answered_at DESC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn get_answered_standalone_interactions(&self) -> Result<Vec<UserInteraction>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
