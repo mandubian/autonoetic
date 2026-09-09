@@ -73,6 +73,18 @@ pub struct LayerStore {
     limits: LayerLimits,
 }
 
+/// Where the walk currently is, for `scan_resolved_packages`. npm package roots
+/// are identified by their parent, so the role must be carried down the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirRole {
+    /// Ordinary directory: check Python / Cargo / Go markers.
+    Plain,
+    /// A `node_modules/` — its non-dot children are package roots.
+    NodeModules,
+    /// An `@scope/` inside a `node_modules/` — its children are package roots.
+    NpmScope,
+}
+
 impl LayerStore {
     pub fn new(gateway_dir: &Path, limits: LayerLimits) -> anyhow::Result<Self> {
         let layers_dir = gateway_dir.join(LAYERS_DIR);
@@ -259,12 +271,32 @@ impl LayerStore {
     /// `pip --target` and venv layouts produce these) and parses `name==version`
     /// from the directory stem. Read-only and bounded. (Node `node_modules`
     /// provenance is a follow-up.)
+    /// Walk a captured tree and record the packages it resolves, per ecosystem.
+    ///
+    /// This provenance is what `aggregate_resolved_packages` merges into the
+    /// closure the approval boundary surfaces and bless-on-promotion freezes.
+    /// It recognised only Python `.dist-info` until now, so every npm, Cargo
+    /// and Go layer reported an EMPTY set — all six layers in a real store
+    /// (two `node_modules` trees and a Node runtime among them) recorded zero
+    /// packages, meaning a Node agent's blessed closure froze nothing and the
+    /// operator was shown nothing about what had been installed.
+    ///
+    /// Layout markers per ecosystem:
+    /// - Python: `<name>-<version>.dist-info/`
+    /// - npm:    a direct child of a `node_modules/` dir (or of an `@scope/`
+    ///           inside one), identified by its own `package.json`
+    /// - Cargo:  `<name>-<version>/Cargo.toml` (registry src) or a vendored
+    ///           crate dir carrying `.cargo-checksum.json`
+    /// - Go:     `<module>@<version>/` in the module cache
+    ///
+    /// Symlinks are never followed (`file_type()` rather than `path.is_dir()`),
+    /// so a symlinked tree cannot pull provenance in from outside the capture.
     fn scan_resolved_packages(dir: &Path) -> Vec<autonoetic_types::layer::ResolvedPackage> {
         use autonoetic_types::layer::ResolvedPackage;
         let mut found: Vec<ResolvedPackage> = Vec::new();
-        let mut stack = vec![dir.to_path_buf()];
+        let mut stack = vec![(dir.to_path_buf(), Self::dir_role(dir))];
         let mut visited = 0usize;
-        while let Some(d) = stack.pop() {
+        while let Some((d, role)) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&d) else {
                 continue;
             };
@@ -282,7 +314,7 @@ impl LayerStore {
                 }
                 // `file_type()` does NOT follow symlinks (unlike `path.is_dir()`),
                 // so a symlinked dir / cycle can't traverse outside the capture
-                // root or leak host package names into the manifest.
+                // root and contribute provenance that was never captured.
                 let Ok(file_type) = entry.file_type() else {
                     continue;
                 };
@@ -291,6 +323,35 @@ impl LayerStore {
                 }
                 let fname = entry.file_name();
                 let name = fname.to_string_lossy();
+                let path = entry.path();
+
+                match role {
+                    DirRole::NodeModules => {
+                        // `.bin`, `.package-lock.json` and friends are not packages.
+                        if name.starts_with('.') {
+                            continue;
+                        }
+                        if name.starts_with('@') {
+                            stack.push((path, DirRole::NpmScope));
+                            continue;
+                        }
+                        if let Some(pkg) = Self::read_npm_package(&path) {
+                            found.push(pkg);
+                        }
+                        // Descend anyway: packages can nest their own node_modules.
+                        stack.push((path, DirRole::Plain));
+                        continue;
+                    }
+                    DirRole::NpmScope => {
+                        if let Some(pkg) = Self::read_npm_package(&path) {
+                            found.push(pkg);
+                        }
+                        stack.push((path, DirRole::Plain));
+                        continue;
+                    }
+                    DirRole::Plain => {}
+                }
+
                 if let Some(stem) = name.strip_suffix(".dist-info") {
                     if let Some((pkg, ver)) = stem.rsplit_once('-') {
                         if !pkg.is_empty() && !ver.is_empty() {
@@ -303,10 +364,98 @@ impl LayerStore {
                     // Don't descend into the dist-info directory itself.
                     continue;
                 }
-                stack.push(entry.path());
+
+                // Go module cache: `<module>@<version>`. Guarded against index 0
+                // so an npm scope dir reached out of role can never match here.
+                if let Some(at) = name.find('@') {
+                    if at > 0 {
+                        let (module, version) = name.split_at(at);
+                        let version = &version[1..];
+                        if !module.is_empty() && !version.is_empty() {
+                            found.push(ResolvedPackage {
+                                name: module.to_string(),
+                                version: version.to_string(),
+                            });
+                            stack.push((path, DirRole::Plain));
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(pkg) = Self::read_cargo_package(&path, &name) {
+                    found.push(pkg);
+                    continue;
+                }
+
+                let role = Self::dir_role(&path);
+                stack.push((path, role));
             }
         }
         Self::finalize_resolved(found)
+    }
+
+    /// A directory's role in the walk — npm package roots are identified by
+    /// their PARENT being `node_modules` (or a scope inside one), not by any
+    /// marker of their own, so the role has to be carried down the walk.
+    fn dir_role(path: &Path) -> DirRole {
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some("node_modules") => DirRole::NodeModules,
+            _ => DirRole::Plain,
+        }
+    }
+
+    /// Read `<dir>/package.json` and return its declared name + version.
+    /// The manifest's own `name` wins over the directory name so a scoped
+    /// package records as `@scope/pkg`, matching how it is required.
+    fn read_npm_package(dir: &Path) -> Option<autonoetic_types::layer::ResolvedPackage> {
+        let raw = std::fs::read_to_string(dir.join("package.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let name = v.get("name")?.as_str()?.trim().to_string();
+        let version = v.get("version")?.as_str()?.trim().to_string();
+        if name.is_empty() || version.is_empty() {
+            return None;
+        }
+        Some(autonoetic_types::layer::ResolvedPackage { name, version })
+    }
+
+    /// Recognise a Cargo crate directory: registry `src/<name>-<version>/` or a
+    /// vendored crate carrying `.cargo-checksum.json`. The version comes from
+    /// `Cargo.toml` when readable (vendored dirs are named without one) and
+    /// falls back to the `<name>-<version>` directory name.
+    fn read_cargo_package(
+        dir: &Path,
+        dir_name: &str,
+    ) -> Option<autonoetic_types::layer::ResolvedPackage> {
+        let has_manifest = dir.join("Cargo.toml").is_file();
+        if !has_manifest && !dir.join(".cargo-checksum.json").is_file() {
+            return None;
+        }
+        if let Ok(raw) = std::fs::read_to_string(dir.join("Cargo.toml")) {
+            if let Ok(parsed) = raw.parse::<toml::Value>() {
+                let pkg = parsed.get("package");
+                let name = pkg.and_then(|p| p.get("name")).and_then(|n| n.as_str());
+                let version = pkg.and_then(|p| p.get("version")).and_then(|n| n.as_str());
+                if let (Some(name), Some(version)) = (name, version) {
+                    if !name.is_empty() && !version.is_empty() {
+                        return Some(autonoetic_types::layer::ResolvedPackage {
+                            name: name.to_string(),
+                            version: version.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        // A workspace manifest inherits its version and names no package —
+        // fall back to the registry-src directory name.
+        let (name, version) = dir_name.rsplit_once('-')?;
+        if name.is_empty() || version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return None;
+        }
+        Some(autonoetic_types::layer::ResolvedPackage {
+            name: name.to_string(),
+            version: version.to_string(),
+        })
     }
 
     fn finalize_resolved(
@@ -610,6 +759,159 @@ mod tests {
             names,
             vec!["good".to_string()],
             "symlinked external dist-info must not be traversed"
+        );
+    }
+
+    fn write_npm_pkg(root: &std::path::Path, rel: &str, name: &str, version: &str) {
+        let dir = root.join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+    }
+
+    /// The defect this scanner had: npm layers recorded ZERO packages, so a
+    /// Node agent's blessed closure froze nothing. Real store evidence: two
+    /// `node_modules` trees and a Node runtime, all `resolved_packages=0`.
+    #[test]
+    fn npm_node_modules_resolve_including_scoped_and_nested() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("node_modules");
+        fs::create_dir_all(&src).unwrap();
+        write_npm_pkg(&src, "agent-browser", "agent-browser", "0.27.0");
+        write_npm_pkg(&src, "@scope/inner", "@scope/inner", "2.1.0");
+        // A package nesting its own dependency.
+        write_npm_pkg(&src, "outer", "outer", "1.0.0");
+        write_npm_pkg(&src, "outer/node_modules/nested", "nested", "3.3.3");
+        // `.bin` shims are not packages.
+        fs::create_dir_all(src.join(".bin")).unwrap();
+
+        let found = LayerStore::scan_resolved_packages(&src);
+        let got: Vec<String> = found
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "@scope/inner@2.1.0".to_string(),
+                "agent-browser@0.27.0".to_string(),
+                "nested@3.3.3".to_string(),
+                "outer@1.0.0".to_string(),
+            ],
+            "npm packages (scoped + nested) must resolve; .bin must not"
+        );
+    }
+
+    #[test]
+    fn cargo_registry_and_vendored_crates_resolve() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("cargo");
+        // Registry src layout: <name>-<version>/Cargo.toml
+        let reg = src.join("registry/src/index.crates.io-abc/serde-1.0.219");
+        fs::create_dir_all(&reg).unwrap();
+        fs::write(
+            reg.join("Cargo.toml"),
+            "[package]\nname = \"serde\"\nversion = \"1.0.219\"\n",
+        )
+        .unwrap();
+        // Vendored crate: dir name carries no version, manifest does.
+        let vend = src.join("vendor/anyhow");
+        fs::create_dir_all(&vend).unwrap();
+        fs::write(vend.join(".cargo-checksum.json"), "{}").unwrap();
+        fs::write(
+            vend.join("Cargo.toml"),
+            "[package]\nname = \"anyhow\"\nversion = \"1.0.95\"\n",
+        )
+        .unwrap();
+
+        let found = LayerStore::scan_resolved_packages(&src);
+        let got: Vec<String> = found
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        assert_eq!(got, vec!["anyhow@1.0.95", "serde@1.0.219"]);
+    }
+
+    #[test]
+    fn go_module_cache_entries_resolve() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("pkg/mod");
+        fs::create_dir_all(src.join("github.com/pkg/errors@v0.9.1")).unwrap();
+        fs::create_dir_all(src.join("golang.org/x/net@v0.33.0")).unwrap();
+
+        let found = LayerStore::scan_resolved_packages(&src);
+        let got: Vec<String> = found
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        assert_eq!(got, vec!["errors@v0.9.1", "net@v0.33.0"]);
+    }
+
+    /// A project's own manifest is not a resolved dependency — only children of
+    /// a `node_modules/` are. Without this the scanner would claim the agent's
+    /// own package as part of its dependency closure.
+    #[test]
+    fn a_bare_project_package_json_is_not_a_resolved_package() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("proj");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("package.json"),
+            r#"{"name":"my-app","version":"0.1.0"}"#,
+        )
+        .unwrap();
+        let found = LayerStore::scan_resolved_packages(&src);
+        assert!(found.is_empty(), "project manifest must not resolve: {found:?}");
+    }
+
+    #[test]
+    fn python_dist_info_still_resolves_alongside_the_new_ecosystems() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("mixed");
+        fs::create_dir_all(src.join("lib/python3.11/site-packages/requests-2.32.3.dist-info"))
+            .unwrap();
+        write_npm_pkg(&src, "node_modules/left-pad", "left-pad", "1.3.0");
+        let found = LayerStore::scan_resolved_packages(&src);
+        let got: Vec<String> = found
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        assert_eq!(got, vec!["left-pad@1.3.0", "requests@2.32.3"]);
+    }
+
+    /// Two layers carrying different versions of the same package both survive
+    /// aggregation — dedup is on the (name, version) pair. That is the signal
+    /// a conflict check needs, and it is only observable now that non-Python
+    /// ecosystems resolve at all.
+    #[test]
+    fn conflicting_versions_across_layers_both_appear_in_the_aggregate() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let a = temp.path().join("a/node_modules");
+        let b = temp.path().join("b/node_modules");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        write_npm_pkg(&a, "lodash", "lodash", "4.17.21");
+        write_npm_pkg(&b, "lodash", "lodash", "3.10.1");
+        let la = store
+            .create_from_dir(&a, "a", "/tmp/a/node_modules", None)
+            .unwrap();
+        let lb = store
+            .create_from_dir(&b, "b", "/tmp/b/node_modules", None)
+            .unwrap();
+
+        let agg = store.aggregate_resolved_packages(&[la.layer_id, lb.layer_id]);
+        let got: Vec<String> = agg
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        assert_eq!(
+            got,
+            vec!["lodash@3.10.1", "lodash@4.17.21"],
+            "both versions must be visible — the sandbox can only reach one"
         );
     }
 
