@@ -136,10 +136,15 @@ directory as hermetic-only future work.
 embedding that defines those modes is entirely unbuilt, not merely missing its
 layer half.
 
-Hermetic and Replay export therefore **refuse** rather than emit a capsule that
-declares a closure it does not carry. Thin and Headless are defined as
-reference-carrying and are what works today: the receiving gateway resolves the
-artifacts and layers the `runtime.lock` names, so it must already hold them.
+Hermetic and Replay export therefore **refuse when there is a closure to
+embed** — pinned layers, pinned artifacts, or a runtime-install step — rather
+than emit a capsule that declares one it does not carry. An agent whose lock
+pins none of those has nothing to misrepresent, so the export proceeds and
+Replay's checkpoint carrying, which does work, stays available.
+
+Thin and Headless are defined as reference-carrying and are what works for an
+agent with a real closure: the receiving gateway resolves the artifacts and
+layers the `runtime.lock` names, so it must already hold them.
 
 ## Where the code is
 

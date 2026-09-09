@@ -595,42 +595,68 @@ fn mode_str(mode: CapsuleMode) -> &'static str {
     }
 }
 
-/// Refuse Hermetic/Replay export: the embedding those modes are defined by is
-/// not implemented.
+/// Refuse Hermetic/Replay export **when there is a closure to embed**, because
+/// the embedding those modes are defined by is not implemented.
 ///
 /// `CapsuleMode::Hermetic` is documented as "embedded artifact **content** +
 /// layers … no network needed on import", and the archive layout reserves
 /// `artifacts/` and `layers/` for it. Nothing populates either: the export path
 /// writes `included_artifacts: vec![]` and `included_layers: vec![]`
 /// unconditionally, stages no such directories, and import never reads those
-/// manifest fields. So the mode produced a capsule that *declared* itself
-/// hermetic while carrying no closure at all — an operator could export one for
-/// an air-gapped machine, ship it, and discover on import that the agent has no
-/// dependencies, with nothing in the capsule or the export saying so.
+/// manifest fields. So a capsule for an agent that HAS a closure declares one it
+/// does not carry — an operator could export it for an air-gapped machine, ship
+/// it, and find on import that the agent has no dependencies.
 ///
-/// Failing at export is the honest behaviour until embedding ships. Thin and
-/// Headless are unaffected: they are *defined* as reference-carrying, and they
-/// are what works today.
+/// The refusal is scoped to that case. An agent whose `runtime.lock` pins no
+/// layers, no artifacts and no runtime-install step has nothing to embed, so the
+/// capsule is honestly self-contained and Replay's checkpoint carrying — which
+/// does work — stays available.
 ///
-/// This supersedes the previous dependency-locked precondition, which required
-/// pip dependencies to be baked into pinned layers "because Hermetic/Replay
-/// capsules import offline" — enforcing a precondition for a capability that
-/// does not exist, and then exporting no layers even once they were baked.
+/// This subsumes the previous dependency-locked precondition, which refused only
+/// runtime-pip agents and told the operator to bake dependencies into pinned
+/// layers first — then exported no layers once they were baked. Baked layers are
+/// now refused too, for the same underlying reason.
+///
+/// Thin and Headless are defined as reference-carrying and are unaffected.
 fn require_locked_dependencies_for_hermetic(
-    _revision_dir: &Path,
+    revision_dir: &Path,
     mode: CapsuleMode,
 ) -> Result<()> {
     if !mode.is_hermetic() {
         return Ok(());
     }
+    let lock_path = revision_dir.join("runtime.lock");
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        return Ok(());
+    };
+    let Ok(lock) = serde_yaml::from_str::<autonoetic_types::runtime_lock::RuntimeLock>(&content)
+    else {
+        return Ok(());
+    };
+
+    let mut unembeddable: Vec<String> = Vec::new();
+    if !lock.layers.is_empty() {
+        unembeddable.push(format!("{} pinned layer(s)", lock.layers.len()));
+    }
+    if !lock.artifacts.is_empty() {
+        unembeddable.push(format!("{} pinned artifact(s)", lock.artifacts.len()));
+    }
+    if lock.has_runtime_pip_dependencies() {
+        unembeddable.push("runtime-installed (pip) dependencies".to_string());
+    }
+    if unembeddable.is_empty() {
+        return Ok(());
+    }
+
     anyhow::bail!(
-        "{}-mode export is not implemented: the capsule would declare an embedded closure \
-         (`included_artifacts`, `included_layers`) but carry neither, so it cannot be imported \
-         offline. Export `thin` (or `headless`) instead — the receiving gateway resolves the \
-         artifacts and layers the runtime.lock references. Tracking: hermetic embedding needs \
-         export staging of artifacts/ and layers/, import materialisation into the artifact and \
-         layer stores, and digest verification on both sides.",
-        mode_str(mode)
+        "{}-mode export is not implemented for an agent with a closure: its runtime.lock declares \
+         {}, which the capsule would claim to embed (`included_artifacts`, `included_layers`) but \
+         would not carry — so it could not be imported offline. Export `thin` (or `headless`) \
+         instead: the receiving gateway resolves what the runtime.lock references. Hermetic \
+         embedding needs export staging of artifacts/ and layers/, import materialisation into \
+         both stores, and digest verification on each side.",
+        mode_str(mode),
+        unembeddable.join(", ")
     );
 }
 
@@ -682,48 +708,59 @@ mod tests {
     const LOCK_WITH_PIP: &str = "gateway:\n  artifact: \"\"\n  version: \"\"\n  sha256: \"\"\n  signature: null\nsdk:\n  version: \"\"\nsandbox:\n  backend: bubblewrap\ndependencies:\n  - runtime: python\n    packages: [requests]\n";
     const LOCK_NO_DEPS: &str = "gateway:\n  artifact: \"\"\n  version: \"\"\n  sha256: \"\"\n  signature: null\nsdk:\n  version: \"\"\nsandbox:\n  backend: bubblewrap\n";
 
+    const LOCK_WITH_LAYERS: &str = "gateway:\n  artifact: \"\"\n  version: \"\"\n  sha256: \"\"\n  signature: null\nsdk:\n  version: \"\"\nsandbox:\n  backend: bubblewrap\nlayers:\n  - layer_id: layer_56:abc\n    digest: \"sha256:abc\"\n    mount_path: /tmp/node_modules\n";
+
+    /// A closure that cannot be embedded must not be exported as if it were.
+    /// Baked layers are refused for the same reason runtime-pip deps are: the
+    /// manifest would claim `included_layers` it does not carry.
     #[test]
-    fn hermetic_and_replay_export_are_refused_as_unimplemented() {
+    fn hermetic_export_refuses_a_closure_it_cannot_embed() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, body) in [("pip", LOCK_WITH_PIP), ("layers", LOCK_WITH_LAYERS)] {
+            std::fs::write(dir.path().join("runtime.lock"), body).unwrap();
+            for mode in [CapsuleMode::Hermetic, CapsuleMode::Replay] {
+                let err = require_locked_dependencies_for_hermetic(dir.path(), mode)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    err.contains("not implemented"),
+                    "{label}: must name the unbuilt capability, not invent a precondition: {err}"
+                );
+                assert!(
+                    err.contains("thin"),
+                    "{label}: must name the mode that does work: {err}"
+                );
+            }
+        }
+    }
+
+    /// An agent with nothing to embed is honestly self-contained, so Replay's
+    /// checkpoint carrying — which does work — stays available. Refusing here
+    /// would break a working surface to fix a claim that was never made.
+    #[test]
+    fn hermetic_export_allows_an_agent_with_no_closure() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("runtime.lock"), LOCK_NO_DEPS).unwrap();
         for mode in [CapsuleMode::Hermetic, CapsuleMode::Replay] {
-            let err = require_locked_dependencies_for_hermetic(dir.path(), mode)
-                .unwrap_err()
-                .to_string();
             assert!(
-                err.contains("not implemented"),
-                "must say the mode is unbuilt, not invent a precondition: {err}"
-            );
-            assert!(
-                err.contains("thin"),
-                "must name the mode that does work: {err}"
+                require_locked_dependencies_for_hermetic(dir.path(), mode).is_ok(),
+                "nothing to embed means nothing is misrepresented"
             );
         }
     }
 
-    /// The refusal cannot depend on lock contents: a locked closure and a
-    /// runtime-pip one are equally unexportable while embedding is unbuilt.
-    /// Previously a locked closure exported "successfully" and produced a
-    /// capsule declaring an embedded closure it did not carry.
     #[test]
-    fn hermetic_refusal_does_not_depend_on_the_lock() {
+    fn hermetic_export_is_lenient_when_the_lock_is_absent_or_unreadable() {
         let dir = tempfile::tempdir().unwrap();
-        for lock in [Some(LOCK_NO_DEPS), Some(LOCK_WITH_PIP), None] {
-            match lock {
-                Some(body) => {
-                    std::fs::write(dir.path().join("runtime.lock"), body).unwrap();
-                }
-                None => {
-                    let _ = std::fs::remove_file(dir.path().join("runtime.lock"));
-                }
-            }
-            assert!(
-                require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic)
-                    .is_err(),
-                "hermetic must refuse regardless of lock state (lock present: {})",
-                lock.is_some()
-            );
-        }
+        assert!(
+            require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic).is_ok(),
+            "no lock: nothing can be positively flagged"
+        );
+        std::fs::write(dir.path().join("runtime.lock"), "{{{ not yaml").unwrap();
+        assert!(
+            require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic).is_ok(),
+            "unparseable lock: nothing can be positively flagged"
+        );
     }
 
     /// Thin and Headless are defined as reference-carrying, so they are exactly
