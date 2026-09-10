@@ -4926,6 +4926,26 @@ pub fn run(
     let mut view_viewport_inner = 0usize;
     let mut view_list_height = 0usize;
     let mut view_turn_boundaries: HashMap<usize, TurnDivider> = HashMap::new();
+    // Derived view aggregates. While a turn is live `should_render` is true on
+    // every tick (spinner), so recomputing these per frame parses the whole
+    // timeline's payloads and rebuilds every row's wrapped lines — the cost
+    // that made scrolling lag on long sessions. They are folded only when
+    // their inputs change (new events, gate decisions, view toggles).
+    let mut cached_stats = compute_session_stats(&[]);
+    let mut cached_gate_count = 0usize;
+    let mut cached_approval_rows: Vec<ApprovalRow> = Vec::new();
+    let mut cached_pending_plan_count = 0usize;
+    let mut cached_fallback_gate: Option<GateRef> = None;
+    let mut cached_blocking_gate_event: Option<(GateRef, String)> = None;
+    let mut cached_newest_plan: Option<(usize, String, String)> = None;
+    let mut cached_gate_inputs = (0usize, 0usize);
+    let mut aggregates_initialized = false;
+    // Set when a view toggle (floor / squash / reasoning) changes the row
+    // layout, invalidating caches that hold rendered-row indices.
+    let mut view_config_dirty = true;
+    // Key under which `view_row_heights` is still valid: terminal width,
+    // reasoning toggle, the detail/one-line layout, and the unread marker.
+    let mut cached_heights_key: Option<(u16, bool, bool, Option<(usize, usize)>)> = None;
     // Idle-frame optimization: only rebuild and redraw when something changed.
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
@@ -8805,27 +8825,31 @@ pub fn run(
             } else {
                 None
             };
-            let early_stats = compute_session_stats(&entries);
-            let early_gate_count = count_active_gates(&entries, &resolved, &acted);
-            let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
-            let early_pending_plans =
-                unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
+            // Cached aggregates: the early frame exists to paint before a
+            // blocking RPC, so it must not re-scan the timeline. Worst case a
+            // decision resolved in the same drain is one frame stale; the full
+            // render below refreshes the caches.
+            let early_stats = &cached_stats;
+            let early_gate_count = cached_gate_count;
+            let early_approval_rows = &cached_approval_rows;
+            let early_pending_plans = cached_pending_plan_count;
             let early_safe_selected = early_selected.min(view_rows.len().saturating_sub(1));
             let early_spawn = view_indexed
                 .get(early_safe_selected)
                 .and_then(|(_, src)| spawn_agent_for_row_source(&view_visible, *src));
-            let early_gate = active_gate(
-                &entries,
+            // Selection-dependent, O(1); the session-wide fallback is cached.
+            let early_gate = selectable_gate(
                 &view_visible,
                 view_indexed.get(early_safe_selected),
                 &resolved,
                 &acted,
-            );
+            )
+            .or_else(|| cached_fallback_gate.clone());
             let early_info = if info_panel_open {
                 Some(build_info_panel(
                     root_session_id,
                     TuiChannel.kind(),
-                    &early_stats,
+                    early_stats,
                     floor,
                     squash,
                     follow,
@@ -8836,7 +8860,7 @@ pub fn run(
                     early_pending_plans,
                     status.as_deref(),
                     early_spawn.as_deref(),
-                    &early_approval_rows,
+                    early_approval_rows,
                     &info_grants_rows,
                     info_grants_taint.as_deref(),
                     info_selected,
@@ -8859,6 +8883,7 @@ pub fn run(
                         Some((view_viewport_offset, view_viewport_inner))
                     },
                     &view_rows,
+                    &view_row_heights,
                     early_selected,
                     early_inner,
                     detail.as_ref(),
@@ -8874,7 +8899,7 @@ pub fn run(
                     &view_turn_boundaries,
                     early_unread_marker,
                     show_reasoning,
-                    &early_stats,
+                    early_stats,
                     early_pending_plans,
                     early_spawn.as_deref(),
                     early_info.as_ref(),
@@ -8890,7 +8915,7 @@ pub fn run(
                         .as_ref()
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     None,
-                    &early_approval_rows,
+                    early_approval_rows,
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
@@ -8953,6 +8978,7 @@ pub fn run(
                         Some((view_viewport_offset, view_viewport_inner))
                     },
                     &view_rows,
+                    &[],
                     selected,
                     selected_inner,
                     detail.as_ref(),
@@ -9362,6 +9388,10 @@ pub fn run(
             cached_squash = squash;
             cached_show_reasoning = show_reasoning;
             needs_redraw = true;
+            // Row layout changed: cached rendered-row indices (newest plan,
+            // row heights key) are no longer valid.
+            view_config_dirty = true;
+            cached_heights_key = None;
         }
 
         // Open turns decay to stale when the timeline goes quiet (no events
@@ -9470,7 +9500,10 @@ pub fn run(
             // same turn stay in their normal altitude glyph so the operator can
             // read the chain.
         let mut extra_inflight_rows = HashSet::new();
-        if let Some(gate) = find_active_gate(&entries, &resolved, &acted) {
+        // Cached from the previous render (refreshed by the aggregate fold
+        // below): an O(n) session-wide gate scan per frame is exactly what
+        // the cache exists to avoid.
+        if let Some(gate) = cached_fallback_gate.clone() {
             if let Some(row_idx) =
                 newest_gate_row_index(&visible, &indexed, &entries, &resolved, &acted, &gate)
             {
@@ -9521,8 +9554,6 @@ pub fn run(
             }
         }
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
-        let pending_plan_count =
-            unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
 
         // Unread tracking: while the operator is scrolled away (`follow` off),
         // appended rows accumulate; the `── N new ──` marker renders above the
@@ -9573,6 +9604,30 @@ pub fn run(
             })
             .collect();
 
+        // Governance aggregates, folded only when their inputs change.
+        // `should_render` is true every tick while a turn is live (spinner),
+        // so recomputing these unconditionally re-parsed the payload of every
+        // timeline entry on every frame — the reason scrolling lagged on long
+        // sessions. The early-input frame reads these caches too.
+        let gates_dirty = entries_changed
+            || !aggregates_initialized
+            || view_config_dirty
+            || cached_gate_inputs != (resolved.len(), acted.len());
+        if gates_dirty {
+            cached_stats = compute_session_stats(&entries);
+            cached_gate_count = count_active_gates(&entries, &resolved, &acted);
+            cached_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
+            cached_pending_plan_count =
+                unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
+            cached_fallback_gate = find_active_gate(&entries, &resolved, &acted);
+            cached_blocking_gate_event = newest_blocking_gate_event(&entries, &resolved, &acted);
+            cached_newest_plan = newest_pending_plan_event(&visible, &indexed, &resolved, &acted);
+            cached_gate_inputs = (resolved.len(), acted.len());
+            aggregates_initialized = true;
+            view_config_dirty = false;
+        }
+        let pending_plan_count = cached_pending_plan_count;
+
         // Recompute search matches each frame so they track the live timeline.
         if let Some(q) = search_query.clone() {
             search_matches = compute_search_matches(&indexed, &visible, &q);
@@ -9618,7 +9673,7 @@ pub fn run(
         }
 
         let new_plan = if input.is_none() && pending_gate.is_none() && compose.is_none() {
-            newest_pending_plan_event(&visible, &indexed, &resolved, &acted)
+            cached_newest_plan.clone()
         } else {
             None
         };
@@ -9664,9 +9719,7 @@ pub fn run(
             && slash.is_none()
             && compose_yields_to_gate
         {
-            if let Some((gate_ref, event_id)) =
-                newest_blocking_gate_event(&entries, &resolved, &acted)
-            {
+            if let Some((gate_ref, event_id)) = cached_blocking_gate_event.clone() {
                 let needs_open = gate_modal
                     .as_ref()
                     .map(|m| m.gate.id != gate_ref.id)
@@ -9712,7 +9765,8 @@ pub fn run(
             }
         }
         if let Some(modal) = &gate_modal {
-            let still_active = find_active_gate(&entries, &resolved, &acted)
+            let still_active = cached_fallback_gate
+                .as_ref()
                 .is_some_and(|g| g.id == modal.gate.id);
             if !still_active {
                 gate_modal = None;
@@ -9738,9 +9792,10 @@ pub fn run(
             }
         }
 
-        let gate = active_gate(&entries, &visible, indexed.get(selected), &resolved, &acted);
+        let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted)
+            .or_else(|| cached_fallback_gate.clone());
 
-        let session_stats = compute_session_stats(&entries);
+        let session_stats = &cached_stats;
 
         let term_size = terminal.size()?;
         let compose_open = compose.is_some() && detail.is_none();
@@ -9767,21 +9822,40 @@ pub fn run(
         let glyph_w = 3usize;
         let label_w = 12usize.min(width / 4);
         let content_w = width.saturating_sub(rail_w + glyph_w + MARK_W + label_w + 2);
-        let row_heights: Vec<usize> = if detail.is_some() && input.is_none() {
-            vec![1; rows.len()]
+        // Row heights require building every row's wrapped lines — by far the
+        // heaviest per-frame cost on a long timeline. Nothing here changes
+        // unless the timeline, width, or a layout toggle does, so reuse the
+        // cached heights across spinner ticks and pure scroll/redraw frames.
+        let heights_key = (
+            term_size.width,
+            show_reasoning,
+            detail.is_some() && input.is_none(),
+            unread_marker,
+        );
+        let row_heights: Vec<usize> = if !entries_changed
+            && view_row_heights.len() == rows.len()
+            && cached_heights_key == Some(heights_key)
+        {
+            view_row_heights.clone()
         } else {
-            (0..rows.len())
-                .map(|i| match &rows[i] {
-                    RenderedRow::Line(spec) => {
-                        build_rich_row_lines(
-                            spec, i, &turn_boundaries, unread_marker, content_w, glyph_w,
-                            rail_w, label_w, spinner_glyph, show_reasoning, false,
-                        )
-                        .len()
-                    }
-                    RenderedRow::Collapsed { .. } => 1,
-                })
-                .collect()
+            let heights: Vec<usize> = if detail.is_some() && input.is_none() {
+                vec![1; rows.len()]
+            } else {
+                (0..rows.len())
+                    .map(|i| match &rows[i] {
+                        RenderedRow::Line(spec) => {
+                            build_rich_row_lines(
+                                spec, i, &turn_boundaries, unread_marker, content_w, glyph_w,
+                                rail_w, label_w, spinner_glyph, show_reasoning, false,
+                            )
+                            .len()
+                        }
+                        RenderedRow::Collapsed { .. } => 1,
+                    })
+                    .collect()
+            };
+            cached_heights_key = Some(heights_key);
+            heights
         };
         let row_count = rows.len();
         // Follow pins the cursor to the newest text line (not just the last
@@ -9812,13 +9886,13 @@ pub fn run(
         let selected_spawn_agent = indexed
             .get(selected)
             .and_then(|(_, src)| spawn_agent_for_row_source(&visible, *src));
-        let gate_count = count_active_gates(&entries, &resolved, &acted);
-        let approval_rows = collect_approval_rows(&entries, &resolved, &acted);
+        let gate_count = cached_gate_count;
+        let approval_rows = &cached_approval_rows;
         let info_panel = if info_panel_open {
             Some(build_info_panel(
                 root_session_id,
                 TuiChannel.kind(),
-                &session_stats,
+                session_stats,
                 floor,
                 squash,
                 follow,
@@ -9829,7 +9903,7 @@ pub fn run(
                 pending_plan_count,
                 status.as_deref(),
                 selected_spawn_agent.as_deref(),
-                &approval_rows,
+                approval_rows,
                 &info_grants_rows,
                 info_grants_taint.as_deref(),
                 info_selected,
@@ -9853,6 +9927,7 @@ pub fn run(
                     Some((view_viewport_offset, view_viewport_inner))
                 },
                 &rows,
+                &row_heights,
                 selected,
                 selected_inner,
                 detail.as_ref(),
@@ -9868,7 +9943,7 @@ pub fn run(
                 &turn_boundaries,
                 unread_marker,
                 show_reasoning,
-                &session_stats,
+                session_stats,
                 pending_plan_count,
                 selected_spawn_agent.as_deref(),
                 info_panel.as_ref(),
@@ -9884,7 +9959,7 @@ pub fn run(
                     .as_ref()
                     .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                 approvals_popup.as_ref(),
-                &approval_rows,
+                approval_rows,
                 grants_panel.as_ref(),
                 labels_panel.as_ref(),
                 current_taint.as_deref(),
@@ -12490,6 +12565,11 @@ fn draw(
     follow: bool,
     prev_viewport: Option<(usize, usize)>,
     rows: &[RenderedRow],
+    // Per-row display heights, computed by the caller and cached across
+    // frames. draw() must not recompute them: building every row's wrapped
+    // lines on each draw was the dominant per-frame cost on long timelines.
+    // A length mismatch falls back to one line per row rather than panicking.
+    row_heights: &[usize],
     selected: usize,
     selected_inner: usize,
     detail: Option<&DetailPane>,
@@ -12651,29 +12731,16 @@ fn draw(
     let list_area = chunks[list_idx];
     let list_height = list_area.height as usize;
     let row_count = rows.len();
-    // Compute the per-row heights first: the line-granular viewport below
-    // is addressed in flattened text lines.
-    let row_heights: Vec<usize> = (0..row_count)
-        .map(|i| match &rows[i] {
-            RenderedRow::Line(spec) => {
-                build_rich_row_lines(
-                    spec,
-                    i,
-                    turn_boundaries,
-                    unread_marker,
-                    content_w,
-                    glyph_w,
-                    rail_w,
-                    label_w,
-                    spinner_glyph,
-                    show_reasoning,
-                    false,
-                )
-                .len()
-            }
-            RenderedRow::Collapsed { .. } => 1,
-        })
-        .collect();
+    // Heights arrive from the caller (cached, and only recomputed when the
+    // timeline or layout changes). A mismatched slice falls back to one line
+    // per row: stale/absent heights must not panic the renderer.
+    let fallback_heights;
+    let row_heights: &[usize] = if row_heights.len() == row_count {
+        row_heights
+    } else {
+        fallback_heights = vec![1; row_count];
+        &fallback_heights
+    };
     // Line-granular viewport: the cursor is a text line, the top of the
     // viewport is a text line, and the first row may start mid-row.
     let (safe_row, _) = clamp_cursor_line(&row_heights, selected, selected_inner);
