@@ -645,6 +645,7 @@ const DEPENDENCY_FILES: &[(&str, &str)] = &[
 /// Used by detect_external_python_imports to distinguish third-party from stdlib.
 const PYTHON_STDLIB: &[&str] = &[
     // Core builtins & runtime
+    "__future__",
     "_thread",
     "atexit",
     "builtins",
@@ -1146,6 +1147,16 @@ pub fn detect_external_python_imports(
                 }
                 let local_file = format!("{top_level}.py");
                 if file_map.contains_key(&local_file) {
+                    continue;
+                }
+                // A co-located first-party *package* (directory with modules,
+                // e.g. `agent_browser_lib/__init__.py`) is just as local as a
+                // top-level `<name>.py` file. Without this, `import my_pkg`
+                // is falsely flagged as an external dependency and the
+                // install gate becomes unclearable (you can't pip-install
+                // first-party code).
+                let package_prefix = format!("{top_level}/");
+                if file_map.keys().any(|k| k.starts_with(&package_prefix)) {
                     continue;
                 }
                 external.insert(top_level.to_string());
@@ -1901,6 +1912,77 @@ agent:
         );
         let external = detect_external_python_imports(&file_map, None);
         assert!(!external.contains(&"autonoetic_sdk".to_string()));
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_local_packages() {
+        // A co-located first-party package directory (agent_browser_lib/)
+        // must be treated as local, same as a top-level `<name>.py` file —
+        // otherwise the install gate is unclearable for bundled packages.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"import agent_browser_lib\nfrom agent_browser_lib.runner import run_command\n".to_vec(),
+        );
+        file_map.insert(
+            "agent_browser_lib/__init__.py".to_string(),
+            b"# local package\n".to_vec(),
+        );
+        file_map.insert(
+            "agent_browser_lib/runner.py".to_string(),
+            b"# local module\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(
+            external.is_empty(),
+            "co-located package dir should not be external: {external:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_future() {
+        // `from __future__ import annotations` is stdlib, not a dependency.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"from __future__ import annotations\nimport json\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(
+            external.is_empty(),
+            "__future__ should be treated as stdlib: {external:?}"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_local_package_and_future_do_not_block() {
+        // Regression for the session-27c101fc false positive: a stdlib-only
+        // bundle with a co-located package and __future__ imports reported
+        // has_unresolved_dependencies=true, making the promote gate
+        // unclearable by packaging.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"from __future__ import annotations\nimport json\nimport agent_browser_lib\n".to_vec(),
+        );
+        file_map.insert(
+            "agent_browser_lib/__init__.py".to_string(),
+            b"# local package\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            !report.has_unresolved_dependencies,
+            "local package + __future__ should not be blocked: {:?}",
+            report.detected_external_imports
+        );
+        assert!(report.detected_external_imports.is_empty());
     }
 
     #[test]
