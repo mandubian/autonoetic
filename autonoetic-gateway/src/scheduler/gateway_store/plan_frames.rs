@@ -149,6 +149,29 @@ pub(crate) fn list_plan_frames_for_workflow(
     Ok(plans)
 }
 
+/// Latest revision of each `approved` plan across all workflows. Used by the
+/// plan-stall janitor (`scheduler::plan_watchdog::reconcile_plan_stalls`) to
+/// find idle sessions that ended their turn with actionable steps remaining.
+pub(crate) fn list_approved_plan_frames(conn: &Connection) -> Result<Vec<PlanFrame>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM plan_frames p
+         WHERE p.status = 'approved'
+           AND p.version = (
+               SELECT MAX(p2.version) FROM plan_frames p2
+               WHERE p2.plan_id = p.plan_id AND p2.status = 'approved'
+           )
+         ORDER BY p.created_at DESC"
+    ))?;
+
+    let rows = stmt.query_map([], |row| Ok(row_to_plan_frame(row)))?;
+
+    let mut plans = Vec::new();
+    for row in rows {
+        plans.push(row??);
+    }
+    Ok(plans)
+}
+
 /// Latest revision of each plan for `root_session_id` that is still awaiting operator approval.
 pub(crate) fn list_pending_plan_frames_for_root(
     conn: &Connection,

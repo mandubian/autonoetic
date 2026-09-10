@@ -4966,63 +4966,16 @@ impl AgentExecutor {
                         // (session-58342961: the planner ended believing a
                         // child was still running; the child had completed).
                         // Nudge and continue the turn instead, budget-bounded.
-                        if !end_turn_waiting_for_child {
-                            let nudge_budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
-                            if let Some(store) = self.gateway_store.as_deref() {
-                                if let Some(nudge) =
-                                    crate::scheduler::plan_watchdog::plan_incomplete_nudge(
-                                        cfg,
-                                        store,
-                                        &session_id,
-                                    )
-                                {
-                                    if plan_incomplete_nudges < nudge_budget {
-                                        plan_incomplete_nudges += 1;
-                                        let msg = crate::scheduler::plan_watchdog::render_nudge_message(
-                                            &nudge,
-                                            plan_incomplete_nudges,
-                                            nudge_budget,
-                                        );
-                                        tracing::warn!(
-                                            target: "workflow",
-                                            session_id = %session_id,
-                                            plan_id = %nudge.plan_id,
-                                            nudge = plan_incomplete_nudges,
-                                            budget = nudge_budget,
-                                            "Plan watchdog: turn would end with incomplete plan steps and nothing outstanding — nudging"
-                                        );
-                                        history.push(Message::user(msg));
-                                        continue;
-                                    }
-                                    // Budget exhausted: let the turn end, but
-                                    // surface the stall to the operator once so
-                                    // it reads as a triage item, not silence.
-                                    let notification = autonoetic_types::notification::NotificationRecord::new(
-                                        autonoetic_types::id_format::short_random_id("ntf-"),
-                                        autonoetic_types::notification::NotificationType::AnomalyFlag,
-                                        crate::runtime::content_store::root_session_id(&session_id).to_string(),
-                                        serde_json::json!({
-                                            "alert": "plan_incomplete_stall",
-                                            "plan_id": nudge.plan_id,
-                                            "plan_version": nudge.plan_version,
-                                            "incomplete_steps": nudge.incomplete_steps.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                                            "nudges_exhausted": nudge_budget,
-                                            "message": format!(
-                                                "Plan {} v{} stalled: {} incomplete step(s) remain but the agent \
-                                                 ended its turn {} time(s) without acting. Nudge the session with a \
-                                                 chat message to resume it.",
-                                                nudge.plan_id,
-                                                nudge.plan_version,
-                                                nudge.incomplete_steps.len(),
-                                                nudge_budget
-                                            ),
-                                        }),
-                                    );
-                                    if let Err(e) = store.create_notification_record(&notification) {
-                                        tracing::warn!("Failed to emit plan-stall notification: {}", e);
-                                    }
-                                }
-                            }
+                        if !end_turn_waiting_for_child
+                            && plan_watchdog_nudge_or_notify(
+                                cfg,
+                                self.gateway_store.as_deref(),
+                                &session_id,
+                                history,
+                                &mut plan_incomplete_nudges,
+                            )
+                        {
+                            continue;
                         }
 
                         // Durable planner checkpoint at turn end
@@ -5178,6 +5131,21 @@ impl AgentExecutor {
                 }
                 StopReason::Other(_) => {
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
+                    // Same plan deadlock shape as EndTurn: a non-standard stop
+                    // (content filter, model length, …) must not end the turn
+                    // with an approved plan unfinished while nothing is
+                    // outstanding. Nudge instead; the LoopGuard bounds rounds.
+                    if let Some(cfg) = self.config.as_ref() {
+                        if plan_watchdog_nudge_or_notify(
+                            cfg,
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                            history,
+                            &mut plan_incomplete_nudges,
+                        ) {
+                            continue;
+                        }
+                    }
                     let _ = tracer.end_digest_turn();
                     break;
                 }
@@ -6657,6 +6625,51 @@ impl AgentExecutor {
 /// (`reconcile_paused_child_wait_tasks`) evaluate the SAME predicate, so a
 /// task is only ever parked when a future child terminal transition — or the
 /// janitor — can wake it.
+/// Plan watchdog turn-end check, shared by the `EndTurn` and `Other(stop)`
+/// arms. Returns `true` when a nudge message was pushed into `history` and
+/// the caller must `continue` the loop instead of ending the turn. When the
+/// per-resume budget is exhausted, emits the operator stall notification and
+/// returns `false` (turn ends).
+fn plan_watchdog_nudge_or_notify(
+    cfg: &GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+    history: &mut Vec<Message>,
+    nudges_used: &mut u32,
+) -> bool {
+    let Some(store) = store else {
+        return false;
+    };
+    let Some(nudge) = crate::scheduler::plan_watchdog::plan_incomplete_nudge(
+        cfg, store, session_id,
+    ) else {
+        return false;
+    };
+
+    let budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
+    if *nudges_used < budget {
+        *nudges_used += 1;
+        let msg = crate::scheduler::plan_watchdog::render_nudge_message(
+            &nudge, *nudges_used, budget,
+        );
+        tracing::warn!(
+            target: "workflow",
+            session_id = %session_id,
+            plan_id = %nudge.plan_id,
+            nudge = *nudges_used,
+            budget = budget,
+            "Plan watchdog: turn would end with incomplete plan steps and nothing outstanding — nudging"
+        );
+        history.push(Message::user(msg));
+        return true;
+    }
+
+    // Budget exhausted: let the turn end, but surface the stall to the
+    // operator once so it reads as a triage item, not silence.
+    crate::scheduler::plan_watchdog::emit_stall_notification(store, &nudge);
+    false
+}
+
 fn waiting_for_child_yield_reason(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,

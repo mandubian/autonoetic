@@ -322,6 +322,14 @@ async fn run_scheduler_tick_common(
         tracing::warn!(error = %e, "Failed to reconcile paused child-wait tasks");
     }
 
+    // Plan-stall janitor: report approved plans with actionable steps while
+    // their owning session is idle and nothing is outstanding. Detection
+    // only — the turn-end watchdog owns auto-nudging; this catches stalls
+    // that formed without passing through a watched turn-end arm.
+    if let Err(e) = reconcile_plan_stalls(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to reconcile plan stalls");
+    }
+
     // Orphan-child reaper: cancel children of terminated parent sessions (P-7.16)
     if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to reap orphaned sessions");
@@ -3233,6 +3241,16 @@ pub async fn reconcile_paused_child_wait_tasks(
     let config = execution.config();
     let store = execution.gateway_store();
     workflow_store::reconcile_paused_child_wait_tasks(&config, store.as_deref())
+}
+
+/// Scheduler-tick wrapper for the plan-stall janitor (detection only).
+pub async fn reconcile_plan_stalls(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let store = execution.gateway_store();
+    plan_watchdog::reconcile_plan_stalls(&config, store.as_deref())?;
+    Ok(())
 }
 
 /// Scan all workflows for Runnable tasks (approval-unblocked) and execute them.

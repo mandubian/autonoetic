@@ -772,6 +772,14 @@ impl GatewayStore {
         plan_frames::list_plan_frames_for_workflow(&conn, workflow_id)
     }
 
+    /// Latest revision of each `approved` plan across all workflows (plan-stall janitor).
+    pub fn list_approved_plan_frames(
+        &self,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_approved_plan_frames(&conn)
+    }
+
     pub fn list_plan_revisions(
         &self,
         plan_id: &str,
