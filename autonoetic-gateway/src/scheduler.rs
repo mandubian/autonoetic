@@ -24,6 +24,7 @@ pub mod fast_scheduler;
 pub mod gateway_store;
 pub mod hooks;
 pub mod overflow_classifier;
+pub(crate) mod plan_watchdog;
 pub mod plan_frame_ops;
 pub mod reclamation;
 pub mod runner;

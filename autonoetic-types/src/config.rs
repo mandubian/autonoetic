@@ -1354,6 +1354,15 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub stuck_task_no_evidence_action: StuckTaskNoEvidenceAction,
 
+    /// Plan watchdog: how many times per resume the gateway nudges an agent that
+    /// tries to end its turn while an approved plan still has actionable
+    /// (non-operator) steps and nothing is outstanding — no non-terminal child
+    /// tasks and no pending operator decisions. Ending there deadlocks the plan:
+    /// no future event will wake the session. 0 disables the watchdog.
+    /// Default: 3.
+    #[serde(default = "default_plan_incomplete_nudge_budget_val")]
+    pub plan_incomplete_nudge_budget: Option<u32>,
+
     /// Warn threshold (seconds) for a workflow task whose executor has been alive
     /// (heartbeat refreshing) without completing its turn. The executor's claim
     /// heartbeat proves the process is alive, not that the turn is making progress —
@@ -3202,6 +3211,10 @@ fn default_stuck_task_timeout_secs_val() -> Option<u64> {
     Some(600)
 }
 
+fn default_plan_incomplete_nudge_budget_val() -> Option<u32> {
+    Some(3)
+}
+
 fn default_stuck_task_warn_secs_val() -> Option<u64> {
     Some(600)
 }
@@ -3850,6 +3863,7 @@ impl Default for GatewayConfig {
             continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
+            plan_incomplete_nudge_budget: default_plan_incomplete_nudge_budget_val(),
             stuck_task_no_evidence_action: StuckTaskNoEvidenceAction::default(),
             stuck_task_warn_secs: default_stuck_task_warn_secs_val(),
             stuck_task_hard_timeout_secs: default_stuck_task_hard_timeout_secs_val(),
