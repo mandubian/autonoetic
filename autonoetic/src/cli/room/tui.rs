@@ -4810,6 +4810,60 @@ fn rpc(
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(client.call(method, params)))
 }
 
+/// Rebind a live session to `target`, or attach a *fresh unbound* session.
+///
+/// `session.handoff` is a rebind primitive: it deliberately refuses a session
+/// with no agent binding because there is no predecessor to hand off from and
+/// no context to carry. A brand-new room session has not spawned yet, so the
+/// room can attach the addressee locally instead — the next message carries
+/// `target_agent_id` and the gateway binds the session on its first spawn
+/// (the same path `send_message`'s "no agent bound yet" hint points at).
+///
+/// Returns `(bound_agent_id, attached_fresh)`.
+fn rebind_or_attach(
+    client: &RoomClient,
+    root_session_id: &str,
+    target: &str,
+    reason: Option<&str>,
+) -> Result<(String, bool), String> {
+    let mut params = serde_json::json!({
+        "session_id": root_session_id,
+        "target_agent_id": target,
+    });
+    if let Some(r) = reason {
+        params["reason"] = serde_json::json!(r);
+    }
+    classify_handoff_outcome(
+        rpc(client, "session.handoff", params).map_err(|e| e.to_string()),
+        target,
+    )
+}
+
+/// Map a `session.handoff` outcome to `(bound_agent_id, attached_fresh)`.
+/// Split from the RPC call so the unbound-session fallback stays
+/// unit-testable without a live gateway.
+///
+/// The "no agent binding" refusal is the only error treated as an *attach*:
+/// every other guard (not a root session, target missing/suspended, gate
+/// pending, already-bound) must still surface to the operator.
+fn classify_handoff_outcome(
+    result: Result<serde_json::Value, String>,
+    target: &str,
+) -> Result<(String, bool), String> {
+    match result {
+        Ok(value) => {
+            let to = value
+                .get("to_agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(target)
+                .to_string();
+            Ok((to, false))
+        }
+        Err(e) if e.contains("has no agent binding") => Ok((target.to_string(), true)),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn run(
     client: &RoomClient,
     root_session_id: &mut String,
@@ -5290,24 +5344,23 @@ pub fn run(
                                                     .to_string(),
                                             );
                                         } else {
-                                            let mut params = serde_json::json!({
-                                                "session_id": &*root_session_id,
-                                                "target_agent_id": target,
-                                            });
-                                            if let Some(r) = reason.as_deref() {
-                                                params["reason"] = serde_json::json!(r);
-                                            }
-                                            match rpc(client, "session.handoff", params) {
-                                                Ok(value) => {
-                                                    let to = value
-                                                        .get("to_agent_id")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or(target.as_str())
-                                                        .to_string();
+                                            match rebind_or_attach(
+                                                client,
+                                                &root_session_id,
+                                                &target,
+                                                reason.as_deref(),
+                                            ) {
+                                                Ok((to, attached)) => {
                                                     *target_agent_id = Some(to.clone());
-                                                    status = Some(format!(
-                                                        "→ session handed off to {to}; your next message goes to it"
-                                                    ));
+                                                    status = Some(if attached {
+                                                        format!(
+                                                            "→ fresh session will start with {to} (nothing to hand off from); your next message binds it"
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "→ session handed off to {to}; your next message goes to it"
+                                                        )
+                                                    });
                                                 }
                                                 Err(e) => {
                                                     status = Some(format!("✗ handoff: {e}"));
@@ -5323,7 +5376,10 @@ pub fn run(
                                         // All the handoff guards apply (root
                                         // session only, refused while a gate is
                                         // pending); the note rides the
-                                        // successor's context envelope.
+                                        // successor's context envelope. A
+                                        // fresh *unbound* session has nothing
+                                        // to hand off from, so it is attached
+                                        // instead (see `rebind_or_attach`).
                                         let target = if enable {
                                             "planner.collaborative"
                                         } else {
@@ -5340,20 +5396,25 @@ pub fn run(
                                             }
                                             .to_string()
                                         });
-                                        let params = serde_json::json!({
-                                            "session_id": &*root_session_id,
-                                            "target_agent_id": target,
-                                            "reason": reason,
-                                        });
-                                        match rpc(client, "session.handoff", params) {
-                                            Ok(value) => {
-                                                let to = value
-                                                    .get("to_agent_id")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or(target)
-                                                    .to_string();
+                                        match rebind_or_attach(
+                                            client,
+                                            &root_session_id,
+                                            target,
+                                            Some(&reason),
+                                        ) {
+                                            Ok((to, attached)) => {
                                                 *target_agent_id = Some(to.clone());
-                                                status = Some(if enable {
+                                                status = Some(if attached {
+                                                    if enable {
+                                                        format!(
+                                                            "✓ collaborative mode — {to} attached (fresh session, nothing to hand off from); send your goal, plans arrive as reviewable PlanFrames (/plan · p · y/n)"
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "✓ back to {to} (fresh session, nothing to hand off from); PlanFrame tools are no longer in play"
+                                                        )
+                                                    }
+                                                } else if enable {
                                                     format!(
                                                         "✓ collaborative mode — {to} is bound; send your goal, plans arrive as reviewable PlanFrames (/plan · p · y/n)"
                                                     )
@@ -14643,6 +14704,51 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+        #[test]
+        fn unbound_session_handoff_falls_back_to_attach() {
+            // /collab on a brand-new session: the gateway refuses handoff
+            // because nothing is bound yet. The room attaches the target
+            // locally instead — the next message binds it on first spawn.
+            let result = classify_handoff_outcome(
+                Err(
+                    "session 'session-5a8a8c9e' has no agent binding; handoff applies to \
+                     bound root sessions"
+                        .to_string(),
+                ),
+                "planner.collaborative",
+            );
+            assert_eq!(
+                result,
+                Ok(("planner.collaborative".to_string(), true))
+            );
+        }
+
+        #[test]
+        fn bound_session_handoff_reports_rebind() {
+            let value = serde_json::json!({ "to_agent_id": "planner.collaborative" });
+            assert_eq!(
+                classify_handoff_outcome(Ok(value), "planner.collaborative"),
+                Ok(("planner.collaborative".to_string(), false))
+            );
+        }
+
+        #[test]
+        fn other_handoff_guards_still_surface() {
+            // Only the unbound refusal means "attach"; every other guard must
+            // reach the operator unchanged.
+            for msg in [
+                "session 'session-x' is a child of root 'session-y'; handoff applies to root sessions only",
+                "target agent 'ghost.default' is not installed",
+                "target agent 'x' is suspended (2026-09-10)",
+                "session 'session-x' is already bound to agent 'planner.default' (revision rev_1); nothing to hand off",
+            ] {
+                assert_eq!(
+                    classify_handoff_outcome(Err(msg.to_string()), "planner.collaborative"),
+                    Err(msg.to_string()),
+                    "guard message must not be swallowed: {msg}"
+                );
+            }
+        }
         #[test]
         fn header_shows_a_chip_for_the_bound_planner() {
             // The 🤝 chip appears only when a handoff (or --agent) put a
