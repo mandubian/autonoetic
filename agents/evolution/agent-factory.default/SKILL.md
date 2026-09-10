@@ -122,6 +122,7 @@ Choose the installation route based on `intended_capabilities` and task complexi
 | No `CodeExecution`, no `AgentSpawn`, no custom code | **Reasoning-only**: skip coder, install directly via intent |
 | Simple code (single script, no deps, no I/O beyond self.*) | **Simple code**: coder → gates if capabilities require → builder |
 | Code with external network/file/exec | **Gated code**: coder → packager (if deps) → gates → builder |
+| Wraps an external tool/CLI or upstream skill (package install declared in the task, design doc, or artifact prose — even with **no manifest file**) | **Gated code**: coder → **packager (declared deps — Step 3 is mandatory)** → gates → builder |
 | `design_needed: true` or multi-file/complex structure | **Design-heavy**: architect → then appropriate code path |
 
 Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
@@ -178,6 +179,7 @@ If the spawn message includes `source_artifact_ref`, treat it as the canonical i
 1. Call `artifact_inspect(source_artifact_ref)` once.
 2. If `source_script_entry` is present and the artifact already contains the required code, skip coder.
 3. If `artifact_inspect` shows dependency files exist AND no dependency layers are present, read the file content via `resolve`. If the content contains real third-party dependencies (not empty / stdlib-only), go to Step 3 (packager). If layers are already present, or the dependency file is empty / stdlib-only, skip Step 3.
+   **Declared deps count as deps, with or without a manifest.** If the spawn task, design doc, or artifact prose (SKILL.md / README) declares an external tool or package dependency — e.g. "wraps the `<tool>` CLI", "installs `<pkg>` via `<pkg-manager>`", "requires binary `<name>`" — go to Step 3 even when the artifact contains **no dependency file at all**. External skill repos frequently ship no manifest of their own (no `package.json`, `requirements.txt`, `Cargo.toml`, …); the dependency lives in prose, and prose-declared deps are exactly what the packager provisions as layers. Pass an explicit install spec (ecosystem + package + version) in this case — see Step 3.
 4. If gates are required and `federation_complete` is not set, go to Step 4 with the same artifact.
 5. Only fall back to coder if the artifact is malformed or missing the required entry script.
 
@@ -226,14 +228,17 @@ On resume after coder completes, the gateway injects the child's typed state int
    | File found | Content has real third-party deps? | Action |
    |---|---|---|
    | No | — | Skip to Step 4 |
+   | No | —, but task/design/prose declares an external tool/CLI dep (e.g. "wraps CLI X", "install X via the ecosystem's package manager") | Go to Step 3 with an explicit install spec |
    | Yes | Yes | Go to Step 3 (packager) |
    | Yes | No (empty / stdlib-only) | Skip to Step 4 |
 
-   Additionally, if coder returned `status: "needs_packager"`, always go to Step 3 regardless of content — the coder explicitly signaled that packaging is required.
+   Additionally, if coder returned `status: "needs_packager"`, always go to Step 3 regardless of content — the coder explicitly signaled that packaging is required. The same applies when the artifact prose declares an external CLI/tool dependency with no manifest: the coder followed the "external prerequisite" pattern, which defers provisioning to you — do not skip Step 3 for it.
 
-### Step 3: Packager (if dependency files found)
+### Step 3: Packager (if dependency files found OR deps declared in prose)
 
 Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_ref from coder. Then end your turn — you resume automatically when it completes (Ri-0.14). Packager returns a new `artifact_ref` with deps baked into layers.
+
+When the artifact has **no manifest file**, the spawn message MUST carry an explicit install spec — ecosystem + package + version as declared in the task/design/prose, e.g. `packages: [{"ecosystem": "<npm|pip|uv|cargo|gem|go|system>", "name": "<package>", "version": "<pinned>"}]`. The packager cannot recover a prose-only dependency from the artifact alone; without the spec it will correctly report "nothing to resolve".
 
 ### Step 4: Promotion gates (if required)
 

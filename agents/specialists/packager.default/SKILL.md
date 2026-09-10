@@ -135,6 +135,8 @@ If the result still comes back with `"network": { "share_net": false }`, the com
 
 ## PRE-FLIGHT: Skip if no real dependencies
 
+**Explicit install spec overrides the manifest check.** If the task message includes an explicit package spec — ecosystem + package name, e.g. `packages: [{"ecosystem": "<npm|pip|uv|cargo|gem|go|system>", "name": "<package>", "version": "<pinned>"}]` — that spec IS the dependency declaration: skip the manifest read and go straight to the Two-Step Workflow. External-tool wrappers routinely have no manifest in the artifact (the upstream skill repo ships none); **no manifest + an explicit spec is normal, not "no dependencies"**. Install each spec entry with the matching declared-prefix command shape from the table above — the exact full prefix for that ecosystem, never an abbreviation — so the exec is detected + preapproved.
+
 Before doing anything, read `requirements.txt` (or equivalent manifest) from the artifact:
 
 1. Use `resolve` to read the dependency file content.
