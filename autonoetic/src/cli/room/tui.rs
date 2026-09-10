@@ -209,17 +209,14 @@ fn step_viewport_top(
     )
 }
 
-/// Viewport-led scroll for wheel/arrows/pages: shift the visible window by
-/// `delta` text lines *and* step the cursor by the same amount, keeping the
-/// cursor inside the moved window.
+/// Page-led scroll for PageUp/PageDown: shift the visible window by `delta`
+/// text lines *and* step the cursor by the same amount, keeping the cursor
+/// inside the moved window.
 ///
-/// The frame's viewport derivation (`compute_line_viewport_top`) otherwise
-/// keeps a stable top while the cursor roams inside it — so from a follow
-/// position the first screenful of wheel notches moved only the invisible
-/// cursor and the screen appeared stuck ("scroll a lot for one line"), then
-/// jumped to 1:1 once the cursor hit the edge. Moving both together makes
-/// every notch visibly scroll while preserving selection-follows-keys
-/// (the cursor still steps by exactly `delta`, clamped at the ends).
+/// Incremental scroll (wheel, `j`/`k`, arrows) is cursor-led instead — it
+/// moves only the cursor and lets the frame derive the viewport, so the
+/// screen scrolls only at its edges. A page is an explicit viewport gesture,
+/// so the window moves immediately and the cursor rides along.
 fn scroll_timeline_by(
     row_heights: &[usize],
     cursor: (usize, usize),
@@ -251,23 +248,25 @@ fn scroll_timeline_by(
 }
 
 /// Row-led scroll for `j`/`k`/wheel: move the cursor to the adjacent rendered
-/// row (its first line going down, its last going up) and shift the window by
-/// the same number of text lines.
+/// row (its first line going down, its last going up).
 ///
 /// A row's height is not one: wrapped continuation lines, the turn divider,
 /// and the unread marker all count. Line-granular stepping therefore needs
 /// several presses to cross a tall row, which reads as "the cursor is stuck".
 /// One row-step crosses all of it. `Shift+J`/`Shift+K` keep the line-granular
-/// [`scroll_timeline_by`] for reading a tall row in full.
-fn scroll_timeline_by_rows(
+/// [`step_cursor_line`] for reading a tall row in full.
+///
+/// The viewport is deliberately **not** moved here. The frame derives it
+/// from the cursor ([`compute_line_viewport_top`]): the cursor roams freely
+/// inside the visible screen and the screen scrolls only when the cursor
+/// crosses an edge — top when scrolling up, bottom when scrolling down.
+fn step_cursor_rows(
     row_heights: &[usize],
     cursor: (usize, usize),
-    viewport: (usize, usize),
-    list_height: usize,
     row_delta: i64,
-) -> ((usize, usize), (usize, usize)) {
+) -> (usize, usize) {
     if row_heights.is_empty() || row_delta == 0 {
-        return (cursor, viewport);
+        return cursor;
     }
     let cur_row = cursor.0.min(row_heights.len() - 1);
     let target_row = if row_delta < 0 {
@@ -279,7 +278,7 @@ fn scroll_timeline_by_rows(
         // First/last row: no neighbour to cross, so fall back to a single
         // text line — the top of a tall first row and the bottom of a tall
         // last row stay reachable without `Shift+K`/`Shift+J`.
-        return scroll_timeline_by(row_heights, cursor, viewport, list_height, row_delta);
+        return step_cursor_line(row_heights, cursor.0, cursor.1, row_delta);
     }
     // Down lands on the next row's first line; up lands on the previous row's
     // last line, so a second step reaches its first line.
@@ -288,15 +287,7 @@ fn scroll_timeline_by_rows(
     } else {
         0
     };
-    let cur_abs = abs_line_index(row_heights, cur_row, cursor.1);
-    let target_abs = abs_line_index(row_heights, target_row, target_inner);
-    scroll_timeline_by(
-        row_heights,
-        cursor,
-        viewport,
-        list_height,
-        target_abs as i64 - cur_abs as i64,
-    )
+    (target_row, target_inner)
 }
 
 /// Line-granular viewport: absolute index of the top visible text line.
@@ -8565,32 +8556,35 @@ pub fn run(
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
-                                // Row scroll: one rendered row per press —
-                                // wrapped lines, turn divider and unread
-                                // marker are crossed as a unit, instead of
-                                // making the operator step through each
+                                // Cursor-led scroll: one rendered row per
+                                // press — wrapped lines, turn divider and
+                                // unread marker are crossed as a unit, instead
+                                // of making the operator step through each
                                 // hidden line. Shift+J / Shift+↓ keep the
                                 // line-granular step for reading a tall row.
-                                follow = false;
-                                ((selected, selected_inner),
-                                 (view_viewport_offset, view_viewport_inner)) =
+                                // The viewport is derived at render time, so
+                                // it scrolls only once the cursor reaches the
+                                // bottom screen edge — not on every press.
+                                // A no-op step at the edge keeps following.
+                                let stepped =
                                     if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                        scroll_timeline_by(
+                                        step_cursor_line(
                                             &view_row_heights,
-                                            (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
+                                            selected,
+                                            selected_inner,
                                             1,
                                         )
                                     } else {
-                                        scroll_timeline_by_rows(
+                                        step_cursor_rows(
                                             &view_row_heights,
                                             (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
                                             1,
                                         )
                                     };
+                                if stepped != (selected, selected_inner) {
+                                    (selected, selected_inner) = stepped;
+                                    follow = false;
+                                }
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -8613,26 +8607,29 @@ pub fn run(
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
-                                follow = false;
-                                ((selected, selected_inner),
-                                 (view_viewport_offset, view_viewport_inner)) =
+                                // Cursor-led scroll — see the Down arm. The
+                                // viewport scrolls only once the cursor
+                                // reaches the top screen edge. A no-op step
+                                // at the edge keeps following.
+                                let stepped =
                                     if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                        scroll_timeline_by(
+                                        step_cursor_line(
                                             &view_row_heights,
-                                            (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
+                                            selected,
+                                            selected_inner,
                                             -1,
                                         )
                                     } else {
-                                        scroll_timeline_by_rows(
+                                        step_cursor_rows(
                                             &view_row_heights,
                                             (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
                                             -1,
                                         )
                                     };
+                                if stepped != (selected, selected_inner) {
+                                    (selected, selected_inner) = stepped;
+                                    follow = false;
+                                }
                             }
                         }
                         // Shift+j / Shift+k (delivered as uppercase letters) =
@@ -8647,16 +8644,16 @@ pub fn run(
                                 && artifact_viewer.is_none()
                                 && !info_panel_open =>
                         {
-                            follow = false;
-                            ((selected, selected_inner),
-                             (view_viewport_offset, view_viewport_inner)) =
-                                scroll_timeline_by(
-                                    &view_row_heights,
-                                    (selected, selected_inner),
-                                    (view_viewport_offset, view_viewport_inner),
-                                    view_list_height,
-                                    1,
-                                );
+                            let stepped = step_cursor_line(
+                                &view_row_heights,
+                                selected,
+                                selected_inner,
+                                1,
+                            );
+                            if stepped != (selected, selected_inner) {
+                                (selected, selected_inner) = stepped;
+                                follow = false;
+                            }
                         }
                         KeyCode::Char('K')
                             if detail.is_none()
@@ -8666,16 +8663,16 @@ pub fn run(
                                 && artifact_viewer.is_none()
                                 && !info_panel_open =>
                         {
-                            follow = false;
-                            ((selected, selected_inner),
-                             (view_viewport_offset, view_viewport_inner)) =
-                                scroll_timeline_by(
-                                    &view_row_heights,
-                                    (selected, selected_inner),
-                                    (view_viewport_offset, view_viewport_inner),
-                                    view_list_height,
-                                    -1,
-                                );
+                            let stepped = step_cursor_line(
+                                &view_row_heights,
+                                selected,
+                                selected_inner,
+                                -1,
+                            );
+                            if stepped != (selected, selected_inner) {
+                                (selected, selected_inner) = stepped;
+                                follow = false;
+                            }
                         }
                         KeyCode::PageDown => {
                             if detail.is_some() {
@@ -8765,34 +8762,26 @@ pub fn run(
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
                                 // Notch = one row; Shift+wheel keeps the
-                                // line-granular step for reading tall rows.
-                                let (row, inner, vrow, vinner) =
+                                // line-granular step. Cursor-led: the viewport
+                                // scrolls only at the screen edge.
+                                let (row, inner) =
                                     if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                                        let ((r, i), (vr, vi)) = scroll_timeline_by(
+                                        step_cursor_line(
                                             &view_row_heights,
-                                            (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
+                                            selected,
+                                            selected_inner,
                                             -1,
-                                        );
-                                        (r, i, vr, vi)
+                                        )
                                     } else {
-                                        let ((r, i), (vr, vi)) = scroll_timeline_by_rows(
+                                        step_cursor_rows(
                                             &view_row_heights,
                                             (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
                                             -1,
-                                        );
-                                        (r, i, vr, vi)
+                                        )
                                     };
-                                if (row, inner, vrow, vinner)
-                                    != (selected, selected_inner, view_viewport_offset, view_viewport_inner)
-                                {
+                                if (row, inner) != (selected, selected_inner) {
                                     selected = row;
                                     selected_inner = inner;
-                                    view_viewport_offset = vrow;
-                                    view_viewport_inner = vinner;
                                     follow = false;
                                 }
                             }
@@ -8801,33 +8790,26 @@ pub fn run(
                             if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
-                                let (row, inner, vrow, vinner) =
+                                // Cursor-led like ScrollUp: a no-op notch at
+                                // the bottom edge must not pause following.
+                                let (row, inner) =
                                     if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                                        let ((r, i), (vr, vi)) = scroll_timeline_by(
+                                        step_cursor_line(
                                             &view_row_heights,
-                                            (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
+                                            selected,
+                                            selected_inner,
                                             1,
-                                        );
-                                        (r, i, vr, vi)
+                                        )
                                     } else {
-                                        let ((r, i), (vr, vi)) = scroll_timeline_by_rows(
+                                        step_cursor_rows(
                                             &view_row_heights,
                                             (selected, selected_inner),
-                                            (view_viewport_offset, view_viewport_inner),
-                                            view_list_height,
                                             1,
-                                        );
-                                        (r, i, vr, vi)
+                                        )
                                     };
-                                if (row, inner, vrow, vinner)
-                                    != (selected, selected_inner, view_viewport_offset, view_viewport_inner)
-                                {
+                                if (row, inner) != (selected, selected_inner) {
                                     selected = row;
                                     selected_inner = inner;
-                                    view_viewport_offset = vrow;
-                                    view_viewport_inner = vinner;
                                     follow = false;
                                 }
                             }
@@ -15738,13 +15720,12 @@ mod tests {
     }
 
     #[test]
-    fn scroll_moves_viewport_and_cursor_together() {
-        // The wheel/arrow dead-zone regression: from a follow position
-        // (cursor on the last line, window bottom-pinned) a single step up
-        // must move the *window*, not just the invisible cursor.
+    fn page_scroll_moves_viewport_and_cursor_together() {
+        // PageUp/PageDown are explicit viewport gestures: the window must
+        // travel immediately, with the cursor riding inside it.
         let h = vec![1usize; 10];
         let ((cr, ci), (vr, vi)) = scroll_timeline_by(&h, (9, 0), (5, 0), 5, -1);
-        assert_eq!((vr, vi), (4, 0), "viewport must travel on the first notch");
+        assert_eq!((vr, vi), (4, 0), "viewport must travel on the first page");
         assert_eq!((cr, ci), (8, 0), "cursor keeps stepping too");
         // Repeated steps stay 1:1 all the way to the top edge.
         let ((cr, ci), (vr, vi)) = scroll_timeline_by(&h, (8, 0), (4, 0), 5, -4);
@@ -15776,36 +15757,56 @@ mod tests {
     }
 
     #[test]
-    fn row_scroll_crosses_a_whole_row() {
+    fn cursor_row_step_crosses_a_whole_row_without_moving_the_viewport() {
         // Rows are 3, 2, 1, 3, 2, 1 lines tall (total 12) in a 4-line window.
         let h = vec![3usize, 2, 1, 3, 2, 1];
-        // Down from row 0's first line lands on row 1's first line and the
-        // window crosses all 3 lines of row 0 — one press, one row.
-        assert_eq!(
-            scroll_timeline_by_rows(&h, (0, 0), (0, 0), 4, 1),
-            ((1, 0), (1, 0))
-        );
+        // Down from row 0's first line lands on row 1's first line — one
+        // press crosses all 3 wrapped lines of row 0.
+        assert_eq!(step_cursor_rows(&h, (0, 0), 1), (1, 0));
         // Up lands on the previous row's LAST line.
-        assert_eq!(
-            scroll_timeline_by_rows(&h, (1, 0), (1, 0), 4, -1),
-            ((0, 2), (0, 2))
-        );
+        assert_eq!(step_cursor_rows(&h, (1, 0), -1), (0, 2));
         // At the first row there is no neighbour: the step falls back to a
         // single text line, so a tall first row stays readable from its top.
-        assert_eq!(
-            scroll_timeline_by_rows(&h, (0, 2), (0, 2), 4, -1),
-            ((0, 1), (0, 1))
-        );
+        assert_eq!(step_cursor_rows(&h, (0, 2), -1), (0, 1));
         // …and at the top of it, the edge is a no-op.
-        assert_eq!(
-            scroll_timeline_by_rows(&h, (0, 0), (0, 0), 4, -1),
-            ((0, 0), (0, 0))
+        assert_eq!(step_cursor_rows(&h, (0, 0), -1), (0, 0));
+        // Bottom edge: j is a no-op.
+        assert_eq!(step_cursor_rows(&h, (5, 0), 1), (5, 0));
+    }
+
+    #[test]
+    fn cursor_step_scrolls_only_at_the_screen_edge() {
+        // End-to-end shape of incremental scroll: 10 single-line rows in a
+        // 5-line window, bottom-pinned (follow). Stepping up moves the
+        // cursor inside the screen while the derived viewport stays put,
+        // and only follows once the cursor reaches the top edge.
+        let h = vec![1usize; 10];
+        let list_height = 5;
+        let total = 10;
+        let (mut row, mut inner) = (9usize, 0usize);
+        let mut top = 5usize; // bottom-pinned at follow
+        // First four steps: cursor roams, screen stays.
+        for expected_cursor in (5..9).rev() {
+            (row, inner) = step_cursor_rows(&h, (row, inner), -1);
+            top = compute_line_viewport_top(
+                abs_line_index(&h, row, inner),
+                list_height,
+                total,
+                Some(top),
+            );
+            assert_eq!(abs_line_index(&h, row, inner), expected_cursor);
+            assert_eq!(top, 5, "screen must not scroll before the top edge");
+        }
+        // Fifth step hits the top edge: the viewport follows by one line.
+        (row, inner) = step_cursor_rows(&h, (row, inner), -1);
+        top = compute_line_viewport_top(
+            abs_line_index(&h, row, inner),
+            list_height,
+            total,
+            Some(top),
         );
-        // Bottom edge, window already bottom-pinned: j is a no-op.
-        assert_eq!(
-            scroll_timeline_by_rows(&h, (5, 0), (3, 2), 4, 1),
-            ((5, 0), (3, 2))
-        );
+        assert_eq!(abs_line_index(&h, row, inner), 4);
+        assert_eq!(top, 4, "screen scrolls once the cursor reaches the edge");
     }
 
     #[test]
