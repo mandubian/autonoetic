@@ -757,6 +757,30 @@ fn build_info_panel(
             let window = stats.context_window.map_or_else(|| String::new(), |w| format_tokens(w as u64));
             lines.push(format!("  Context    {:.0}% used{}", pct, if window.is_empty() { String::new() } else { format!(" (of {window})") }));
         }
+        // Tokens per agent: who spent the session's budget. Shown whenever
+        // more than one agent ran — with a single agent the totals above
+        // already say it, and the section would only be noise.
+        if stats.per_agent.len() > 1 {
+            let mut sorted: Vec<_> = stats.per_agent.iter().collect();
+            sorted.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
+            lines.push(format!("  Agents     {} total", stats.per_agent.len()));
+            for (agent, m) in sorted {
+                let err_tag = if m.errors > 0 {
+                    format!("  {} err", m.errors)
+                } else {
+                    String::new()
+                };
+                lines.push(format!(
+                    "    {:<24} {:>4} calls  in {}  cached {}  out {}{}",
+                    agent,
+                    m.calls,
+                    format_tokens(m.input_tokens),
+                    format_tokens(m.cached_tokens),
+                    format_tokens(m.output_tokens),
+                    err_tag,
+                ));
+            }
+        }
     }
     lines.push(String::new());
     lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
@@ -4387,6 +4411,10 @@ struct SessionStats {
     models: Vec<String>,
     /// Per-model breakdown of calls, tokens, and errors.
     per_model: HashMap<String, ModelStats>,
+    /// Per-agent breakdown of the same. The model table answers "what did the
+    /// models cost"; this answers "who spent it" — the question once a
+    /// workflow's children burn most of the session budget.
+    per_agent: HashMap<String, ModelStats>,
     context_total_pct: f64,
     context_samples: u64,
     context_window: Option<u32>,
@@ -4412,6 +4440,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         llm_calls: 0,
         models: Vec::new(),
         per_model: HashMap::new(),
+        per_agent: HashMap::new(),
         context_total_pct: 0.0,
         context_samples: 0,
         context_window: None,
@@ -4433,6 +4462,14 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                             stats.total_output += out;
                             stats.total_cached += cached;
                             stats.llm_calls += 1;
+                            let a = stats
+                                .per_agent
+                                .entry(e.principal.id.clone())
+                                .or_default();
+                            a.calls += 1;
+                            a.input_tokens += inp;
+                            a.output_tokens += out;
+                            a.cached_tokens += cached;
                         }
 
                         let usage = v.get("usage");
@@ -4479,6 +4516,11 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                             .unwrap_or_else(|| "unknown".to_string());
                         let m = stats.per_model.entry(model).or_default();
                         m.errors += 1;
+                        stats
+                            .per_agent
+                            .entry(e.principal.id.clone())
+                            .or_default()
+                            .errors += 1;
                     }
                     "llm.empty_response" => {
                         let model = v
@@ -4488,6 +4530,11 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                             .unwrap_or_else(|| "unknown".to_string());
                         let m = stats.per_model.entry(model.clone()).or_default();
                         m.errors += 1;
+                        stats
+                            .per_agent
+                            .entry(e.principal.id.clone())
+                            .or_default()
+                            .errors += 1;
                         if !stats.models.contains(&model) {
                             stats.models.push(model);
                         }
@@ -17211,6 +17258,7 @@ mod tests {
             llm_calls: 0,
             models: Vec::new(),
             per_model: HashMap::new(),
+            per_agent: HashMap::new(),
             context_total_pct: 0.0,
             context_samples: 0,
             context_window: None,
@@ -17438,6 +17486,87 @@ mod tests {
             120,
         );
         assert!(!plain.to_string().contains("cache"), "{plain}");
+    }
+
+    #[test]
+    fn session_stats_aggregate_tokens_per_agent() {
+        let mut coder_a = cached_round_entry(2000, 200, 1000);
+        coder_a.principal = autonoetic_types::principal::Principal::agent("coder.default");
+        let mut coder_b = cached_round_entry(500, 50, 0);
+        coder_b.principal = autonoetic_types::principal::Principal::agent("coder.default");
+        let stats = compute_session_stats(&[
+            // The root planner's own calls stay in their own bucket.
+            cached_round_entry(1000, 100, 400),
+            coder_a,
+            coder_b,
+        ]);
+
+        let planner = &stats.per_agent["planner.default"];
+        assert_eq!(planner.calls, 1);
+        assert_eq!(planner.input_tokens, 1000);
+        let coder = &stats.per_agent["coder.default"];
+        assert_eq!(coder.calls, 2);
+        assert_eq!(coder.input_tokens, 2500);
+        assert_eq!(coder.cached_tokens, 1000);
+        assert_eq!(coder.output_tokens, 250);
+    }
+
+    #[test]
+    fn info_panel_shows_tokens_per_agent() {
+        let mut coder = cached_round_entry(2000, 200, 1000);
+        coder.principal = autonoetic_types::principal::Principal::agent("coder.default");
+        let stats = compute_session_stats(&[cached_round_entry(1000, 100, 400), coder]);
+        let panel = build_info_panel(
+            "session-123",
+            "tui",
+            &stats,
+            FloorMode::Altitude(Altitude::Detail),
+            true,
+            true,
+            true,
+            10,
+            0,
+            None,
+            0,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            0,
+            None,
+            &[],
+        );
+        let text = panel.lines.join("\n");
+        assert!(text.contains("Agents     2 total"), "{text}");
+        assert!(text.contains("coder.default"), "{text}");
+        assert!(text.contains("planner.default"), "{text}");
+
+        // A single-agent session keeps the section hidden — the totals above
+        // already say the same thing.
+        let solo = compute_session_stats(&[cached_round_entry(1000, 100, 0)]);
+        let solo_panel = build_info_panel(
+            "session-123",
+            "tui",
+            &solo,
+            FloorMode::Altitude(Altitude::Detail),
+            true,
+            true,
+            true,
+            10,
+            0,
+            None,
+            0,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            0,
+            None,
+            &[],
+        );
+        assert!(!solo_panel.lines.join("\n").contains("Agents"), "{text}");
     }
 
     #[test]
