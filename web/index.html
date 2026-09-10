@@ -122,6 +122,14 @@
       </div>
     </div>
 
+    <!-- Attached decider seat reminder: centered top-middle, colored by mode
+         (violet = advisory, red = binding). Hidden when no seat is attached;
+         absence reads as "no decider". -->
+    <div id="decider-badge" title="Attached decider seat" class="hidden absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg items-center gap-2 text-[13px] font-semibold border transition-all cursor-default whitespace-nowrap max-w-[38vw] overflow-hidden text-ellipsis">
+      <span>⚖️</span>
+      <span id="decider-badge-text">Decider</span>
+    </div>
+
     <!-- Connection Setup & Pending Gates Alert Badge -->
     <div class="flex items-center gap-4 text-sm">
       
@@ -789,6 +797,7 @@
     let lastGrantsData = null;
     let grantsPollTimer = null;
     let llmActivityTimer = null;
+    let deciderPollTimer = null;
     let credentialPromptCtx = null; // {secretFields, allowedHosts} for the open gate modal
     let lastProposals = null; // pending constitutional amendments (O-6 view)
     let lastFlags = null;     // open anomaly flags (O-7 view)
@@ -890,6 +899,7 @@
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-[13px] py-6">Loading plan...</div>';
       document.getElementById('plan-version-badge').classList.add('hidden');
       document.getElementById('workbench-list').innerHTML = '<div class="text-center text-slate-500 text-[13px] py-4">No active workbenches.</div>';
+      hideDeciderBadge();
       
       updateHUD();
 
@@ -954,6 +964,12 @@
         if (!document.getElementById('tab-content-grants').classList.contains('hidden')) fetchLabels();
       }, 10000);
 
+      // Attached decider seat: bootstrap + 10 s re-sync so the top-middle
+      // reminder tracks attach/detach/expiry made from any surface.
+      fetchDeciders();
+      if (deciderPollTimer) clearInterval(deciderPollTimer);
+      deciderPollTimer = setInterval(fetchDeciders, 10000);
+
       // Live LLM activity strip (#1082) — poll the ephemeral stream registry
       pollLlmActivity();
       if (llmActivityTimer) clearInterval(llmActivityTimer);
@@ -998,6 +1014,8 @@
       if (grantsPollTimer) { clearInterval(grantsPollTimer); grantsPollTimer = null; }
       if (llmActivityTimer) { clearInterval(llmActivityTimer); llmActivityTimer = null; }
       if (gatesPollTimer) { clearInterval(gatesPollTimer); gatesPollTimer = null; }
+      if (deciderPollTimer) { clearInterval(deciderPollTimer); deciderPollTimer = null; }
+      hideDeciderBadge();
       if (gatesRefreshTimer) { clearTimeout(gatesRefreshTimer); gatesRefreshTimer = null; }
       // Fail-clean: no previous session's gate view may survive — otherwise a
       // stale authoritative set would gate the *next* session's rendering.
@@ -1205,6 +1223,66 @@
           updateHUD();
         }
       }
+    }
+
+    // ── Attached decider seat reminder (top-middle, colored by mode) ──
+    // `deciders.list` is the authoritative source; timeline replay alone must
+    // never decide it (a revoked seat leaves a dangling `decider.appointed`
+    // event behind). A failed poll keeps the last-known badge (fail-visible),
+    // never fabricates "no decider".
+    async function fetchDeciders() {
+      const { sid, secret, baseURL } = getConnectInfo();
+      if (!sid || !secret) return;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 'deciders-list', method: 'deciders.list',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) throw new Error(json.error.message);
+        const rows = (json.result && json.result.appointments) || [];
+        const active = rows.filter(a => !a.revoked_at && !a.expired);
+        renderDeciderBadge(active);
+      } catch (e) {
+        // Keep the last-known badge on transient failures.
+      }
+    }
+
+    function renderDeciderBadge(active) {
+      const badge = document.getElementById('decider-badge');
+      const text = document.getElementById('decider-badge-text');
+      if (!badge || !text) return;
+      if (!active || active.length === 0) {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+        return;
+      }
+      const first = active[0];
+      const agent = (first.decider_agent || '?').replace(/\.default$/, '');
+      const binding = first.advice_only === false;
+      const mode = binding ? 'BINDING' : 'advisory';
+      const extra = active.length > 1 ? ` +${active.length - 1}` : '';
+      text.innerText = `Decider: ${agent} · ${mode}${extra}`;
+      const kinds = (first.kinds || []).join(',');
+      const ceiling = first.risk_ceiling || first.riskCeiling || '';
+      badge.title = `Seat: ${first.decider_agent || '?'} (${mode})${kinds ? ` · kinds: ${kinds}` : ''}${ceiling ? ` · ceiling: ${ceiling}` : ''}${extra ? ` · ${active.length} active seats` : ''} — verdicts ${binding ? 'RESOLVE gates (fail-closed)' : 'are recorded, gates still park for you'}`;
+      const base = 'absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg items-center gap-2 text-[13px] font-semibold border transition-all cursor-default whitespace-nowrap max-w-[38vw] overflow-hidden text-ellipsis flex ';
+      if (binding) {
+        badge.className = base + 'bg-accentRed/15 border-accentRed/40 text-accentRed gate-pulse';
+      } else {
+        badge.className = base + 'bg-accentViolet/15 border-accentViolet/40 text-accentViolet glow-indigo';
+      }
+    }
+
+    function hideDeciderBadge() {
+      const badge = document.getElementById('decider-badge');
+      if (!badge) return;
+      badge.classList.add('hidden');
+      badge.classList.remove('flex');
     }
 
     function sinksLabelName(sinks) {
@@ -2678,6 +2756,11 @@
       if (fresh.some(e => e.event_type.startsWith('egress.') || e.event_type.startsWith('grant_revocation')) && isConnected) {
         fetchGrants();
         if (fresh.some(x => x.event_type === 'egress.session_policy')) fetchEgressPolicy();
+      }
+      // A seat attach/detach lands as `decider.*` on the chain — refresh the
+      // top-middle reminder immediately instead of waiting for the 10 s poll.
+      if (fresh.some(e => e.event_type.startsWith('decider.')) && isConnected) {
+        fetchDeciders();
       }
     }
 

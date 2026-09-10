@@ -838,6 +838,85 @@ fn truncate_id(id: &str, max: usize) -> String {
     }
 }
 
+/// An attached decider seat worth surfacing in the header: the agent on the
+/// seat plus whether its verdicts resolve gates (binding) or are recorded
+/// advisory-only. `extra` counts further active seats beyond the first so a
+/// second appointment is never silently hidden.
+#[derive(Debug, Clone, PartialEq)]
+struct ActiveDecider {
+    agent: String,
+    binding: bool,
+    extra: usize,
+}
+
+impl ActiveDecider {
+    fn chip_text(&self) -> String {
+        let short = self.agent.strip_suffix(".default").unwrap_or(&self.agent);
+        let mode = if self.binding { "BINDING" } else { "advisory" };
+        if self.extra > 0 {
+            format!("⚖️ decider:{short} ({mode} +{})", self.extra)
+        } else {
+            format!("⚖️ decider:{short} ({mode})")
+        }
+    }
+
+    fn chip_style(&self) -> Style {
+        if self.binding {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
+        }
+    }
+}
+
+/// Read the live decider seats for this run (`deciders.list`). Outer `None`
+/// ⇒ the RPC itself failed (keep the last-known badge, never fabricate "no
+/// decider"); `Some(None)` ⇒ the call succeeded and no seat is attached;
+/// `Some(Some(seat))` ⇒ the first active seat plus a count of any further
+/// ones.
+fn fetch_active_decider(
+    client: &RoomClient,
+    root_session_id: &str,
+) -> Option<Option<ActiveDecider>> {
+    let value = rpc(
+        client,
+        "deciders.list",
+        serde_json::json!({ "root_session_id": root_session_id }),
+    )
+    .ok()?;
+    let rows = value.get("appointments")?.as_array()?;
+    let mut active: Vec<(String, bool)> = Vec::new();
+    for a in rows {
+        if !a.get("revoked_at").is_none_or(|v| v.is_null()) {
+            continue;
+        }
+        if a.get("expired").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let agent = match a.get("decider_agent").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        // `advice_only: false` ⇒ the seat resolves gates (binding).
+        let binding = !a
+            .get("advice_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        active.push((agent, binding));
+    }
+    let (agent, binding) = match active.first() {
+        Some(first) => first,
+        None => return Some(None),
+    };
+    Some(Some(ActiveDecider {
+        agent: agent.clone(),
+        binding: *binding,
+        extra: active.len().saturating_sub(1),
+    }))
+}
+
 fn build_header(
     root: &str,
     channel_kind: &str,
@@ -849,8 +928,9 @@ fn build_header(
     taint: Option<&str>,
     pinned: bool,
     bound_agent: Option<&str>,
+    decider: Option<&ActiveDecider>,
     width: u16,
-) -> String {
+) -> Line<'static> {
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
     // The bound planner, once it differs from the default — the visible
@@ -904,15 +984,48 @@ fn build_header(
         right_parts.push("[following]".to_string());
     }
     let right = right_parts.join("  ");
+    let base = Style::default().add_modifier(Modifier::BOLD);
+    let Some(seat) = decider else {
+        let left_w = left.width();
+        let right_w = right.width();
+        let avail = width as usize;
+        let line = if left_w + right_w + 2 >= avail {
+            format!("{left} {right}")
+        } else {
+            let pad = avail - left_w - right_w;
+            format!("{}{}{}", left, " ".repeat(pad), right)
+        };
+        return Line::from(Span::styled(line, base));
+    };
+    // An attached decider seat gets a colored mention centered on the top
+    // row — the reminder must survive peripheral vision, not hide in the
+    // right-hand chip cluster. Advisory seats render magenta, binding seats
+    // (whose verdicts resolve gates without the operator) render red.
+    let middle = seat.chip_text();
+    let middle_style = seat.chip_style();
     let left_w = left.width();
+    let mid_w = middle.width();
     let right_w = right.width();
     let avail = width as usize;
-    if left_w + right_w + 2 >= avail {
-        format!("{left} {right}")
-    } else {
-        let pad = avail - left_w - right_w;
-        format!("{}{}{}", left, " ".repeat(pad), right)
+    if left_w + mid_w + right_w + 2 >= avail {
+        return Line::from(vec![
+            Span::styled(format!("{left} "), base),
+            Span::styled(middle, middle_style),
+            Span::styled(format!(" {right}"), base),
+        ]);
     }
+    // Center `middle`: its start column tracks the midpoint of the row, not
+    // the end of `left`, so it reads as top-middle at any width.
+    let mid_start = avail.saturating_sub(mid_w) / 2;
+    let gap1 = mid_start.saturating_sub(left_w).max(1);
+    let gap2 = avail
+        .saturating_sub(left_w + gap1 + mid_w + right_w)
+        .max(1);
+    Line::from(vec![
+        Span::styled(format!("{left}{}", " ".repeat(gap1)), base),
+        Span::styled(middle, middle_style),
+        Span::styled(format!("{}{right}", " ".repeat(gap2)), base),
+    ])
 }
 
 /// Turns-since-request beyond which a still-pending call is flagged stale (`!`).
@@ -4581,6 +4694,12 @@ pub fn run(
     let mut current_pinned: bool = false;
     let mut last_taint_poll = Instant::now();
     let mut force_taint_refresh = false;
+    // Attached decider seat: polled alongside the egress posture so the
+    // top-middle reminder tracks attach/detach/expiry without a manual
+    // refresh. `None` ⇒ no seat ⇒ no mention (absence reads as "no decider").
+    let mut current_decider: Option<ActiveDecider> = None;
+    let mut last_decider_poll = Instant::now();
+    let mut force_decider_refresh = true;
     // RFC §4.3 (#978): an in-flight `/local` proposal awaiting the operator's
     // one-keystroke confirm. `None` when no proposal is pending; `y` declares
     // the proposed rules, `n`/Esc cancels — an unconfirmed proposal has no
@@ -5021,6 +5140,7 @@ pub fn run(
                                                     a["decider_agent"].as_str().unwrap_or(agent.as_str()),
                                                 ));
                                                 force_timeline_refresh = true;
+                                                force_decider_refresh = true;
                                             }
                                             Err(e) => status = Some(format!("✗ deciders.appoint: {e}")),
                                         }
@@ -5084,6 +5204,7 @@ pub fn run(
                                                     Ok(_) => {
                                                         status = Some(format!("✓ detached {id} — its verdicts stay attributed"));
                                                         force_timeline_refresh = true;
+                                                        force_decider_refresh = true;
                                                     }
                                                     Err(e) => status = Some(format!("✗ deciders.revoke: {e}")),
                                                 }
@@ -8537,6 +8658,7 @@ pub fn run(
                     current_taint.as_deref(),
                     current_pinned,
                     target_agent_id.as_deref(),
+                    current_decider.as_ref(),
                     &llm_activity,
                     run_line.as_deref(),
                 )
@@ -8627,6 +8749,7 @@ pub fn run(
                     current_taint.as_deref(),
                     current_pinned,
                     target_agent_id.as_deref(),
+                    current_decider.as_ref(),
                     &llm_activity,
                     run_line.as_deref(),
                 )
@@ -8927,6 +9050,22 @@ pub fn run(
                 current_message_labels = message_labels;
                 current_pinned = pinned;
                 needs_redraw = true;
+            }
+        }
+        // Attached decider seat poll — same cadence as the egress posture so
+        // the top-middle reminder tracks attach/detach/expiry. A failed poll
+        // keeps the last-known seat (fail-visible, never fabricates "no
+        // decider"); an explicit attach/detach forces an immediate refresh.
+        if force_decider_refresh
+            || last_decider_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_decider_poll = Instant::now();
+            force_decider_refresh = false;
+            if let Some(fresh) = fetch_active_decider(client, &root_session_id) {
+                if fresh != current_decider {
+                    current_decider = fresh;
+                    needs_redraw = true;
+                }
             }
         }
         // Recompute open turns only when the timeline changed; otherwise reuse
@@ -9496,6 +9635,7 @@ pub fn run(
                 current_taint.as_deref(),
                 current_pinned,
                 target_agent_id.as_deref(),
+                current_decider.as_ref(),
                 &llm_activity,
                 run_line.as_deref(),
             )
@@ -12129,6 +12269,7 @@ fn draw(
     taint: Option<&str>,
     pinned: bool,
     bound_agent: Option<&str>,
+    decider: Option<&ActiveDecider>,
     llm_activity: &[LlmActivityRow],
     run_line: Option<&str>,
 ) {
@@ -12156,9 +12297,9 @@ fn draw(
     let footer_idx = chunks.len() - 1;
     let list_idx = if has_activity_strip { 2 } else { 1 };
 
-    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, bound_agent, chunks[0].width);
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, bound_agent, decider, chunks[0].width);
     f.render_widget(
-        Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(header),
         chunks[0],
     );
 
@@ -13993,29 +14134,81 @@ mod tests {
             let with = build_header(
                 "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
                 FloorMode::Altitude(Altitude::Normal), true, None, false,
-                Some("planner.collaborative"), 160,
+                Some("planner.collaborative"), None, 160,
             );
-            assert!(with.contains("🤝 planner.collaborative"), "{with}");
+            assert!(with.to_string().contains("🤝 planner.collaborative"), "{with}");
             // The `.default` suffix is stripped for compactness.
             let short = build_header(
                 "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
                 FloorMode::Altitude(Altitude::Normal), true, None, false,
-                Some("nightwatch.default"), 160,
+                Some("nightwatch.default"), None, 160,
             );
-            assert!(short.contains("🤝 nightwatch"), "{short}");
+            assert!(short.to_string().contains("🤝 nightwatch"), "{short}");
             // Default planner (or unknown binding) renders no chip.
             let without = build_header(
                 "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
                 FloorMode::Altitude(Altitude::Normal), true, None, false,
-                Some("planner.default"), 160,
+                Some("planner.default"), None, 160,
             );
-            assert!(!without.contains("🤝"), "{without}");
+            assert!(!without.to_string().contains("🤝"), "{without}");
             let unset = build_header(
                 "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
                 FloorMode::Altitude(Altitude::Normal), true, None, false,
-                None, 160,
+                None, None, 160,
             );
-            assert!(!unset.contains("🤝"), "{unset}");
+            assert!(!unset.to_string().contains("🤝"), "{unset}");
+        }
+
+        #[test]
+        fn header_shows_a_centered_colored_mention_for_an_attached_decider() {
+            // An attached seat is a top-middle mention, not another right-hand
+            // chip: advisory seats render magenta, binding seats red.
+            let advisory = ActiveDecider {
+                agent: "nightwatch.default".to_string(),
+                binding: false,
+                extra: 0,
+            };
+            let line = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                None, Some(&advisory), 160,
+            );
+            let text = line.to_string();
+            assert!(text.contains("⚖️ decider:nightwatch (advisory)"), "{text}");
+            let spans: Vec<_> = line.spans.iter().collect();
+            assert!(spans.iter().any(|s| s.content.contains("decider:nightwatch")), "{text}");
+            let mid = spans
+                .iter()
+                .find(|s| s.content.contains("decider:"))
+                .expect("decider span");
+            assert_eq!(mid.style.fg, Some(Color::Magenta), "{text}");
+
+            let binding = ActiveDecider {
+                agent: "auditor.default".to_string(),
+                binding: true,
+                extra: 1,
+            };
+            let bline = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                None, Some(&binding), 160,
+            );
+            let btext = bline.to_string();
+            assert!(btext.contains("⚖️ decider:auditor (BINDING +1)"), "{btext}");
+            let bmid = bline
+                .spans
+                .iter()
+                .find(|s| s.content.contains("decider:"))
+                .expect("binding span");
+            assert_eq!(bmid.style.fg, Some(Color::Red), "{btext}");
+
+            // No seat ⇒ no mention (absence reads as "no decider").
+            let bare = build_header(
+                "session-root-1", "tui", &compute_session_stats(&[]), 0, true,
+                FloorMode::Altitude(Altitude::Normal), true, None, false,
+                None, None, 160,
+            );
+            assert!(!bare.to_string().contains("decider:"), "{}", bare.to_string());
         }
 
     use super::*;
@@ -16938,9 +17131,10 @@ mod tests {
             None,
             false,
             None,
+            None,
             120,
         );
-        assert!(header.contains("cache 58%"), "{header}");
+        assert!(header.to_string().contains("cache 58%"), "{header}");
 
         // A session without cache telemetry keeps the header unchanged.
         let no_cache = compute_session_stats(&[cached_round_entry(100, 10, 0)]);
@@ -16955,9 +17149,10 @@ mod tests {
             None,
             false,
             None,
+            None,
             120,
         );
-        assert!(!plain.contains("cache"), "{plain}");
+        assert!(!plain.to_string().contains("cache"), "{plain}");
     }
 
     #[test]
@@ -16965,16 +17160,16 @@ mod tests {
         let stats = test_stats();
         let with_taint = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            Some("local_only"), false, None, 120,
+            Some("local_only"), false, None, None, 120,
         );
-        assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
+        assert!(with_taint.to_string().contains("🔒 local_only"), "{with_taint}");
 
         // Unrestricted (None) ⇒ no chip — absence reads as "open".
         let open = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            None, false, None, 120,
+            None, false, None, None, 120,
         );
-        assert!(!open.contains("🔒"), "{open}");
+        assert!(!open.to_string().contains("🔒"), "{open}");
     }
 
     #[test]
@@ -16982,16 +17177,16 @@ mod tests {
         let stats = test_stats();
         let pinned = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            None, true, None, 120,
+            None, true, None, None, 120,
         );
-        assert!(pinned.contains("📌 pinned"), "{pinned}");
+        assert!(pinned.to_string().contains("📌 pinned"), "{pinned}");
 
         // Not pinned ⇒ no chip (even with a taint label from room data).
         let unpinned = build_header(
             "session-root-1", "tui", &stats, 0, true, FloorMode::Altitude(Altitude::Normal), true,
-            Some("no_remote_model"), false, None, 120,
+            Some("no_remote_model"), false, None, None, 120,
         );
-        assert!(!unpinned.contains("📌"), "{unpinned}");
+        assert!(!unpinned.to_string().contains("📌"), "{unpinned}");
     }
 
     #[test]
