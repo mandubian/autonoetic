@@ -407,6 +407,33 @@ impl ArtifactStore {
             file_handles = deduped_handles;
         }
 
+        // Reject file-name sets that cannot coexist in one directory tree: a
+        // bundle file may not also be a directory prefix of another file
+        // (`bundle` + `bundle/main.py`). Without this, the session projection
+        // fails mid-way (ENOTDIR/EISDIR — and `Permission denied` if the
+        // conflicting node is a symlink into the read-only content store)
+        // *after* the immutable manifest is persisted, so the retry takes the
+        // dedup reuse path and resurfaces as an unrelated downstream error.
+        // Fail early, before persisting anything.
+        {
+            let names: std::collections::HashSet<&str> =
+                files.iter().map(|f| f.name.as_str()).collect();
+            for name in &names {
+                let mut ancestor = *name;
+                while let Some(idx) = ancestor.rfind('/') {
+                    ancestor = &ancestor[..idx];
+                    if names.contains(ancestor) {
+                        anyhow::bail!(
+                            "artifact file names conflict: '{}' is a file and also a directory prefix of '{}'. \
+                             A bundle cannot contain both a file and a directory at the same path; rename one of them.",
+                            ancestor,
+                            name
+                        );
+                    }
+                }
+            }
+        }
+
         // Validate entrypoints before dedup so we never "reuse" with invalid args.
         let ep: Vec<String> = if let Some(eps) = entrypoints {
             for e in eps {
@@ -600,21 +627,17 @@ impl ArtifactStore {
             self.materialize_projection_file(&file.handle, &output_path)?;
         }
 
-        // The generated projection readme must never collide with a bundle
-        // file of the same name. Bundle files are projected as symlinks into
-        // the read-only content store (blobs are chmod 0444), so writing the
-        // generated readme to a path already occupied by a bundle `README.md`
-        // would follow the symlink into the blob and fail with EACCES
-        // (`Permission denied (os error 13)`) — and would corrupt
-        // content-addressed data if the blob were writable. When the artifact
-        // ships its own README.md, keep it and write the projection metadata
-        // under a non-colliding sibling name.
-        let readme_name = if bundle.files.iter().any(|f| f.name == "README.md") {
-            "README.artifact.md"
-        } else {
-            "README.md"
-        };
-        let readme_path = artifact_dir.join(readme_name);
+        // The generated projection metadata must never collide with a bundle
+        // file path — as an exact name *or* as a directory node. Bundle files
+        // are projected as symlinks into the read-only content store (blobs
+        // are chmod 0444), so writing metadata to a path already occupied by
+        // a bundle file would follow the symlink into the blob and fail with
+        // EACCES (`Permission denied (os error 13)`) — and would corrupt
+        // content-addressed data if the blob were writable. The generated
+        // name is derived from the bundle's own name set, so no input can
+        // shadow it or be shadowed by it.
+        let readme_name = Self::projection_metadata_name(&bundle.files);
+        let readme_path = artifact_dir.join(&readme_name);
         // Defense in depth: never write through a pre-existing symlink.
         if readme_path.is_symlink() {
             std::fs::remove_file(&readme_path)?;
@@ -624,8 +647,28 @@ impl ArtifactStore {
         Ok(())
     }
 
-    fn materialize_projection_file(&self, handle: &str, output_path: &Path) -> anyhow::Result<()> {
-        if output_path.exists() || output_path.is_symlink() {
+    /// Pick a projection metadata filename that collides with no bundle file,
+    /// tested both as an exact path and as a directory node (`name/…`).
+    /// `build_with_kind` rejects file/directory prefix conflicts within the
+    /// bundle itself, so the directory-node test only ever matters against
+    /// candidate names (`README.artifact1.md/…` cannot occur, but the check
+    /// keeps the invariant local and total).
+    fn projection_metadata_name(files: &[ArtifactFileEntry]) -> String {
+        let mut candidate = "README.md".to_string();
+        let mut n = 0u32;
+        loop {
+            let taken = files.iter().any(|f| {
+                f.name == candidate || f.name.starts_with(&format!("{candidate}/"))
+            });
+            if !taken {
+                return candidate;
+            }
+            n += 1;
+            candidate = format!("README.artifact{n}.md");
+        }
+    }
+
+    fn materialize_projection_file(&self, handle: &str, output_path: &Path) -> anyhow::Result<()> {        if output_path.exists() || output_path.is_symlink() {
             std::fs::remove_file(output_path)?;
         }
 
@@ -871,10 +914,14 @@ mod tests {
     /// (os error 13)`. The generated projection readme was written to
     /// `<projection>/README.md`, which by then was a symlink to the bundle's
     /// read-only content-store blob — writing through it hit EACCES (and
-    /// would have corrupted the blob had it been writable). The bundle's own
-    /// README must survive; projection metadata goes to a sibling name.
+    /// would have corrupted the blob had it been writable).
+    ///
+    /// This is name-collision-specific, not README-specific: any generated
+    /// metadata name is picked against the bundle's *entire* name set. Here
+    /// the bundle also claims the first fallback name, proving the selection
+    /// can't be shadowed by a fixed special case.
     #[test]
-    fn test_artifact_projection_readme_collision_with_bundle_readme() {
+    fn test_artifact_projection_metadata_name_never_collides_with_bundle_files() {
         let temp = tempdir().unwrap();
         let gw = temp.path().join(".gateway");
         std::fs::create_dir_all(&gw).unwrap();
@@ -882,24 +929,27 @@ mod tests {
         let store = ArtifactStore::new(&gw).unwrap();
         let content_store = ContentStore::new(&gw).unwrap();
 
-        let h1 = content_store.write(b"print('hello')").unwrap();
-        content_store
-            .register_name("demo-session/coder.default-abc", "main.py", &h1)
-            .unwrap();
-
-        let h2 = content_store.write(b"# my own readme\n").unwrap();
-        content_store
-            .register_name("demo-session/coder.default-abc", "README.md", &h2)
-            .unwrap();
+        let mut inputs = Vec::new();
+        for (name, body) in [
+            ("main.py", &b"print('hello')"[..]),
+            ("README.md", b"# my own readme\n"),
+            ("README.artifact1.md", b"# also mine\n"),
+        ] {
+            let h = content_store.write(body).unwrap();
+            content_store
+                .register_name("demo-session/coder.default-abc", name, &h)
+                .unwrap();
+            inputs.push(name.to_string());
+        }
 
         let bundle = store
             .build(
-                &["main.py".into(), "README.md".into()],
+                &inputs,
                 Some(&["main.py".into()]),
                 None,
                 "demo-session/coder.default-abc",
             )
-            .expect("build must not fail on a bundle that ships README.md");
+            .expect("build must not fail when the bundle claims README variants");
 
         let session_artifact_dir = gw
             .join("sessions")
@@ -907,16 +957,56 @@ mod tests {
             .join("artifacts")
             .join(&bundle.artifact_id);
 
-        // The bundle's README is preserved and still resolves to its content.
-        let projected_readme =
-            std::fs::read_to_string(session_artifact_dir.join("README.md")).unwrap();
-        assert_eq!(projected_readme, "# my own readme\n");
+        // Both bundle READMEs are preserved with their own content.
+        assert_eq!(
+            std::fs::read_to_string(session_artifact_dir.join("README.md")).unwrap(),
+            "# my own readme\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session_artifact_dir.join("README.artifact1.md")).unwrap(),
+            "# also mine\n"
+        );
 
-        // Projection metadata lives beside it.
-        let meta = std::fs::read_to_string(session_artifact_dir.join("README.artifact.md"))
-            .unwrap();
+        // Metadata lands on the first name the bundle left free.
+        let meta =
+            std::fs::read_to_string(session_artifact_dir.join("README.artifact2.md")).unwrap();
         assert!(meta.contains(&bundle.artifact_id));
         assert!(meta.contains("main.py"));
+    }
+
+    /// A bundle cannot contain both a file and a directory at the same path.
+    /// Such a set used to fail mid-projection (after the manifest persisted,
+    /// so retries masked it); it is now rejected up front with an actionable
+    /// message and nothing persisted.
+    #[test]
+    fn test_artifact_build_rejects_file_directory_prefix_conflict() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"i am a file").unwrap();
+        content_store
+            .register_name("demo-session/coder.default-abc", "bundle", &h1)
+            .unwrap();
+        let h2 = content_store.write(b"i am a child").unwrap();
+        content_store
+            .register_name("demo-session/coder.default-abc", "bundle/main.py", &h2)
+            .unwrap();
+
+        let err = store
+            .build(
+                &["bundle".into(), "bundle/main.py".into()],
+                None,
+                None,
+                "demo-session/coder.default-abc",
+            )
+            .expect_err("file/directory prefix conflict must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("conflict"), "unexpected error: {msg}");
+        assert!(msg.contains("bundle"), "unexpected error: {msg}");
     }
 
     #[cfg(unix)]
