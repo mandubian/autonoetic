@@ -687,3 +687,229 @@ fn find_orphaned_sessions_protects_children_of_an_unrecognised_parent() {
         "an unrecognised parent state must not reap its children, got: {orphans:?}"
     );
 }
+
+/// Regression for the `wf-bf15bb44` deadlock: the reaper cancels orphan tasks
+/// by writing the task row directly, bypassing `update_task_run_status` — the
+/// normal singleton-slot release site. Without an explicit release the cancelled
+/// task kept its index row at `running` forever; every later spawn deduped onto
+/// the corpse and an operator-approved promote could never land.
+#[tokio::test]
+async fn orphan_reaper_releases_singleton_slot_for_cancelled_task() {
+    use autonoetic_gateway::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, save_task_run, save_workflow_run,
+    };
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let root_id = "root-singleton-release";
+    let parent_id = "root-singleton-release/agent-factory.default-aaaa1111";
+    let child_id = "root-singleton-release/agent-factory.default-aaaa1111/specialized_builder.default-bbbb2222";
+
+    store
+        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .unwrap();
+    // Parent terminated → the child is an orphan.
+    store
+        .upsert_session_transcript(&make_transcript(parent_id, root_id, "agent-factory.default", "failed"))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(child_id, root_id, "specialized_builder.default", "active"))
+        .unwrap();
+
+    let config = ws.gateway_config();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_id,
+        Some("planner.default"),
+    )
+    .unwrap();
+    wf.status = WorkflowRunStatus::WaitingChildren;
+    save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
+
+    let task = TaskRun {
+        task_id: "task-holds-slot".to_string(),
+        workflow_id: wf.workflow_id.clone(),
+        agent_id: "specialized_builder.default".to_string(),
+        session_id: child_id.to_string(),
+        parent_session_id: parent_id.to_string(),
+        status: TaskRunStatus::Running,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        source_agent_id: Some("agent-factory.default".to_string()),
+        result_summary: None,
+        join_group: None,
+        message: None,
+        metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
+    };
+    save_task_run(&config, Some(store.as_ref()), &task).unwrap();
+    // The task owns the singleton slot.
+    assert!(store
+        .acquire_singleton_slot(&wf.workflow_id, "specialized_builder.default", None, &task.task_id)
+        .unwrap()
+        .is_none());
+
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
+    reap_orphaned_sessions(execution)
+        .await
+        .expect("reaper should succeed");
+
+    let loaded = store
+        .get_task_run(&wf.workflow_id, &task.task_id)
+        .unwrap()
+        .expect("task run should be kept, only cancelled");
+    assert_eq!(loaded.status, TaskRunStatus::Cancelled);
+
+    // The next stage attempt must be able to acquire the singleton.
+    assert!(
+        store
+            .acquire_singleton_slot(
+                &wf.workflow_id,
+                "specialized_builder.default",
+                None,
+                "task-fresh-promote",
+            )
+            .unwrap()
+            .is_none(),
+        "reaping a singleton task must release its slot so the workflow can re-dispatch"
+    );
+}
+
+/// Regression: a task already moved to `Stale` by the approval-timeout sweeper
+/// still holds a pending gate. The reaper used to close gates only for tasks in
+/// `AwaitingApproval`, leaving a Stale task's gate pending — so the operator's
+/// late approval resolved against a Cancelled task and changed nothing. Reaping
+/// must close the gate too.
+#[tokio::test]
+async fn orphan_reaper_closes_pending_gate_on_stale_task() {
+    use autonoetic_gateway::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, save_task_run, save_workflow_run,
+    };
+    use autonoetic_types::background::{
+        ApprovalLevel, ApprovalRequest, ScheduledAction,
+    };
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let root_id = "root-stale-gate";
+    let parent_id = "root-stale-gate/agent-factory.default-cccc3333";
+    let child_id =
+        "root-stale-gate/agent-factory.default-cccc3333/specialized_builder.default-dddd4444";
+
+    store
+        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(parent_id, root_id, "agent-factory.default", "failed"))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(child_id, root_id, "specialized_builder.default", "active"))
+        .unwrap();
+
+    let config = ws.gateway_config();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_id,
+        Some("planner.default"),
+    )
+    .unwrap();
+    wf.status = WorkflowRunStatus::WaitingChildren;
+    save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
+
+    let task = TaskRun {
+        task_id: "task-stale-gate".to_string(),
+        workflow_id: wf.workflow_id.clone(),
+        agent_id: "specialized_builder.default".to_string(),
+        session_id: child_id.to_string(),
+        parent_session_id: parent_id.to_string(),
+        status: TaskRunStatus::Stale,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        source_agent_id: Some("agent-factory.default".to_string()),
+        result_summary: Some("Approval timed out".to_string()),
+        join_group: None,
+        message: None,
+        metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
+    };
+    save_task_run(&config, Some(store.as_ref()), &task).unwrap();
+
+    let mut approval = ApprovalRequest {
+        request_id: "apr-stale-gate".to_string(),
+        agent_id: "specialized_builder.default".to_string(),
+        session_id: child_id.to_string(),
+        action: ScheduledAction::SandboxExec {
+            command: "install".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: None,
+            detected_mounts: None,
+            intent: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        reason: None,
+        evidence_ref: None,
+        workflow_id: Some(wf.workflow_id.clone()),
+        task_id: Some(task.task_id.clone()),
+        root_session_id: Some(root_id.to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut approval).unwrap();
+    assert!(
+        store
+            .get_pending_approvals()
+            .unwrap()
+            .iter()
+            .any(|a| a.request_id == "apr-stale-gate"),
+        "gate should start pending"
+    );
+
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
+    reap_orphaned_sessions(execution)
+        .await
+        .expect("reaper should succeed");
+
+    let loaded = store
+        .get_task_run(&wf.workflow_id, &task.task_id)
+        .unwrap()
+        .expect("task run should exist");
+    assert_eq!(loaded.status, TaskRunStatus::Cancelled);
+    assert!(
+        !store
+            .get_pending_approvals()
+            .unwrap()
+            .iter()
+            .any(|a| a.request_id == "apr-stale-gate"),
+        "reaping a Stale task must close its pending gate, not leave it to no-op on a late approval"
+    );
+}

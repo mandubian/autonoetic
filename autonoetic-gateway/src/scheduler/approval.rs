@@ -13,6 +13,7 @@ use autonoetic_types::background::{
     ScheduledAction,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::notification::{NotificationRecord, NotificationType};
 use autonoetic_types::plan_frame::PlanStatus;
 use std::sync::Arc;
 
@@ -1830,12 +1831,16 @@ fn unblock_task_on_approval(
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
         if existing.status.is_terminal() {
-            tracing::debug!(
+            tracing::warn!(
                 target: "approval",
                 workflow_id = %wf_id,
                 task_id = %t_id,
                 current_status = ?existing.status,
+                approval_status = decision.status.as_str(),
                 "Task already in terminal state, skipping unblock"
+            );
+            surface_decision_after_terminal(
+                config, gateway_store, decision, wf_id, t_id, existing.status,
             );
             return;
         }
@@ -1969,6 +1974,92 @@ fn unblock_task_on_approval(
                 }
             }
         }
+    }
+}
+
+/// A human/agent decision that arrived after its task already reached a
+/// terminal state changes nothing: the cancellation/timeout/completion path
+/// wrote the outcome first. Silence here is the bug — an operator who answers
+/// a gate late sees the approval "resolved" and assumes the work resumed. Emit
+/// a workflow event plus an operator notification so the non-landing is a
+/// visible, actionable triage item ("nothing resumed — re-dispatch if still
+/// needed"), never a swallowed no-op.
+///
+/// Gateway-initiated closes (`Cancelled`, `Stale`) are not operator decisions
+/// and deliberately emit nothing: there is no expectation to correct.
+fn surface_decision_after_terminal(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    decision: &ApprovalDecision,
+    workflow_id: &str,
+    task_id: &str,
+    task_status: autonoetic_types::workflow::TaskRunStatus,
+) {
+    if !matches!(
+        decision.status,
+        ApprovalStatus::Approved | ApprovalStatus::Rejected
+    ) {
+        return;
+    }
+
+    let _ = super::workflow_store::append_workflow_event(
+        config,
+        gateway_store,
+        &autonoetic_types::workflow::WorkflowEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            workflow_id: workflow_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            event_type: "task.approval_resolved_after_terminal".to_string(),
+            agent_id: Some(decision.agent_id.clone()),
+            payload: serde_json::json!({
+                "request_id": decision.request_id,
+                "approval_status": decision.status.as_str(),
+                "decided_by": decision.decided_by,
+                "task_status": task_status.as_str(),
+                "message": "Decision recorded but the task had already reached a terminal \
+                            state; nothing resumed. Re-dispatch the task if it is still needed.",
+            }),
+            occurred_at: decision.decided_at.clone(),
+        },
+    );
+
+    let Some(store) = gateway_store else {
+        return;
+    };
+    let mut record = NotificationRecord::new(
+        format!("ntf-late-{}", decision.request_id),
+        NotificationType::AnomalyFlag,
+        "system".to_string(),
+        serde_json::json!({
+            "alert": "approval_resolved_after_terminal",
+            "message": format!(
+                "Approval {} was {} by {} after task {} had already reached '{}'. \
+                 Nothing resumed — re-dispatch the task if the work is still needed.",
+                decision.request_id,
+                decision.status.as_str(),
+                decision.decided_by,
+                task_id,
+                task_status.as_str(),
+            ),
+            "request_id": decision.request_id,
+            "approval_status": decision.status.as_str(),
+            "decided_by": decision.decided_by,
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "task_status": task_status.as_str(),
+        }),
+    );
+    record.request_id = Some(decision.request_id.clone());
+    record.workflow_id = Some(workflow_id.to_string());
+    record.task_id = Some(task_id.to_string());
+    record.target_agent_id = Some(decision.agent_id.clone());
+    if let Err(e) = store.create_notification_record(&record) {
+        tracing::warn!(
+            target: "approval",
+            request_id = %decision.request_id,
+            error = %e,
+            "Failed to emit late-approval operator notification"
+        );
     }
 }
 
@@ -3739,6 +3830,172 @@ mod tests {
             err_msg.contains("already decided"),
             "error should mention already decided: {}",
             err_msg
+        );
+    }
+
+    /// A late operator approval against an already-terminal task must not look
+    /// like a successful resolution. It changes nothing, so the gateway owes
+    /// the operator a visible "did not land" signal: a workflow event and an
+    /// operator notification (the `wf-bf15bb44` promote was approved after the
+    /// P-7.16 reaper had already cancelled its task, and the no-op was silent).
+    #[test]
+    fn late_operator_decision_on_terminal_task_is_surfaced() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "demo-session", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-late".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "demo-session/specialized_builder.default-abc".to_string(),
+            parent_session_id: "demo-session".to_string(),
+            // The reaper (or any cancellation path) already finished it.
+            status: TaskRunStatus::Cancelled,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        let decision = ApprovalDecision {
+            request_id: "apr-late-terminal".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: task.session_id.clone(),
+            action: ScheduledAction::WriteFile {
+                path: "approved.txt".to_string(),
+                content: "approved".to_string(),
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: chrono::Utc::now().to_rfc3339(),
+            decided_by: "operator".to_string(),
+            reason: Some("operator approved late".to_string()),
+            root_session_id: Some("demo-session".to_string()),
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task.task_id.clone()),
+            approval_level: ApprovalLevel::Operator,
+        };
+
+        super::unblock_task_on_approval(&cfg, Some(&store), &decision);
+
+        // The task verdict is untouched…
+        let loaded = load_task_run(&cfg, Some(&store), &wf.workflow_id, &task.task_id)
+            .unwrap()
+            .expect("task run should still exist");
+        assert_eq!(loaded.status, TaskRunStatus::Cancelled);
+
+        // …the no-op is recorded on the workflow…
+        let events = store.list_workflow_events(&wf.workflow_id).unwrap();
+        let surfaced = events
+            .iter()
+            .find(|e| e.event_type == "task.approval_resolved_after_terminal")
+            .expect("late decision must be recorded as a workflow event");
+        assert_eq!(
+            surfaced.payload.get("approval_status").and_then(|v| v.as_str()),
+            Some("approved")
+        );
+
+        // …and raised as an operator triage item.
+        let notifications = store.list_pending_notifications().unwrap();
+        let alert = notifications
+            .iter()
+            .find(|n| {
+                n.payload.get("alert").and_then(|v| v.as_str())
+                    == Some("approval_resolved_after_terminal")
+            })
+            .expect("late decision must raise an operator notification");
+        assert_eq!(alert.notification_type, NotificationType::AnomalyFlag);
+        assert_eq!(alert.task_id.as_deref(), Some("task-late"));
+    }
+
+    /// Gateway-initiated closes (Cancelled/Stale) are not operator decisions;
+    /// they must not generate a "your decision didn't land" alert.
+    #[test]
+    fn gateway_cancel_on_terminal_task_is_not_surfaced() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            runtime_dir: gateway_dir.clone(),
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "demo-session", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-cancelled".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "demo-session/specialized_builder.default-xyz".to_string(),
+            parent_session_id: "demo-session".to_string(),
+            status: TaskRunStatus::Cancelled,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        let decision = ApprovalDecision {
+            request_id: "apr-gateway-cancel".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: task.session_id.clone(),
+            action: ScheduledAction::WriteFile {
+                path: "approved.txt".to_string(),
+                content: "approved".to_string(),
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            status: ApprovalStatus::Cancelled,
+            decided_at: chrono::Utc::now().to_rfc3339(),
+            decided_by: "gateway".to_string(),
+            reason: Some("orphan_child_reaper".to_string()),
+            root_session_id: Some("demo-session".to_string()),
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task.task_id.clone()),
+            approval_level: ApprovalLevel::Operator,
+        };
+
+        super::unblock_task_on_approval(&cfg, Some(&store), &decision);
+
+        let notifications = store.list_pending_notifications().unwrap();
+        assert!(
+            !notifications.iter().any(|n| {
+                n.payload.get("alert").and_then(|v| v.as_str())
+                    == Some("approval_resolved_after_terminal")
+            }),
+            "gateway-initiated cancellation must not raise a late-decision alert"
         );
     }
 }

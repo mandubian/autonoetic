@@ -1453,8 +1453,6 @@ pub async fn reap_orphaned_sessions(
                 if task.status.is_terminal() {
                     continue;
                 }
-                let was_awaiting_approval =
-                    task.status == autonoetic_types::workflow::TaskRunStatus::AwaitingApproval;
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
                 task.result_summary =
@@ -1465,19 +1463,68 @@ pub async fn reap_orphaned_sessions(
                     &task,
                 );
                 cancelled_task_ids.push(task.task_id.clone());
-                if was_awaiting_approval {
-                    let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
-                        &config,
-                        Some(store.as_ref()),
-                        &task.task_id,
-                        "gateway",
-                        "orphan_child_reaper",
+
+                // Release any singleton slot held by this task. The direct
+                // `save_task_run` above bypasses `update_task_run_status`,
+                // which is the normal release site; without this explicit
+                // release a cancelled singleton (e.g. specialized_builder)
+                // keeps its "active" index row forever and every later spawn
+                // dedups onto the dead task — a permanent workflow deadlock,
+                // since `workflow_cancel_task`/`workflow_force_complete` both
+                // refuse a task in this state.
+                if let Err(e) =
+                    store.release_singleton_slot_by_task_id(&task.workflow_id, &task.task_id)
+                {
+                    tracing::warn!(
+                        target: "singleton_dedup",
+                        workflow_id = %task.workflow_id,
+                        task_id = %task.task_id,
+                        error = %e,
+                        "Failed to release singleton slot for reaped orphan task"
                     );
-                    let _ = crate::scheduler::workflow_store::sync_workflow_blocked_approval_status(
-                        &config,
-                        Some(store.as_ref()),
-                        &task.workflow_id,
-                    );
+                }
+
+                // Close any gate the task still holds — including a task the
+                // approval-timeout sweeper already moved to `Stale`. The
+                // timeout path deliberately leaves the request pending so a
+                // late operator decision can revive the task (P-2.11), but
+                // reaping makes revival impossible: the task is now Cancelled
+                // and its slot released. A gate left pending would let a late
+                // approval "succeed" while changing nothing; closing it keeps
+                // the operator surface honest (and P2 surfaces any decision
+                // that still arrives after a terminal transition).
+                match crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
+                    &config,
+                    Some(store.as_ref()),
+                    &task.task_id,
+                    "gateway",
+                    "orphan_child_reaper",
+                ) {
+                    Ok(Some(request_id)) => {
+                        tracing::info!(
+                            target: "orphan_reaper",
+                            workflow_id = %task.workflow_id,
+                            task_id = %task.task_id,
+                            request_id = %request_id,
+                            "Closed pending gate held by reaped orphan task"
+                        );
+                        let _ =
+                            crate::scheduler::workflow_store::sync_workflow_blocked_approval_status(
+                                &config,
+                                Some(store.as_ref()),
+                                &task.workflow_id,
+                            );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "orphan_reaper",
+                            workflow_id = %task.workflow_id,
+                            task_id = %task.task_id,
+                            error = %e,
+                            "Failed to close pending gate for reaped orphan task"
+                        );
+                    }
                 }
                 crate::scheduler::workflow_store::dequeue_task(
                     &config,
