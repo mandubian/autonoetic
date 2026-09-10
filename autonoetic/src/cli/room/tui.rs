@@ -647,11 +647,23 @@ fn clear_detail(
 
 struct InfoPanel {
     lines: Vec<String>,
+    /// Index into `lines` of each pending-anomaly row, in `InfoAnomaly` order.
+    /// draw() uses it to keep the selected anomaly in view without re-deriving
+    /// the panel layout; empty when the anomaly list is empty or the pane is
+    /// showing one flag's detail.
+    anomaly_lines: Vec<usize>,
+    /// The pane is showing a single anomaly's full detail (`Esc` goes back to
+    /// the list, not straight out).
+    detail_mode: bool,
 }
 
 impl InfoPanel {
-    fn new(lines: Vec<String>) -> Self {
-        Self { lines }
+    fn new(lines: Vec<String>, anomaly_lines: Vec<usize>, detail_mode: bool) -> Self {
+        Self {
+            lines,
+            anomaly_lines,
+            detail_mode,
+        }
     }
 }
 
@@ -672,8 +684,21 @@ fn build_info_panel(
     approval_rows: &[ApprovalRow],
     info_grants: &[GrantRow],
     info_grants_taint: Option<&str>,
-    info_anomalies: &[(String, String, String)],
+    info_selected: usize,
+    info_anomaly_detail: Option<&str>,
+    info_anomalies: &[InfoAnomaly],
 ) -> InfoPanel {
+    // Detail sub-view: one flag, full text. Enter on a list row lands here;
+    // Esc goes back to the list (see the Esc handling in `run`). Rendered
+    // before the normal snapshot so nothing else competes for the space.
+    if let Some(flag_id) = info_anomaly_detail {
+        if let Some(flag) = info_anomalies.iter().find(|a| a.flag_id == flag_id) {
+            let mut lines = anomaly_detail_lines(&flag.raw);
+            lines.push(String::new());
+            lines.push("  Esc back to the list · ? close".to_string());
+            return InfoPanel::new(lines, Vec::new(), true);
+        }
+    }
     let mut lines = Vec::new();
     let short_id = if root.len() > 32 {
         format!("{}…{}", &root[..12], &root[root.len()-8..])
@@ -809,16 +834,22 @@ fn build_info_panel(
             lines.push(format!("    … +{} more", info_grants.len() - INFO_MAX_ROWS));
         }
     }
+    let mut anomaly_lines = Vec::new();
     if info_anomalies.is_empty() {
         lines.push("  Anomalies  —".to_string());
     } else {
-        lines.push(format!("  Anomalies  {} pending", info_anomalies.len()));
-        for (flag_id, severity, subject) in info_anomalies.iter().take(INFO_MAX_ROWS) {
-            let subject = truncate_str(subject, 44);
-            lines.push(format!("    ⚠ {severity} {flag_id} {subject}"));
-        }
-        if info_anomalies.len() > INFO_MAX_ROWS {
-            lines.push(format!("    … +{} more", info_anomalies.len() - INFO_MAX_ROWS));
+        lines.push(format!(
+            "  Anomalies  {} pending  (j/k select · Enter detail)",
+            info_anomalies.len()
+        ));
+        // The full list, uncapped: every row is selectable and its detail is
+        // where the observation lives. Capping it would leave anomalies the
+        // operator can count but never open.
+        for (i, a) in info_anomalies.iter().enumerate() {
+            let subject = truncate_str(&a.subject_ref, 44);
+            let cursor = if i == info_selected { "▸" } else { " " };
+            anomaly_lines.push(lines.len());
+            lines.push(format!("    {cursor} ⚠ {} {} {subject}", a.severity, a.flag_id));
         }
     }
     lines.push(String::new());
@@ -827,7 +858,7 @@ fn build_info_panel(
         lines.push(String::new());
         lines.push(format!("  Status     {s}"));
     }
-    InfoPanel::new(lines)
+    InfoPanel::new(lines, anomaly_lines, false)
 }
 
 fn truncate_id(id: &str, max: usize) -> String {
@@ -1598,8 +1629,14 @@ fn build_footer(
             nav
         };
         let center = turn_hint.unwrap_or_else(|| "—".to_string());
-        let right = if info_panel.is_some() {
-            "info: j/k scroll · Esc close".to_string()
+        let right = if let Some(panel) = info_panel {
+            if panel.detail_mode {
+                "info: anomaly detail · j/k scroll · Esc back".to_string()
+            } else if !panel.anomaly_lines.is_empty() {
+                "info: j/k select · Enter detail · Esc close".to_string()
+            } else {
+                "info: j/k scroll · Esc close".to_string()
+            }
         } else if !gate_hint.is_empty() {
             gate_hint
         } else {
@@ -2724,12 +2761,22 @@ fn fetch_grant_rows(
     (rows, taint, child_taints)
 }
 
-/// Pending anomaly flags for the info pane (`?`): `(flag_id, severity,
-/// subject_ref)`, oldest first (gateway returns creation order). `None` on
-/// RPC error — a sentinel the caller must honour by keeping the last-known
-/// snapshot, so a transient gateway failure never overwrites a populated
-/// pane with an empty section.
-fn fetch_info_anomalies(client: &RoomClient) -> Option<Vec<(String, String, String)>> {
+/// One pending anomaly flag held by the info pane (`?`). The raw record rides
+/// along so Enter can render the full detail — the list row truncates the
+/// subject to 44 chars, which is not enough to know what the flag is about.
+#[derive(Debug, Clone, PartialEq)]
+struct InfoAnomaly {
+    flag_id: String,
+    severity: String,
+    subject_ref: String,
+    raw: serde_json::Value,
+}
+
+/// Pending anomaly flags for the info pane (`?`), oldest first (gateway returns
+/// creation order). `None` on RPC error — a sentinel the caller must honour by
+/// keeping the last-known snapshot, so a transient gateway failure never
+/// overwrites a populated pane with an empty section.
+fn fetch_info_anomalies(client: &RoomClient) -> Option<Vec<InfoAnomaly>> {
     let value = match rpc(
         client,
         "anomaly.list_pending",
@@ -2748,22 +2795,106 @@ fn fetch_info_anomalies(client: &RoomClient) -> Option<Vec<(String, String, Stri
             .map(|arr| {
                 arr.iter()
                     .filter_map(|f| {
-                        Some((
-                            f.get("flag_id")?.as_str()?.to_string(),
-                            f.get("severity")
+                        Some(InfoAnomaly {
+                            flag_id: f.get("flag_id")?.as_str()?.to_string(),
+                            severity: f
+                                .get("severity")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("?")
                                 .to_string(),
-                            f.get("subject_ref")
+                            subject_ref: f
+                                .get("subject_ref")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
-                        ))
+                            raw: f.clone(),
+                        })
                     })
                     .collect()
             })
             .unwrap_or_default(),
     )
+}
+
+/// Full rendering of one pending anomaly flag for the info pane's detail
+/// sub-view: observation, evidence and provenance in full. Field order mirrors
+/// the O-7 adjudication surface (what it is, how bad, who reported it, what
+/// backs it), so the operator can decide from the pane without a second tool.
+fn anomaly_detail_lines(flag: &serde_json::Value) -> Vec<String> {
+    let text = |key: &str| {
+        flag.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("—")
+    };
+    let mut lines = vec![
+        format!("anomaly {}", text("flag_id")),
+        String::new(),
+        format!("  severity   {}", text("severity")),
+        format!("  status     {}", text("status")),
+        format!("  subject    {}", text("subject_ref")),
+        format!("  reporter   {}", text("reporter_agent_id")),
+    ];
+    if let Some(session) = flag
+        .get("reporter_session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  session    {session}"));
+    }
+    lines.push(format!("  created    {}", text("created_at")));
+    if let Some(sla) = flag
+        .get("sla_breached_at")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  ⚠ SLA       breached {sla}"));
+    }
+    if let Some(decided_by) = flag
+        .get("decided_by")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  decided by {decided_by}"));
+    }
+    if let Some(decision) = flag
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  decision   {decision}"));
+    }
+    if let Some(reason) = flag
+        .get("decision_reason")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  reason     {reason}"));
+    }
+    lines.push(String::new());
+    lines.push("  Observation".to_string());
+    lines.push(format!("    {}", text("observation")));
+    let evidence = flag
+        .get("evidence_json")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let evidence_empty = match &evidence {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    };
+    if !evidence_empty {
+        lines.push(String::new());
+        lines.push("  Evidence".to_string());
+        let pretty = serde_json::to_string_pretty(&evidence)
+            .unwrap_or_else(|_| evidence.to_string());
+        for l in pretty.lines() {
+            lines.push(format!("    {l}"));
+        }
+    }
+    lines
 }
 
 /// Open the session info pane (`?`) with an eager governance snapshot so it
@@ -2774,14 +2905,18 @@ fn open_info_panel(
     root_session_id: &str,
     info_panel_open: &mut bool,
     info_scroll: &mut u16,
+    info_selected: &mut usize,
+    info_anomaly_detail: &mut Option<String>,
     info_grants_rows: &mut Vec<GrantRow>,
     info_grants_taint: &mut Option<String>,
-    info_anomaly_rows: &mut Vec<(String, String, String)>,
+    info_anomaly_rows: &mut Vec<InfoAnomaly>,
     last_info_poll: &mut Instant,
     status: &mut Option<String>,
 ) {
     *info_panel_open = true;
     *info_scroll = 0;
+    *info_selected = 0;
+    *info_anomaly_detail = None;
     let (rows, taint, _) = fetch_grant_rows(client, root_session_id);
     *info_grants_rows = rows;
     *info_grants_taint = taint;
@@ -2789,7 +2924,11 @@ fn open_info_panel(
     // empty pane section is honest until the idle poll succeeds.
     *info_anomaly_rows = fetch_info_anomalies(client).unwrap_or_default();
     *last_info_poll = Instant::now();
-    *status = Some("info: j/k scroll · Esc close".to_string());
+    *status = Some(if info_anomaly_rows.is_empty() {
+        "info: j/k scroll · Esc close".to_string()
+    } else {
+        "info: j/k select anomaly · Enter detail · Esc close".to_string()
+    });
 }
 
 /// Prompt-first: the room's resting state is a focused empty prompt. Closing
@@ -4660,6 +4799,11 @@ pub fn run(
     let mut spinner_frame: usize = 0;
     let mut info_panel_open = false;
     let mut info_scroll: u16 = 0;
+    // Selected pending-anomaly row in the info pane, and the flag whose full
+    // detail sub-view is open (None ⇒ the normal list). Kept across refreshes
+    // so a poll mid-read doesn't move the cursor.
+    let mut info_selected: usize = 0;
+    let mut info_anomaly_detail: Option<String> = None;
     let mut artifact_viewer: Option<ArtifactViewer> = None;
     let mut artifact_file_view: Option<ArtifactFileView> = None;
     // Pillar D: live session content tree (drafts visible from t=0) + viewer.
@@ -4680,7 +4824,7 @@ pub fn run(
     // `anomaly.list_pending`; fetched once eagerly on open.
     let mut info_grants_rows: Vec<GrantRow> = Vec::new();
     let mut info_grants_taint: Option<String> = None;
-    let mut info_anomaly_rows: Vec<(String, String, String)> = Vec::new();
+    let mut info_anomaly_rows: Vec<InfoAnomaly> = Vec::new();
     let mut last_info_poll = Instant::now();
     let mut labels_panel: Option<LabelsPanel> = None;
     let mut last_labels_poll = Instant::now();
@@ -4796,6 +4940,7 @@ pub fn run(
                                     // Dismiss the overlay, keep typing.
                                     info_panel_open = false;
                                     info_scroll = 0;
+                                    info_anomaly_detail = None;
                                 } else {
                                     // Yield focus so j/k/Esc work in the pane.
                                     compose = None;
@@ -4804,6 +4949,8 @@ pub fn run(
                                         &root_session_id,
                                         &mut info_panel_open,
                                         &mut info_scroll,
+                                        &mut info_selected,
+                                        &mut info_anomaly_detail,
                                         &mut info_grants_rows,
                                         &mut info_grants_taint,
                                         &mut info_anomaly_rows,
@@ -6970,8 +7117,15 @@ pub fn run(
                             } else if live_content_pane.is_some() {
                                 live_content_pane = None;
                             } else if info_panel_open {
-                                info_panel_open = false;
-                                info_scroll = 0;
+                                // In the anomaly detail sub-view, Esc steps back
+                                // to the list; a second Esc closes the pane.
+                                if info_anomaly_detail.is_some() {
+                                    info_anomaly_detail = None;
+                                    info_scroll = 0;
+                                } else {
+                                    info_panel_open = false;
+                                    info_scroll = 0;
+                                }
                             } else if detail.is_some() {
                                 detail = None;
                                 detail_scroll = 0;
@@ -7261,6 +7415,26 @@ pub fn run(
                         KeyCode::Enter => {
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                            } else if info_panel_open && !info_anomaly_rows.is_empty() {
+                                // Toggle the selected anomaly's detail sub-view.
+                                // The list row truncates to 44 chars; this is
+                                // where the observation and evidence are read.
+                                let idx = info_selected.min(info_anomaly_rows.len() - 1);
+                                let flag_id = info_anomaly_rows[idx].flag_id.clone();
+                                if info_anomaly_detail.as_deref() == Some(flag_id.as_str()) {
+                                    info_anomaly_detail = None;
+                                    info_scroll = 0;
+                                    status = Some(
+                                        "info: j/k select anomaly · Enter detail · Esc close"
+                                            .to_string(),
+                                    );
+                                } else {
+                                    info_anomaly_detail = Some(flag_id.clone());
+                                    info_scroll = 0;
+                                    status = Some(format!(
+                                        "anomaly {flag_id} — j/k scroll · Esc back"
+                                    ));
+                                }
                             } else if let Some(pane) = live_content_pane.clone() {
                                 let _ = open_content_pane_node(
                                     &pane, pane.selected, client, root_session_id,
@@ -7754,12 +7928,15 @@ pub fn run(
                             if info_panel_open {
                                 info_panel_open = false;
                                 info_scroll = 0;
+                                info_anomaly_detail = None;
                             } else {
                                 open_info_panel(
                                     client,
                                     &root_session_id,
                                     &mut info_panel_open,
                                     &mut info_scroll,
+                                    &mut info_selected,
+                                    &mut info_anomaly_detail,
                                     &mut info_grants_rows,
                                     &mut info_grants_taint,
                                     &mut info_anomaly_rows,
@@ -8172,7 +8349,13 @@ pub fn run(
                                 let viewer = artifact_viewer.as_mut().unwrap();
                                 viewer.selected = (viewer.selected + 1).min(viewer.files.len().saturating_sub(1));
                             } else if info_panel_open {
-                                info_scroll = info_scroll.saturating_add(1);
+                                if info_anomaly_detail.is_none() && !info_anomaly_rows.is_empty()
+                                {
+                                    info_selected =
+                                        (info_selected + 1).min(info_anomaly_rows.len() - 1);
+                                } else {
+                                    info_scroll = info_scroll.saturating_add(1);
+                                }
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
@@ -8205,7 +8388,12 @@ pub fn run(
                                 let viewer = artifact_viewer.as_mut().unwrap();
                                 viewer.selected = viewer.selected.saturating_sub(1);
                             } else if info_panel_open {
-                                info_scroll = info_scroll.saturating_sub(1);
+                                if info_anomaly_detail.is_none() && !info_anomaly_rows.is_empty()
+                                {
+                                    info_selected = info_selected.saturating_sub(1);
+                                } else {
+                                    info_scroll = info_scroll.saturating_sub(1);
+                                }
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
@@ -8604,6 +8792,8 @@ pub fn run(
                     &early_approval_rows,
                     &info_grants_rows,
                     info_grants_taint.as_deref(),
+                    info_selected,
+                    info_anomaly_detail.as_deref(),
                     &info_anomaly_rows,
                 ))
             } else {
@@ -8642,6 +8832,7 @@ pub fn run(
                     early_spawn.as_deref(),
                     early_info.as_ref(),
                     info_scroll,
+                    info_selected,
                     early_gate_count,
                     artifact_viewer.as_ref(),
                     artifact_file_view.as_ref(),
@@ -8695,6 +8886,8 @@ pub fn run(
                     &boot_approval_rows,
                     &info_grants_rows,
                     info_grants_taint.as_deref(),
+                    info_selected,
+                    info_anomaly_detail.as_deref(),
                     &info_anomaly_rows,
                 ))
             } else {
@@ -8733,6 +8926,7 @@ pub fn run(
                     None,
                     boot_info.as_ref(),
                     info_scroll,
+                    info_selected,
                     boot_gate_count,
                     artifact_viewer.as_ref(),
                     artifact_file_view.as_ref(),
@@ -9014,6 +9208,17 @@ pub fn run(
             if let Some(anomalies) = fetch_info_anomalies(client) {
                 if anomalies != info_anomaly_rows {
                     info_anomaly_rows = anomalies;
+                    // Anomalies can be resolved on another surface while the
+                    // pane is open: keep the cursor in range and leave the
+                    // detail sub-view if its flag is gone, instead of showing
+                    // a stale detail forever.
+                    info_selected = info_selected.min(info_anomaly_rows.len().saturating_sub(1));
+                    if let Some(open_id) = info_anomaly_detail.as_deref() {
+                        if !info_anomaly_rows.iter().any(|a| a.flag_id == open_id) {
+                            info_anomaly_detail = None;
+                            info_scroll = 0;
+                        }
+                    }
                     changed = true;
                 }
             }
@@ -9580,6 +9785,8 @@ pub fn run(
                 &approval_rows,
                 &info_grants_rows,
                 info_grants_taint.as_deref(),
+                info_selected,
+                info_anomaly_detail.as_deref(),
                 &info_anomaly_rows,
             ))
         } else {
@@ -9619,6 +9826,7 @@ pub fn run(
                 selected_spawn_agent.as_deref(),
                 info_panel.as_ref(),
                 info_scroll,
+                info_selected,
                 gate_count,
                 artifact_viewer.as_ref(),
                 artifact_file_view.as_ref(),
@@ -12255,6 +12463,7 @@ fn draw(
     _selected_spawn_agent: Option<&str>,
     info_panel: Option<&InfoPanel>,
     info_scroll: u16,
+    info_selected: usize,
     gate_count: usize,
     artifact_viewer: Option<&ArtifactViewer>,
     artifact_file_view: Option<&ArtifactFileView>,
@@ -12599,7 +12808,23 @@ fn draw(
         let inner_height = area.height.saturating_sub(2) as usize;
         let total_lines = panel.lines.len();
         let max_scroll = total_lines.saturating_sub(inner_height) as u16;
-        let scroll = info_scroll.min(max_scroll);
+        let mut scroll = info_scroll.min(max_scroll);
+        // Viewport follows the anomaly selection: `j`/`k` move the cursor and
+        // the pane scrolls just enough to keep it visible, without the key
+        // handler having to know the panel's line layout.
+        if let Some(&line) = panel.anomaly_lines.get(info_selected) {
+            let line = (line as u16).min(max_scroll);
+            if line < scroll {
+                scroll = line;
+            } else if line >= scroll.saturating_add(inner_height as u16) {
+                scroll = (line + 1).saturating_sub(inner_height as u16).min(max_scroll);
+            }
+        }
+        let title = if panel.detail_mode {
+            " Session Info — anomaly detail [Esc back] "
+        } else {
+            " Session Info [?/Esc close] "
+        };
         let text: Vec<Line> = panel
             .lines
             .iter()
@@ -12610,7 +12835,7 @@ fn draw(
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Session Info [?/Esc close] ")
+                        .title(title)
                         .border_style(Style::default().fg(Color::Cyan))
                         .style(Style::default().bg(Color::Black)),
                 )
@@ -17017,11 +17242,12 @@ mod tests {
             summary: "example.com".into(),
             detail: "root · by operator".into(),
         }];
-        let anomalies = vec![(
-            "aflag-1".to_string(),
-            "high".to_string(),
-            "cred_signal-bridge_abc".to_string(),
-        )];
+        let anomalies = vec![InfoAnomaly {
+            flag_id: "aflag-1".to_string(),
+            severity: "high".to_string(),
+            subject_ref: "cred_signal-bridge_abc".to_string(),
+            raw: serde_json::json!({ "flag_id": "aflag-1" }),
+        }];
         let panel = build_info_panel(
             "session-123",
             "tui",
@@ -17039,6 +17265,8 @@ mod tests {
             &approvals,
             &grants,
             Some("local_only"),
+            0,
+            None,
             &anomalies,
         );
         let text = panel.lines.join("\n");
@@ -17048,6 +17276,10 @@ mod tests {
         assert!(text.contains("approval #7"), "{text}");
         assert!(text.contains("1 pending"), "{text}");
         assert!(text.contains("aflag-1"), "{text}");
+        // The selected anomaly is marked and its line is selectable.
+        assert_eq!(panel.anomaly_lines.len(), 1, "{text}");
+        assert!(text.contains("▸ ⚠ high aflag-1"), "{text}");
+        assert!(!panel.detail_mode, "{text}");
     }
 
     #[test]
@@ -17069,12 +17301,65 @@ mod tests {
             &[],
             &[],
             None,
+            0,
+            None,
             &[],
         );
         let text = panel.lines.join("\n");
         assert!(text.contains("Approvals  —"), "{text}");
         assert!(text.contains("Grants     —"), "{text}");
         assert!(text.contains("Anomalies  —"), "{text}");
+        assert!(panel.anomaly_lines.is_empty(), "{text}");
+    }
+
+    /// The list row's 44-char subject is not enough to adjudicate; the detail
+    /// sub-view must carry the observation, evidence and provenance in full.
+    #[test]
+    fn anomaly_detail_shows_full_observation_and_evidence() {
+        let raw = serde_json::json!({
+            "flag_id": "aflag-42",
+            "severity": "high",
+            "status": "pending",
+            "subject_ref": "cred_signal-bridge_abc",
+            "reporter_agent_id": "nightwatch.default",
+            "reporter_session_id": "session-x/nightwatch.default-1",
+            "observation": "Credential vault key rotated while a sandbox exec was in flight; the in-flight exec may have read the pre-rotation value.",
+            "evidence_json": { "trace_id": "tr-1", "exit_code": 0 },
+            "created_at": "2026-09-10T08:00:00Z",
+        });
+        let anomalies = vec![InfoAnomaly {
+            flag_id: "aflag-42".to_string(),
+            severity: "high".to_string(),
+            subject_ref: "cred_signal-bridge_abc".to_string(),
+            raw,
+        }];
+        let panel = build_info_panel(
+            "session-123",
+            "tui",
+            &test_stats(),
+            FloorMode::Altitude(Altitude::Detail),
+            true,
+            true,
+            true,
+            10,
+            0,
+            None,
+            0,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            0,
+            Some("aflag-42"),
+            &anomalies,
+        );
+        let text = panel.lines.join("\n");
+        assert!(panel.detail_mode, "{text}");
+        assert!(text.contains("in-flight exec may have read"), "{text}");
+        assert!(text.contains("trace_id"), "{text}");
+        assert!(text.contains("nightwatch.default"), "{text}");
+        assert!(panel.anomaly_lines.is_empty(), "{text}");
     }
 
     // ---- cached-token accounting (#prompt-cache observability) ----
