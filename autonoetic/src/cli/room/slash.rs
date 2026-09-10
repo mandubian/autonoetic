@@ -151,8 +151,10 @@ pub fn help_lines() -> Vec<String> {
         "Session Room — commands & keys".to_string(),
         String::new(),
         "Navigation".to_string(),
-        "  j / ↓        scroll down one text line".to_string(),
-        "  k / ↑        scroll up one text line".to_string(),
+        "  j / ↓        next row (wheel too; divider/wrapped lines counted as one)"
+            .to_string(),
+        "  k / ↑        previous row · Shift+J/K (or Shift+wheel) = one text line"
+            .to_string(),
         "  PgDn / PgUp  page down / up (timeline or detail pane)".to_string(),
         "  g / Home     jump to oldest row".to_string(),
         "  G / End      jump to newest row (enable follow)".to_string(),
