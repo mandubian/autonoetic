@@ -148,6 +148,24 @@ Before doing anything, read `requirements.txt` (or equivalent manifest) from the
 
 3. If the file contains real third-party entries, proceed with the standard Two-Step Workflow below.
 
+## Prefer the prebuilt distribution over a source build
+
+Most ecosystems ship a **prebuilt** artifact through the package manager: a platform binary, a wheel with bundled native code, a release asset fetched by the package's own install hook, or a vendored tarball. Use that path. Do **not** default to compiling from source (`cargo build`, `go build`, `make`, `node-gyp`, …) — source builds need toolchains that sandboxes routinely lack, and a failed build produces an empty or partial layer that installs silently broken.
+
+Decision order:
+
+1. **Prebuilt via the package manager** — install the package normally and let its own install step fetch the platform artifact. This is the default; reach for it first.
+2. **Explicit release asset** — fetch the platform asset directly from the project's release/download endpoint when there is no package-manager path, and capture the extracted tree.
+3. **Source build** — only when no prebuilt artifact exists for the target platform. State that explicitly in your result (which toolchain was required and why), so the caller can provision a capable node instead of accepting a broken layer.
+
+**Verify the layer is real before building the artifact.** A capture that yields an empty or near-empty tree is a failed package, not a success: list the captured tree and confirm the executable/library/bundle the consumer will resolve actually exists inside it. Never fabricate or "style" a layer placeholder to satisfy the layer requirement.
+
+**Redirects are part of the install path.** Package registries routinely redirect to a CDN or release-asset host, and the package's install hook may fetch from a different host than the registry. If a download is denied mid-flight, the captured tree is partial — fix the network envelope to cover the redirect/download hosts and re-run the *real* install. Do not substitute a stub.
+
+### Runtime toolchain assumptions are part of the spec
+
+If the prebuilt artifact still requires a host runtime the sandbox may not have (an interpreter or VM at a minimum version), say so in your result as an explicit runtime requirement — including whether the dependency can be bundled into the layer instead. A layer that only works when some unstated host tool is present is an install that fails at first use.
+
 ## MANDATORY: Two-Step Workflow
 
 Every packaging task has exactly two steps. You must complete BOTH.
