@@ -3499,6 +3499,27 @@ fn gate_modal_kind(gate: &GateRef) -> bool {
     )
 }
 
+/// Map a keypress in the blocking gate modal to the key the modal handles.
+///
+/// Enter opens the resolve input for approval-family gates (same as `y` — the
+/// operator still submits with a second Enter after motivating). Scoped to
+/// kinds whose `y` only *opens* an input panel: Plan's `y` approves
+/// immediately (and Interaction has its own Enter arm), so neither is remapped
+/// and Enter can never fire a direct action.
+fn resolve_modal_key(kind: GateKind, code: KeyCode) -> KeyCode {
+    match code {
+        KeyCode::Enter
+            if matches!(
+                kind,
+                GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation
+            ) =>
+        {
+            KeyCode::Char('y')
+        }
+        other => other,
+    }
+}
+
 /// Newest unresolved operator gate that should block the session (plans now use
 /// the same blocking GateModal as other critical gates).
 fn newest_blocking_gate_event(
@@ -6424,9 +6445,12 @@ pub fn run(
                                 // Prompt-first punch-through: any printable key that
                                 // peek mode does not own starts a message. The gate
                                 // stays pending in the peek banner; y/n still act it
-                                // once the composer is Esc-blurred.
+                                // once the composer is Esc-blurred. `c` is excluded
+                                // so the content pane still opens while peeking —
+                                // otherwise it silently becomes the first draft
+                                // character and the pane never appears.
                                 KeyCode::Char(c)
-                                    if !matches!(c, 'y' | 'n' | 'g' | 'q' | 'j' | 'k')
+                                    if !matches!(c, 'y' | 'n' | 'g' | 'q' | 'j' | 'k' | 'c')
                                         && !key
                                             .modifiers
                                             .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -6443,7 +6467,10 @@ pub fn run(
                                 _ => {}
                             }
                         } else if input.is_none() && pending_gate.is_none() {
-                            match key.code {
+                            // Enter = open the resolve input for approval-family
+                            // gates (see `resolve_modal_key`).
+                            let modal_key = resolve_modal_key(modal.gate.kind, key.code);
+                            match modal_key {
                                 KeyCode::Esc => {
                                     if let Some(m) = gate_modal.as_mut() {
                                         m.peek_timeline = true;
@@ -6466,7 +6493,7 @@ pub fn run(
                                 {
                                     let gate_id = modal.gate.id.clone();
                                     let kind = modal.gate.kind;
-                                    let approve = key.code == KeyCode::Char('y');
+                                    let approve = modal_key == KeyCode::Char('y');
                                     if kind == GateKind::Plan {
                                         if approve {
                                             match approve_plan_and_wake(
@@ -14361,7 +14388,7 @@ fn draw_gate_modal(
         }
         let action_hint = match modal.gate.kind {
             GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation => {
-                "y approve · n reject · j/k scroll details · Esc peek timeline"
+                "y/Enter approve · n reject · j/k scroll details · Esc peek timeline"
             }
             GateKind::Interaction => "Enter/r answer · j/k scroll · Esc peek timeline",
             GateKind::Plan => {
@@ -14820,6 +14847,44 @@ mod tests {
         let spans = line_spans("    · * — WILDCARD: the secret can be sent to ANY host");
         assert_eq!(spans[0].style.fg, Some(Color::Red));
         assert_eq!(spans[0].style.add_modifier, Modifier::BOLD);
+    }
+
+    /// Enter must open the resolve input for approval-family gates (the user
+    /// expected "Enter opens the approval"), but never alias `y` for a Plan —
+    /// that key approves immediately, and defaulting a bare Enter to an
+    /// irreversible approval would be a trap. Interaction keeps Enter for its
+    /// own answer-input arm.
+    #[test]
+    fn resolve_modal_key_enter_opens_approval_family_but_never_plans() {
+        for kind in [
+            GateKind::Approval,
+            GateKind::WikiProposal,
+            GateKind::Escalation,
+        ] {
+            assert_eq!(
+                resolve_modal_key(kind, KeyCode::Enter),
+                KeyCode::Char('y'),
+                "{kind:?} Enter must open the resolve input"
+            );
+        }
+        assert_eq!(
+            resolve_modal_key(GateKind::Plan, KeyCode::Enter),
+            KeyCode::Enter,
+            "Plan y approves immediately — Enter must not alias it"
+        );
+        assert_eq!(
+            resolve_modal_key(GateKind::Interaction, KeyCode::Enter),
+            KeyCode::Enter,
+            "Interaction owns Enter in its own arm"
+        );
+        assert_eq!(
+            resolve_modal_key(GateKind::Approval, KeyCode::Char('n')),
+            KeyCode::Char('n')
+        );
+        assert_eq!(
+            resolve_modal_key(GateKind::Plan, KeyCode::Char('y')),
+            KeyCode::Char('y')
+        );
     }
 
     #[test]
