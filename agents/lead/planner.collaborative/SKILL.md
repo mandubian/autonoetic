@@ -152,7 +152,7 @@ These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan s
 | `researcher.default` | Web/evidence, fetching URLs | Research findings (text) |
 | `architect.default` | Multi-file design, structural breakdown | **Design brief only** (JSON: interfaces, data flow, trade-offs). Never code, never SKILL.md. |
 | `coder.default` | Durable code and artifact-producing implementation | **SKILL.md + source files + tests** packaged as an artifact_ref |
-| `packager.default` | After coder when `needs_packager` or dependency manifests exist — **before** federation gates or unit tests on deps | Layered artifact_ref |
+| `packager.default` | After coder when `needs_packager`, dependency manifests exist, **or the bundle declares external packages** in its task/design/bootstrap (install scripts, fetched CLIs) — **before** federation gates or unit tests on deps | Layered artifact_ref |
 | `executor.default` | Quick deterministic scripts without artifact handoff | Script output (stdout) |
 | `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. | Install status + revision_id |
 | `discovery.default` | Finding a non-foundational agent (spawn with intent) | Agent roster match |
@@ -270,7 +270,7 @@ justify a one-step plan — the operator should see the real scope before approv
 | Research / evidence gathering | Yes |
 | Architecture / design | Yes |
 | Implementation / artifact build | Yes |
-| **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc.) | Yes, for code with non-stdlib deps |
+| **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc., or an install/bootstrap step fetches packages) | Yes, for code with non-stdlib or externally-declared deps |
 | Federation / promotion review (`federation_escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
 | Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — always via `credential_onboarding.default`; you do not hold `credential_setup` |
@@ -327,7 +327,7 @@ For a new agent build, include the full pipeline — not just the first step:
       "owner": "agent",
       "agent_id": "packager.default",
       "depends_on": ["s3"],
-      "notes": "Include when coder returns needs_packager or artifact has requirements.txt/package.json. Use layered artifact_ref for all downstream steps."
+      "notes": "Include when coder returns needs_packager, the artifact has dependency manifests, or the bundle's task/design/bootstrap declares external packages. Spawn message must carry an explicit install spec (packages: [{ecosystem, name, version}]) when there is no manifest — the packager cannot recover a prose-only dependency from the artifact alone. Use layered artifact_ref for all downstream steps."
     },
     {
       "step_id": "s4",
@@ -563,13 +563,14 @@ When an installable artifact exists (after `coder.default` or workbench reconcil
 
 ### Packaging before federation (critical)
 
-`coder.default` has **no** `NetworkAccess` — it declares deps in manifests (`requirements.txt`, `package.json`, …) and may return `status: "needs_packager"`. **`packager.default`** resolves those into **artifact layers** so `unit_test_runner` and install can import them in no-network sandboxes.
+`coder.default` has **no** `NetworkAccess` — it declares deps in manifests (`requirements.txt`, `package.json`, …), may return `status: "needs_packager"`, or its bundle fetches/installs packages in a bootstrap step (an install script that pulls a package or CLI is a dependency declaration, even with no manifest). **`packager.default`** resolves those into **artifact layers** so `unit_test_runner` and install can import them in no-network sandboxes.
 
 **Order:** coder → packager (when needed) → federation gates → escalate → agent-factory.
 
 - Run federation gates on the **layered** `artifact_ref` from packager, not the pre-layer coder ref.
 - If you gate first then pack, the digest changes and **all `promotion_record`s are stale** — re-run every gate.
-- Skip s3b only for stdlib-only artifacts with no dependency manifests.
+- Skip s3b only for stdlib-only artifacts: no dependency manifests **and** nothing installed/fetched by the bundle's own scripts.
+- When the bundle has no manifest, the packager spawn message MUST carry an explicit install spec — ecosystem + package + version as declared by the task/design/bootstrap, e.g. `packages: [{"ecosystem": "<npm|pip|uv|cargo|gem|go|system>", "name": "<package>", "version": "<pinned>"}]` — plus any host-runtime requirement (interpreter/VM minimum version) the bundle needs, and whether it can be bundled into the layer instead.
 
 When `coder` returns `needs_packager`, spawn `packager.default` before s4 — do not send unpackaged artifacts to `unit_test_runner` (imports fail or yield false `unable_to_evaluate`).
 
