@@ -12919,8 +12919,21 @@ fn draw(
     if let Some(panel) = info_panel {
         let area = centered_rect(60, 70, f.area());
         f.render_widget(Clear, area);
+        let inner_width = area.width.saturating_sub(2).max(1);
         let inner_height = area.height.saturating_sub(2) as usize;
-        let total_lines = panel.lines.len();
+        let text: Vec<Line<'static>> = panel
+            .lines
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
+            .collect();
+        // The anomaly detail carries free prose (observation, evidence), so it
+        // wraps; the list view stays unwrapped so `anomaly_lines` indices stay
+        // exact one-per-source-line positions for the cursor-follow below.
+        let total_lines = if panel.detail_mode {
+            detail_wrap_line_count(&text, inner_width)
+        } else {
+            text.len()
+        };
         let max_scroll = total_lines.saturating_sub(inner_height) as u16;
         let mut scroll = info_scroll.min(max_scroll);
         // Viewport follows the anomaly selection: `j`/`k` move the cursor and
@@ -12939,23 +12952,19 @@ fn draw(
         } else {
             " Session Info [?/Esc close] "
         };
-        let text: Vec<Line> = panel
-            .lines
-            .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
-            .collect();
-        f.render_widget(
-            Paragraph::new(text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .style(Style::default().bg(Color::Black)),
-                )
-                .scroll((scroll, 0)),
-            area,
+        let paragraph = Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan))
+                .style(Style::default().bg(Color::Black)),
         );
+        let paragraph = if panel.detail_mode {
+            paragraph.wrap(Wrap { trim: false })
+        } else {
+            paragraph
+        };
+        f.render_widget(paragraph.scroll((scroll, 0)), area);
     }
 
     if let Some(ref view) = artifact_file_view {
@@ -17475,6 +17484,40 @@ mod tests {
         assert!(text.contains("trace_id"), "{text}");
         assert!(text.contains("nightwatch.default"), "{text}");
         assert!(panel.anomaly_lines.is_empty(), "{text}");
+    }
+
+    /// The detail sub-view renders with `Wrap { trim: false }`; this pins that
+    /// a long observation actually produces wrapped lines (the pane scroll
+    /// budget is computed from the wrapped count, not the source count), so
+    /// free prose is readable instead of clipped at the right border.
+    #[test]
+    fn anomaly_detail_lines_wrap_instead_of_clipping() {
+        let raw = serde_json::json!({
+            "flag_id": "aflag-wrap",
+            "severity": "high",
+            "status": "pending",
+            "subject_ref": "cred_signal-bridge_abc",
+            "reporter_agent_id": "nightwatch.default",
+            "observation": "Credential vault key rotated while a sandbox exec was \
+                in flight, so the in-flight read may have observed the pre-rotation \
+                value and every subsequent gate must re-check provenance.",
+            "created_at": "2026-09-10T08:00:00Z",
+        });
+        let lines = anomaly_detail_lines(&raw);
+        let rendered: Vec<Line<'static>> =
+            lines.iter().map(|l| Line::from(l.clone())).collect();
+        let narrow = detail_wrap_line_count(&rendered, 40);
+        assert!(
+            narrow > rendered.len(),
+            "long observation must wrap ({narrow} rendered vs {} source)",
+            rendered.len()
+        );
+        let wide = detail_wrap_line_count(&rendered, 200);
+        assert_eq!(
+            wide,
+            rendered.len(),
+            "a wide pane must not wrap the short provenance rows"
+        );
     }
 
     // ---- cached-token accounting (#prompt-cache observability) ----
