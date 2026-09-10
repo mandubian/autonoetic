@@ -600,10 +600,26 @@ impl ArtifactStore {
             self.materialize_projection_file(&file.handle, &output_path)?;
         }
 
-        std::fs::write(
-            artifact_dir.join("README.md"),
-            self.render_session_projection_readme(bundle),
-        )?;
+        // The generated projection readme must never collide with a bundle
+        // file of the same name. Bundle files are projected as symlinks into
+        // the read-only content store (blobs are chmod 0444), so writing the
+        // generated readme to a path already occupied by a bundle `README.md`
+        // would follow the symlink into the blob and fail with EACCES
+        // (`Permission denied (os error 13)`) — and would corrupt
+        // content-addressed data if the blob were writable. When the artifact
+        // ships its own README.md, keep it and write the projection metadata
+        // under a non-colliding sibling name.
+        let readme_name = if bundle.files.iter().any(|f| f.name == "README.md") {
+            "README.artifact.md"
+        } else {
+            "README.md"
+        };
+        let readme_path = artifact_dir.join(readme_name);
+        // Defense in depth: never write through a pre-existing symlink.
+        if readme_path.is_symlink() {
+            std::fs::remove_file(&readme_path)?;
+        }
+        std::fs::write(&readme_path, self.render_session_projection_readme(bundle))?;
 
         Ok(())
     }
@@ -848,6 +864,59 @@ mod tests {
         assert!(readme.contains(&bundle.artifact_id));
         assert!(readme.contains("weather_fetch.py"));
         assert!(readme.contains("tests/test_weather_fetch.py"));
+    }
+
+    /// Regression (session-58342961, coder): a bundle that includes its own
+    /// `README.md` used to fail the whole build with `Permission denied
+    /// (os error 13)`. The generated projection readme was written to
+    /// `<projection>/README.md`, which by then was a symlink to the bundle's
+    /// read-only content-store blob — writing through it hit EACCES (and
+    /// would have corrupted the blob had it been writable). The bundle's own
+    /// README must survive; projection metadata goes to a sibling name.
+    #[test]
+    fn test_artifact_projection_readme_collision_with_bundle_readme() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"print('hello')").unwrap();
+        content_store
+            .register_name("demo-session/coder.default-abc", "main.py", &h1)
+            .unwrap();
+
+        let h2 = content_store.write(b"# my own readme\n").unwrap();
+        content_store
+            .register_name("demo-session/coder.default-abc", "README.md", &h2)
+            .unwrap();
+
+        let bundle = store
+            .build(
+                &["main.py".into(), "README.md".into()],
+                Some(&["main.py".into()]),
+                None,
+                "demo-session/coder.default-abc",
+            )
+            .expect("build must not fail on a bundle that ships README.md");
+
+        let session_artifact_dir = gw
+            .join("sessions")
+            .join("demo-session")
+            .join("artifacts")
+            .join(&bundle.artifact_id);
+
+        // The bundle's README is preserved and still resolves to its content.
+        let projected_readme =
+            std::fs::read_to_string(session_artifact_dir.join("README.md")).unwrap();
+        assert_eq!(projected_readme, "# my own readme\n");
+
+        // Projection metadata lives beside it.
+        let meta = std::fs::read_to_string(session_artifact_dir.join("README.artifact.md"))
+            .unwrap();
+        assert!(meta.contains(&bundle.artifact_id));
+        assert!(meta.contains("main.py"));
     }
 
     #[cfg(unix)]
