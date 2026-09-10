@@ -248,9 +248,10 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage {
                 input_tokens: 100,
-                output_tokens: 5,
-                reasoning_tokens: 4,
+                output_tokens: 50,
+                reasoning_tokens: 0,
                 cached_tokens: 0,
+                cache_creation_tokens: 0,
             },
         };
         assert!(!is_retryable_empty_other_response(&normal_end_turn));

@@ -1091,6 +1091,9 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
 /// provider reports them (OpenAI/OpenRouter `*_tokens_details`).
 fn parse_usage(usage: &serde_json::Value) -> TokenUsage {
     TokenUsage {
+        // `prompt_tokens` is already the total prompt, cached subset included
+        // — the shape `TokenUsage::input_tokens` documents. Cache writes are
+        // not itemized; they bill as plain input.
         input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
         output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
         reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
@@ -1099,6 +1102,7 @@ fn parse_usage(usage: &serde_json::Value) -> TokenUsage {
         cached_tokens: usage["prompt_tokens_details"]["cached_tokens"]
             .as_u64()
             .unwrap_or(0),
+        cache_creation_tokens: 0,
     }
 }
 

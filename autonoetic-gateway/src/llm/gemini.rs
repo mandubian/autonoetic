@@ -379,6 +379,9 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
         other => StopReason::Other(other.to_string()),
     };
     let usage = TokenUsage {
+        // `promptTokenCount` is the total effective prompt even with
+        // `cachedContent` set (it includes the cached tokens) — already the
+        // provider-independent shape. Gemini itemizes no cache writes.
         input_tokens: j["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0),
         output_tokens: j["usageMetadata"]["candidatesTokenCount"]
             .as_u64()
@@ -389,6 +392,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
         cached_tokens: j["usageMetadata"]["cachedContentTokenCount"]
             .as_u64()
             .unwrap_or(0),
+        cache_creation_tokens: 0,
     };
 
     CompletionResponse {

@@ -502,8 +502,16 @@ impl LlmDriver for AnthropicDriver {
                     match event_type.as_str() {
                         "message_start" => {
                             if self.provider.capabilities.supports_usage_in_stream {
-                                usage.input_tokens =
-                                    j["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                                // Same fold as the non-streaming path: prompt
+                                // usage is itemized on `message_start` and must
+                                // become total-input + cached-reads here, or a
+                                // streamed cache hit reports zero cached tokens
+                                // (and a tiny fresh-only `input_tokens`).
+                                let (total, cached, writes) =
+                                    fold_prompt_usage(&j["message"]["usage"]);
+                                usage.input_tokens = total;
+                                usage.cached_tokens = cached;
+                                usage.cache_creation_tokens = writes;
                             }
                         }
                         "content_block_start" => {
@@ -598,6 +606,21 @@ impl LlmDriver for AnthropicDriver {
     }
 }
 
+/// Fold Anthropic's itemized prompt usage into the provider-independent shape
+/// every consumer assumes: `input_tokens` is the **total** prompt (fresh +
+/// cache writes + cache reads), `cached_tokens` is the cache-read subset, and
+/// cache writes ride in their own bucket. Anthropic's `input_tokens` alone is
+/// only the fresh remainder, so passing it through would make a fully cached
+/// turn look tiny next to an OpenAI-style `prompt_tokens`.
+///
+/// Returns `(total_input, cached_reads, cache_writes)`.
+fn fold_prompt_usage(usage: &serde_json::Value) -> (u64, u64, u64) {
+    let fresh = usage["input_tokens"].as_u64().unwrap_or(0);
+    let writes = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    let reads = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    (fresh + writes + reads, reads, writes)
+}
+
 fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -632,12 +655,14 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
             "Anthropic response missing usage block — token counts will be zero"
         );
     }
+    let (input_tokens, cached_tokens, cache_creation_tokens) = fold_prompt_usage(&j["usage"]);
     let usage = TokenUsage {
-        input_tokens: j["usage"]["input_tokens"].as_u64().unwrap_or(0),
+        input_tokens,
         output_tokens: j["usage"]["output_tokens"].as_u64().unwrap_or(0),
-        // Anthropic reports cache reads separately; thinking tokens are folded
-        // into output_tokens and not itemized, so reasoning_tokens stays 0.
-        cached_tokens: j["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        // Thinking tokens are folded into output_tokens and not itemized, so
+        // reasoning_tokens stays 0.
+        cached_tokens,
+        cache_creation_tokens,
         ..Default::default()
     };
     CompletionResponse {
@@ -661,7 +686,7 @@ fn parse_stop_reason(s: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_with_cache, build_tools_with_cache};
+    use super::{build_system_with_cache, build_tools_with_cache, fold_prompt_usage, parse_response};
     use crate::llm::ToolDefinition;
 
     fn tool(name: &str) -> ToolDefinition {
@@ -774,5 +799,40 @@ mod tests {
     fn tools_empty_returns_empty_array() {
         let v = build_tools_with_cache(&[], Some(10));
         assert!(v.as_array().unwrap().is_empty());
+    }
+
+    /// Provider-independent input accounting: Anthropic itemizes prompt usage
+    /// (fresh / cache writes / cache reads), OpenAI-style endpoints report one
+    /// total. `parse_response` must fold Anthropic's three buckets so
+    /// `input_tokens` means the same thing everywhere — a fully cached turn is
+    /// not "12 tokens of input".
+    #[test]
+    fn parse_response_folds_itemized_prompt_usage_to_total_input() {
+        let j = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 12,
+                "cache_creation_input_tokens": 300,
+                "cache_read_input_tokens": 10000,
+                "output_tokens": 7
+            }
+        });
+        let resp = parse_response(&j);
+        assert_eq!(resp.usage.input_tokens, 12 + 300 + 10000);
+        assert_eq!(resp.usage.cached_tokens, 10000);
+        assert_eq!(resp.usage.cache_creation_tokens, 300);
+        assert_eq!(resp.usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn fold_prompt_usage_defaults_absent_buckets_to_zero() {
+        let (total, cached, writes) = fold_prompt_usage(&serde_json::json!({ "input_tokens": 42 }));
+        assert_eq!((total, cached, writes), (42, 0, 0));
+        // Cache fields present but fresh input zero (all reads) still totals.
+        let (total, cached, writes) = fold_prompt_usage(
+            &serde_json::json!({ "cache_read_input_tokens": 900, "cache_creation_input_tokens": 1 }),
+        );
+        assert_eq!((total, cached, writes), (901, 900, 1));
     }
 }

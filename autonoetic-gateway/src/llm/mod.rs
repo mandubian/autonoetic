@@ -885,6 +885,11 @@ pub enum StopReason {
 /// Token usage statistics returned by the provider.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
+    /// **Total** prompt tokens sent to the provider — provider-independent.
+    /// OpenAI-style endpoints report this directly (`prompt_tokens`, which
+    /// already includes the cached subset); Anthropic itemizes fresh, cache
+    /// writes and cache reads separately, and its driver folds them together
+    /// here so every consumer sees the same shape.
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Reasoning tokens, a subset of `output_tokens`, billed as output but
@@ -892,11 +897,20 @@ pub struct TokenUsage {
     /// .reasoning_tokens` (OpenAI/OpenRouter). 0 when unknown.
     #[serde(default)]
     pub reasoning_tokens: u64,
-    /// Prompt tokens served from the provider's cache, a subset of
-    /// `input_tokens`. From `prompt_tokens_details.cached_tokens`. 0 when
-    /// unknown. Useful for cost attribution when prompt caching is enabled.
+    /// Prompt tokens **served from** the provider's cache, a subset of
+    /// `input_tokens`. From `prompt_tokens_details.cached_tokens`
+    /// (OpenAI/OpenRouter), `cachedContentTokenCount` (Gemini), or
+    /// `cache_read_input_tokens` (Anthropic). 0 when unknown. Useful for cost
+    /// attribution when prompt caching is enabled.
     #[serde(default)]
     pub cached_tokens: u64,
+    /// Prompt tokens **written to** the provider's cache this call, a subset
+    /// of `input_tokens` and disjoint from `cached_tokens`. From Anthropic's
+    /// `cache_creation_input_tokens`; 0 for providers that do not itemize
+    /// writes (OpenAI-style endpoints bill cache misses as plain input). Kept
+    /// for cost attribution — writes are priced above plain input on Anthropic.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
 }
 
 /// Full response from a completion call.
