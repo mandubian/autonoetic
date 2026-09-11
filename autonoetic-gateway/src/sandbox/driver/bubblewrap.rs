@@ -147,6 +147,7 @@ impl SandboxDriver for BubblewrapDriver {
             spec.entrypoint,
             spec.mounts,
             spec.overrides,
+            spec.extra_env,
         )
     }
 
@@ -181,6 +182,7 @@ fn bubblewrap_shell_command(
     shell_command: &str,
     extra_mounts: &[SandboxMount],
     overrides: Option<&BwrapIsolationOverrides>,
+    extra_env: &[(String, String)],
 ) -> anyhow::Result<(String, Vec<String>)> {
     anyhow::ensure!(
         !shell_command.trim().is_empty(),
@@ -232,6 +234,45 @@ fn bubblewrap_shell_command(
         argv.push(mount.source.to_string_lossy().to_string());
         argv.push(mount.dest.clone());
         bound_dests.push(mount.dest.clone());
+    }
+
+    // AllowSet: the inherited host PATH names directories that do not exist
+    // inside the namespace (home-dir version managers, per-user toolchains).
+    // The child environment is inherited while the filesystem is not, and a
+    // PATH that names absent directories misleads tooling into resolving —
+    // and designing around — interpreters that cannot exist here (observed:
+    // PATH advertised an nvm Node that was absent, so install scripts picked
+    // a runtime that was not there). Emit a truthful PATH instead: entries
+    // under bound roots / the workspace / explicit mounts survive; the rest
+    // is dropped. With `--setenv PATH` the child gets exactly this value.
+    if mode == HostFsMode::AllowSet {
+        let effective_path = extra_env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+        let existing_roots: Vec<&str> = ALLOW_SET_TOOLCHAIN_ROOTS
+            .iter()
+            .copied()
+            .filter(|r| std::path::Path::new(r).exists())
+            .collect();
+        let mount_dests: Vec<&str> = bound_dests.iter().map(|s| s.as_str()).collect();
+        let entries = allow_set_path_entries(
+            &effective_path,
+            &existing_roots,
+            BWRAP_WORKSPACE_DIR,
+            &mount_dests,
+        );
+        let final_path = if entries.is_empty() {
+            ALLOW_SET_FALLBACK_PATH.to_string()
+        } else {
+            entries.join(":")
+        };
+        argv.extend(vec![
+            "--setenv".to_string(),
+            "PATH".to_string(),
+            final_path,
+        ]);
     }
 
     argv.extend(vec![
@@ -483,6 +524,42 @@ fn allow_set_bind_candidates() -> impl Iterator<Item = &'static str> {
         .chain(ALLOW_SET_NAME_RESOLUTION.iter())
         .chain(ALLOW_SET_TLS_TRUST.iter())
         .copied()
+}
+
+/// Conventional system PATH when no inherited entry is visible inside an
+/// allow-set namespace. Exists via the bound toolchain roots.
+const ALLOW_SET_FALLBACK_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// PATH entries visible inside an `allow_set` namespace: under an existing
+/// bound toolchain root, under the workspace mount, or under an explicit
+/// mount destination. Everything else is dropped — notably home-directory
+/// version managers the *inherited host env* advertises: the child
+/// environment is inherited while the filesystem is not, and a PATH that
+/// names absent directories misleads tooling into resolving interpreters
+/// that cannot exist here.
+fn allow_set_path_entries(
+    path_value: &str,
+    existing_toolchain_roots: &[&str],
+    workspace_dest: &str,
+    mount_dests: &[&str],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in path_value.split(':') {
+        // Only absolute entries can resolve inside the namespace; empty
+        // entries mean "current directory" and are dropped.
+        if entry.is_empty() || !entry.starts_with('/') {
+            continue;
+        }
+        let under =
+            |base: &str| entry == base || entry.starts_with(&format!("{base}/"));
+        let visible = existing_toolchain_roots.iter().any(|r| under(r))
+            || under(workspace_dest)
+            || mount_dests.iter().any(|d| under(d));
+        if visible && !out.iter().any(|e| e == entry) {
+            out.push(entry.to_string());
+        }
+    }
+    out
 }
 
 fn base_argv(agent_dir: &str, mode: HostFsMode) -> Vec<String> {
@@ -808,6 +885,112 @@ mod tests {
     }
 
     #[test]
+    fn allow_set_path_drops_home_version_managers_keeps_system_and_mounts() {
+        // The observed trap: the inherited host PATH advertises an nvm Node
+        // (`~/.nvm/...`) that does not exist inside the allow-set namespace
+        // (only system roots, the workspace and explicit mounts are bound).
+        // A PATH that names absent directories made install scripts resolve —
+        // and design around — interpreters that were not there.
+        let roots = ["/usr", "/bin"];
+        let entries = allow_set_path_entries(
+            "/home/op/.nvm/versions/node/v25.2.1/bin:/usr/local/bin:/usr/bin:/bin:/tmp/venv/bin",
+            &roots,
+            "/tmp",
+            &["/opt/layer"],
+        );
+        assert_eq!(
+            entries,
+            vec![
+                "/usr/local/bin".to_string(),
+                "/usr/bin".to_string(),
+                "/bin".to_string(),
+                "/tmp/venv/bin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn allow_set_path_keeps_layer_mount_and_workspace_entries() {
+        let roots = ["/usr"];
+        let entries = allow_set_path_entries(
+            "/tmp/w/bin:/opt/deps/bin:/usr/bin:/snap/bin",
+            &roots,
+            "/tmp",
+            &["/opt/deps"],
+        );
+        assert_eq!(
+            entries,
+            vec!["/tmp/w/bin".to_string(), "/opt/deps/bin".to_string(), "/usr/bin".to_string()]
+        );
+    }
+
+    #[test]
+    fn allow_set_path_drops_empty_relative_entries_and_dedups() {
+        let roots = ["/usr"];
+        let entries = allow_set_path_entries(
+            ":relative/bin:/usr/bin::/usr/bin",
+            &roots,
+            "/tmp",
+            &[],
+        );
+        assert_eq!(entries, vec!["/usr/bin".to_string()]);
+    }
+
+    #[test]
+    fn allow_set_shell_command_emits_truthful_path() {
+        // The built argv must carry `--setenv PATH` with the host home entry
+        // dropped, so the child sees only directories that exist inside the
+        // namespace. Legacy mode is untouched (no --setenv at all).
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let overrides = BwrapIsolationOverrides {
+            share_net: false,
+            force_network_off: true,
+            host_fs_allow_set: true,
+        };
+        let extra_env = vec![(
+            "PATH".to_string(),
+            "/home/op/.nvm/versions/node/v25.2.1/bin:/usr/bin".to_string(),
+        )];
+        let (_, argv) = bubblewrap_shell_command(
+            agent_dir.to_string_lossy().as_ref(),
+            &dir.path().join(".gateway"),
+            "echo ok",
+            &[],
+            Some(&overrides),
+            &extra_env,
+        )
+        .unwrap();
+        let idx = argv
+            .iter()
+            .position(|a| a == "--setenv")
+            .expect("allow_set must emit --setenv PATH");
+        assert_eq!(argv[idx + 1], "PATH");
+        let path_value = &argv[idx + 2];
+        assert!(
+            !path_value.contains(".nvm"),
+            "host home entry must be dropped: {path_value}"
+        );
+        assert!(path_value.contains("/usr/bin"), "system entry must survive");
+
+        // Legacy: no --setenv (the whole host is bound; env passes through).
+        let (_, legacy_argv) = bubblewrap_shell_command(
+            agent_dir.to_string_lossy().as_ref(),
+            &dir.path().join(".gateway"),
+            "echo ok",
+            &[],
+            None,
+            &extra_env,
+        )
+        .unwrap();
+        assert!(
+            !legacy_argv.iter().any(|a| a == "--setenv"),
+            "legacy must not gain a PATH override: {legacy_argv:?}"
+        );
+    }
+
+    #[test]
     fn allow_set_binds_host_tls_trust_store() {
         // The sandbox needs the host CA bundle for TLS (`npm install`,
         // `curl https://…`): without it every fetch dies with
@@ -845,7 +1028,7 @@ mod tests {
         let gateway_dir = tmp.path().join("runtime");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None)
+        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None, &[])
             .expect("shell command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
@@ -911,6 +1094,7 @@ mod tests {
             "echo ok",
             &mounts,
             None, // legacy
+            &[],
         )
         .expect("shell command should build");
         let tmpfs_pos = argv
@@ -1074,7 +1258,7 @@ mod tests {
             },
         ];
         let (_bin, argv) =
-            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo ok", &mounts, None)
+            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo ok", &mounts, None, &[])
                 .expect("shell command should build");
         let count = argv.iter().filter(|a| *a == "--tmpfs").count();
         assert_eq!(count, 1, "shared parent provisioned exactly once: {argv:?}");
@@ -1098,6 +1282,7 @@ mod tests {
             "echo ok",
             &mounts,
             None,
+            &[],
         )
         .expect_err("root-level mount_as must be refused in legacy mode");
         assert!(err.to_string().contains("allow_set"), "{err}");
@@ -1125,6 +1310,7 @@ mod tests {
             "echo ok",
             &mounts,
             Some(&overrides),
+            &[],
         )
         .expect("shell command should build");
         // allow_set's base argv starts with its own `--tmpfs /`; the only
@@ -1195,7 +1381,7 @@ mod tests {
             })
             .expect("driver should build the command");
         let (expected_program, expected_argv) =
-            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None)
+            bubblewrap_shell_command(&agent_dir_str, &gateway_dir, "echo hi", &[], None, &[])
                 .expect("shell command");
         assert_eq!(program, expected_program);
         assert_eq!(argv, expected_argv);
@@ -1323,6 +1509,7 @@ mod tests {
             "echo hi",
             &[],
             Some(&overrides),
+            &[],
         )
         .expect("allow-set command builds");
 
@@ -1370,6 +1557,7 @@ mod tests {
             "echo hi",
             &[],
             Some(&overrides),
+            &[],
         )
         .expect("legacy command builds");
         assert!(
@@ -1396,6 +1584,7 @@ mod tests {
             "echo hi",
             &[],
             None,
+            &[],
         )
         .expect("shell command should build");
         let unshare = argv.iter().position(|a| a == "--unshare-all").unwrap();
