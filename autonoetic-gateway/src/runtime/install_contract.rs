@@ -1121,10 +1121,6 @@ fn toml_array_entry_pkg(line: &str) -> Option<&str> {
 }
 
 
-///
-/// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
-/// false positives from test files and dev tooling bundled alongside the agent.
-/// Pass `None` to scan all `.py` files.
 /// True when `s` is a legal Python identifier (`[A-Za-z_][A-Za-z0-9_]*`).
 fn is_python_identifier(s: &str) -> bool {
     let mut chars = s.chars();
@@ -1147,6 +1143,12 @@ fn is_valid_module_path(token: &str) -> bool {
     !token.is_empty() && token.split('.').all(is_python_identifier)
 }
 
+/// Scan the bundle's Python files for imports of external (non-stdlib,
+/// non-gateway-injected, non-local) top-level modules.
+///
+/// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
+/// false positives from test files and dev tooling bundled alongside the agent.
+/// Pass `None` to scan all `.py` files.
 pub fn detect_external_python_imports(
     file_map: &BTreeMap<String, Vec<u8>>,
     script_entry: Option<&str>,
