@@ -339,12 +339,18 @@ impl Report {
 /// able to re-read its own filing, so the schema is paid on every turn of
 /// every agent by design (~1.5-1.9k ch measured per agent). Measured
 /// headroom is ~0.3-0.5%, matching the tight-ratchet style.
-const PLANNER_CEILINGS: (usize, usize, usize) = (76_800, 93_300, 105_400);
-const CODER_CEILINGS: (usize, usize, usize) = (61_500, 71_200, 71_200);
+/// Layer identity recovery (layer_list + the resolve `layer_*` branch) is the
+/// addition that moved every ceiling here: capture returns `captured_layers`
+/// exactly once, and when that response is truncated the agent previously had
+/// NO way to recover the id (live: `artifact_build` retries on `layer_56:`
+/// fragments). The recovery surface is paid by every ReadAccess agent by
+/// design; ceilings re-encoded at the new measured baseline, tight-ratchet.
+const PLANNER_CEILINGS: (usize, usize, usize) = (77_400, 93_900, 106_300);
+const CODER_CEILINGS: (usize, usize, usize) = (62_100, 71_800, 71_800);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (93_700, 103_400, 104_300);
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_800, 104_900, 106_700);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -358,12 +364,12 @@ const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (93_700, 103_400, 104_300
 ///
 /// Both are measured so the phase-gating of each procedure is observable
 /// somewhere. The lead and coder agents see neither tool.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (49_900, 50_900, 50_900);
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_400, 86_400, 86_400);
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_400, 50_900, 51_200);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_400, 87_200);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.
-const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (56_900, 56_900, 56_900);
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (57_400, 57_400, 57_400);
 
 #[test]
 fn prompt_composition_report() {

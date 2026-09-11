@@ -366,6 +366,36 @@ const TRUNCATION_EXEMPT_KEYS: &[&str] = &[
     // this key. It is the payload being delivered (not a field to budget), so
     // it must survive the JSON-aware truncator verbatim.
     "gateway_note",
+    // Identity handles. These are the values an agent addresses follow-up
+    // calls BY (`artifact_build` layers, `resolve` refs, `workflow_wait`
+    // task_ids). They are small by design, and a head-truncated fragment
+    // (`"layer_id":"layer_56:"`, `"digest":"sha256:f6"`) is worse than no
+    // value at all: it parses as a plausible complete ID, and the agent
+    // submits it and burns turns on not-found errors. Observed live: a
+    // `sandbox_exec` capture result with 64 `mount_set` entries + 156
+    // `resolved_packages` drove the fair-share per-field cap to 6 chars, and
+    // every handle in `captured_layers` was silently beheaded. Handles are
+    // exempt from both truncation and the budget divisor, like the routing
+    // directives above.
+    "id",
+    "layer_id",
+    "digest",
+    "ref",
+    "task_id",
+    "workflow_id",
+    "artifact_id",
+    "artifact_ref",
+    "execution_trace_id",
+    "trace_id",
+    "request_id",
+    "approval_ref",
+    "session_id",
+    "root_session_id",
+    "message_id",
+    "plan_id",
+    "step_id",
+    "revision_id",
+    "content_ref",
 ];
 
 /// The largest per-field cap `c` such that `sum(min(len_i, c)) <= budget`.
@@ -526,7 +556,18 @@ fn truncate_middle(s: &str, max_chars: usize) -> String {
     // Keep head and tail; each gets roughly half the budget.
     let keep_each = max_chars.saturating_sub(30) / 2;
     if keep_each == 0 {
-        return s.chars().take(max_chars).collect();
+        // Budget too small for the full `\n[... N chars truncated ...]`
+        // marker (max_chars < 30). A bare head-cut here is the worst
+        // possible output: `"layer_56:"` or `"sha256:f6"` reads as a
+        // complete short value, so the agent submits the fragment as an ID
+        // and burns turns on not-found errors. Keep head+tail around a
+        // cheap `…` so the value is visibly partial AND the (more
+        // discriminating) tail survives — digest tails are what
+        // prefix-matching resolves by.
+        let keep = max_chars.saturating_sub(1) / 2;
+        let head: String = s.chars().take(keep).collect();
+        let tail: String = s.chars().skip(len - keep).collect();
+        return format!("{head}…{tail}");
     }
 
     let head: String = s.chars().take(keep_each).collect();
@@ -1990,9 +2031,47 @@ mod tests {
             truncate_middle("a".repeat(500).as_str(), 100).contains("[..."),
             "expected middle-truncation marker for large content"
         );
-        // When max_chars is too small for head + ellipsis + tail, fall back
-        // to a simple head truncation.
-        assert_eq!(truncate_middle("hello world", 5).len(), 5);
+        // When max_chars is too small for head + full marker + tail, the
+        // cheap head+tail form keeps the budget AND marks the cut.
+        let small = truncate_middle("hello world", 5);
+        assert_eq!(small.chars().count(), 5);
+        assert!(
+            small.contains('…'),
+            "small-budget cut must be visibly partial, got: {small}"
+        );
+    }
+
+    #[test]
+    fn truncate_middle_below_marker_floor_keeps_head_and_tail() {
+        // Regression anchor for the live incident: `"sha256:f6"` was a bare
+        // head-cut of `sha256:f643de09…` — it parses as a complete short
+        // value, so the agent submitted the fragment and burned turns on
+        // not-found errors. The tail is what digest prefix-matching resolves
+        // by, so it must survive alongside a visible marker.
+        let digest = "sha256:f643de099e16a990e45ce3572fcb897d94bc766a6c6b8a3bd96336e4a167f381";
+        for budget in [10usize, 16, 29] {
+            let cut = truncate_middle(digest, budget);
+            assert!(
+                cut.contains('…'),
+                "budget {budget}: cut must carry the ellipsis marker, got: {cut}"
+            );
+            assert!(
+                cut.starts_with("sha") && cut.ends_with("f381"),
+                "budget {budget}: head and tail must both survive, got: {cut}"
+            );
+            assert!(
+                cut.chars().count() <= budget,
+                "budget {budget}: cut must respect the budget, got: {cut}"
+            );
+        }
+        // Very tight budget: the tail shortens to whatever fits (head+tail
+        // are floor((budget-1)/2) each), but the value is still visibly
+        // partial.
+        let tight = truncate_middle(digest, 6);
+        assert_eq!(tight.chars().count(), 5);
+        assert_eq!(tight, "sh…81");
+        // Degenerate budget: still marked, never an empty or bare fragment.
+        assert_eq!(truncate_middle(digest, 1), "…");
     }
 
     #[test]
@@ -2144,6 +2223,90 @@ mod tests {
         // The non-exempt output field is small; it must not be starved by the
         // huge note (budget math excludes exempt strings).
         assert_eq!(parsed["output"].as_str().unwrap(), "done");
+    }
+
+    #[test]
+    fn truncate_tool_result_preserves_identity_handles_verbatim() {
+        // Live incident: a `sandbox_exec` capture result (64 `mount_set`
+        // entries + 156 `resolved_packages` ≈ 395 string values against a
+        // 4000-char result budget) drove the fair-share per-field cap to 6
+        // chars, beheading every handle in `captured_layers` to fragments
+        // like `"layer_56:"` / `"sha256:f6"`. Handles are what the agent
+        // addresses follow-up calls BY (`artifact_build.layers`,
+        // `resolve(ref)`), so they are exempt: they neither get truncated
+        // nor shrink the budget of the fields that ARE cut.
+        let packages: Vec<serde_json::Value> = (0..156)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("@scope/some-package-number-{i}"),
+                    "version": "1.0.3",
+                })
+            })
+            .collect();
+        let mount_set: Vec<String> = (0..64)
+            .map(|i| {
+                format!("rw:/tmp/autonoetic_content/session-x/path/segment-{i}/file.txt")
+            })
+            .collect();
+        let content = serde_json::json!({
+            "ok": true,
+            "exit_code": 0,
+            "execution_trace_id": "2ebe98f4-9c55-4942-b2fb-0c8d2d59b877",
+            "captured_layers": [{
+                "layer_id": "layer_56:f643d",
+                "digest": "sha256:f643de099e16a990e45ce3572fcb897d94bc766a6c6b8a3bd96336e4a167f381",
+                "mount_as": "/opt/node",
+                "path": "/tmp/runtime",
+                "file_count": 5263,
+                "content_files": [{"name": "runtime/README.md", "ref": "cnt_402f35f6", "bytes": 41791}],
+                "resolved_packages": packages,
+            }],
+            "mount_set": mount_set,
+        })
+        .to_string();
+
+        let result = truncate_tool_result(&content, 4000);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result must stay valid JSON");
+
+        let layer = &parsed["captured_layers"][0];
+        assert_eq!(
+            layer["layer_id"].as_str().unwrap(),
+            "layer_56:f643d",
+            "layer_id handle must survive truncation verbatim — a beheaded fragment submits as a plausible-but-wrong ID"
+        );
+        assert_eq!(
+            layer["digest"].as_str().unwrap(),
+            "sha256:f643de099e16a990e45ce3572fcb897d94bc766a6c6b8a3bd96336e4a167f381",
+            "digest handle must survive truncation verbatim"
+        );
+        assert_eq!(
+            layer["content_files"][0]["ref"].as_str().unwrap(),
+            "cnt_402f35f6",
+            "content ref handle must survive truncation verbatim"
+        );
+        assert_eq!(
+            parsed["execution_trace_id"].as_str().unwrap(),
+            "2ebe98f4-9c55-4942-b2fb-0c8d2d59b877",
+        );
+        // The bulky diagnostics are still subject to the budget.
+        let pkg_name = parsed["captured_layers"][0]["resolved_packages"][0]["name"]
+            .as_str()
+            .unwrap();
+        assert!(
+            pkg_name.len() < "@scope/some-package-number-0".len(),
+            "non-exempt diagnostic strings should still be truncated, got: {pkg_name}"
+        );
+        // Handles are tiny; the exempt-content rule (same tradeoff as
+        // `gateway_note`) keeps the serialized result intact rather than
+        // whole-string splitting it, so it must at least shrink vs. the raw
+        // payload.
+        assert!(
+            result.chars().count() < content.chars().count(),
+            "truncation must still shrink the result ({} vs {})",
+            result.chars().count(),
+            content.chars().count()
+        );
     }
 
     #[test]

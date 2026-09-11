@@ -218,7 +218,7 @@ impl NativeTool for ArtifactBuildTool {
             layers: Option<Vec<autonoetic_types::layer::ArtifactLayer>>,
             kind: Option<String>,
         }
-        let args: Args = serde_json::from_str(arguments_json)
+        let mut args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gw_dir) = gateway_dir else {
@@ -239,26 +239,59 @@ impl NativeTool for ArtifactBuildTool {
             }
         };
 
-        if let Some(ref layers) = args.layers {
+        if let Some(ref mut layers) = args.layers {
             let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
-            for layer in layers {
-                let manifest = layer_store.inspect(&layer.layer_id).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Layer '{}' referenced in artifact.build does not exist in layer store",
-                        layer.layer_id
-                    )
-                })?;
-                if manifest.digest != layer.digest {
+            for layer in layers.iter_mut() {
+                // Resolve the layer by exact id, full digest, or unambiguous
+                // digest prefix (`layer_56:987f5225…` — the id/digest merge —
+                // and `sha256:<prefix>` both work). Agents routinely hold a
+                // prefix of the identity (a truncated capture, a
+                // half-remembered id); a prefix that resolves to exactly one
+                // stored layer IS that layer, so it is canonicalized into the
+                // bundle rather than rejected.
+                let manifest = match layer_store
+                    .resolve_ref(&layer.layer_id)
+                    .or_else(|_| layer_store.resolve_ref(&layer.digest))
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(ToolError::execution(
+                            format!(
+                                "Layer '{}' referenced in artifact.build does not exist in layer store: {e}. Capture it with sandbox_exec(capture_paths=…) first, or call layer_list to recover the full id/digest.",
+                                layer.layer_id
+                            ),
+                            None::<String>,
+                        )
+                        .to_error_response());
+                    }
+                };
+                // The digest the caller supplied must agree with the stored
+                // layer: a full digest that diverges is a wrong pairing, not a
+                // prefix. (A strict prefix passes — that is the fragment
+                // recovery path — but the bundle records the canonical form.)
+                let caller_hex = layer
+                    .digest
+                    .trim()
+                    .strip_prefix("sha256:")
+                    .unwrap_or(layer.digest.trim());
+                let stored_hex = manifest
+                    .digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&manifest.digest);
+                if !caller_hex.is_empty() && !stored_hex.starts_with(caller_hex) {
                     return Ok(ToolError::fatal(
                         format!(
                             "Layer digest mismatch for '{}': artifact.build references digest '{}' but layer store has '{}'",
-                            layer.layer_id,
-                            layer.digest,
-                            manifest.digest
+                            layer.layer_id, layer.digest, manifest.digest
                         ),
                         None::<String>,
-                    ).to_error_response());
+                    )
+                    .to_error_response());
                 }
+                // Canonical identity only: a bundle pinning a truncated
+                // digest would fail exec-time verification later.
+                layer.layer_id = manifest.layer_id;
+                layer.digest = manifest.digest;
             }
         }
 

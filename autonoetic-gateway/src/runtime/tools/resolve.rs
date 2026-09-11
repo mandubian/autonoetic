@@ -1,7 +1,8 @@
 //! `resolve` — the single front door for any artifact/content handle (#312).
 //!
 //! Agents juggle several handle shapes — `art_<id>`, `ar.<ref>`, `cnt_<alias>`,
-//! a bare 8-char alias, a content `name`, and `sha256:…`.
+//! a bare 8-char alias, a content `name`, a `sha256:…` digest, and a captured
+//! dependency layer's `layer_<x>:<id>`.
 //! Choosing *which tool* consumes *which shape* is exactly the decision that
 //! drives tool-thrashing. `resolve` takes **any** of them and answers "what is
 //! this / show me this" without that choice:
@@ -9,7 +10,10 @@
 //! - artifact-shaped refs (`art_` / `ar.`) → artifact resolution, with scope
 //!   inferred from the session (no explicit `scope_type`/`scope_id`); a single
 //!   file inside is selected with the `file` argument, not packed into the ref;
-//! - everything else → the content store.
+//! - layer-shaped refs (`layer_*`) → the layer store, with digest-prefix
+//!   recovery for a truncated identity (see `LayerStore::resolve_ref`);
+//! - everything else → the content store, with a `sha256:` miss falling back
+//!   to the layer store (the same handle shape names both).
 //!
 //! The agent's decision collapses to: **run it → `artifact_exec`; see it →
 //! `resolve`.** `resolve` is the sole read door — there is no separate
@@ -54,11 +58,11 @@ impl NativeTool for ResolveTool {
             // `include` / `offset` / `limit` field descriptions below — ~430
             // duplicated chars paid on every turn of every agent holding
             // ReadAccess, which is nearly all of them.
-            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. **Run it → `artifact_exec`; see it → `resolve`.** Large `include=content` reads are truncated — page with `next_offset`.".to_string(),
+            description: "Resolve ANY handle to what it points at — `art_`/`ar.` artifact refs, `cnt_`/8-char alias/content name/`sha256:` content handles, and `layer_*` dependency layers (a `sha256:` miss resolves as a layer; unambiguous digest prefixes work). The one front door for \"what is this / show me this\": you do not pick a tool by handle type. **Run it → `artifact_exec`; see it → `resolve`.** Large `include=content` reads are truncated — page with `next_offset`.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, or sha256:…" },
+                    "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, sha256:…, layer_<x>:<id>" },
                     "include": { "type": "string", "enum": ["metadata", "files", "content"], "description": "Depth: metadata (default), files (artifact file list), content (inline bytes)" },
                     "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read (the file name from include=files)" },
                     "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading from. On each call, check `next_offset` in the response and pass it here to page through the rest. Do not re-read from 0 if next_offset is set." },
@@ -158,6 +162,16 @@ impl NativeTool for ResolveTool {
                 offset,
                 limit,
             );
+        }
+
+        // Layer handles (`layer_*`) are the third handle family: a captured
+        // dependency layer's manifest. Before this branch a layer id had NO
+        // read path at all — an agent holding a truncated or half-remembered
+        // capture had nowhere to recover the full identity. Resolution
+        // accepts the exact id, a full/prefix digest, and the id+digest
+        // concatenation LLMs produce (see `LayerStore::resolve_ref`).
+        if reference.starts_with("layer_") {
+            return self.resolve_layer(gw_dir, reference, include);
         }
 
         self.resolve_content(gw_dir, sid, reference, include, offset, limit)
@@ -319,6 +333,85 @@ impl ResolveTool {
         Ok(out.to_string())
     }
 
+    /// Build the layer-not-found response for a `sha256:`/`layer_*` ref.
+    /// A digest that misses the content store is almost always a layer ref,
+    /// so the layer resolution failure (with its recovery hint) is the
+    /// honest answer — not a generic content miss.
+    fn layer_not_found_response(&self, reference: &str, err: &str) -> String {
+        let mut value = json!({
+            "ok": false,
+            "error_type": "resource",
+            "error": "layer_not_found",
+            "message": format!("layer ref '{reference}': {err}"),
+            "repair_hint": "Call layer_list to see stored layer ids and digests, or re-run the sandbox_exec capture to get a fresh captured_layers entry.",
+        });
+        if let Some(object) = value.as_object_mut() {
+            crate::runtime::failure_classification::WorkflowFailureMetadata::bad_reference()
+                .apply_to_json_map(object);
+        }
+        value.to_string()
+    }
+
+    /// Resolve a `layer_*` reference to its stored manifest, or — via
+    /// `LayerStore::resolve_ref`'s digest-prefix matching — recover a layer
+    /// from a fragment of its identity. `include=files` streams the
+    /// compressed archive's entry list without extracting it.
+    fn resolve_layer(
+        &self,
+        gw_dir: &Path,
+        reference: &str,
+        include: &str,
+    ) -> anyhow::Result<String> {
+        let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
+        let manifest = match layer_store.resolve_ref(reference) {
+            Ok(m) => m,
+            Err(e) => return Ok(self.layer_not_found_response(reference, &e.to_string())),
+        };
+
+        if include == "files" {
+            return match layer_store.list_files(&manifest.layer_id, 200) {
+                Ok((entries, total, truncated)) => Ok(json!({
+                    "ok": true,
+                    "kind": "layer_files",
+                    "layer_id": manifest.layer_id,
+                    "digest": manifest.digest,
+                    "files": entries,
+                    "total_files": total,
+                    "truncated": truncated,
+                })
+                .to_string()),
+                Err(e) => Ok(ToolError::resource(
+                    format!("layer '{}': {e}", manifest.layer_id),
+                    None::<String>,
+                )
+                .to_error_response()),
+            };
+        }
+        if include == "content" {
+            return Ok(ToolError::validation(
+                "a layer is a compressed directory archive, not readable text",
+                Some("Use include=files to list its contents; to read a file inside, mount the layer via artifact_build(layers=…) then artifact_exec."),
+            )
+            .to_error_response());
+        }
+
+        Ok(json!({
+            "ok": true,
+            "kind": "layer",
+            "ref": reference,
+            "layer_id": manifest.layer_id,
+            "digest": manifest.digest,
+            "name": manifest.name,
+            "file_count": manifest.file_count,
+            "size_bytes": manifest.size_bytes,
+            "created_at": manifest.created_at,
+            "approval_scope": manifest.approval_scope,
+            "resolved_package_count": manifest.resolved_packages.len(),
+            "exists": true,
+        })
+        .to_string())
+    }
+
     fn resolve_content(
         &self,
         gw_dir: &Path,
@@ -351,7 +444,42 @@ impl ResolveTool {
                     })
                     .to_string())
                 }
-                Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
+                Err(e) => {
+                    // A `sha256:` miss in the content store may still be a
+                    // LAYER digest — the same handle shape names both stores.
+                    // Try the layer store before reporting not-found, so the
+                    // digests `captured_layers` reports resolve like any other
+                    // handle.
+                    if reference.starts_with("sha256:") {
+                        if let Ok(layer_store) =
+                            crate::layer_store::LayerStore::new(gw_dir, Default::default())
+                        {
+                            match layer_store.resolve_ref(reference) {
+                                Ok(manifest) => {
+                                    return Ok(json!({
+                                        "ok": true,
+                                        "kind": "layer",
+                                        "ref": reference,
+                                        "layer_id": manifest.layer_id,
+                                        "digest": manifest.digest,
+                                        "name": manifest.name,
+                                        "file_count": manifest.file_count,
+                                        "size_bytes": manifest.size_bytes,
+                                        "created_at": manifest.created_at,
+                                        "exists": true,
+                                    })
+                                    .to_string());
+                                }
+                                Err(e) => {
+                                    return Ok(
+                                        self.layer_not_found_response(reference, &e.to_string())
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string()))
+                }
             };
         }
 
@@ -365,7 +493,36 @@ impl ResolveTool {
                 "alias": crate::runtime::content_store::ContentStore::get_short_alias(&handle),
             })
             .to_string()),
-            Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
+            Err(e) => {
+                // Same layer-digest fallback for the metadata path.
+                if reference.starts_with("sha256:") {
+                    if let Ok(layer_store) =
+                        crate::layer_store::LayerStore::new(gw_dir, Default::default())
+                    {
+                        match layer_store.resolve_ref(reference) {
+                            Ok(manifest) => {
+                                return Ok(json!({
+                                    "ok": true,
+                                    "kind": "layer",
+                                    "ref": reference,
+                                    "layer_id": manifest.layer_id,
+                                    "digest": manifest.digest,
+                                    "name": manifest.name,
+                                    "file_count": manifest.file_count,
+                                    "size_bytes": manifest.size_bytes,
+                                    "created_at": manifest.created_at,
+                                    "exists": true,
+                                })
+                                .to_string());
+                            }
+                            Err(le) => {
+                                return Ok(self.layer_not_found_response(reference, &le.to_string()));
+                            }
+                        }
+                    }
+                }
+                Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string()))
+            }
         }
     }
 

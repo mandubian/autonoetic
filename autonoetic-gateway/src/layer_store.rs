@@ -675,6 +675,123 @@ impl LayerStore {
             .collect()
     }
 
+    /// Resolve a layer reference in any agent-usable form to its manifest.
+    ///
+    /// Layers had no read door: capture returns `captured_layers` once, and
+    /// if that response was truncated or half-remembered there was no way to
+    /// recover the full identity (`artifact_build` failed, `resolve` rejected
+    /// `layer_*`). This accepts every shape an agent realistically holds:
+    ///
+    /// - exact layer id:  `layer_56:f643d`
+    /// - full digest:     `sha256:<64 hex>`
+    /// - digest prefix:   `sha256:<6..63 hex>` (must be unambiguous)
+    /// - layer id carrying a long hex suffix (`layer_56:987f5225fbc9…`) —
+    ///   the concatenation an LLM produces when it merges the short id and
+    ///   the digest head; the suffix is treated as a digest prefix.
+    ///
+    /// A prefix match must resolve to exactly one layer. Ambiguity is an
+    /// error naming the candidates — a silent pick would build a different
+    /// bundle than the one the agent described, which is worse than failing.
+    pub fn resolve_ref(&self, reference: &str) -> anyhow::Result<LayerManifest> {
+        let reference = reference.trim();
+        anyhow::ensure!(
+            !reference.is_empty(),
+            "layer reference must not be empty"
+        );
+
+        // Exact layer id — the canonical form `captured_layers` reports.
+        if let Ok(manifest) = self.inspect(reference) {
+            return Ok(manifest);
+        }
+
+        // Digest-shaped references. A layer id embeds `56:` (bytes 4..12 of
+        // its own digest), so the hex token is taken after the LAST colon.
+        let hex_token: Option<String> = if let Some(rest) = reference.strip_prefix("sha256:") {
+            Some(rest.to_ascii_lowercase())
+        } else if reference.starts_with(LAYER_ID_PREFIX) {
+            reference
+                .rsplit_once(':')
+                .map(|(_, suffix)| suffix.to_ascii_lowercase())
+        } else {
+            None
+        };
+
+        let Some(token) = hex_token else {
+            anyhow::bail!(
+                "layer reference '{reference}' is not a layer id (layer_…) or digest (sha256:…)"
+            );
+        };
+        if token.is_empty() {
+            anyhow::bail!(
+                "layer reference '{reference}' carries no digest hex — recover the full id with layer_list"
+            );
+        }
+        if token.len() < 6 {
+            anyhow::bail!(
+                "digest fragment '{token}' is too short to resolve safely (need ≥ 6 hex chars) — recover the full id with layer_list"
+            );
+        }
+        if !token.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!(
+                "layer reference '{reference}' is not hex after its prefix — recover the full id with layer_list"
+            );
+        }
+
+        let matches: Vec<(String, String)> = {
+            let index = self.index.lock().unwrap();
+            index
+                .entries
+                .iter()
+                .filter(|(digest, _)| {
+                    digest
+                        .strip_prefix("sha256:")
+                        .is_some_and(|hex| hex.starts_with(&token))
+                })
+                .map(|(d, id)| (d.clone(), id.clone()))
+                .collect()
+        };
+        match matches.len() {
+            0 => anyhow::bail!(
+                "no layer matches digest prefix '{token}' — recover the full id with layer_list"
+            ),
+            1 => self.inspect(&matches[0].1),
+            _ => {
+                let listed = matches
+                    .iter()
+                    .take(5)
+                    .map(|(d, id)| format!("{id} ({d})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "digest prefix '{token}' is ambiguous: {} layers match ({}) — pass the full digest",
+                    matches.len(),
+                    listed
+                )
+            }
+        }
+    }
+
+    /// List stored layers, newest first (bounded by `limit`).
+    ///
+    /// This is the read surface behind `layer_list`. The store is
+    /// content-addressed and global (like the `sha256:` content handles), so
+    /// listing crosses sessions deliberately: a layer captured by a sibling
+    /// session is addressable by any agent holding its id, and the id is
+    /// exactly what this listing restores.
+    pub fn list_layers(&self, limit: usize) -> anyhow::Result<Vec<LayerManifest>> {
+        let ids: Vec<String> = {
+            let index = self.index.lock().unwrap();
+            index.entries.values().cloned().collect()
+        };
+        let mut manifests: Vec<LayerManifest> = ids
+            .iter()
+            .filter_map(|id| self.inspect(id).ok())
+            .collect();
+        manifests.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        manifests.truncate(limit);
+        Ok(manifests)
+    }
+
     pub fn resolve_for_artifact(
         &self,
         layers: &[ArtifactLayer],
@@ -1287,5 +1404,96 @@ mod tests {
 
         let err = store.list_files("layer_nope", 10).unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    fn capture_two_layers(store: &LayerStore, temp: &Path) -> (CapturedLayer, CapturedLayer) {
+        let a = temp.join("layer-a");
+        fs::create_dir_all(&a).unwrap();
+        fs::write(a.join("marker.txt"), b"alpha").unwrap();
+        let b = temp.join("layer-b");
+        fs::create_dir_all(&b).unwrap();
+        fs::write(b.join("marker.txt"), b"beta").unwrap();
+        let ca = store
+            .create_from_dir(&a, "alpha-deps", "/opt/a", None)
+            .unwrap();
+        let cb = store
+            .create_from_dir(&b, "beta-deps", "/opt/b", None)
+            .unwrap();
+        (ca, cb)
+    }
+
+    #[test]
+    fn resolve_ref_accepts_exact_id_full_digest_and_prefix() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let (ca, _cb) = capture_two_layers(&store, temp.path());
+
+        // Exact layer id.
+        let m = store.resolve_ref(&ca.layer_id).unwrap();
+        assert_eq!(m.layer_id, ca.layer_id);
+        assert_eq!(m.digest, ca.digest);
+
+        // Full digest.
+        let m = store.resolve_ref(&ca.digest).unwrap();
+        assert_eq!(m.layer_id, ca.layer_id);
+
+        // Unambiguous digest prefix (>= 6 hex chars).
+        let hex = ca.digest.strip_prefix("sha256:").unwrap();
+        let m = store.resolve_ref(&format!("sha256:{}", &hex[..10])).unwrap();
+        assert_eq!(m.layer_id, ca.layer_id);
+
+        // The id+digest concatenation an LLM produces when it merges the
+        // short id and the digest head — the live hallucination shape
+        // (`layer_56:987f5225fbc9…`): the id's 5-char suffix is REPLACED by
+        // a longer digest prefix.
+        let base = ca.layer_id.split(':').next().unwrap();
+        let m = store.resolve_ref(&format!("{}:{}", base, &hex[..16])).unwrap();
+        assert_eq!(m.layer_id, ca.layer_id);
+    }
+
+    #[test]
+    fn resolve_ref_rejects_fragments_loudly() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let (ca, _cb) = capture_two_layers(&store, temp.path());
+        let _ = ca;
+
+        // A 2-char head fragment (the live incident shape, `sha256:f6`) must
+        // fail with a recoverable hint, never silently pick a layer.
+        let err = store.resolve_ref("sha256:f6").unwrap_err();
+        assert!(err.to_string().contains("too short"), "got: {err}");
+
+        // Empty id suffix (`layer_56:` — the beheaded capture).
+        let err = store.resolve_ref("layer_56:").unwrap_err();
+        assert!(err.to_string().contains("no digest hex"), "got: {err}");
+
+        // Unknown but well-formed prefix.
+        let err = store.resolve_ref("sha256:dead00beef00").unwrap_err();
+        assert!(err.to_string().contains("no layer matches"), "got: {err}");
+
+        // Non-hex suffix.
+        let err = store.resolve_ref("layer_56:not-hex!").unwrap_err();
+        assert!(err.to_string().contains("not hex"), "got: {err}");
+    }
+
+    #[test]
+    fn list_layers_returns_all_newest_first() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let (ca, cb) = capture_two_layers(&store, temp.path());
+
+        let listed = store.list_layers(10).unwrap();
+        assert_eq!(listed.len(), 2);
+        let ids: Vec<&str> = listed.iter().map(|m| m.layer_id.as_str()).collect();
+        assert!(ids.contains(&ca.layer_id.as_str()));
+        assert!(ids.contains(&cb.layer_id.as_str()));
+
+        // Newest first: the second capture sorts at or before the first.
+        let pos_a = listed.iter().position(|m| m.layer_id == ca.layer_id).unwrap();
+        let pos_b = listed.iter().position(|m| m.layer_id == cb.layer_id).unwrap();
+        assert!(pos_b <= pos_a);
+
+        // Limit is honoured.
+        assert_eq!(store.list_layers(1).unwrap().len(), 1);
     }
 }

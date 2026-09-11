@@ -178,11 +178,32 @@ artifact_build({
 ```
 
 The gateway:
-1. Validates that each referenced layer exists and digest matches
+1. Resolves each referenced layer by exact `layer_id`, full digest, or an **unambiguous digest prefix** — including the `layer_<x>:<hex…>` concatenation an LLM produces when it merges the short id with the digest head. A prefix that matches exactly one stored layer is canonicalized: the bundle records the full `layer_id`/`digest`, never the fragment. A full digest that diverges from the stored layer is refused (wrong pairing, not a prefix).
 2. Records layers in the artifact manifest
 3. The artifact's deterministic ID now incorporates layer digests (so different deps → different artifact)
 
-### 2.6 `sandbox_exec` with Layer-Aware Artifacts
+### 2.6 Layer identity recovery (`layer_list`, `resolve`)
+
+Capture returns `captured_layers` (id + digest) exactly once, in a tool result
+that is subject to the prompt budget. If that response is lost or truncated,
+the identity is otherwise unrecoverable — a live incident had an agent
+retrying `artifact_build` with beheaded fragments (`"layer_id": "layer_56:"`,
+`"digest": "sha256:f6"`). Two read doors close that hole:
+
+- **`layer_list`** — lists stored layers (id, digest, name, size), newest
+  first, with an optional `name_contains` filter and `limit`. Available to
+  any agent holding ReadAccess.
+- **`resolve(ref="layer_*")`** — returns one layer's manifest
+  (`include=files` streams the archive's entry list without extraction).
+  `LayerStore::resolve_ref` accepts the exact id, a full/prefix digest
+  (≥ 6 hex chars, must be unambiguous), and the merged id+digest form. A
+  `sha256:` ref that misses the content store falls back to the layer store,
+  so layer digests resolve like any other handle.
+
+Fragments below the prefix floor fail loudly with a `layer_list` repair hint —
+never a silent pick (an ambiguous prefix names its candidates).
+
+### 2.7 `sandbox_exec` with Layer-Aware Artifacts
 
 When `sandbox_exec` runs with an `artifact_ref`/artifact that has layers:
 

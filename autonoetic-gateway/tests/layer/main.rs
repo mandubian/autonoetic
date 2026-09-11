@@ -4,3 +4,4 @@ mod support;
 mod artifact;
 mod scope_approval;
 mod store;
+mod tools;

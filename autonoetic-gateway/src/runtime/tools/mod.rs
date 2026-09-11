@@ -1301,6 +1301,7 @@ pub mod federation;
 pub mod github_issue;
 pub mod improvement;
 pub mod knowledge;
+pub mod layer;
 pub mod observability;
 pub mod plan_frame;
 pub mod promotion;
@@ -1355,6 +1356,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::artifact_exec::register_tools(&mut registry);
     crate::runtime::tools::artifact_prepare::register_tools(&mut registry);
     crate::runtime::tools::knowledge::register_tools(&mut registry);
+    crate::runtime::tools::layer::register_tools(&mut registry);
     crate::runtime::tools::sandbox::register_tools(&mut registry);
     crate::runtime::tools::workflow::register_tools(&mut registry);
     crate::runtime::tools::user_interaction::register_tools(&mut registry);

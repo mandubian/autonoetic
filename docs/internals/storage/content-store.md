@@ -96,6 +96,8 @@ Write content with visibility control.
 Default visibility is `session` (collaborative). Use `private` for scratchpads/drafts.
 Use `sandbox_path` when passing files to `sandbox_exec`.
 `cnt_...` and `sha256:...` are content references for `resolve`, not filesystem paths.
+A `sha256:` ref that misses the content store falls back to the layer store, and
+`layer_*` ids resolve directly — see `docs/internals/build-layers.md` §2.6.
 
 ### `resolve`
 
