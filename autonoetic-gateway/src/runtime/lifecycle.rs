@@ -6634,13 +6634,21 @@ fn plan_watchdog_nudge_or_notify(
     let Some(store) = store else {
         return false;
     };
+
+    // `0 disables the watchdog` (config.rs): neither nudge nor stall
+    // notification may fire — otherwise a zero budget reads as "already
+    // exhausted" and every turn-end emits a stall notification.
+    let budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
+    if budget == 0 {
+        return false;
+    }
+
     let Some(nudge) = crate::scheduler::plan_watchdog::plan_incomplete_nudge(
         cfg, store, session_id,
     ) else {
         return false;
     };
 
-    let budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
     if *nudges_used < budget {
         *nudges_used += 1;
         let msg = crate::scheduler::plan_watchdog::render_nudge_message(
@@ -9162,6 +9170,100 @@ mod divergence_robustness_tests {
     /// `WaitingForChild` — it is set when the current task is enqueued and
     /// cleared only on terminal status, so it is a stale label when the sole
     /// active task IS the caller. `has_other_active` is the real signal.
+    // -- plan watchdog nudge budget -----------------------------------------
+
+    /// `plan_incomplete_nudge_budget: 0` documents "0 disables the watchdog".
+    /// A zero budget must not read as "budget already exhausted": the old code
+    /// fell through to `emit_stall_notification` on every turn-end, spamming
+    /// the operator. Pins: no nudge pushed, no notification stored.
+    #[test]
+    fn plan_watchdog_zero_budget_disables_watchdog() {
+        use autonoetic_types::plan_frame::{
+            PlanFrame, PlanStatus, PlanStep, StepOwner, StepStatus, ValidationPolicy,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
+
+        let mut config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
+            agents_dir: agents_dir.clone(),
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        config.plan_incomplete_nudge_budget = Some(0);
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        let root_session = "root-nudge-budget-zero";
+        let wf = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            None,
+        )
+        .expect("workflow should be ensured");
+
+        // A stalled plan: approved, agent-owned pending step, older than the
+        // janitor grace — with a nonzero budget this session would be nudged.
+        let frame = PlanFrame {
+            plan_id: "plan-nudge-budget-zero".to_string(),
+            version: 1,
+            parent_version: None,
+            workflow_id: wf.workflow_id.clone(),
+            root_session_id: root_session.to_string(),
+            title: "t".to_string(),
+            objective: "o".to_string(),
+            status: PlanStatus::Approved,
+            steps: vec![PlanStep {
+                step_id: "s1".to_string(),
+                title: "stalled step".to_string(),
+                owner: StepOwner::Agent,
+                depends_on: vec![],
+                agent_id: Some("coder.default".to_string()),
+                notes: None,
+                status: StepStatus::Pending,
+                required_capabilities: vec![],
+            }],
+            validation_policy: ValidationPolicy::default(),
+            capability_envelope: vec![],
+            approved_by: None,
+            approved_at: Some("2026-09-01T00:00:00Z".to_string()),
+            created_by_agent_id: "planner.collaborative".to_string(),
+            reason: None,
+            created_at: "2026-09-01T00:00:00Z".to_string(),
+            expires_at: None,
+        };
+        store.save_plan_frame(&frame).expect("plan frame should save");
+
+        let mut history: Vec<crate::llm::Message> = Vec::new();
+        let mut nudges_used = 0u32;
+        let nudged = super::plan_watchdog_nudge_or_notify(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            &mut history,
+            &mut nudges_used,
+        );
+        assert!(!nudged, "zero budget disables the watchdog: turn may end");
+        assert!(history.is_empty(), "no nudge message may be pushed");
+        assert_eq!(nudges_used, 0);
+        let pending = store
+            .list_notifications_for_session(
+                root_session,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .expect("notifications should list");
+        assert!(
+            pending.is_empty(),
+            "zero budget must not emit stall notifications, got: {pending:?}"
+        );
+    }
+
     #[test]
     fn waiting_for_child_yield_reason_ignores_stale_waiting_children() {
         use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
