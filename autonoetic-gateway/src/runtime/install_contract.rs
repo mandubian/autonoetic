@@ -814,9 +814,23 @@ const PYTHON_STDLIB: &[&str] = &[
     // Other common stdlib
     "time",
     "copy",
-    // Gateway-provided SDK (injected via PYTHONPATH; not available on PyPI)
-    "autonoetic_sdk",
 ];
+
+/// Gateway-injected Python modules: provided inside sandboxes via PYTHONPATH,
+/// not installable from PyPI. The dependency scanner must never treat them as
+/// external dependencies, and the promote gate must not prescribe a packager
+/// pass when they are the only flagged imports (a packager cannot clear them).
+pub const GATEWAY_INJECTED_PYTHON_MODULES: &[&str] = &["autonoetic_sdk"];
+
+/// Strip non-identifier characters from the edges of a stored import token.
+///
+/// Revisions created by older (buggy) scanner builds can store prose-derived
+/// names like `` ``autonoetic_sdk `` (RST backticks included). Consumers that
+/// classify stored names — not the scanner itself, which now validates —
+/// normalize before comparing so those stale revisions still match.
+pub fn normalize_import_token(token: &str) -> &str {
+    token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+}
 
 #[derive(Debug, Default)]
 pub struct BundleHealthReport {
@@ -1008,7 +1022,7 @@ fn requirements_txt_has_real_packages(content: &[u8]) -> bool {
             .next()
             .unwrap_or(line)
             .trim();
-        if pkg_name.is_empty() || pkg_name == "autonoetic_sdk" {
+        if pkg_name.is_empty() || GATEWAY_INJECTED_PYTHON_MODULES.contains(&pkg_name) {
             continue;
         }
         return true;
@@ -1039,7 +1053,7 @@ fn pyproject_toml_has_dependencies(text: &str) -> bool {
         if section == "[project]" {
             if in_deps_multiline {
                 if let Some(pkg) = toml_array_entry_pkg(line) {
-                    if pkg != "autonoetic_sdk" {
+                    if !GATEWAY_INJECTED_PYTHON_MODULES.contains(&pkg) {
                         return true;
                     }
                 }
@@ -1060,7 +1074,7 @@ fn pyproject_toml_has_dependencies(text: &str) -> bool {
                                 .trim_end_matches(']')
                                 .split(',')
                                 .filter_map(|e| toml_array_entry_pkg(e))
-                                .any(|p| p != "autonoetic_sdk");
+                                .any(|p| !GATEWAY_INJECTED_PYTHON_MODULES.contains(&p));
                         } else {
                             in_deps_multiline = true;
                         }
@@ -1073,7 +1087,10 @@ fn pyproject_toml_has_dependencies(text: &str) -> bool {
         if section == "[tool.poetry.dependencies]" {
             if let Some(eq_idx) = line.find('=') {
                 let pkg = line[..eq_idx].trim();
-                if !pkg.is_empty() && pkg != "python" && pkg != "autonoetic_sdk" {
+                if !pkg.is_empty()
+                    && pkg != "python"
+                    && !GATEWAY_INJECTED_PYTHON_MODULES.contains(&pkg)
+                {
                     return true;
                 }
             }
@@ -1108,6 +1125,28 @@ fn toml_array_entry_pkg(line: &str) -> Option<&str> {
 /// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
 /// false positives from test files and dev tooling bundled alongside the agent.
 /// Pass `None` to scan all `.py` files.
+/// True when `s` is a legal Python identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_python_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// True when `token` is a legal dotted module path (`pkg.sub.mod`).
+///
+/// Used to reject prose captured by the line-based import scan: docstrings
+/// often wrap sentences so a line begins with `from `/`import ` (e.g.
+/// `from ``autonoetic_sdk.load_input()`` shaped either as::`). Without this
+/// validation the scanner extracts a name like `` ``autonoetic_sdk `` — which
+/// then misses every exclusion list and can block promotion with a phantom
+/// unresolved dependency no packager can clear.
+fn is_valid_module_path(token: &str) -> bool {
+    !token.is_empty() && token.split('.').all(is_python_identifier)
+}
+
 pub fn detect_external_python_imports(
     file_map: &BTreeMap<String, Vec<u8>>,
     script_entry: Option<&str>,
@@ -1126,23 +1165,34 @@ pub fn detect_external_python_imports(
         let text = String::from_utf8_lossy(content);
         for line in text.lines() {
             let trimmed = line.trim();
-            let module = if trimmed.starts_with("import ") {
-                trimmed
-                    .strip_prefix("import ")
-                    .and_then(|s| s.split_whitespace().next())
-            } else if trimmed.starts_with("from ") {
-                trimmed
-                    .strip_prefix("from ")
-                    .and_then(|s| s.split_whitespace().next())
+            // `import a, b as c, d` — comma-split so every listed module is
+            // checked individually; taking only the first whitespace token
+            // would capture `a,` (trailing comma) and miss `b`/`d`.
+            let candidates: Vec<&str> = if let Some(rest) = trimmed.strip_prefix("import ") {
+                rest.split(',')
+                    .filter_map(|p| p.split_whitespace().next())
+                    .collect()
+            } else if let Some(rest) = trimmed.strip_prefix("from ") {
+                rest.split_whitespace()
+                    .next()
+                    .into_iter()
+                    .collect()
             } else {
-                None
+                Vec::new()
             };
-            if let Some(module) = module {
+            for module in candidates {
+                // Not a syntactically valid module path → this line is prose
+                // (docstring/comment text) or invalid Python; skip it.
+                if !is_valid_module_path(module) {
+                    continue;
+                }
                 let top_level = module.split('.').next().unwrap_or(module);
                 if top_level.is_empty() {
                     continue;
                 }
-                if PYTHON_STDLIB.contains(&top_level) {
+                if PYTHON_STDLIB.contains(&top_level)
+                    || GATEWAY_INJECTED_PYTHON_MODULES.contains(&top_level)
+                {
                     continue;
                 }
                 let local_file = format!("{top_level}.py");
@@ -1912,6 +1962,68 @@ agent:
         );
         let external = detect_external_python_imports(&file_map, None);
         assert!(!external.contains(&"autonoetic_sdk".to_string()));
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_docstring_prose() {
+        // Regression: the agent-browser bundle's docstring wrapped a sentence
+        // so a line began with `from ``autonoetic_sdk.load_input()`` …`.
+        // The scanner extracted `` ``autonoetic_sdk `` (backticks included),
+        // which missed the autonoetic_sdk whitelist and froze
+        // has_unresolved_dependencies=true into the revision metadata,
+        // deadlocking promotion with an unfixable "run packager" remedy.
+        let script = br#"#!/usr/bin/env python3
+"""Thin wrapper.
+
+This module is invoked by the gateway as a script agent. It reads a JSON payload
+from ``autonoetic_sdk.load_input()`` shaped either as::
+
+    {"argv": ["open", "https://example.com"]}
+
+Command resolution:
+1. ``AGENT_BROWSER_BIN`` env var -- path to an already-installed binary.
+"""
+
+import json
+try:
+    import autonoetic_sdk
+except ImportError:
+    autonoetic_sdk = None
+
+import subprocess
+"#;
+        let mut file_map = BTreeMap::new();
+        file_map.insert("main.py".to_string(), script.to_vec());
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(
+            external.is_empty(),
+            "docstring prose must not be flagged as external imports: {external:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_relative_and_star() {
+        // Relative imports are local by definition; `import *` is invalid.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"from . import helper\nfrom ..pkg import thing\nimport *\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(external.is_empty(), "got {external:?}");
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_comma_list() {
+        // `import a, b` must check each listed module: taking only the first
+        // whitespace token captured `a,` (trailing comma) and missed `b`.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"import os, sys\nimport requests, pydantic\nimport json as j, yaml\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert_eq!(external, vec!["pydantic", "requests", "yaml"]);
     }
 
     #[test]

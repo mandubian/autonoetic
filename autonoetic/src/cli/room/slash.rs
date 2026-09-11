@@ -181,6 +181,7 @@ pub fn help_lines() -> Vec<String> {
         "Content & artifacts".to_string(),
         "  c            toggle live content tree (content.list)".to_string(),
         "  Enter/o      open selected content · artifact file list · view file".to_string(),
+        "  x            fold/unfold artifact files & older plan versions (artifacts start folded)".to_string(),
         "  m            comment on open content (prefix L12: or L12-14: for line hint)".to_string(),
         String::new(),
         "Grants".to_string(),

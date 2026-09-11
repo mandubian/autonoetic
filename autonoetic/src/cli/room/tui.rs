@@ -1905,9 +1905,15 @@ struct LiveContentPane {
     /// plan_id is always shown; older versions are hidden by default and can be
     /// toggled with `x` when a plan node is selected.
     folded: std::collections::HashMap<String, bool>,
-    /// artifact_id -> folded (children hidden). Defaults to expanded (false),
-    /// so artifacts show their files/layers on first open; `x` collapses them.
+    /// artifact_id -> folded (children hidden). Artifacts are folded by
+    /// default (true), so the pane opens compact and `x` unfolds them —
+    /// except the active artifact (most recently written), which starts
+    /// unfolded (see `active_artifact_id`).
     artifact_folded: std::collections::HashMap<String, bool>,
+    /// The active artifact (first/newest in the tree): starts unfolded so the
+    /// operator sees what the session is working on without a manual `x`.
+    /// An explicit `x` toggle still wins (stored in `artifact_folded`).
+    active_artifact_id: Option<String>,
 }
 
 impl LiveContentPane {
@@ -2022,7 +2028,11 @@ impl LiveContentPane {
             _ => None,
         };
         if let Some(aid) = artifact_id {
-            let entry = self.artifact_folded.entry(aid).or_insert(false);
+            // First toggle flips from the *current default*: inactive
+            // artifacts start folded (first `x` unfolds), the active one
+            // starts unfolded (first `x` folds it).
+            let current = self.is_artifact_folded(&aid);
+            let entry = self.artifact_folded.entry(aid).or_insert(current);
             *entry = !*entry;
             self.clamp_selection_to_visible();
             return;
@@ -2055,9 +2065,13 @@ impl LiveContentPane {
     }
 
     /// Whether an artifact's children (files/layers) are currently folded.
-    /// Defaults to expanded (false) — artifacts are visible on first open.
+    /// Folded by default (true) — the pane opens compact — except the active
+    /// artifact, which starts unfolded. An explicit `x` always wins.
     fn is_artifact_folded(&self, artifact_id: &str) -> bool {
-        self.artifact_folded.get(artifact_id).copied().unwrap_or(false)
+        match self.artifact_folded.get(artifact_id) {
+            Some(folded) => *folded,
+            None => Some(artifact_id) != self.active_artifact_id.as_deref(),
+        }
     }
 }
 
@@ -2212,8 +2226,9 @@ fn format_layer_inspect_lines(
 }
 
 /// Open the selected node in the live content pane.
-/// Shared by the Enter and `o` key handlers.
-/// Returns `true` if a view/detail was opened (and the popup should be closed).
+/// Shared by the Enter and `o` key handlers. The pane itself stays open
+/// underneath the opened view — Esc pops back to it layer by layer.
+/// Returns `true` if a view/detail was opened.
 fn open_content_pane_node(
     pane: &LiveContentPane,
     idx: usize,
@@ -2226,7 +2241,6 @@ fn open_content_pane_node(
     artifact_file_view: &mut Option<ArtifactFileView>,
     content_view: &mut Option<ContentView>,
     status: &mut Option<String>,
-    live_content_pane: &mut Option<LiveContentPane>,
 ) -> bool {
     let idx = idx.min(pane.nodes.len().saturating_sub(1));
     if let Some(ref node) = pane.nodes.get(idx) {
@@ -2250,7 +2264,6 @@ fn open_content_pane_node(
                                 *detail_scroll = 0;
                                 *detail_h_scroll = 0;
                                 *status = Some("plan detail · Esc close".to_string());
-                                *live_content_pane = None;
                                 return true;
                             }
                         }
@@ -2302,8 +2315,7 @@ fn open_content_pane_node(
                                 layers,
                                 selected: 0,
                             });
-                            *status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
-                            *live_content_pane = None;
+                            *status = Some("artifact files · j/k navigate · o open · Esc back".to_string());
                             return true;
                         }
                     }
@@ -2325,7 +2337,6 @@ fn open_content_pane_node(
                                 content: content.to_string(),
                                 scroll: 0,
                             });
-                            *live_content_pane = None;
                             return true;
                         } else {
                             *status = Some("artifact.read_file: no content field".to_string());
@@ -2349,8 +2360,7 @@ fn open_content_pane_node(
                         *detail = Some(DetailPane::event(lines, None));
                         *detail_scroll = 0;
                         *detail_h_scroll = 0;
-                        *status = Some("layer detail · Esc close".to_string());
-                        *live_content_pane = None;
+                        *status = Some("layer detail · Esc back".to_string());
                         return true;
                     }
                     Err(e) => *status = Some(format!("layer inspect failed: {e}")),
@@ -2359,7 +2369,6 @@ fn open_content_pane_node(
             LiveContentNode::Draft { name, .. } => {
                 *content_view = open_content_draft(client, root_session_id, name, status);
                 if content_view.is_some() {
-                    *live_content_pane = None;
                     return true;
                 }
             }
@@ -7294,18 +7303,11 @@ pub fn run(
                                 );
                                 continue;
                             }
-                            // Batch-close: when a sub-view is open from the content pane,
-                            // one Esc closes everything back to the main timeline view.
-                            if live_content_pane.is_some()
-                                && (content_view.is_some()
-                                    || artifact_file_view.is_some()
-                                    || artifact_viewer.is_some())
-                            {
-                                content_view = None;
-                                artifact_file_view = None;
-                                artifact_viewer = None;
-                                live_content_pane = None;
-                            } else if content_view.is_some() {
+                            // Layer-by-layer close: a view opened from the
+                            // live content pane keeps that pane alive
+                            // underneath, so Esc pops back to it first and a
+                            // second Esc closes the pane itself.
+                            if content_view.is_some() {
                                 content_view = None;
                             } else if artifact_file_view.is_some() {
                                 artifact_file_view = None;
@@ -7638,7 +7640,6 @@ pub fn run(
                                     &mut detail, &mut detail_scroll, &mut detail_h_scroll,
                                     &mut artifact_viewer, &mut artifact_file_view,
                                     &mut content_view, &mut status,
-                                    &mut live_content_pane,
                                 );
                             } else if let Some((_, src)) = view_indexed.get(selected) {
                                 // Open detail for the selected row
@@ -8381,16 +8382,30 @@ pub fn run(
                                         .as_ref()
                                         .map(|p| p.folded.clone())
                                         .unwrap_or_default();
+                                    let artifact_folded = live_content_pane
+                                        .as_ref()
+                                        .map(|p| p.artifact_folded.clone())
+                                        .unwrap_or_default();
                                     let prev_selected = live_content_pane
                                         .as_ref()
                                         .map(|p| p.selected)
                                         .unwrap_or(0);
+                                    // The active artifact is the most recently
+                                    // written one — the tree is built newest-first,
+                                    // so the first Artifact node in `all_nodes`.
+                                    let active_artifact_id = all_nodes.iter().find_map(|n| match n {
+                                        LiveContentNode::Artifact { artifact_id, .. } => {
+                                            Some(artifact_id.clone())
+                                        }
+                                        _ => None,
+                                    });
                                     let mut pane = LiveContentPane {
                                         nodes: all_nodes,
                                         sections,
                                         selected: prev_selected,
                                         folded,
-                                        artifact_folded: std::collections::HashMap::new(),
+                                        artifact_folded,
+                                        active_artifact_id,
                                     };
                                     pane.clamp_selection_to_visible();
                                     live_content_pane = Some(pane);
@@ -8399,22 +8414,25 @@ pub fn run(
                             }
                         }
                         KeyCode::Char('x') => {
-                            if let Some(pane) = live_content_pane.as_mut() {
-                                pane.toggle_fold();
+                            // Fold toggling only when the pane is the top
+                            // overlay — under an opened view, `x` belongs to
+                            // that view's context, not the hidden pane.
+                            if content_view.is_none()
+                                && artifact_file_view.is_none()
+                                && artifact_viewer.is_none()
+                            {
+                                if let Some(pane) = live_content_pane.as_mut() {
+                                    pane.toggle_fold();
+                                }
                             }
                         }
                         KeyCode::Char('o') => {
-                            // Open the selected item in the live content pane
+                            // Open the selected item in the live content pane.
+                            // Overlay priority matches the render chain:
+                            // content view → artifact file view → artifact
+                            // viewer → pane → timeline.
                             if content_view.is_some() {
                                 // already viewing content; ignore
-                            } else if let Some(pane) = live_content_pane.clone() {
-                                let _ = open_content_pane_node(
-                                    &pane, pane.selected, client, root_session_id,
-                                    &mut detail, &mut detail_scroll, &mut detail_h_scroll,
-                                    &mut artifact_viewer, &mut artifact_file_view,
-                                    &mut content_view, &mut status,
-                                    &mut live_content_pane,
-                                );
                             } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
                                 if let Some(file) = viewer.files.get(viewer.selected) {
@@ -8443,6 +8461,13 @@ pub fn run(
                                         Err(e) => status = Some(format!("artifact read failed: {e}")),
                                     }
                                 }
+                            } else if let Some(pane) = live_content_pane.clone() {
+                                let _ = open_content_pane_node(
+                                    &pane, pane.selected, client, root_session_id,
+                                    &mut detail, &mut detail_scroll, &mut detail_h_scroll,
+                                    &mut artifact_viewer, &mut artifact_file_view,
+                                    &mut content_view, &mut status,
+                                );
                             } else if let Some((_, src)) = view_indexed.get(selected) {
                                 let idx = match src {
                                     RowSource::Single(i) => *i,
@@ -13326,7 +13351,13 @@ fn draw(
                 .scroll((scroll, 0)),
             area,
         );
-    } else if let Some(ref pane) = live_content_pane {
+    // The pane renders only when no artifact overlay is stacked on top of it
+    // (a file/layer/artifact view opened from the pane keeps it alive in
+    // state; Esc pops back to it). Content views render above the pane, so
+    // they keep their own chain slot below.
+    } else if let Some(ref pane) = live_content_pane.filter(
+        |_| artifact_file_view.is_none() && artifact_viewer.is_none(),
+    ) {
         let area = centered_rect(65, 70, f.area());
         f.render_widget(Clear, area);
 
@@ -13448,7 +13479,12 @@ fn draw(
                         } else {
                             String::new()
                         };
-                        format!("  {name} [{kind}]{fold_hint}")
+                        let active_tag = if pane.active_artifact_id.as_deref() == Some(artifact_id.as_str()) {
+                            " ✦"
+                        } else {
+                            ""
+                        };
+                        format!("  {name} [{kind}]{active_tag}{fold_hint}")
                     }
                     LiveContentNode::ArtifactLayer {
                         layer_id: _,
@@ -16313,6 +16349,7 @@ mod tests {
             selected: 0,
             folded: std::collections::HashMap::from([("plan-1".into(), true)]),
             artifact_folded: std::collections::HashMap::new(),
+            active_artifact_id: None,
         };
 
         let visible = pane.visible_indices();
@@ -16322,6 +16359,133 @@ mod tests {
         assert!(!visible.contains(&3), "older plan steps must be folded");
         assert!(visible.contains(&4), "artifact must remain visible");
         assert!(visible.contains(&5), "draft must remain visible");
+    }
+
+    #[test]
+    fn live_content_artifacts_folded_by_default_and_toggle_unfolds() {
+        // Artifact children (files/layers) are hidden on first open; `x`
+        // unfolds them, and a second `x` folds them again. This pane has no
+        // active artifact, so every artifact defaults to folded.
+        let nodes = vec![
+            LiveContentNode::Artifact {
+                artifact_id: "art-1".into(),
+                artifact_ref: "art-1".into(),
+                kind: "patch".into(),
+                name: "changes.patch".into(),
+            },
+            LiveContentNode::ArtifactLayer {
+                layer_id: "layer-1".into(),
+                name: "deps".into(),
+                mount_path: "/deps".into(),
+                digest: "sha256:abc".into(),
+                artifact_id: "art-1".into(),
+            },
+            LiveContentNode::ArtifactFile {
+                name: "main.rs".into(),
+                artifact_id: "art-1".into(),
+                artifact_ref: "art-1".into(),
+            },
+            LiveContentNode::Draft {
+                name: "notes.md".into(),
+                visibility: "session".into(),
+            },
+        ];
+        let mut pane = LiveContentPane {
+            nodes,
+            sections: vec![(0, "Artifacts"), (3, "Drafts")],
+            selected: 0,
+            folded: std::collections::HashMap::new(),
+            artifact_folded: std::collections::HashMap::new(),
+            active_artifact_id: None,
+        };
+
+        assert!(pane.is_artifact_folded("art-1"), "artifact must be folded by default");
+        let visible = pane.visible_indices();
+        assert!(visible.contains(&0), "artifact parent must remain visible");
+        assert!(!visible.contains(&1), "artifact layer must be hidden by default");
+        assert!(!visible.contains(&2), "artifact file must be hidden by default");
+        assert!(visible.contains(&3), "draft must remain visible");
+
+        pane.toggle_fold();
+        assert!(!pane.is_artifact_folded("art-1"), "first `x` must unfold");
+        let visible = pane.visible_indices();
+        assert!(visible.contains(&1), "layer visible after unfold");
+        assert!(visible.contains(&2), "file visible after unfold");
+
+        pane.toggle_fold();
+        assert!(pane.is_artifact_folded("art-1"), "second `x` must fold again");
+        let visible = pane.visible_indices();
+        assert!(!visible.contains(&1), "layer hidden after re-fold");
+        assert!(!visible.contains(&2), "file hidden after re-fold");
+    }
+
+    #[test]
+    fn live_content_active_artifact_unfolds_by_default_and_explicit_toggle_wins() {
+        // The active artifact (most recently written → first node, tree is
+        // newest-first) starts unfolded so the operator sees current work
+        // without a manual `x`. Older artifacts stay folded. An explicit `x`
+        // on the active artifact still folds it (operator intent wins over
+        // the default).
+        let nodes = vec![
+            LiveContentNode::Artifact {
+                artifact_id: "art-new".into(),
+                artifact_ref: "art-new".into(),
+                kind: "agent_bundle".into(),
+                name: "agent-browser".into(),
+            },
+            LiveContentNode::ArtifactFile {
+                name: "main.py".into(),
+                artifact_id: "art-new".into(),
+                artifact_ref: "art-new".into(),
+            },
+            LiveContentNode::Artifact {
+                artifact_id: "art-old".into(),
+                artifact_ref: "art-old".into(),
+                kind: "patch".into(),
+                name: "changes.patch".into(),
+            },
+            LiveContentNode::ArtifactFile {
+                name: "lib.rs".into(),
+                artifact_id: "art-old".into(),
+                artifact_ref: "art-old".into(),
+            },
+        ];
+        let mut pane = LiveContentPane {
+            nodes,
+            sections: vec![(0, "Artifacts")],
+            selected: 0,
+            folded: std::collections::HashMap::new(),
+            artifact_folded: std::collections::HashMap::new(),
+            active_artifact_id: Some("art-new".into()),
+        };
+
+        assert!(
+            !pane.is_artifact_folded("art-new"),
+            "active artifact must start unfolded"
+        );
+        assert!(
+            pane.is_artifact_folded("art-old"),
+            "older artifacts stay folded by default"
+        );
+        let visible = pane.visible_indices();
+        assert!(visible.contains(&1), "active artifact's file visible by default");
+        assert!(!visible.contains(&3), "older artifact's file hidden by default");
+
+        // First `x` on the active artifact folds it (flips from the default).
+        pane.toggle_fold();
+        assert!(
+            pane.is_artifact_folded("art-new"),
+            "explicit `x` must fold the active artifact"
+        );
+        let visible = pane.visible_indices();
+        assert!(!visible.contains(&1), "active artifact's file hidden after fold");
+
+        // Selecting the older artifact and toggling unfolds it from its
+        // folded default.
+        pane.selected = 2;
+        pane.toggle_fold();
+        assert!(!pane.is_artifact_folded("art-old"));
+        assert!(pane.visible_indices().contains(&3));
     }
 
     #[test]

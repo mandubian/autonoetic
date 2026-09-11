@@ -3855,6 +3855,61 @@ do not re-issue."
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if has_unresolved {
+                // Surface the stored bundle-health evidence so agents (and
+                // operators) can see WHAT was flagged instead of guessing:
+                // the analysis ran at candidate creation; promote only reads
+                // the frozen verdict.
+                let detected: Vec<String> = rev
+                    .metadata_json
+                    .get("detected_external_imports")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let dependency_files: Vec<String> = rev
+                    .metadata_json
+                    .get("dependency_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut evidence = Vec::new();
+                if !dependency_files.is_empty() {
+                    evidence.push(format!(
+                        "dependency files: {}",
+                        dependency_files.join(", ")
+                    ));
+                }
+                if !detected.is_empty() {
+                    evidence.push(format!(
+                        "detected external imports: {}",
+                        detected.join(", ")
+                    ));
+                }
+                let evidence_suffix = if evidence.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", evidence.join("; "))
+                };
+                // When every flagged import is gateway-injected (PYTHONPATH,
+                // not on PyPI), a packager pass cannot clear the gate — the
+                // flagged names indicate a scanner false positive (e.g. prose
+                // misparsed as an import) or a stale analysis. Prescribe a
+                // re-create instead so the health report is recomputed.
+                let all_injected = !detected.is_empty()
+                    && detected.iter().all(|m| {
+                        let normalized = crate::runtime::install_contract::normalize_import_token(m);
+                        crate::runtime::install_contract::GATEWAY_INJECTED_PYTHON_MODULES
+                            .contains(&normalized)
+                    });
                 if let Some(rejection) = record_attempt(
                     "rejected",
                     Some("promotion_gate"),
@@ -3862,16 +3917,40 @@ do not re-issue."
                 ) {
                     return Ok(Some(rejection.to_tool_error().to_string()));
                 }
-                return Ok(Some(
-                    ToolError::permission(
-                        "Promotion gate: revision has unresolved dependencies. \
-                     Run packager.default to install dependencies as layers, \
-                     then re-submit the revision."
+                let (message, repair_hint) = if all_injected {
+                    (
+                        format!(
+                            "Promotion gate: revision has unresolved dependencies{}. \
+                         Every flagged import is a gateway-injected module (available \
+                         inside sandboxes via PYTHONPATH, not installable from PyPI), \
+                         so a packager pass CANNOT clear this gate — it is a dependency-\
+                         scanner false positive or a stale analysis. Re-create the \
+                         candidate revision from the same artifact so the bundle health \
+                         report is recomputed; do not run packager.default for this.",
+                            evidence_suffix
+                        ),
+                        "Re-create the candidate revision from the artifact (recomputes the \
+                         dependency scan), then re-submit and retry. If the flag persists on \
+                         a current gateway build, file it as a gateway defect."
                             .to_string(),
                     )
-                    .with_code("unresolved_dependencies")
-                    .with_repair_hint("Resolve the revision's dependencies (install as layers), then re-submit and retry.")
-                    .to_error_response(),
+                } else {
+                    (
+                        format!(
+                            "Promotion gate: revision has unresolved dependencies{}. \
+                         Run packager.default to install dependencies as layers, \
+                         then re-submit the revision.",
+                            evidence_suffix
+                        ),
+                        "Resolve the revision's dependencies (install as layers), then re-submit and retry."
+                            .to_string(),
+                    )
+                };
+                return Ok(Some(
+                    ToolError::permission(message)
+                        .with_code("unresolved_dependencies")
+                        .with_repair_hint(repair_hint)
+                        .to_error_response(),
                 ));
             }
             if let Some((code, message)) =

@@ -746,6 +746,144 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
     );
 }
 
+/// When every flagged import is a gateway-injected module (PYTHONPATH, not on
+/// PyPI), the gate must say so and prescribe a candidate re-create — not the
+/// packager remedy, which cannot clear it. Regression for the agent-browser
+/// deadlock (session-57e3d0b5): the only real remedy is recomputing the
+/// bundle health report.
+#[test]
+fn test_promote_unresolved_all_gateway_injected_prescribes_recreate() {
+    let agent_id = "hr.injected.deps";
+    let skill = high_risk_skill_md(agent_id);
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let builder_dir = agents_dir.join("specialized_builder.default");
+    std::fs::create_dir_all(&builder_dir).unwrap();
+
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let config = GatewayConfig {
+        runtime_dir: gateway_dir.clone(),
+        agents_dir: agents_dir.clone(),
+        require_operator_approval_for_new_agents: false,
+        ..Default::default()
+    };
+
+    let revision_id = "rev_sha256:test_injected_deps_001";
+    let revision_dir = gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(revision_id);
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(revision_dir.join("SKILL.md"), &skill).unwrap();
+
+    let artifact_id = "art_injected_test";
+    let rev = AgentRevisionRecord {
+        revision_id: revision_id.to_string(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: Some(artifact_id.to_string()),
+        content_digest: "sha256:test_injected".to_string(),
+        runtime_lock_hash: "sha256:test_lock".to_string(),
+        manifest_hash: "sha256:test_manifest".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
+        created_by_id: "test_harness".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Candidate,
+        metadata_json: serde_json::json!({
+            "has_unresolved_dependencies": true,
+            "dependency_files": [],
+            "detected_external_imports": ["``autonoetic_sdk"],
+        }),
+        short_id: String::new(),
+        detected_network_hosts: None,
+        signature: None,
+        signer_id: None,
+    };
+    store.insert_agent_revision(&rev).unwrap();
+
+    let registry = default_registry();
+    let eval_manifest = evaluator_manifest();
+    let eval_policy = PolicyEngine::new(eval_manifest.clone());
+    record_promotion(
+        &registry,
+        &eval_manifest,
+        &eval_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        artifact_id,
+        "sealed_evaluator",
+        true,
+        "session-sealed_evaluator",
+    );
+
+    let audit_manifest = auditor_manifest();
+    let audit_policy = PolicyEngine::new(audit_manifest.clone());
+    record_promotion(
+        &registry,
+        &audit_manifest,
+        &audit_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        artifact_id,
+        "auditor",
+        true,
+        "session-auditor",
+    );
+
+    let b_manifest = builder_manifest();
+    let b_policy = PolicyEngine::new(b_manifest.clone());
+    let result = try_promote(
+        &registry,
+        &b_manifest,
+        &b_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        store,
+        agent_id,
+        revision_id,
+    );
+
+    assert!(
+        as_outcome(result.clone()).is_err(),
+        "promote should fail with unresolved dependencies"
+    );
+    let err = gate_err(result);
+    assert!(
+        err.contains("unresolved dependencies"),
+        "error should mention unresolved dependencies: {err}"
+    );
+    assert!(
+        err.contains("``autonoetic_sdk"),
+        "error should quote the detected import evidence: {err}"
+    );
+    assert!(
+        err.contains("gateway-injected"),
+        "error should name the gateway-injected special case: {err}"
+    );
+    assert!(
+        err.contains("Re-create the candidate revision"),
+        "repair hint should prescribe re-creating the candidate: {err}"
+    );
+    assert!(
+        !err.contains("Run packager.default"),
+        "packager remedy must not be offered when only gateway-injected modules are flagged: {err}"
+    );
+}
+
 /// § 3.8 — Promotion evidence is keyed by canonical content_digest, not by revision timestamp.
 #[test]
 fn test_promote_accepts_precreate_records_when_digest_matches() {
