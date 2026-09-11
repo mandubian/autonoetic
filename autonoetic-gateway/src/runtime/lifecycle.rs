@@ -48,7 +48,6 @@ use crate::runtime::prompt_budget::{
     truncate_tool_result as truncate_tool_result_once,
 };
 use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
-use autonoetic_types::tool_error::ToolErrorType;
 use autonoetic_types::trajectory::FeedbackEvent;
 
 // ---------------------------------------------------------------------------
@@ -359,18 +358,10 @@ pub struct AgentExecutor {
 
 use crate::runtime::tool_dispatch::{
     effective_max_session_turns, effective_max_session_turns_hard,
-    loop_guard_from_config_and_manifest, tool_result_counts_as_progress,
+    loop_guard_from_config_and_manifest,
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
 use std::sync::atomic::AtomicU64;
-
-fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
-    value.get("ok").and_then(|v| v.as_bool()) == Some(false)
-        && value
-            .get("exit_code")
-            .and_then(|v| v.as_i64())
-            .map_or(false, |code| code >= 128)
-}
 
 /// Best-effort normalization of an error message so semantically identical
 /// errors compare equal even when incidental details (ids, paths, timestamps)
@@ -5271,7 +5262,30 @@ impl AgentExecutor {
                         tracing::debug!(target: "session_timeline", error = %err, "guard.tripped timeline emit failed");
                     }
                 }
-                return Err(self.save_and_yield(history, turn_id, YieldReason::MaxTurnsReached, None, e));
+                // Yield with a LoopGuard-specific reason, NOT MaxTurnsReached:
+                // the guard tripped on a named condition, not the turn cap.
+                // Repairable trip classes stay auto-resumable so the #847
+                // close path suspends the session instead of cascading
+                // `fail_workflow_for_root_session` over in-flight children
+                // (observed live: a root-planner P-7.7 trip marked the whole
+                // workflow failed while agent-factory was mid-task, which
+                // manufactured the factory's P-7.5 terminal-workflow
+                // hard-trip). Non-repairable classes keep the old terminal
+                // close behavior via the `repairable: false` flag.
+                let yield_reason = YieldReason::LoopGuardTripped {
+                    reason_code: self
+                        .guard
+                        .last_trip_reason()
+                        .map(|r| r.code().to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    repairable: self
+                        .guard
+                        .last_trip_reason()
+                        .map(|r| r.is_session_repairable())
+                        .unwrap_or(false),
+                    repairs: self.guard.loop_guard_repairs_used,
+                };
+                return Err(self.save_and_yield(history, turn_id, yield_reason, None, e));
             }
 
             if self.session_state == autonoetic_types::agent::SessionState::Normal
@@ -6117,23 +6131,28 @@ impl AgentExecutor {
                     // so one unrecoverable cause surfacing through different tools
                     // trips the guard even when no single tool's budget is hit.
                     self.guard.register_error(_name, result);
-                    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                        let error_type = parsed.get("error_type")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| match s {
-                                "validation" => Some(ToolErrorType::Validation),
-                                "permission" => Some(ToolErrorType::Permission),
-                                "resource" => Some(ToolErrorType::Resource),
-                                "execution" => Some(ToolErrorType::Execution),
-                                "fatal" => Some(ToolErrorType::Fatal),
-                                "conflict" => Some(ToolErrorType::Conflict),
-                                "quota_exceeded" => Some(ToolErrorType::QuotaExceeded),
-                                "not_found" => Some(ToolErrorType::NotFound),
-                                "timeout" => Some(ToolErrorType::Timeout),
-                                "sandbox_unavailable" => Some(ToolErrorType::SandboxUnavailable),
-                                _ => None,
-                            });
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id) {
+                    let tool_call = tool_calls.iter().find(|tc| tc.id == *id);
+                    let classification = tool_call
+                        .map(|tc| {
+                            crate::runtime::guard::classify_tool_result(
+                                &tc.name,
+                                &tc.arguments,
+                                result,
+                            )
+                        });
+                    match (&classification, tool_call) {
+                        // `ok: false` deterministic failure: feed the feedback
+                        // loop, then route to the irrecoverable-rejection
+                        // counter (#718) or the per-tool failure budget.
+                        (
+                            Some(crate::runtime::guard::ToolResultClassification {
+                                verdict: crate::runtime::guard::ToolResultVerdict::Failure,
+                                error_type,
+                                irrecoverable,
+                                signal_derived,
+                            }),
+                            Some(tc),
+                        ) => {
                             if let Some(et) = error_type.clone() {
                                 let message_signature = normalize_error_signature(
                                     parsed.get("message").and_then(|v| v.as_str()).unwrap_or(""),
@@ -6144,23 +6163,14 @@ impl AgentExecutor {
                                     message_signature,
                                 });
                             }
-                        }
-                        let signal_derived = is_signal_derived_exit(&parsed);
-                        let irrecoverable = error_type
-                            .as_ref()
-                            .map(crate::runtime::guard::LoopGuard::is_irrecoverable)
-                            .unwrap_or(false)
-                            || signal_derived;
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
-                        {
-                            if irrecoverable {
-                                // #718: irrecoverable rejections are excluded
-                                // from the per-tool failure budget (retrying
-                                // can't fix them), but re-issuing the *same*
-                                // call for the *same* deterministic rejection
-                                // is a no-progress loop (P-7.7). Count it; the
-                                // guard trips once the same (tool, error)
-                                // rejection recurs past its threshold.
+                            if *irrecoverable {
+                                // Irrecoverable rejections are excluded from
+                                // the per-tool failure budget (retrying can't
+                                // fix them), but re-issuing the *same* call for
+                                // the *same* deterministic rejection is a
+                                // no-progress loop (P-7.7). Count it; the guard
+                                // trips once the same (tool, error) rejection
+                                // recurs past its threshold.
                                 self.guard.register_irrecoverable(&tc.name, result);
                                 if !self.blocked_state_event_emitted {
                                     let payload = serde_json::json!({
@@ -6192,58 +6202,39 @@ impl AgentExecutor {
                                 );
                             }
                         }
-                    } else if tool_result_counts_as_progress(result) {
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
-                        {
-                            // Suppress progress reset for stagnant
-                            // no-op polls (e.g. workflow_wait that
-                            // returned "still running" after 0s). These
-                            // carry no new information and should
-                            // advance the no-progress counter instead
-                            // of resetting it (issue: polling churn).
-                            if crate::runtime::tool_dispatch::is_stagnant_poll(
-                                &tc.name,
-                                result,
-                            ) {
-                                continue;
-                            }
-                            // Tools may opt into terminal-progress
-                            // semantics by stamping
-                            // `side_effect_state: "committed"` in
-                            // their result (P-5.14 / P-6.26).
-                            // Terminal events clear the
-                            // rotating-polling window — a real
-                            // side effect just landed, so any prior
-                            // monotony is stale (issue #287).
-                            let terminal = parsed
-                                .get("side_effect_state")
-                                .and_then(|v| v.as_str())
-                                == Some("committed");
-                            // Reading artifact/content file bytes is
-                            // substantive progress for review agents
-                            // (static_evaluator, auditor, etc.). Keep
-                            // metadata/files resolves as read-only
-                            // probes so a planner cannot reset the
-                            // guard by re-listing artifacts.
-                            let is_resolve_content_read =
-                                crate::runtime::tool_dispatch::is_resolve_content_read(
-                                    &tc.name,
-                                    &tc.arguments,
-                                );
-                            if crate::runtime::tool_dispatch::is_read_only_tool(&tc.name)
-                                && !is_resolve_content_read
-                            {
+                        // Successful call: apply the verdict's accounting.
+                        (Some(classification), Some(tc)) => {
+                            match classification.verdict {
+                                // Stagnant no-op polls (e.g. workflow_wait that
+                                // returned "still running" after 0s) carry no
+                                // new information: they must advance the
+                                // no-progress counter instead of resetting it
+                                // (issue: polling churn). Unparsed and
+                                // unrecognized results are recorded in history
+                                // but not accounted by the guard.
+                                crate::runtime::guard::ToolResultVerdict::StagnantPoll
+                                | crate::runtime::guard::ToolResultVerdict::Unparsed
+                                | crate::runtime::guard::ToolResultVerdict::Unrecognized => {}
                                 // Read-only probes advance no workflow — track
                                 // for rotating-polling detection but do not
                                 // reset the no-progress counter (#701).
-                                self.guard
-                                    .register_readonly_progress(&tc.name, &tc.arguments);
-                            } else if terminal {
-                                self.guard
-                                    .register_progress_terminal(&tc.name, &tc.arguments);
-                            } else {
-                                self.guard
-                                    .register_progress(&tc.name, &tc.arguments);
+                                crate::runtime::guard::ToolResultVerdict::ReadOnlyProgress => {
+                                    self.guard
+                                        .register_readonly_progress(&tc.name, &tc.arguments);
+                                }
+                                // Terminal events clear the rotating-polling
+                                // window — a real side effect just landed, so
+                                // any prior monotony is stale (issue #287).
+                                crate::runtime::guard::ToolResultVerdict::TerminalProgress => {
+                                    self.guard
+                                        .register_progress_terminal(&tc.name, &tc.arguments);
+                                }
+                                crate::runtime::guard::ToolResultVerdict::Progress => {
+                                    self.guard.register_progress(&tc.name, &tc.arguments);
+                                }
+                                crate::runtime::guard::ToolResultVerdict::Failure => {
+                                    unreachable!("failure verdict handled above")
+                                }
                             }
 
                             // RFC #776 Part B.4: track spawn structural identity
@@ -6283,6 +6274,9 @@ impl AgentExecutor {
                                 }
                             }
                         }
+                        // No matching tool call for this result id — nothing
+                        // to classify or account.
+                        _ => {}
                     }
                     if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
                         self.guard.register_child_failure();
@@ -9044,7 +9038,7 @@ mod tests {
 
 #[cfg(test)]
 mod divergence_robustness_tests {
-    use super::is_signal_derived_exit;
+    use crate::runtime::guard::is_signal_derived_exit;
 
     #[test]
     fn signal_derived_exit_codes_are_irrecoverable() {

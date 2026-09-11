@@ -202,13 +202,47 @@ Additional approval features:
 Do NOT add a `warnings_acknowledged` boolean — the LLM will just set it to `true`. The evidence field is the only mechanical proof.
 
 ### LoopGuard
-Two trip conditions, independent:
-1. **Max loops without progress**: `current_loops >= max_loops_without_progress` (default 10). Reset by `register_progress()` (any tool returning `ok: true`).
-2. **Per-tool failure budget**: `tool_failure_counts[tool_name] >= max_tool_failures` (default 8). NOT reset by `register_progress()`. Counts total failures per tool name regardless of arguments/hosts.
+The state machine lives in `runtime/guard.rs`; the accounting policy (read-only
+list, stagnant-poll shapes, error-type parsing) lives right next to it in
+`classify_tool_result` — one place to add a tool name or a new rule. It has
+**12 independent trip conditions** (`LoopGuardTripReason`), not 2:
+1. **NoMeaningfulProgress** (P-7.7, default 10 cycles) — reset only by
+   *meaningful* progress: a new (tool, args) fingerprint. Read-only probes
+   (`is_read_only_tool`) and stagnant polls (`is_stagnant_poll`, e.g.
+   `workflow_wait` that returned "still running" after 0s) never reset it.
+2. **ToolFailureBudget** (P-7.5, default 8 per tool) — total failures per tool
+   name regardless of arguments. Validation and irrecoverable errors excluded.
+3. **RotatingPollingPattern** (P-7.19) — last 16 successful calls used ≤6
+   distinct fingerprints.
+4. **ChildFailureBudget** (P-7.20, default 5) — also applies a +2 loop penalty
+   per child failure (#704).
+5. **RedundantRosterPolling** (P-7.19, 3 identical roster reads) — fast path.
+6. **LlmFailureBudget** (P-7.5, 3 consecutive LLM failures).
+7. **WorkflowTerminal** (P-7.5) — hard-trip on a deterministic terminal-workflow
+   tool error (e.g. `agent_spawn` against a failed workflow).
+8. **RecurringUnrecoverableError** (#703), 9. **RepeatedIrrecoverableRejection**
+   (#718), 10. **RepeatedSpawnIdentity** (#776 B.4), 11.
+   **RedundantAnnotationLoop** (#1092), 12. **IrrecoverableGateFlailing**.
 
-Both are configurable via `loop_guard:` in `config-template.yaml`.
+**Trips suspend, they don't cascade.** A trip yields
+`YieldReason::LoopGuardTripped { reason_code, repairable, repairs }` (not
+`MaxTurnsReached`), so the #847 close path suspends the session instead of
+closing as an error — grants and workflow survive, in-flight children keep
+running. Behavioral trip classes (`is_session_repairable()`) auto-resume on the
+next inbound signal: `restore_into` applies `clear_trip_for_repair()` (clears
+the latch + behavioral counters, spends one unit of the repair budget,
+`MAX_LOOP_GUARD_REPAIRS = 3`) and the resumed turn gets the corrective trip
+prose as a system message. Exhausted budget → terminal close; the operator
+forks or restarts. Deterministic trips (`WorkflowTerminal`,
+`ToolFailureBudget`, `ChildFailureBudget`, `IrrecoverableGateFlailing`) are
+never auto-resumed.
 
-When modifying `LoopGuard`, update all checkpoint construction sites (grep `loop_guard_state: `).
+All knobs are configurable via `loop_guard:` in `config-template.yaml`.
+
+When modifying `LoopGuard`, update all checkpoint construction sites (grep
+`loop_guard_state: `), the Ri-0.12 closed-list classification and roundtrip
+samples in `tests/constitution/rights_mid_bucket.rs`, and
+`docs/reference/config.md` if defaults changed.
 
 ## Testing
 

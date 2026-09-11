@@ -60,138 +60,15 @@ impl Ri06CapabilitySnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// LoopGuard helpers
+// LoopGuard classification
 // ---------------------------------------------------------------------------
-
-pub(crate) fn tool_result_counts_as_progress(result: &str) -> bool {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-        if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
-            return ok;
-        }
-        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
-            return !approval_required;
-        }
-        if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
-            return exit_code == 0;
-        }
-        if parsed.get("error").is_some() || parsed.get("error_type").is_some() {
-            return false;
-        }
-        return true;
-    }
-    false
-}
-
-/// Returns `true` when the tool result is a stagnant no-op — a successful
-/// call that carries no new information and therefore should NOT reset the
-/// loop-guard's no-progress counter.
-///
-/// Currently covers:
-/// - `workflow_wait` with `waited_secs == 0` and `join_satisfied == false`
-///   (probe returned "still running" — the agent already knew this)
-/// - `planframe_amend` with `progress_recorded == false` and
-///   `requires_regate == false` (a cosmetic-only amend that changed nothing
-///   but title/objective/reason text — no step status moved, no envelope
-///   expanded). Observed in `session-9d5b3ef1`: the planner re-sent the same
-///   single step 11 times; every amend returned `ok: true` and reset the
-///   no-progress counter, so `max_loops_without_progress` never tripped.
-///   An amend that marks a step `completed` carries `progress_recorded: true`
-///   and is NOT stagnant.
-pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
-    if tool_name == "workflow_wait" {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-            let waited = parsed.get("waited_secs").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
-            let satisfied = parsed.get("join_satisfied").and_then(|v| v.as_bool()).unwrap_or(false);
-            let failed = parsed.get("any_failed").and_then(|v| v.as_bool()).unwrap_or(false);
-            // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
-            return waited == 0 && !satisfied && !failed;
-        }
-        return false;
-    }
-    if tool_name == "planframe_amend" {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-            // Only a successful, cosmetic-only amend with no step-status
-            // transition is stagnant. Envelope-expanding amends
-            // (`requires_regate: true`) and progress-recording amends
-            // (`progress_recorded: true`) reset the counter as usual.
-            let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-            let requires_regate = parsed
-                .get("requires_regate")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let progress_recorded = parsed
-                .get("progress_recorded")
-                .and_then(|v| v.as_bool())
-                // Default to true when absent so older shards / partial
-                // results never get silently suppressed.
-                .unwrap_or(true);
-            return ok && !requires_regate && !progress_recorded;
-        }
-        return false;
-    }
-    false
-}
-
-/// Read-only, side-effect-free tools whose successful result advances no
-/// workflow (#701). A successful call to one of these must NOT reset the
-/// LoopGuard's no-progress counter — otherwise a planner can interleave one
-/// read-only probe between every failed mutation and keep
-/// `max_loops_without_progress` from ever tripping (observed in
-/// `session-cc54cec3`, which wasted ~30 planner rounds this way).
-///
-/// This is the vetted subset observed in the death-spiral post-mortem plus the
-/// obvious state-query tools (including roster directory reads). Being
-/// conservative is deliberate: labelling a tool that actually mutates state as
-/// read-only would let a real loop run unbounded, so only tools known to be
-/// pure reads are listed.
-///
-/// Note: `resolve` is listed here because `resolve(include=metadata)` and
-/// `resolve(include=files)` are pure probes. `resolve(include=content)` is
-/// treated as substantive progress at the call site via
-/// `is_resolve_content_read`.
-pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "resolve"
-            | "workflow_state"
-            | "planframe_get"
-            | "planframe_list"
-            | "planframe_history"
-            | "approval_list"
-            | "approval_status"
-            | "agent_discover"
-            | "agent_inspect"
-            | "agent_list"
-            | "artifact_inspect"
-            | "session_peek"
-            | "tool_discover"
-            | "agent_revision_schema"
-            | "promotion_query"
-            | "knowledge_recall"
-            | "knowledge_search"
-            | "digest_query"
-            | "observability_search"
-            | "observability_read"
-            | "observability_read_reasoning"
-            | "execution_search"
-    )
-}
-
-/// Returns true when a tool call is `resolve(include="content")`.
-///
-/// Content reads are substantive progress for review agents, so they should
-/// reset the LoopGuard no-progress counter even though `resolve` is otherwise
-/// classified as read-only (see `is_read_only_tool`). Metadata and files
-/// resolves remain read-only probes.
-pub(crate) fn is_resolve_content_read(tool_name: &str, arguments_json: &str) -> bool {
-    if tool_name != "resolve" {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(arguments_json)
-        .ok()
-        .and_then(|v| v.get("include").and_then(|x| x.as_str().map(|s| s == "content")))
-        .unwrap_or(false)
-}
+//
+// The classification policy (read-only list, stagnant-poll shapes, progress
+// accounting, error-type parsing) lives in `runtime/guard.rs` next to the
+// state machine it feeds — one place to add a tool name or a new
+// incident-shaped rule. Re-exported here for the call sites that historically
+// imported these helpers from this module.
+pub(crate) use crate::runtime::guard::tool_result_counts_as_progress;
 
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
@@ -600,10 +477,8 @@ impl AgentExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        child_tool_tier_filter_for_manifest, is_resolve_content_read, is_stagnant_poll,
-        tool_result_counts_as_progress,
-    };
+    use super::{child_tool_tier_filter_for_manifest, tool_result_counts_as_progress};
+    use crate::runtime::guard::{is_resolve_content_read, is_stagnant_poll};
     use autonoetic_types::agent::{AgentManifest, ToolTier};
     use autonoetic_types::capability::Capability;
 

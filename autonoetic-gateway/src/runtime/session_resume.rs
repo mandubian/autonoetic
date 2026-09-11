@@ -105,17 +105,28 @@ pub(crate) fn should_auto_resume_checkpoint_yield_reason(
     yield_reason: &crate::runtime::checkpoint::YieldReason,
 ) -> bool {
     use crate::runtime::checkpoint::YieldReason;
-    matches!(
-        yield_reason,
+    match yield_reason {
         YieldReason::Hibernation
-            | YieldReason::BudgetExhausted
-            | YieldReason::WaitingForChild { .. }
-            | YieldReason::ManualStop
-            | YieldReason::Error(_)
-            // A parked resident session exists precisely to be resumed by an
-            // inbound message; excluding it here would strand every delivery.
-            | YieldReason::Idle { .. }
-    )
+        | YieldReason::BudgetExhausted
+        | YieldReason::WaitingForChild { .. }
+        | YieldReason::ManualStop
+        | YieldReason::Error(_)
+        // A parked resident session exists precisely to be resumed by an
+        // inbound message; excluding it here would strand every delivery.
+        | YieldReason::Idle { .. } => true,
+        // A LoopGuard trip suspends the session (closing it as an error would
+        // cascade-fail the workflow and every in-flight child). Behavioral
+        // trip classes resume on the next inbound signal — the resume applies
+        // the one-shot repair (`LoopGuard::clear_trip_for_repair`) — but only
+        // while the session's repair budget lasts. Non-repairable classes
+        // (workflow-terminal, exhausted failure budgets) never auto-resume.
+        YieldReason::LoopGuardTripped {
+            repairable,
+            repairs,
+            ..
+        } => *repairable && *repairs < crate::runtime::guard::MAX_LOOP_GUARD_REPAIRS,
+        _ => false,
+    }
 }
 
 pub(crate) fn build_user_ask_answer_tool_result_json(interaction: &UserInteraction) -> anyhow::Result<String> {
@@ -452,5 +463,61 @@ mod session_resume_tests {
         ] {
             assert_eq!(verify_trigger_coherence(&t, &reason), Ok(()));
         }
+    }
+
+    // ── LoopGuard trip auto-resume gate ──────────────────────────────────
+
+    #[test]
+    fn repairable_loop_guard_trip_is_auto_resumable_within_budget() {
+        let reason = crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+            reason_code: "no_meaningful_progress".into(),
+            repairable: true,
+            repairs: 0,
+        };
+        assert!(should_auto_resume_checkpoint_yield_reason(&reason));
+        // Under the cap: still resumable.
+        let reason = crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+            reason_code: "no_meaningful_progress".into(),
+            repairable: true,
+            repairs: crate::runtime::guard::MAX_LOOP_GUARD_REPAIRS - 1,
+        };
+        assert!(should_auto_resume_checkpoint_yield_reason(&reason));
+    }
+
+    #[test]
+    fn repair_budget_exhaustion_stops_auto_resume() {
+        let reason = crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+            reason_code: "no_meaningful_progress".into(),
+            repairable: true,
+            repairs: crate::runtime::guard::MAX_LOOP_GUARD_REPAIRS,
+        };
+        assert!(
+            !should_auto_resume_checkpoint_yield_reason(&reason),
+            "past the repair budget the trip closes terminally — operator forks or restarts"
+        );
+    }
+
+    #[test]
+    fn non_repairable_loop_guard_trip_never_auto_resumes() {
+        for code in ["workflow_terminal", "tool_failure_budget", "child_failure_budget"] {
+            let reason = crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+                reason_code: code.into(),
+                repairable: false,
+                repairs: 0,
+            };
+            assert!(
+                !should_auto_resume_checkpoint_yield_reason(&reason),
+                "{code} trips are deterministic — resume would re-trip instantly"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_max_turns_reached_yield_still_not_auto_resumable() {
+        // The pre-fix behavior — LoopGuard trips yielded MaxTurnsReached —
+        // must stay non-resumable so legacy checkpoints keep their semantics.
+        assert!(!should_auto_resume_checkpoint_yield_reason(
+            &crate::runtime::checkpoint::YieldReason::MaxTurnsReached
+        ));
     }
 }

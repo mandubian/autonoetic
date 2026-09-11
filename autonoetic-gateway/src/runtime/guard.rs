@@ -333,6 +333,44 @@ pub struct LoopGuard {
     /// `idle_loop_floor_secs`. Absent in legacy snapshots.
     #[serde(default)]
     pub last_loop_at_ms: Option<u64>,
+    /// How many times this session has already been suspended by a LoopGuard
+    /// trip and repaired on resume (see [`Self::clear_trip_for_repair`]).
+    /// Persisted with the checkpointed guard state so the repair budget
+    /// survives suspend/resume; absent in legacy snapshots.
+    #[serde(default)]
+    pub loop_guard_repairs_used: u32,
+}
+
+/// Maximum number of LoopGuard-trip repairs a single session may consume.
+/// Each signal-driven resume of a `LoopGuardTripped` checkpoint with a
+/// repairable trip reason spends one repair; once exhausted, the yield
+/// reason stops being auto-resumable and the session closes terminally —
+/// the operator must fork or start a new session. Mechanical bound, not
+/// LLM judgment: the model cannot talk its way past the cap.
+pub const MAX_LOOP_GUARD_REPAIRS: u32 = 3;
+
+impl LoopGuardTripReason {
+    /// Can this trip be repaired by resuming the session? Behavioral trips
+    /// diagnose the agent's *strategy* — spin, polling, annotation, repeated
+    /// spawn/error shapes — and a resume that clears the counter and hands
+    /// the corrective trip prose back to the model is a meaningful retry.
+    /// Budget/deterministic trips are not repairable at the session level:
+    /// `WorkflowTerminal` needs a new workflow (fork), and exhausted
+    /// failure/child budgets mean the session's record, not its momentary
+    /// state, is the problem — an operator must intervene or the session ends.
+    pub fn is_session_repairable(&self) -> bool {
+        matches!(
+            self,
+            LoopGuardTripReason::NoMeaningfulProgress { .. }
+                | LoopGuardTripReason::RotatingPollingPattern { .. }
+                | LoopGuardTripReason::RedundantRosterPolling { .. }
+                | LoopGuardTripReason::RedundantAnnotationLoop { .. }
+                | LoopGuardTripReason::RepeatedSpawnIdentity { .. }
+                | LoopGuardTripReason::RecurringUnrecoverableError { .. }
+                | LoopGuardTripReason::RepeatedIrrecoverableRejection { .. }
+                | LoopGuardTripReason::LlmFailureBudget { .. }
+        )
+    }
 }
 
 impl LoopGuard {
@@ -369,6 +407,7 @@ impl LoopGuard {
             last_annotation_tool: String::new(),
             idle_loop_floor_secs: default_idle_loop_floor_secs(),
             last_loop_at_ms: None,
+            loop_guard_repairs_used: 0,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -408,6 +447,7 @@ impl LoopGuard {
             last_annotation_tool: String::new(),
             idle_loop_floor_secs: cfg.idle_loop_floor_secs,
             last_loop_at_ms: None,
+            loop_guard_repairs_used: 0,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -961,6 +1001,32 @@ impl LoopGuard {
     pub fn restore(state: LoopGuard) -> Self {
         state
     }
+
+    /// One-shot mechanical repair applied when a `LoopGuardTripped`
+    /// checkpoint with a repairable trip reason is resumed. Clears the
+    /// latched trip and the *behavioral* counters that produced it so the
+    /// resumed turn gets a fresh budget; spends one unit of the repair
+    /// budget ([`MAX_LOOP_GUARD_REPAIRS`]).
+    ///
+    /// Deliberately NOT cleared: `tool_failure_counts` and
+    /// `child_failure_count` — those budget trips are classified
+    /// non-repairable ([`LoopGuardTripReason::is_session_repairable`]), and
+    /// if an operator manually resumes such a session the immediate re-trip
+    /// is the honest answer, not a state error to paper over.
+    pub fn clear_trip_for_repair(&mut self) {
+        self.trip_reason = None;
+        self.current_loops = 0;
+        self.consecutive_progress_count = 0;
+        self.last_progress_fingerprint = None;
+        self.recent_fingerprints.clear();
+        self.recent_error_fingerprints.clear();
+        self.llm_failure_count = 0;
+        self.irrecoverable_repeat_counts.clear();
+        self.spawn_identity_counts.clear();
+        self.consecutive_annotation_rounds = 0;
+        self.last_annotation_tool.clear();
+        self.loop_guard_repairs_used = self.loop_guard_repairs_used.saturating_add(1);
+    }
 }
 
 impl Default for LoopGuard {
@@ -997,6 +1063,7 @@ impl Default for LoopGuard {
             last_annotation_tool: String::new(),
             idle_loop_floor_secs: default_idle_loop_floor_secs(),
             last_loop_at_ms: None,
+            loop_guard_repairs_used: 0,
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -1222,6 +1289,285 @@ fn compute_fingerprint(tool_name: &str, arguments: &str) -> (String, u64) {
     tool_name.hash(&mut hasher);
     arguments.hash(&mut hasher);
     (tool_name.to_string(), hasher.finish())
+}
+
+// ---------------------------------------------------------------------------
+// Tool-result classification (the single accounting policy)
+// ---------------------------------------------------------------------------
+//
+// How the LoopGuard accounts a completed tool call used to be decided at the
+// lifecycle call sites: the read-only list lived in `tool_dispatch.rs`, the
+// roster/annotation lists here, error-type parsing and the
+// success/stagnant/terminal decision inline in `lifecycle.rs`. Every new
+// incident-shaped rule meant touching two or three files. This section is now
+// the one place: a pure classifier maps (tool, args, result) to a verdict and
+// the executor just applies it.
+
+/// Best-effort parse of a tool result's `error_type` string into the typed
+/// enum the failure budgets and feedback events use.
+pub(crate) fn parse_tool_error_type(s: Option<&str>) -> Option<ToolErrorType> {
+    s.and_then(|s| match s {
+        "validation" => Some(ToolErrorType::Validation),
+        "permission" => Some(ToolErrorType::Permission),
+        "resource" => Some(ToolErrorType::Resource),
+        "execution" => Some(ToolErrorType::Execution),
+        "fatal" => Some(ToolErrorType::Fatal),
+        "conflict" => Some(ToolErrorType::Conflict),
+        "quota_exceeded" => Some(ToolErrorType::QuotaExceeded),
+        "not_found" => Some(ToolErrorType::NotFound),
+        "timeout" => Some(ToolErrorType::Timeout),
+        "sandbox_unavailable" => Some(ToolErrorType::SandboxUnavailable),
+        _ => None,
+    })
+}
+
+/// True when a tool result represents a process killed by a signal
+/// (`ok: false` with `exit_code >= 128`). Treated as irrecoverable alongside
+/// permission/quota/sandbox errors.
+pub(crate) fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
+    value.get("ok").and_then(|v| v.as_bool()) == Some(false)
+        && value
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .map_or(false, |code| code >= 128)
+}
+
+/// How the guard should account one completed tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolResultVerdict {
+    /// Result was not JSON — the guard cannot classify it; no accounting.
+    Unparsed,
+    /// `ok: false` deterministic failure. `error_type` and `irrecoverable`
+    /// on the classification carry the parsed detail.
+    Failure,
+    /// Parsed JSON that carries neither a success shape nor a failure shape
+    /// (e.g. `approval_required: true`, non-zero `exit_code` with `ok`
+    /// absent). Recorded in history but not accounted by the guard — same
+    /// dead zone the pre-classifier call sites had.
+    Unrecognized,
+    /// Successful no-op probe (`workflow_wait` that returned "still running"
+    /// after 0s, cosmetic `planframe_amend`) — does not reset the
+    /// no-progress counter.
+    StagnantPoll,
+    /// Successful call that stamped `side_effect_state: "committed"`
+    /// (P-5.14 / P-6.26) — terminal-progress evidence; clears the
+    /// rotating-polling window.
+    TerminalProgress,
+    /// Successful read-only probe (`is_read_only_tool`, minus
+    /// `resolve(include="content")`) — window tracking only, no counter
+    /// reset (#701).
+    ReadOnlyProgress,
+    /// Ordinary successful call — resets the no-progress counter.
+    Progress,
+}
+
+/// The full accounting decision for one tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolResultClassification {
+    pub verdict: ToolResultVerdict,
+    /// Parsed error type; `Some` only for `ToolResultVerdict::Failure`.
+    pub error_type: Option<ToolErrorType>,
+    /// The failure is a deterministic gateway-side gate (permission / quota /
+    /// sandbox-unavailable) or a signal-derived exit — excluded from the
+    /// per-tool failure budget and fed to `register_irrecoverable` instead
+    /// (#718). `true` only for `ToolResultVerdict::Failure`.
+    pub irrecoverable: bool,
+    /// The failure came from a signal-killed process (`exit_code >= 128`).
+    /// Reported in the blocked-state operator alert. `true` only for
+    /// `ToolResultVerdict::Failure`.
+    pub signal_derived: bool,
+}
+
+/// Classify one completed tool call. Pure: no guard state, no I/O — the
+/// executor looks at the verdict and calls the matching `register_*`.
+pub(crate) fn classify_tool_result(
+    tool_name: &str,
+    arguments: &str,
+    result_json: &str,
+) -> ToolResultClassification {
+    let no_finding = |verdict| ToolResultClassification {
+        verdict,
+        error_type: None,
+        irrecoverable: false,
+        signal_derived: false,
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result_json) else {
+        return no_finding(ToolResultVerdict::Unparsed);
+    };
+
+    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        let error_type = parse_tool_error_type(parsed.get("error_type").and_then(|v| v.as_str()));
+        let irrecoverable = error_type
+            .as_ref()
+            .map(LoopGuard::is_irrecoverable)
+            .unwrap_or(false)
+            || is_signal_derived_exit(&parsed);
+        return ToolResultClassification {
+            verdict: ToolResultVerdict::Failure,
+            error_type,
+            irrecoverable,
+            signal_derived: is_signal_derived_exit(&parsed),
+        };
+    }
+
+    if !tool_result_counts_as_progress(result_json) {
+        return no_finding(ToolResultVerdict::Unrecognized);
+    }
+
+    let verdict = if is_stagnant_poll(tool_name, result_json) {
+        ToolResultVerdict::StagnantPoll
+    } else if parsed.get("side_effect_state").and_then(|v| v.as_str()) == Some("committed") {
+        ToolResultVerdict::TerminalProgress
+    } else if is_read_only_tool(tool_name) && !is_resolve_content_read(tool_name, arguments) {
+        ToolResultVerdict::ReadOnlyProgress
+    } else {
+        ToolResultVerdict::Progress
+    };
+
+    no_finding(verdict)
+}
+
+/// Whether a tool result counts as progress at all: `ok`, non-`approval_required`,
+/// zero `exit_code`, or no error field. Non-JSON results never count.
+pub(crate) fn tool_result_counts_as_progress(result: &str) -> bool {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+        if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
+            return ok;
+        }
+        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
+            return !approval_required;
+        }
+        if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
+            return exit_code == 0;
+        }
+        if parsed.get("error").is_some() || parsed.get("error_type").is_some() {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+/// Returns `true` when the tool result is a stagnant no-op — a successful
+/// call that carries no new information and therefore should NOT reset the
+/// loop-guard's no-progress counter.
+///
+/// Currently covers:
+/// - `workflow_wait` with `waited_secs == 0` and `join_satisfied == false`
+///   (probe returned "still running" — the agent already knew this)
+/// - `planframe_amend` with `progress_recorded == false` and
+///   `requires_regate == false` (a cosmetic-only amend that changed nothing
+///   but title/objective/reason text — no step status moved, no envelope
+///   expanded). Observed in `session-9d5b3ef1`: the planner re-sent the same
+///   single step 11 times; every amend returned `ok: true` and reset the
+///   no-progress counter, so `max_loops_without_progress` never tripped.
+///   An amend that marks a step `completed` carries `progress_recorded: true`
+///   and is NOT stagnant.
+pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
+    if tool_name == "workflow_wait" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            let waited = parsed
+                .get("waited_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX);
+            let satisfied = parsed
+                .get("join_satisfied")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let failed = parsed
+                .get("any_failed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
+            return waited == 0 && !satisfied && !failed;
+        }
+        return false;
+    }
+    if tool_name == "planframe_amend" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            // Only a successful, cosmetic-only amend with no step-status
+            // transition is stagnant. Envelope-expanding amends
+            // (`requires_regate: true`) and progress-recording amends
+            // (`progress_recorded: true`) reset the counter as usual.
+            let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let requires_regate = parsed
+                .get("requires_regate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let progress_recorded = parsed
+                .get("progress_recorded")
+                .and_then(|v| v.as_bool())
+                // Default to true when absent so older shards / partial
+                // results never get silently suppressed.
+                .unwrap_or(true);
+            return ok && !requires_regate && !progress_recorded;
+        }
+        return false;
+    }
+    false
+}
+
+/// Read-only, side-effect-free tools whose successful result advances no
+/// workflow (#701). A successful call to one of these must NOT reset the
+/// LoopGuard's no-progress counter — otherwise a planner can interleave one
+/// read-only probe between every failed mutation and keep
+/// `max_loops_without_progress` from ever tripping (observed in
+/// `session-cc54cec3`, which wasted ~30 planner rounds this way).
+///
+/// This is the vetted subset observed in the death-spiral post-mortem plus the
+/// obvious state-query tools (including roster directory reads). Being
+/// conservative is deliberate: labelling a tool that actually mutates state as
+/// read-only would let a real loop run unbounded, so only tools known to be
+/// pure reads are listed.
+///
+/// Note: `resolve` is listed here because `resolve(include=metadata)` and
+/// `resolve(include=files)` are pure probes. `resolve(include=content)` is
+/// treated as substantive progress via [`is_resolve_content_read`].
+pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "resolve"
+            | "workflow_state"
+            | "planframe_get"
+            | "planframe_list"
+            | "planframe_history"
+            | "approval_list"
+            | "approval_status"
+            | "agent_discover"
+            | "agent_inspect"
+            | "agent_list"
+            | "artifact_inspect"
+            | "session_peek"
+            | "tool_discover"
+            | "agent_revision_schema"
+            | "promotion_query"
+            | "knowledge_recall"
+            | "knowledge_search"
+            | "digest_query"
+            | "observability_search"
+            | "observability_read"
+            | "observability_read_reasoning"
+            | "execution_search"
+    )
+}
+
+/// Returns true when a tool call is `resolve(include="content")`.
+///
+/// Content reads are substantive progress for review agents, so they should
+/// reset the LoopGuard no-progress counter even though `resolve` is otherwise
+/// classified as read-only (see `is_read_only_tool`). Metadata and files
+/// resolves remain read-only probes.
+pub(crate) fn is_resolve_content_read(tool_name: &str, arguments_json: &str) -> bool {
+    if tool_name != "resolve" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(arguments_json)
+        .ok()
+        .and_then(|v| {
+            v.get("include")
+                .and_then(|x| x.as_str().map(|s| s == "content"))
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2689,5 +3035,192 @@ mod tests {
         guard.check_loop().expect("idle reset applies to loops only");
         assert_eq!(guard.current_loops, 1);
         assert_eq!(guard.tool_failure_counts.get("sandbox_exec"), Some(&2));
+    }
+
+    // ── Tool-result classification (the single accounting policy) ────────
+
+    #[test]
+    fn classify_ok_true_counts_as_progress() {
+        let c = classify_tool_result("sandbox_exec", "{}", r#"{"ok": true}"#);
+        assert_eq!(c.verdict, ToolResultVerdict::Progress);
+        assert_eq!(c.error_type, None);
+        assert!(!c.irrecoverable);
+    }
+
+    #[test]
+    fn classify_non_json_result_is_unparsed() {
+        let c = classify_tool_result("sandbox_exec", "{}", "plain text output");
+        assert_eq!(c.verdict, ToolResultVerdict::Unparsed);
+    }
+
+    #[test]
+    fn classify_json_without_success_or_failure_shape_is_unrecognized() {
+        // approval_required:true and non-zero exit_code without ok:false are
+        // recorded in history but never accounted by the guard — the same
+        // dead zone the pre-classifier call sites had.
+        let approval = classify_tool_result("t", "{}", r#"{"approval_required": true}"#);
+        assert_eq!(approval.verdict, ToolResultVerdict::Unrecognized);
+        let exit = classify_tool_result("t", "{}", r#"{"exit_code": 1}"#);
+        assert_eq!(exit.verdict, ToolResultVerdict::Unrecognized);
+    }
+
+    #[test]
+    fn classify_permission_failure_is_irrecoverable() {
+        let c = classify_tool_result(
+            "sandbox_exec",
+            "{}",
+            r#"{"ok": false, "error_type": "permission", "message": "denied"}"#,
+        );
+        assert_eq!(c.verdict, ToolResultVerdict::Failure);
+        assert!(c.irrecoverable);
+        assert!(!c.signal_derived);
+        assert!(matches!(c.error_type, Some(ToolErrorType::Permission)));
+    }
+
+    #[test]
+    fn classify_execution_failure_is_recoverable() {
+        let c = classify_tool_result(
+            "sandbox_exec",
+            "{}",
+            r#"{"ok": false, "error_type": "execution", "message": "boom"}"#,
+        );
+        assert_eq!(c.verdict, ToolResultVerdict::Failure);
+        assert!(!c.irrecoverable);
+        assert!(matches!(c.error_type, Some(ToolErrorType::Execution)));
+    }
+
+    #[test]
+    fn classify_signal_exit_is_irrecoverable() {
+        let c = classify_tool_result(
+            "sandbox_exec",
+            "{}",
+            r#"{"ok": false, "exit_code": 137}"#,
+        );
+        assert!(c.irrecoverable);
+        assert!(c.signal_derived);
+        assert_eq!(c.error_type, None);
+    }
+
+    #[test]
+    fn classify_zero_second_wait_is_stagnant_poll() {
+        let c = classify_tool_result(
+            "workflow_wait",
+            "{}",
+            r#"{"ok": true, "waited_secs": 0, "join_satisfied": false, "any_failed": false}"#,
+        );
+        assert_eq!(c.verdict, ToolResultVerdict::StagnantPoll);
+        // A wait that actually waited is real sanctioned waiting, not a spin.
+        let waited = classify_tool_result(
+            "workflow_wait",
+            "{}",
+            r#"{"ok": true, "waited_secs": 30, "join_satisfied": false, "any_failed": false}"#,
+        );
+        assert_eq!(waited.verdict, ToolResultVerdict::Progress);
+        // A wait that reports child failure is never stagnant.
+        let failed = classify_tool_result(
+            "workflow_wait",
+            "{}",
+            r#"{"ok": true, "waited_secs": 0, "join_satisfied": false, "any_failed": true}"#,
+        );
+        assert_eq!(failed.verdict, ToolResultVerdict::Progress);
+    }
+
+    #[test]
+    fn classify_committed_side_effect_is_terminal_progress() {
+        let c = classify_tool_result(
+            "promotion_record",
+            "{}",
+            r#"{"ok": true, "side_effect_state": "committed"}"#,
+        );
+        assert_eq!(c.verdict, ToolResultVerdict::TerminalProgress);
+    }
+
+    #[test]
+    fn classify_read_only_probe_is_read_only_progress() {
+        let c = classify_tool_result(
+            "artifact_inspect",
+            "{}",
+            r#"{"ok": true, "artifact": "ar.123"}"#,
+        );
+        assert_eq!(c.verdict, ToolResultVerdict::ReadOnlyProgress);
+    }
+
+    #[test]
+    fn classify_resolve_content_read_is_progress_but_metadata_is_read_only() {
+        let content = classify_tool_result(
+            "resolve",
+            r#"{"include": "content", "ref": "cnt_1"}"#,
+            r#"{"ok": true}"#,
+        );
+        assert_eq!(content.verdict, ToolResultVerdict::Progress);
+        let metadata = classify_tool_result(
+            "resolve",
+            r#"{"include": "metadata", "ref": "cnt_1"}"#,
+            r#"{"ok": true}"#,
+        );
+        assert_eq!(metadata.verdict, ToolResultVerdict::ReadOnlyProgress);
+    }
+
+    // ── Trip repairability + one-shot repair ─────────────────────────────
+
+    #[test]
+    fn behavioral_trips_are_session_repairable_budget_trips_are_not() {
+        assert!(LoopGuardTripReason::NoMeaningfulProgress { cycles: 10 }
+            .is_session_repairable());
+        assert!(LoopGuardTripReason::RotatingPollingPattern {
+            window_size: 16,
+            distinct_count: 3,
+            floor: 6,
+        }
+        .is_session_repairable());
+        assert!(LoopGuardTripReason::LlmFailureBudget { failures: 3 }
+            .is_session_repairable());
+        assert!(!LoopGuardTripReason::WorkflowTerminal {
+            workflow_id: "wf-x".to_string()
+        }
+        .is_session_repairable());
+        assert!(!LoopGuardTripReason::ToolFailureBudget {
+            tool: "t".to_string(),
+            failures: 8
+        }
+        .is_session_repairable());
+        assert!(!LoopGuardTripReason::ChildFailureBudget { failures: 5 }
+            .is_session_repairable());
+    }
+
+    #[test]
+    fn clear_trip_for_repair_clears_trip_and_behavioral_counters() {
+        let mut guard = LoopGuard::new(2);
+        guard.register_failure("t", "", None); // budget counters survive repair
+        guard.register_failure("t", "", None);
+        // Spin to trip NoMeaningfulProgress.
+        guard.check_loop().expect("ok");
+        guard.check_loop().expect("ok");
+        let err = guard.check_loop().expect_err("trips");
+        assert!(err.to_string().contains("without meaningful progress"));
+
+        guard.clear_trip_for_repair();
+        assert_eq!(guard.loop_guard_repairs_used, 1);
+        assert!(guard.last_trip_reason().is_none(), "trip latched cleared");
+        assert_eq!(guard.current_loops, 0, "no-progress counter reset");
+        // check_loop works again after repair.
+        guard.check_loop().expect("guard healthy after repair");
+        // Failure budget survived.
+        assert_eq!(guard.tool_failure_counts.get("t"), Some(&2));
+    }
+
+    #[test]
+    fn repair_budget_exhaustion_is_enforced_by_resume_gate_not_guard() {
+        // The guard itself does not refuse repairs (an operator may manually
+        // resume and must see the honest re-trip); the auto-resume gate in
+        // session_resume.rs enforces MAX_LOOP_GUARD_REPAIRS. Here we only pin
+        // that repeated repairs accumulate.
+        // max_loops = 0 trips on the very first check_loop call.
+        let mut guard = LoopGuard::new(0);
+        for _ in 0..3 {
+            guard.check_loop().expect_err("trips");
+            guard.clear_trip_for_repair();
+        }
+        assert_eq!(guard.loop_guard_repairs_used, 3);
     }
 }

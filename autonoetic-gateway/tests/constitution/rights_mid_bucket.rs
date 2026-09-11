@@ -180,6 +180,10 @@ enum Ri012Category {
 fn ri_0_12_category(reason: &YieldReason) -> Ri012Category {
     match reason {
         YieldReason::MaxTurnsReached
+        // LoopGuard trip: the session suspends (a repaired behavioral trip
+        // resumes on the next inbound signal; a non-repairable one waits for
+        // the operator) — it does not end the session outright.
+        | YieldReason::LoopGuardTripped { .. }
         | YieldReason::BudgetExhausted
         | YieldReason::EmergencyStop { .. }
         | YieldReason::Error(_)
@@ -224,6 +228,11 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
             stop_id: "es-test".to_string(),
         },
         YieldReason::MaxTurnsReached,
+        YieldReason::LoopGuardTripped {
+            reason_code: "no_meaningful_progress".to_string(),
+            repairable: true,
+            repairs: 0,
+        },
         YieldReason::ManualStop,
         YieldReason::Error("something went wrong".to_string()),
         YieldReason::HumanEscalation {
@@ -253,7 +262,7 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
     }
     assert_eq!(
         reasons.len(),
-        12,
+        13,
         "every YieldReason variant needs a roundtrip sample here — \
          add one when you add a variant (the exhaustive match in \
          `ri_0_12_category` is the guard that will not let you forget)"
