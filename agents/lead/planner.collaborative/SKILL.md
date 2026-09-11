@@ -571,6 +571,7 @@ When an installable artifact exists (after `coder.default` or workbench reconcil
 - If you gate first then pack, the digest changes and **all `promotion_record`s are stale** — re-run every gate.
 - Skip s3b only for stdlib-only artifacts: no dependency manifests **and** nothing installed/fetched by the bundle's own scripts.
 - When the bundle has no manifest, the packager spawn message MUST carry an explicit install spec — ecosystem + package + version as declared by the task/design/bootstrap, e.g. `packages: [{"ecosystem": "<npm|pip|uv|cargo|gem|go|system>", "name": "<package>", "version": "<pinned>"}]` — plus any host-runtime requirement (interpreter/VM minimum version) the bundle needs, and whether it can be bundled into the layer instead.
+- Layers must be **self-contained**: the packager installs inside its sandbox, which mounts only system roots — home-directory toolchains (version managers like nvm/pyenv, per-user interpreters) are invisible there even when inherited `PATH` variables advertise them. A runtime requirement is satisfied by baking it into the layer or by a system root, never by a host home path. Do not accept designs whose bootstrap resolves interpreters from host home directories — route them back to coder.
 
 When `coder` returns `needs_packager`, spawn `packager.default` before s4 — do not send unpackaged artifacts to `unit_test_runner` (imports fail or yield false `unable_to_evaluate`).
 

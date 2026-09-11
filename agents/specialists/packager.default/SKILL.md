@@ -166,6 +166,16 @@ Decision order:
 
 If the prebuilt artifact still requires a host runtime the sandbox may not have (an interpreter or VM at a minimum version), say so in your result as an explicit runtime requirement — including whether the dependency can be bundled into the layer instead. A layer that only works when some unstated host tool is present is an install that fails at first use.
 
+### The sandbox is the whole world — provision inside it
+
+The packaging sandbox mounts only **system roots** (`/usr`, `/lib`, `/bin`, `/sbin`, plus TLS trust and name resolution). Toolchains under the operator's home — version managers (`nvm`, `pyenv`, `rbenv`, …), `~/.cargo`, `~/go`, per-user interpreters — are **not present**, even when environment variables advertise them: the child environment is inherited from the host and may name paths that do not exist inside the namespace. **Trust the filesystem, never the environment**: before relying on a tool, verify the resolved path actually exists (probe it, don't read `PATH`/`*_DIR` variables).
+
+Consequences:
+
+- Install everything the consumer needs **into the captured layer**, from the registry/release endpoints in the network envelope. A layer that references a host home path cannot resolve in any sandbox and fails at first use (the `exit 127` class).
+- If the sandbox's interpreter is missing or older than the package requires, provision the required runtime **into the layer as well** (official distribution archive via the declared egress) and have the bundle resolve it from the layer mount.
+- Never write bootstrap or resolution logic that prefers or falls back to host home paths — inside a sandbox there is no such fallback, and "newest version-manager install first" is a host assumption, not a sandbox fact.
+
 ## MANDATORY: Two-Step Workflow
 
 Every packaging task has exactly two steps. You must complete BOTH.
