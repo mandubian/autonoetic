@@ -165,16 +165,22 @@ fn measure(label: &'static str, rel: &str) -> Report {
     let (tools, tool_chars) = tool_schema_chars(&manifest, &ToolTierFilter::all());
 
     let empty = SessionPhase::default();
-    let mut built = SessionPhase::default();
-    built.insert(PHASE_ARTIFACT_BUILT);
+    // Steady state = every gate earned. Gates are keyed on per-agent phase
+    // facts (planners gate on `artifact_built`; agent-factory gates its error
+    // routing and resumption doctrine on `child_spawned`), so the "post"
+    // measurement must insert the full vocabulary, not a hardcoded fact.
+    let mut all_earned = SessionPhase::default();
+    for fact in guidance::ALL_PHASE_FACTS {
+        all_earned.insert(fact);
+    }
 
     // Section gates (RFC P3) evict from the standing body until their phase is
     // reached. Measure the standing halves, and the earned sections separately,
     // so turn 1 reflects the eviction and steady state reflects their return.
     let (core_standing, core_earned) =
-        partition_gated_sections(&core, &manifest.sections, &built);
+        partition_gated_sections(&core, &manifest.sections, &all_earned);
     let (ext_standing, ext_earned) = match extended.as_deref() {
-        Some(e) => partition_gated_sections(e, &manifest.sections, &built),
+        Some(e) => partition_gated_sections(e, &manifest.sections, &all_earned),
         None => (String::new(), Vec::new()),
     };
     let earned: usize = core_earned
@@ -192,7 +198,7 @@ fn measure(label: &'static str, rel: &str) -> Report {
         skill_earned: earned,
         foundation: foundation_chars(),
         guidance_pre: guidance_for(&manifest, &empty).len(),
-        guidance_post: guidance_for(&manifest, &built).len(),
+        guidance_post: guidance_for(&manifest, &all_earned).len(),
     }
 }
 
@@ -225,7 +231,7 @@ fn print_report(r: &Report) {
     );
     if r.skill_earned > 0 {
         println!(
-            "  SKILL.md phase-earned     {:>7} ch  (~{:>5} tok)   [evicted until artifact_built]",
+            "  SKILL.md phase-earned     {:>7} ch  (~{:>5} tok)   [evicted until its phase]",
             r.skill_earned,
             tok(r.skill_earned)
         );
@@ -346,7 +352,13 @@ impl Report {
 /// fragments). The recovery surface is paid by every ReadAccess agent by
 /// design; ceilings re-encoded at the new measured baseline, tight-ratchet.
 const PLANNER_CEILINGS: (usize, usize, usize) = (77_400, 93_900, 106_300);
-const CODER_CEILINGS: (usize, usize, usize) = (62_100, 71_800, 71_800);
+/// Lowered 2026-09-12 with cause: same trim pass as #42602e9b/#1328 —
+/// extended-intro compressed, mock/needs_packager restatements deduplicated,
+/// and the three post-artifact sections (evaluator findings, exec failure,
+/// permission denied) phase-gated on `phase(artifact_built)` (~3.2k ch
+/// deferred). Measured 61489/68031/71196; working ceiling re-encoded,
+/// turn-1/steady unchanged (still ~1% headroom).
+const CODER_CEILINGS: (usize, usize, usize) = (62_100, 68_800, 71_800);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
@@ -370,8 +382,15 @@ const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_200, 94_900, 105_900)
 ///
 /// Both are measured so the phase-gating of each procedure is observable
 /// somewhere. The lead and coder agents see neither tool.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_400, 50_900, 51_200);
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_400, 87_200);
+/// Lowered 2026-09-12 with cause: Status Field Mapping section deleted
+/// (restated Key Rules), artifact_exec-vs-sandbox_exec and network-stop
+/// doctrine deduplicated to pointers. Measured 49656/49656/50483.
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_200, 50_200, 51_000);
+/// Lowered 2026-09-12 with cause: privilege-boundary restatement, Key Rule #1,
+/// capability-detection prose list (restated the table), and STOP-duplication
+/// in the promote-gate subsection removed. Measured 85091/85091/86439;
+/// working ceiling re-encoded, turn-1/steady unchanged.
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_000, 87_200);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.

@@ -56,6 +56,18 @@ metadata:
       - "approval_*"
       - "promotion_*"
     validation: "soft"
+    # RFC P3 — evict, don't defer (mirrors planner.default): these sections only
+    # make sense once this session has built an artifact (federation findings,
+    # artifact_exec failures, permission denials all presuppose one). Gates are
+    # validated at parse time against both the heading and the phase-fact
+    # vocabulary.
+    sections:
+      - heading: "If Evaluator/Auditor Finds Issues"
+        when: phase(artifact_built)
+      - heading: "Artifact Execution Failure Handling"
+        when: phase(artifact_built)
+      - heading: "Permission Denied"
+        when: phase(artifact_built)
     io:
       returns:
         type: object
@@ -122,7 +134,7 @@ Read every file before `artifact_build`. Classify each `import`/`from`/`require`
 
 - Third-party import → declare in `dependency_files` (e.g. `["requirements.txt"]`), set `status: "needs_packager"`, OR rewrite to eliminate it.
 - **NEVER write `requirements.txt` for stdlib-only code** — an empty one triggers the packager downstream and wastes ~5-10 LLM turns. No real deps = no `requirements.txt` file. Return `dependency_files: []`, `status: "ok"`.
-- `pytest`/`jest`/`nose`/`hypothesis` are NOT stdlib — rewrite to the language's built-in runner. `autonoetic_sdk` is NEVER a dependency.
+- `autonoetic_sdk` is NEVER a dependency (it is gateway-provided — see above).
 
 ## Behavior
 - **Start working immediately on turn 1. Do not spend a turn acknowledging the task — reply with your first tool call directly.**
@@ -132,7 +144,7 @@ Read every file before `artifact_build`. Classify each `import`/`from`/`require`
 - Use `content_write` to author NEW files; use `content_patch` to edit existing files in place
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
-- Do not attempt dependency installation — you lack `NetworkAccess` and `sandbox_exec`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
+- Do not attempt dependency installation (you lack `NetworkAccess` and `sandbox_exec`) — signal `needs_packager` so the planner spawns `packager.default` (see Dependencies below).
 - When repairing an installed agent, do not keep probing `resolve` or `resolve` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
 
 ## Out Of Scope
@@ -183,17 +195,11 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 ## Extended Instructions
 
 The gateway loads the extended half of this SKILL automatically on your FIRST
-**tool call** — it arrives as a `gateway_note` on the first tool result, and
-from the next turn it is part of your system prompt. You never need to fetch
-it manually: proceed with your first action; do not delay for it. The topics
-below live there, so expect them to appear once you start executing:
-
-- **Evaluator/auditor findings** — when the planner returns review issues for your script
-- **Gateway response validation & repair** — when your output is rejected for a contract violation
-- **Receiving tasks from architect, content system, running code** — when working on an implementation task
-- **Artifact execution failure handling** — when a built artifact fails at runtime
-- **Permission denied** — when a sandboxed operation is refused
-- **Clarification protocol** — when the task is ambiguous and you must ask before coding
+**tool call** (as a `gateway_note` on the first tool result; from the next turn
+it is part of your system prompt). Proceed with your first action — do not
+delay or fetch it manually. It covers evaluator/auditor findings handling,
+gateway response validation & repair, architect task intake, the content
+system, running code, dependency handling, and the clarification protocol.
 
 <!-- extended -->
 

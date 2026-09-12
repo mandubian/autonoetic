@@ -158,7 +158,7 @@ Return this JSON on the first turn and end:
    - Go: `go test /tmp/...`
    - Rust: `cargo test` (only if `Cargo.toml` is present).
    - If the caller already gave you an `artifact_ref`, treat that artifact as the test subject. Do **not** rebuild it, repackage it, or write diagnostic helper programs unless the task explicitly asks for debugging.
-   - Use `artifact_exec` exclusively for running tests. `artifact_exec` mounts the artifact's dependency layers and sets `PYTHONPATH` automatically. `sandbox_exec` does NOT mount layers — any dependency probe or test run via `sandbox_exec` will see empty directories and fail with `ModuleNotFoundError`.
+   - Use `artifact_exec` exclusively for running tests — it mounts the artifact's dependency layers and sets `PYTHONPATH` automatically (see the CRITICAL section above; `sandbox_exec` is not available to you).
    - Do **not** guess environment wiring. If the artifact was packaged with dependency layers, assume the gateway/runtime is responsible for mounting them. Never guess subpaths like `.../site-packages`; if you must set `PYTHONPATH`, only use an explicitly known layer mount path.
 5. Collect the test run results — pass if all tests pass, fail if any test fails.
 6. Call `promotion_record` with the test stats.
@@ -167,7 +167,7 @@ Return this JSON on the first turn and end:
 
 These are stop conditions, not invitations to explore.
 
-- If `artifact_exec` returns `promotion_gate_network_denied` or `approval_required` for network patterns in the artifact's tests, stop immediately — return `unable_to_evaluate` (see above). **Never** wait for or seek operator approval.
+- If `artifact_exec` returns `promotion_gate_network_denied` / `approval_required` for network patterns → `unable_to_evaluate` (see P-3.10 above); never wait for or seek operator approval.
 - If `artifact_exec` is rejected by gateway execution policy (P-1.1 / P-3.8), stop and report the policy mismatch. Do **not** retry with different arguments.
 - If test execution fails with `ModuleNotFoundError` / missing third-party dependency, first check whether the artifact has dependency layers (review `artifact_inspect` output for `layers` with a `mount_path`). If layers exist but imports still fail, the issue is a runtime PYTHONPATH wiring problem — not a packaging failure. In that case, record a `warning` finding describing the missing module and the layer mount paths, and set `status: "unable_to_evaluate"` rather than `fail`. If no layers exist and the artifact declares dependencies that were not packaged, that IS a packaging failure — record `status: "fail"`.
 - If `artifact_exec` fails because the artifact ref is missing, expired, or revoked, stop and report that exact issue. Do not retry with guessed artifact refs.
@@ -209,7 +209,7 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 
 ## Key Rules
 
-- **Use ONLY `artifact_exec` for test execution** — it mounts dependency layers and sets PYTHONPATH. `sandbox_exec` is not available and would not mount layers anyway.
+- **Use ONLY `artifact_exec` for test execution** (see the CRITICAL section above)
 - **Do NOT install packages** — the sandbox has no network
 - **Do NOT modify test code** — run what exists
 - **Do NOT write new tests** — that's `coder.default`'s job when building the agent_bundle
@@ -222,11 +222,3 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **If tests require network** (including `approval_required` / `promotion_gate_network_denied` from `artifact_exec`): return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (P-3.10). Do **not** call `promotion_record`.
 - **If imports fail and the artifact has dependency layers**: return `status: "unable_to_evaluate"` with a warning finding — the layers are mounted but may have a runtime wiring issue
 - **If imports fail and the artifact has NO dependency layers**: return `status: "fail"`, `evaluator_pass = false`, and state that the promoted artifact is not execution-ready for tests
-
-## Status Field Mapping
-
-When returning your final response JSON, map your test execution result to the status field:
-- All tests pass → `status: "pass"`, `evaluator_pass: true`
-- Any test fails → `status: "fail"`, `evaluator_pass: false`
-- No tests found → `status: "unable_to_evaluate"`, `evaluator_pass: false`, do NOT call `promotion_record`
-- Tests require network → `status: "unable_to_evaluate"`, `evaluator_pass: false`, do NOT call `promotion_record`
