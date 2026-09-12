@@ -247,7 +247,7 @@ fn print_report(r: &Report) {
         tok(r.guidance_pre)
     );
     println!(
-        "  guidance (artifact_built) {:>7} ch  (~{:>5} tok)   [+{} ch entered at phase]",
+        "  guidance (all phases)    {:>7} ch  (~{:>5} tok)   [+{} ch entered by phase gates]",
         r.guidance_post,
         tok(r.guidance_post),
         r.guidance_post.saturating_sub(r.guidance_pre)
