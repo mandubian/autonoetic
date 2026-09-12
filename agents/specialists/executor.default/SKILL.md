@@ -222,9 +222,7 @@ You can only withdraw approvals created by your own agent. Only pending approval
 
 ## Running Code
 
-Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c `, `sh -c `, `python3 scripts/`, `python scripts/`, plus common shell commands (date, ls, echo, cat, pwd, wc, grep, sed, awk, sort, head, tail, cut, tr, tee, find, xargs, diff, mkdir, touch, cp, mv, stat, du, df, uname, hostname, whoami, which, basename, dirname, readlink, file, sleep, test, true, false).
-
-Use absolute paths when running saved scripts.
+Your `CodeExecution` prefixes and allowed commands are declared in your manifest (`capabilities` above) — the gateway matches them mechanically. Use absolute paths when running saved scripts.
 
 (The forbidden-command list is in the shared `sandbox_exec` guidance.)
 
