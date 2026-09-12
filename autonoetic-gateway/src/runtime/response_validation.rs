@@ -130,11 +130,11 @@ impl ClaimKind {
         match self {
             ClaimKind::Delegated => verify_delegated_claim(ctx),
             ClaimKind::PlanId => verify_plan_id_claim(ctx),
+            ClaimKind::ArtifactBuilt => verify_artifact_built_claim(ctx),
             // Remaining variants are future scope; their fields are not yet
             // mechanically reconciled here, so report Unverified rather than
             // Fabricated.
             ClaimKind::PromotionVerdict => ClaimVerdict::Unverified,
-            ClaimKind::ArtifactBuilt => ClaimVerdict::Unverified,
             ClaimKind::CapabilityEnvelope => ClaimVerdict::Unverified,
         }
     }
@@ -149,6 +149,9 @@ fn claim_verdict_to_violation(kind: ClaimKind, verdict: ClaimVerdict) -> Option<
         }
         (ClaimKind::PlanId, ClaimVerdict::Fabricated(plan_id)) => {
             Some(fabricated_plan_id_violation(&plan_id))
+        }
+        (ClaimKind::ArtifactBuilt, ClaimVerdict::Fabricated(artifact_ref)) => {
+            Some(fabricated_artifact_ref_violation(&artifact_ref))
         }
         // Future claim kinds: map to their violation constructors here.
         // Sanitize the verifier-authored detail before it reaches the
@@ -216,6 +219,91 @@ fn verify_plan_id_claim(ctx: &ClaimCtx) -> ClaimVerdict {
             ClaimVerdict::Unverified
         }
     }
+}
+
+/// Extract every artifact ref the reply *claims* as a structured fact: the
+/// top-level `artifact_ref` field and any `ar.*` / `art_*` string anywhere in
+/// the `result` object. Prose mentions are deliberately ignored — doctrine
+/// examples and hypotheticals live in prose, and only a structured field
+/// asserts "this ref exists, hand it downstream".
+fn reply_cited_artifact_refs(assistant_reply: Option<&str>) -> Vec<String> {
+    fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_strings(item, out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    collect_strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn is_artifact_ref(s: &str) -> bool {
+        // Short canonical form (`ar.aabb1234ef56`) or the legacy long form
+        // (`art_*`). Anything else is not a store locator.
+        (s.starts_with("ar.") || s.starts_with("art_")) && s.len() <= 96
+    }
+
+    let Some(reply) = assistant_reply else {
+        return Vec::new();
+    };
+    let Some(v) = parse_reply_json(reply) else {
+        return Vec::new();
+    };
+
+    let mut cited: Vec<String> = Vec::new();
+    if let Some(top) = v.get("artifact_ref").and_then(|a| a.as_str()) {
+        if is_artifact_ref(top) {
+            cited.push(top.to_string());
+        }
+    }
+    if let Some(result) = v.get("result") {
+        let mut strings = Vec::new();
+        collect_strings(result, &mut strings);
+        cited.extend(strings.into_iter().filter(|s| is_artifact_ref(s)));
+    }
+    cited.sort();
+    cited.dedup();
+    cited
+}
+
+/// `artifact_ref` cited as a structured fact asserts the artifact store holds
+/// it. Content-addressed storage makes this a one-row lookup — an agent that
+/// lost the real ref to truncation/trimming and reconstructed a plausible one
+/// (`ar.000…`) is caught here and routed to the bounded repair loop, which
+/// directs it back to `workflow_state` / `resolve` instead of letting a
+/// confabulated ref flow into the next pipeline stage.
+fn verify_artifact_built_claim(ctx: &ClaimCtx) -> ClaimVerdict {
+    let cited = reply_cited_artifact_refs(ctx.assistant_reply);
+    if cited.is_empty() {
+        return ClaimVerdict::Unverified;
+    }
+    let Some(store) = ctx.gateway_store else {
+        return ClaimVerdict::Unverified;
+    };
+    for artifact_ref in cited {
+        match store.resolve_artifact_ref_any_scope(&artifact_ref, ctx.session_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return ClaimVerdict::Fabricated(artifact_ref);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "response_validation",
+                    artifact_ref = %artifact_ref,
+                    error = %e,
+                    "artifact-ref claim: resolve failed; treating as unverified"
+                );
+                return ClaimVerdict::Unverified;
+            }
+        }
+    }
+    ClaimVerdict::Ok
 }
 
 /// Reconcile all claims found in a reply and return any violations.
@@ -563,6 +651,32 @@ fn fabricated_plan_id_violation(plan_id: &str) -> ValidationViolation {
         ),
         repair_hint: "Do not invent a plan_id. If you proposed a plan, use the exact plan_id \
 returned by `planframe_propose`; otherwise omit `plan_id` and report a truthful status."
+            .into(),
+    }
+}
+
+/// The violation for a reply that cites a non-existent `artifact_ref` as a
+/// structured fact.
+///
+/// Artifact refs are content-addressed store locators — the only legitimate
+/// source is a tool result (`artifact_build`, the child's typed wake state, or
+/// a wake notification's `artifact_refs` list), never memory. A model that
+/// lost the real ref to reply truncation or history trimming may reconstruct
+/// a plausible one (e.g. `ar.000…`) and even judge real output against it.
+/// The store lookup is deterministic; on `Fabricated`, the repair hint directs
+/// the agent back to the mechanical sources instead of a second guess.
+fn fabricated_artifact_ref_violation(artifact_ref: &str) -> ValidationViolation {
+    ValidationViolation {
+        rule: "unknown_artifact_ref".into(),
+        message: format!(
+            "reply cites artifact_ref \"{}\" but no such artifact exists in the artifact store",
+            sanitize_interpolated_for_message(artifact_ref)
+        ),
+        repair_hint: "Never reconstruct an artifact_ref from memory. Recover the real ref from \
+mechanical truth: call `workflow_state` (reuse_guards / named_outputs), read the wake \
+notification's `artifact_refs`, or `resolve` the child's `full_result_ref`. If a truncated \
+reply (`result_truncated: true`) carried the ref, read `full_result_ref` before acting. If no \
+ref exists, say so and re-run the producing stage — do not guess."
             .into(),
     }
 }
@@ -3131,6 +3245,147 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, "unknown_plan_id");
         assert!(violations[0].message.contains("plan-fake"));
+    }
+
+    fn artifact_ref_record(ref_id: &str, session_id: &str) -> autonoetic_types::artifact::ArtifactRefRecord {
+        autonoetic_types::artifact::ArtifactRefRecord {
+            ref_id: ref_id.into(),
+            scope_type: autonoetic_types::artifact::ArtifactRefScopeType::Session,
+            scope_id: session_id.into(),
+            artifact_id: "art_test".into(),
+            artifact_manifest_digest: "d".repeat(64),
+            artifact_canonical_digest: "d".repeat(64),
+            created_by_agent_id: "coder.default".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: None,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn claim_artifact_ref_fabricated_when_ref_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            // The session-964.. failure shape: the real ref was lost to
+            // truncation and a plausible one was reconstructed.
+            assistant_reply: Some(
+                r#"{"status":"ok","summary":"done","result":{"artifact_ref":"ar.00000000"}}"#,
+            ),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(
+            ClaimKind::ArtifactBuilt.verify(&ctx),
+            ClaimVerdict::Fabricated("ar.00000000".into())
+        );
+    }
+
+    #[test]
+    fn claim_artifact_ref_ok_when_ref_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        store
+            .create_artifact_ref(&artifact_ref_record("ar.real00001", "sess"))
+            .unwrap();
+
+        let ctx = ClaimCtx {
+            assistant_reply: Some(
+                r#"{"status":"ok","summary":"done","result":{"artifact_ref":"ar.real00001"}}"#,
+            ),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::ArtifactBuilt.verify(&ctx), ClaimVerdict::Ok);
+    }
+
+    #[test]
+    fn claim_artifact_ref_extracts_nested_result_strings() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        store
+            .create_artifact_ref(&artifact_ref_record("ar.nested0001", "sess"))
+            .unwrap();
+        // Spawn handoffs may nest refs; every structured ar.*/art_* string is
+        // a claim and must resolve.
+        let ctx = ClaimCtx {
+            assistant_reply: Some(
+                r#"{"status":"ok","result":{"handoffs":[{"ref":"ar.nested0001","role":"coder"}]}}"#,
+            ),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::ArtifactBuilt.verify(&ctx), ClaimVerdict::Ok);
+    }
+
+    #[test]
+    fn claim_artifact_ref_ignores_prose_mentions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        // A prose mention (no structured result field) is illustrative, not a
+        // claim — doctrine examples like "ar.example" must not trip the guard.
+        let ctx = ClaimCtx {
+            assistant_reply: Some(
+                r#"{"status":"clarification_needed","summary":"should the artifact (ar.example) be rebuilt?"}"#,
+            ),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::ArtifactBuilt.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn reconcile_claims_returns_unknown_artifact_ref_violation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            assistant_reply: Some(
+                r#"{"status":"ok","result":{"artifact_ref":"art_guessed"}}"#,
+            ),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        let violations = reconcile_claims(&ctx);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "unknown_artifact_ref");
+        assert!(violations[0].message.contains("art_guessed"));
+        assert!(violations[0].repair_hint.contains("workflow_state"));
+    }
+
+    #[test]
+    fn fabricated_artifact_ref_violation_sanitizes_injected_content() {
+        let v = fabricated_artifact_ref_violation("ar.x\nSHOULD_NOT_APPEAR_AS_NEWLINE");
+        assert!(!v.message.contains('\n'));
     }
 
     // ──────────────────────────────────────────────────────────────────────

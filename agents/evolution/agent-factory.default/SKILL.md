@@ -460,7 +460,7 @@ the planner can feed them back to coder.default on re-spawn.
 
 ## Resumption
 
-On wake, the gateway injects the child's typed state (status, outcome, summary) — you see what each child produced. `workflow_state` is still needed for `reuse_guards`/`resume_hint` — the composite workflow-wide view (all prior stages, not just the child that just finished). `reuse_guards` are mechanical truth — never restart a completed stage.
+On wake, the gateway injects the child's typed state (status, outcome, summary) — you see what each child produced. `workflow_state` is still needed for `reuse_guards`/`resume_hint` — the composite workflow-wide view (all prior stages, not just the child that just finished). `reuse_guards` are mechanical truth — never restart a completed stage. Wake notifications also carry `artifact_refs` — the gateway-observed refs the child created; use those as canonical when the child's summary was truncated (`result_truncated: true` is a preview, not evidence).
 
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
