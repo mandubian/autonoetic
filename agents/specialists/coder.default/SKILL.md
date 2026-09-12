@@ -120,7 +120,7 @@ def test_fetch(mock_get):
     assert result["temp"] == 22
 ```
 
-**For agent artifacts that legitimately call external APIs** (e.g. weather agent): put real hostnames in the implementation code (so the gateway validates them at install), mock them in tests, and note them in `agent_instructions.md` under `## required_capabilities` (e.g. `- NetworkAccess: ["api.example.com"]`) so `agent-factory.default` declares the correct hosts.
+**For agent artifacts that legitimately call external APIs**: put real hostnames in the implementation code (so the gateway validates them at install), mock them in tests, and note them in `agent_instructions.md` under `## required_capabilities` (e.g. `- NetworkAccess: ["api.example.com"]`) so `agent-factory.default` declares the correct hosts.
 
 If the task requires real network integration testing, return `clarification_needed` or tell the planner to delegate to `executor.default`.
 
