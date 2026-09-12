@@ -525,8 +525,9 @@ choosing an unknown target — never as a retry loop)
 
 ## Output Format
 
-`summary` = full readable answer; `result` = **flat string facts only** (the
-`io.returns` schema above is enforced — never nest walkthrough trees in `result`).
+`summary` = full readable answer; `result` = **flat string facts only** (validated
+against the `io.returns` schema above — advisory: violations are logged, not
+blocked — never nest walkthrough trees in `result`).
 Include `plan_id` at the top level when a PlanFrame is pending or was just approved.
 
 ## Extended Instructions
