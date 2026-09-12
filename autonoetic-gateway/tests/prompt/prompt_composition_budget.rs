@@ -352,7 +352,13 @@ impl Report {
 /// fragments). The recovery surface is paid by every ReadAccess agent by
 /// design; ceilings re-encoded at the new measured baseline, tight-ratchet.
 const PLANNER_CEILINGS: (usize, usize, usize) = (77_400, 93_900, 106_300);
-const CODER_CEILINGS: (usize, usize, usize) = (62_100, 71_800, 71_800);
+/// Lowered 2026-09-12 with cause: same trim pass as #42602e9b/#1328 —
+/// extended-intro compressed, mock/needs_packager restatements deduplicated,
+/// and the three post-artifact sections (evaluator findings, exec failure,
+/// permission denied) phase-gated on `phase(artifact_built)` (~3.2k ch
+/// deferred). Measured 61489/68031/71196; working ceiling re-encoded,
+/// turn-1/steady unchanged (still ~1% headroom).
+const CODER_CEILINGS: (usize, usize, usize) = (62_100, 68_800, 71_800);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
@@ -383,8 +389,15 @@ const AGENT_FACTORY_CEILINGS: (usize, usize, usize) = (80_200, 80_200, 84_600);
 ///
 /// Both are measured so the phase-gating of each procedure is observable
 /// somewhere. The lead and coder agents see neither tool.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_400, 50_900, 51_200);
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_400, 87_200);
+/// Lowered 2026-09-12 with cause: Status Field Mapping section deleted
+/// (restated Key Rules), artifact_exec-vs-sandbox_exec and network-stop
+/// doctrine deduplicated to pointers. Measured 49656/49656/50483.
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_200, 50_200, 51_000);
+/// Lowered 2026-09-12 with cause: privilege-boundary restatement, Key Rule #1,
+/// capability-detection prose list (restated the table), and STOP-duplication
+/// in the promote-gate subsection removed. Measured 85091/85091/86439;
+/// working ceiling re-encoded, turn-1/steady unchanged.
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_000, 87_200);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.

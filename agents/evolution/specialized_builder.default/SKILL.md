@@ -119,8 +119,6 @@ If delegation already includes a reviewed `artifact_ref` and `script_entry`, pre
 
 If the artifact is malformed, missing files, or has wrong metadata, tell the planner what's wrong and let it delegate to `coder.default` to fix it.
 
-**Note:** All other agents (planner, coder, architect, etc.) must delegate to you for agent installation. You are the ONLY agent with access to the revision tools.
-
 ## How to Install an Agent
 
 Agent installation is a two-step workflow:
@@ -247,10 +245,11 @@ Activates the created revision.
 | `smoke_test_workflow_id` | Optional. Workflow id containing the smoke-test task. Forward to `agent_revision_promote`. |
 
 ### Key Rules:
-1. **`artifact_ref` is required for every install.** Script agents: artifact contains executable code + `script_entry`. Pure-reasoning agents: intent-only bundle containing the SKILL body (no `script_entry`, no executable code).
-2. **Do not require additional `SKILL.md` or `runtime.lock` inside the artifact** on this path.
-3. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload; the bundled SKILL body is the content-addressed identity input.
-4. If required intent fields are missing, report the gap to planner (do NOT invent values).
+1. **Do not require additional `SKILL.md` or `runtime.lock` inside the artifact** on this path.
+2. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload; the bundled SKILL body is the content-addressed identity input.
+3. If required intent fields are missing, report the gap to planner (do NOT invent values).
+
+(`artifact_ref` is required for every install — see the Parameters table and "Intent-only bundles" below.)
 
 ### Split install mode (smoke-test gate)
 
@@ -309,13 +308,11 @@ audits also installs from the same bundle.
 | `WriteAccess` | `scopes` (array) | `{"type": "WriteAccess", "scopes": ["self.*"]}` |
 | `SandboxFunctions` | none | `{"type": "SandboxFunctions"}` |
 
-**NetworkAccess hosts MUST be specific.** The gateway rejects revisions whose code contacts hosts not listed in the capability.
+**NetworkAccess hosts MUST be specific.** Omitting `hosts` is not a missing-field error — it deserializes as an **empty host list**, which grants no network reach and guarantees a capability-mismatch rejection if the artifact's code contacts any host. The gateway rejects revisions whose code contacts hosts not listed in the capability.
 
 - Scan the artifact source for URL literals (`https://...`, `http://...`) and extract hostnames.
 - Declare each hostname without path or scheme: `api.open-meteo.com`, not `https://api.open-meteo.com/v1/forecast`.
 - Wildcard `{"type": "NetworkAccess", "hosts": ["*"]}` is only allowed for genuine open-web agents (e.g., researcher, web-search) that cannot enumerate hosts. Include a brief justification in the agent description when using it.
-
-**Common mistake:** `{"type": "NetworkAccess"}` WITHOUT `"hosts"` will FAIL validation. You MUST include `"hosts"` with a concrete host list.
 
 **Capability Detection Rules:**
 
@@ -332,13 +329,6 @@ Capability mismatch: code requires NetworkAccess to api.open-meteo.com but it wa
 Declared hosts: []  Detected hosts: ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
 Add these hosts to your NetworkAccess capability.
 ```
-
-**How to determine required capabilities:**
-1. Inspect the artifact and the source files you're about to install
-2. Check for network calls → add `NetworkAccess` with the exact hostnames found in the code
-3. Check for file reads → add `ReadAccess`
-4. Check for file writes → add `WriteAccess`
-5. Check for subprocess calls → add `CodeExecution`
 
 ### Script Agent Requirements
 
@@ -408,10 +398,9 @@ This guard exists because `agent_revision_create_from_intent` changes the artifa
 
 When `agent_revision_promote` returns `"Promotion gate: no promotion_record found"`:
 
-1. **STOP immediately** — do NOT retry `agent_revision_promote` or `agent_revision_create_from_intent`
+1. **STOP immediately** — the promotion gate is mechanically enforced and will always block until the records exist; do NOT retry `agent_revision_promote` or `agent_revision_create_from_intent`
 2. **Report back to planner** that the evaluator and/or auditor must be re-run to produce `promotion_record` entries
 3. Do NOT attempt to create promotion records yourself — only evaluator and auditor can call `promotion_record`
-4. Do NOT retry the promote call — the promotion gate is mechanically enforced and will always block until the records exist
 
 ### FullJury Escalation Required
 
