@@ -3865,6 +3865,26 @@ impl GatewayExecutionService {
 
             let mut history = checkpoint.history.clone();
 
+            // LoopGuard repair-resume: tell the model why it was suspended and
+            // what its trip reason demands. The guard state was already
+            // repaired inside `restore_into` (`clear_trip_for_repair`);
+            // without this note the resumed turn sees only the inbound signal
+            // and repeats the pattern that tripped the guard.
+            if let crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+                reason_code,
+                ..
+            } = &checkpoint.yield_reason
+            {
+                history.push(crate::llm::Message::system(format!(
+                    "This session was suspended by the LoopGuard (trip: {reason_code}). \
+                     The trip counter has been reset for one bounded repair; if the guard \
+                     trips again after too many repairs, the session will close terminally. \
+                     Change strategy: do the work your trip message describes (end the turn \
+                     to yield for children, stop re-probing state you already have, or \
+                     escalate) instead of repeating the calls that tripped the guard."
+                )));
+            }
+
             if matches!(
                 checkpoint.yield_reason,
                 crate::runtime::checkpoint::YieldReason::WaitingForChild { .. }

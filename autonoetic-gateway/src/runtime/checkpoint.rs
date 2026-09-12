@@ -60,6 +60,24 @@ pub enum YieldReason {
     EmergencyStop { stop_id: String },
     /// Loop guard limit reached.
     MaxTurnsReached,
+    /// LoopGuard tripped mid-turn. Distinct from `MaxTurnsReached` (a
+    /// turn-cap exhaustion): a trip names a *condition* — carried in
+    /// `reason_code` — and behavioral trips are repairable, so the checkpoint
+    /// stays auto-resumable (bounded by `repairs`; see
+    /// `MAX_LOOP_GUARD_REPAIRS`). Auto-resumability is what keeps a
+    /// root-planner trip from cascade-failing its workflow and in-flight
+    /// children: the session closes as suspended, children keep running, and
+    /// the next child-summary wake resumes the root with a fresh behavioral
+    /// budget.
+    LoopGuardTripped {
+        /// Stable trip identifier (`LoopGuardTripReason::code`).
+        reason_code: String,
+        /// Whether the trip class can be repaired on resume
+        /// (`LoopGuardTripReason::is_session_repairable`).
+        repairable: bool,
+        /// Repairs already consumed by this session when the trip fired.
+        repairs: u32,
+    },
     /// Operator/user interrupt.
     ManualStop,
     /// Recoverable error.
@@ -306,6 +324,19 @@ impl SessionCheckpoint {
     pub fn restore_into(&self, runtime: &mut crate::runtime::lifecycle::AgentExecutor) {
         runtime.guard =
             crate::runtime::guard::LoopGuard::restore(self.loop_guard_state.clone());
+        // Repair-on-resume: a checkpoint saved by a *repairable* LoopGuard
+        // trip carries a latched trip reason that would re-fire on the
+        // restored guard's first `check_loop`. Clear the trip and the
+        // behavioral counters that produced it (one repair budget unit) so
+        // the resumed turn gets a fresh budget. Non-repairable trips keep
+        // the latch: a manual resume re-trips immediately by design.
+        if let crate::runtime::checkpoint::YieldReason::LoopGuardTripped {
+            repairable: true,
+            ..
+        } = &self.yield_reason
+        {
+            runtime.guard.clear_trip_for_repair();
+        }
         // Restore the egress label sidecar so the resumed session withholds the
         // same labeled content the live session would (RFC data-envelopes §3.4).
         // `#[serde(default)]` on the field means old checkpoints restore empty.

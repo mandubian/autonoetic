@@ -48,7 +48,6 @@ use crate::runtime::prompt_budget::{
     truncate_tool_result as truncate_tool_result_once,
 };
 use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
-use autonoetic_types::tool_error::ToolErrorType;
 use autonoetic_types::trajectory::FeedbackEvent;
 
 // ---------------------------------------------------------------------------
@@ -359,18 +358,10 @@ pub struct AgentExecutor {
 
 use crate::runtime::tool_dispatch::{
     effective_max_session_turns, effective_max_session_turns_hard,
-    loop_guard_from_config_and_manifest, tool_result_counts_as_progress,
+    loop_guard_from_config_and_manifest,
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
 use std::sync::atomic::AtomicU64;
-
-fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
-    value.get("ok").and_then(|v| v.as_bool()) == Some(false)
-        && value
-            .get("exit_code")
-            .and_then(|v| v.as_i64())
-            .map_or(false, |code| code >= 128)
-}
 
 /// Best-effort normalization of an error message so semantically identical
 /// errors compare equal even when incidental details (ids, paths, timestamps)
@@ -5271,7 +5262,30 @@ impl AgentExecutor {
                         tracing::debug!(target: "session_timeline", error = %err, "guard.tripped timeline emit failed");
                     }
                 }
-                return Err(self.save_and_yield(history, turn_id, YieldReason::MaxTurnsReached, None, e));
+                // Yield with a LoopGuard-specific reason, NOT MaxTurnsReached:
+                // the guard tripped on a named condition, not the turn cap.
+                // Repairable trip classes stay auto-resumable so the #847
+                // close path suspends the session instead of cascading
+                // `fail_workflow_for_root_session` over in-flight children
+                // (observed live: a root-planner P-7.7 trip marked the whole
+                // workflow failed while agent-factory was mid-task, which
+                // manufactured the factory's P-7.5 terminal-workflow
+                // hard-trip). Non-repairable classes keep the old terminal
+                // close behavior via the `repairable: false` flag.
+                let yield_reason = YieldReason::LoopGuardTripped {
+                    reason_code: self
+                        .guard
+                        .last_trip_reason()
+                        .map(|r| r.code().to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    repairable: self
+                        .guard
+                        .last_trip_reason()
+                        .map(|r| r.is_session_repairable())
+                        .unwrap_or(false),
+                    repairs: self.guard.loop_guard_repairs_used,
+                };
+                return Err(self.save_and_yield(history, turn_id, yield_reason, None, e));
             }
 
             if self.session_state == autonoetic_types::agent::SessionState::Normal
@@ -6117,23 +6131,28 @@ impl AgentExecutor {
                     // so one unrecoverable cause surfacing through different tools
                     // trips the guard even when no single tool's budget is hit.
                     self.guard.register_error(_name, result);
-                    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                        let error_type = parsed.get("error_type")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| match s {
-                                "validation" => Some(ToolErrorType::Validation),
-                                "permission" => Some(ToolErrorType::Permission),
-                                "resource" => Some(ToolErrorType::Resource),
-                                "execution" => Some(ToolErrorType::Execution),
-                                "fatal" => Some(ToolErrorType::Fatal),
-                                "conflict" => Some(ToolErrorType::Conflict),
-                                "quota_exceeded" => Some(ToolErrorType::QuotaExceeded),
-                                "not_found" => Some(ToolErrorType::NotFound),
-                                "timeout" => Some(ToolErrorType::Timeout),
-                                "sandbox_unavailable" => Some(ToolErrorType::SandboxUnavailable),
-                                _ => None,
-                            });
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id) {
+                    let tool_call = tool_calls.iter().find(|tc| tc.id == *id);
+                    let classification = tool_call
+                        .map(|tc| {
+                            crate::runtime::guard::classify_tool_result(
+                                &tc.name,
+                                &tc.arguments,
+                                result,
+                            )
+                        });
+                    match (&classification, tool_call) {
+                        // `ok: false` deterministic failure: feed the feedback
+                        // loop, then route to the irrecoverable-rejection
+                        // counter (#718) or the per-tool failure budget.
+                        (
+                            Some(crate::runtime::guard::ToolResultClassification {
+                                verdict: crate::runtime::guard::ToolResultVerdict::Failure,
+                                error_type,
+                                irrecoverable,
+                                signal_derived,
+                            }),
+                            Some(tc),
+                        ) => {
                             if let Some(et) = error_type.clone() {
                                 let message_signature = normalize_error_signature(
                                     parsed.get("message").and_then(|v| v.as_str()).unwrap_or(""),
@@ -6144,23 +6163,14 @@ impl AgentExecutor {
                                     message_signature,
                                 });
                             }
-                        }
-                        let signal_derived = is_signal_derived_exit(&parsed);
-                        let irrecoverable = error_type
-                            .as_ref()
-                            .map(crate::runtime::guard::LoopGuard::is_irrecoverable)
-                            .unwrap_or(false)
-                            || signal_derived;
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
-                        {
-                            if irrecoverable {
-                                // #718: irrecoverable rejections are excluded
-                                // from the per-tool failure budget (retrying
-                                // can't fix them), but re-issuing the *same*
-                                // call for the *same* deterministic rejection
-                                // is a no-progress loop (P-7.7). Count it; the
-                                // guard trips once the same (tool, error)
-                                // rejection recurs past its threshold.
+                            if *irrecoverable {
+                                // Irrecoverable rejections are excluded from
+                                // the per-tool failure budget (retrying can't
+                                // fix them), but re-issuing the *same* call for
+                                // the *same* deterministic rejection is a
+                                // no-progress loop (P-7.7). Count it; the guard
+                                // trips once the same (tool, error) rejection
+                                // recurs past its threshold.
                                 self.guard.register_irrecoverable(&tc.name, result);
                                 if !self.blocked_state_event_emitted {
                                     let payload = serde_json::json!({
@@ -6192,58 +6202,39 @@ impl AgentExecutor {
                                 );
                             }
                         }
-                    } else if tool_result_counts_as_progress(result) {
-                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
-                        {
-                            // Suppress progress reset for stagnant
-                            // no-op polls (e.g. workflow_wait that
-                            // returned "still running" after 0s). These
-                            // carry no new information and should
-                            // advance the no-progress counter instead
-                            // of resetting it (issue: polling churn).
-                            if crate::runtime::tool_dispatch::is_stagnant_poll(
-                                &tc.name,
-                                result,
-                            ) {
-                                continue;
-                            }
-                            // Tools may opt into terminal-progress
-                            // semantics by stamping
-                            // `side_effect_state: "committed"` in
-                            // their result (P-5.14 / P-6.26).
-                            // Terminal events clear the
-                            // rotating-polling window — a real
-                            // side effect just landed, so any prior
-                            // monotony is stale (issue #287).
-                            let terminal = parsed
-                                .get("side_effect_state")
-                                .and_then(|v| v.as_str())
-                                == Some("committed");
-                            // Reading artifact/content file bytes is
-                            // substantive progress for review agents
-                            // (static_evaluator, auditor, etc.). Keep
-                            // metadata/files resolves as read-only
-                            // probes so a planner cannot reset the
-                            // guard by re-listing artifacts.
-                            let is_resolve_content_read =
-                                crate::runtime::tool_dispatch::is_resolve_content_read(
-                                    &tc.name,
-                                    &tc.arguments,
-                                );
-                            if crate::runtime::tool_dispatch::is_read_only_tool(&tc.name)
-                                && !is_resolve_content_read
-                            {
+                        // Successful call: apply the verdict's accounting.
+                        (Some(classification), Some(tc)) => {
+                            match classification.verdict {
+                                // Stagnant no-op polls (e.g. workflow_wait that
+                                // returned "still running" after 0s) carry no
+                                // new information: they must advance the
+                                // no-progress counter instead of resetting it
+                                // (issue: polling churn). Unparsed and
+                                // unrecognized results are recorded in history
+                                // but not accounted by the guard.
+                                crate::runtime::guard::ToolResultVerdict::StagnantPoll
+                                | crate::runtime::guard::ToolResultVerdict::Unparsed
+                                | crate::runtime::guard::ToolResultVerdict::Unrecognized => {}
                                 // Read-only probes advance no workflow — track
                                 // for rotating-polling detection but do not
                                 // reset the no-progress counter (#701).
-                                self.guard
-                                    .register_readonly_progress(&tc.name, &tc.arguments);
-                            } else if terminal {
-                                self.guard
-                                    .register_progress_terminal(&tc.name, &tc.arguments);
-                            } else {
-                                self.guard
-                                    .register_progress(&tc.name, &tc.arguments);
+                                crate::runtime::guard::ToolResultVerdict::ReadOnlyProgress => {
+                                    self.guard
+                                        .register_readonly_progress(&tc.name, &tc.arguments);
+                                }
+                                // Terminal events clear the rotating-polling
+                                // window — a real side effect just landed, so
+                                // any prior monotony is stale (issue #287).
+                                crate::runtime::guard::ToolResultVerdict::TerminalProgress => {
+                                    self.guard
+                                        .register_progress_terminal(&tc.name, &tc.arguments);
+                                }
+                                crate::runtime::guard::ToolResultVerdict::Progress => {
+                                    self.guard.register_progress(&tc.name, &tc.arguments);
+                                }
+                                crate::runtime::guard::ToolResultVerdict::Failure => {
+                                    unreachable!("failure verdict handled above")
+                                }
                             }
 
                             // RFC #776 Part B.4: track spawn structural identity
@@ -6283,6 +6274,9 @@ impl AgentExecutor {
                                 }
                             }
                         }
+                        // No matching tool call for this result id — nothing
+                        // to classify or account.
+                        _ => {}
                     }
                     if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
                         self.guard.register_child_failure();
@@ -6640,13 +6634,21 @@ fn plan_watchdog_nudge_or_notify(
     let Some(store) = store else {
         return false;
     };
+
+    // `0 disables the watchdog` (config.rs): neither nudge nor stall
+    // notification may fire — otherwise a zero budget reads as "already
+    // exhausted" and every turn-end emits a stall notification.
+    let budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
+    if budget == 0 {
+        return false;
+    }
+
     let Some(nudge) = crate::scheduler::plan_watchdog::plan_incomplete_nudge(
         cfg, store, session_id,
     ) else {
         return false;
     };
 
-    let budget = cfg.plan_incomplete_nudge_budget.unwrap_or(3);
     if *nudges_used < budget {
         *nudges_used += 1;
         let msg = crate::scheduler::plan_watchdog::render_nudge_message(
@@ -9044,7 +9046,7 @@ mod tests {
 
 #[cfg(test)]
 mod divergence_robustness_tests {
-    use super::is_signal_derived_exit;
+    use crate::runtime::guard::is_signal_derived_exit;
 
     #[test]
     fn signal_derived_exit_codes_are_irrecoverable() {
@@ -9168,6 +9170,100 @@ mod divergence_robustness_tests {
     /// `WaitingForChild` — it is set when the current task is enqueued and
     /// cleared only on terminal status, so it is a stale label when the sole
     /// active task IS the caller. `has_other_active` is the real signal.
+    // -- plan watchdog nudge budget -----------------------------------------
+
+    /// `plan_incomplete_nudge_budget: 0` documents "0 disables the watchdog".
+    /// A zero budget must not read as "budget already exhausted": the old code
+    /// fell through to `emit_stall_notification` on every turn-end, spamming
+    /// the operator. Pins: no nudge pushed, no notification stored.
+    #[test]
+    fn plan_watchdog_zero_budget_disables_watchdog() {
+        use autonoetic_types::plan_frame::{
+            PlanFrame, PlanStatus, PlanStep, StepOwner, StepStatus, ValidationPolicy,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
+
+        let mut config = autonoetic_types::config::GatewayConfig {
+            runtime_dir: agents_dir.join(".gateway"),
+            agents_dir: agents_dir.clone(),
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        config.plan_incomplete_nudge_budget = Some(0);
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        let root_session = "root-nudge-budget-zero";
+        let wf = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            None,
+        )
+        .expect("workflow should be ensured");
+
+        // A stalled plan: approved, agent-owned pending step, older than the
+        // janitor grace — with a nonzero budget this session would be nudged.
+        let frame = PlanFrame {
+            plan_id: "plan-nudge-budget-zero".to_string(),
+            version: 1,
+            parent_version: None,
+            workflow_id: wf.workflow_id.clone(),
+            root_session_id: root_session.to_string(),
+            title: "t".to_string(),
+            objective: "o".to_string(),
+            status: PlanStatus::Approved,
+            steps: vec![PlanStep {
+                step_id: "s1".to_string(),
+                title: "stalled step".to_string(),
+                owner: StepOwner::Agent,
+                depends_on: vec![],
+                agent_id: Some("coder.default".to_string()),
+                notes: None,
+                status: StepStatus::Pending,
+                required_capabilities: vec![],
+            }],
+            validation_policy: ValidationPolicy::default(),
+            capability_envelope: vec![],
+            approved_by: None,
+            approved_at: Some("2026-09-01T00:00:00Z".to_string()),
+            created_by_agent_id: "planner.collaborative".to_string(),
+            reason: None,
+            created_at: "2026-09-01T00:00:00Z".to_string(),
+            expires_at: None,
+        };
+        store.save_plan_frame(&frame).expect("plan frame should save");
+
+        let mut history: Vec<crate::llm::Message> = Vec::new();
+        let mut nudges_used = 0u32;
+        let nudged = super::plan_watchdog_nudge_or_notify(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            &mut history,
+            &mut nudges_used,
+        );
+        assert!(!nudged, "zero budget disables the watchdog: turn may end");
+        assert!(history.is_empty(), "no nudge message may be pushed");
+        assert_eq!(nudges_used, 0);
+        let pending = store
+            .list_notifications_for_session(
+                root_session,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .expect("notifications should list");
+        assert!(
+            pending.is_empty(),
+            "zero budget must not emit stall notifications, got: {pending:?}"
+        );
+    }
+
     #[test]
     fn waiting_for_child_yield_reason_ignores_stale_waiting_children() {
         use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};

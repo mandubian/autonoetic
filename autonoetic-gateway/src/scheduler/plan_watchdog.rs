@@ -189,8 +189,11 @@ pub(crate) fn reconcile_plan_stalls(
         return Ok(0);
     };
 
+    let plans = store.list_approved_plan_frames()?;
+    let listed_plan_ids: std::collections::HashSet<String> =
+        plans.iter().map(|p| p.plan_id.clone()).collect();
     let mut reported = 0usize;
-    for plan in store.list_approved_plan_frames()? {
+    for plan in &plans {
         let incomplete_steps: Vec<(String, String)> = plan
             .steps
             .iter()
@@ -257,6 +260,15 @@ pub(crate) fn reconcile_plan_stalls(
         emit_stall_notification(store, &nudge);
         reported += 1;
     }
+
+    // Prune dedup entries for plans that left the approved listing
+    // (completed, archived, …). The set is process-global and insert-heavy;
+    // without this sweep it grows without bound over a long-lived gateway.
+    janitor_alerted_plans()
+        .lock()
+        .unwrap()
+        .retain(|plan_id| listed_plan_ids.contains(plan_id));
+
     Ok(reported)
 }
 
@@ -605,6 +617,35 @@ mod tests {
         assert_eq!(reconcile_plan_stalls(&f.cfg, Some(&f.store)).unwrap(), 1);
         assert_eq!(reconcile_plan_stalls(&f.cfg, Some(&f.store)).unwrap(), 0);
         assert_eq!(notification_count_for_plan(&f.store, &f.root, &plan_id), 1);
+    }
+
+    /// Plans that leave the approved listing (completed, archived, …) must
+    /// have their dedup entries pruned — the set is process-global and
+    /// insert-heavy, so without the sweep it grows without bound over a
+    /// long-lived gateway process.
+    #[test]
+    fn janitor_prunes_dedup_entries_for_plans_leaving_the_listing() {
+        let f = fixture();
+        let p = plan_unique(
+            &f.workflow_id,
+            &f.root,
+            vec![step("s1", StepOwner::Agent, StepStatus::Pending)],
+        );
+        let plan_id = p.plan_id.clone();
+        f.store.save_plan_frame(&p).unwrap();
+        assert_eq!(reconcile_plan_stalls(&f.cfg, Some(&f.store)).unwrap(), 1);
+        assert!(janitor_alerted_plans().lock().unwrap().contains(&plan_id));
+
+        // The plan completes: its status leaves the approved listing.
+        f.store
+            .update_plan_frame_status(&plan_id, p.version, PlanStatus::Completed, None, None)
+            .unwrap();
+
+        reconcile_plan_stalls(&f.cfg, Some(&f.store)).unwrap();
+        assert!(
+            !janitor_alerted_plans().lock().unwrap().contains(&plan_id),
+            "dedup entry must be pruned once the plan leaves the approved listing"
+        );
     }
 
     #[test]
