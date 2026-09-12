@@ -165,16 +165,22 @@ fn measure(label: &'static str, rel: &str) -> Report {
     let (tools, tool_chars) = tool_schema_chars(&manifest, &ToolTierFilter::all());
 
     let empty = SessionPhase::default();
-    let mut built = SessionPhase::default();
-    built.insert(PHASE_ARTIFACT_BUILT);
+    // Steady state = every gate earned. Gates are keyed on per-agent phase
+    // facts (planners gate on `artifact_built`; agent-factory gates its error
+    // routing and resumption doctrine on `child_spawned`), so the "post"
+    // measurement must insert the full vocabulary, not a hardcoded fact.
+    let mut all_earned = SessionPhase::default();
+    for fact in guidance::ALL_PHASE_FACTS {
+        all_earned.insert(fact);
+    }
 
     // Section gates (RFC P3) evict from the standing body until their phase is
     // reached. Measure the standing halves, and the earned sections separately,
     // so turn 1 reflects the eviction and steady state reflects their return.
     let (core_standing, core_earned) =
-        partition_gated_sections(&core, &manifest.sections, &built);
+        partition_gated_sections(&core, &manifest.sections, &all_earned);
     let (ext_standing, ext_earned) = match extended.as_deref() {
-        Some(e) => partition_gated_sections(e, &manifest.sections, &built),
+        Some(e) => partition_gated_sections(e, &manifest.sections, &all_earned),
         None => (String::new(), Vec::new()),
     };
     let earned: usize = core_earned
@@ -192,7 +198,7 @@ fn measure(label: &'static str, rel: &str) -> Report {
         skill_earned: earned,
         foundation: foundation_chars(),
         guidance_pre: guidance_for(&manifest, &empty).len(),
-        guidance_post: guidance_for(&manifest, &built).len(),
+        guidance_post: guidance_for(&manifest, &all_earned).len(),
     }
 }
 
@@ -225,7 +231,7 @@ fn print_report(r: &Report) {
     );
     if r.skill_earned > 0 {
         println!(
-            "  SKILL.md phase-earned     {:>7} ch  (~{:>5} tok)   [evicted until artifact_built]",
+            "  SKILL.md phase-earned     {:>7} ch  (~{:>5} tok)   [evicted until its phase]",
             r.skill_earned,
             tok(r.skill_earned)
         );
@@ -241,7 +247,7 @@ fn print_report(r: &Report) {
         tok(r.guidance_pre)
     );
     println!(
-        "  guidance (artifact_built) {:>7} ch  (~{:>5} tok)   [+{} ch entered at phase]",
+        "  guidance (all phases)    {:>7} ch  (~{:>5} tok)   [+{} ch entered by phase gates]",
         r.guidance_post,
         tok(r.guidance_post),
         r.guidance_post.saturating_sub(r.guidance_pre)
@@ -357,6 +363,13 @@ const CODER_CEILINGS: (usize, usize, usize) = (62_100, 71_800, 71_800);
 /// install" (~9.1k ch) is evicted until `phase(artifact_built)`. Measured
 /// 93259/93889/104806; re-encoded at ~1% headroom, tight-ratchet.
 const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_200, 94_900, 105_900);
+/// `agent-factory.default` is the largest specialist skill (36k ch) and the
+/// only non-lead orchestrator whose pipeline rivals a planner's — previously
+/// unmeasured. Added 2026-09-12 at the measured baseline after a trim pass
+/// (gate-failure/digest doctrine deduplicated to the Error Handling canon;
+/// Error Handling + Resumption phase-gated on `child_spawned`) with ~1%
+/// headroom, tight-ratchet. Measured 79411/79411/83685.
+const AGENT_FACTORY_CEILINGS: (usize, usize, usize) = (80_200, 80_200, 84_600);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -385,6 +398,10 @@ fn prompt_composition_report() {
         "planner.collaborative",
         "agents/lead/planner.collaborative/SKILL.md",
     );
+    let factory = measure(
+        "agent-factory.default",
+        "agents/evolution/agent-factory.default/SKILL.md",
+    );
     let utr = measure(
         "unit_test_runner.default",
         "agents/specialists/unit_test_runner.default/SKILL.md",
@@ -400,6 +417,7 @@ fn prompt_composition_report() {
     print_report(&planner);
     print_report(&coder);
     print_report(&collab);
+    print_report(&factory);
     print_report(&utr);
     print_report(&builder);
     print_report(&onboarding);
@@ -411,6 +429,7 @@ fn prompt_composition_report() {
         (&planner, PLANNER_CEILINGS),
         (&coder, CODER_CEILINGS),
         (&collab, PLANNER_COLLAB_CEILINGS),
+        (&factory, AGENT_FACTORY_CEILINGS),
         (&utr, UNIT_TEST_RUNNER_CEILINGS),
         (&builder, SPECIALIZED_BUILDER_CEILINGS),
         (&onboarding, CREDENTIAL_ONBOARDING_CEILINGS),

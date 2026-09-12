@@ -51,6 +51,15 @@ metadata:
       - "artifact_exec"
       - "artifact_prepare"
     validation: "soft"
+    # RFC P3 — evict, don't defer (mirrors planner.default): error routing and
+    # resume doctrine only bite once the pipeline has spawned its first child;
+    # the decision turns before that pay nothing for them. Gates are validated
+    # at parse time against both the heading and the phase-fact vocabulary.
+    sections:
+      - heading: "Error Handling"
+        when: phase(child_spawned)
+      - heading: "Resumption"
+        when: phase(child_spawned)
     io:
       returns:
         type: object
@@ -97,16 +106,7 @@ When a pipeline stage is owned by another installed agent, your default action i
 
 ## Output
 
-```json
-{
-  "status": "ok",
-  "agent_id": "my-agent",
-  "revision_id": "r01.example",
-  "execution_mode": "reasoning"
-}
-```
-
-On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `smoke_test_performed`, `installed`. Never claim success unless the final `specialized_builder.default` promote call returned `status: "promoted"` / `installed: true`.
+On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `smoke_test_performed`, `installed` (shape: the frontmatter `io.returns` schema). Never claim success unless the final `specialized_builder.default` promote call returned `status: "promoted"` / `installed: true`.
 
 On failure: set `status: "error"` and include the failing `stage` and `error`.
 
@@ -232,7 +232,7 @@ On resume after coder completes, the gateway injects the child's typed state int
    | Yes | Yes | Go to Step 3 (packager) |
    | Yes | No (empty / stdlib-only) | Skip to Step 4 |
 
-   Additionally, if coder returned `status: "needs_packager"`, always go to Step 3 regardless of content — the coder explicitly signaled that packaging is required. The same applies when the artifact prose declares an external CLI/tool dependency with no manifest: the coder followed the "external prerequisite" pattern, which defers provisioning to you — do not skip Step 3 for it.
+   Additionally, if coder returned `status: "needs_packager"`, always go to Step 3 regardless of content — the coder explicitly signaled that packaging is required.
 
 ### Step 3: Packager (if dependency files found OR deps declared in prose)
 
@@ -291,11 +291,8 @@ and proceed to Step 4b.
 3. Check the result:
    - **pass** → proceed to Step 4b.
    - **fail / partial** → return `ok: false, stage: "unit_tests_failed"`
-     with the gate's findings to the planner. **Do NOT fix the code
-     yourself.** Do NOT use `content_write`, `content_patch`, or
-     `artifact_build` to patch test assertions, rewrite scripts, or
-     rebuild the artifact. The planner will re-spawn `coder.default`
-     with the failure findings.
+     with the gate's findings to the planner — do NOT fix the code
+     yourself (see Error Handling).
    - **unable_to_evaluate** → return `ok: false, stage: "unit_tests_blocked"`
      with findings to the planner.
    - _(no `promotion_record`)_ → re-run the gate once. If it still
@@ -320,8 +317,8 @@ is pure waste.
 4. Check the results:
    - **all pass** → proceed to Step 5.
    - **any fail / partial** → return `ok: false, stage: "review_failed"`
-     with the failing gate's findings to the planner. **Do NOT fix the
-     code yourself.**
+     with the failing gate's findings to the planner — do NOT fix the
+     code yourself (see Error Handling).
    - **unable_to_evaluate** → report to planner with `stage: "review_blocked"`.
 
 Each required gate must call `promotion_record` against the same
@@ -348,11 +345,8 @@ future behavioral-drift detection a starting point to compare against. If the re
 gate cannot produce assertable cases for this agent (e.g. purely conversational, no
 stable output shape), proceed without blocking the install.
 
-**Do NOT iterate on gate failures.** The agent-factory is an orchestrator,
-not a debugger. When any gate fails, report the findings to the planner
-and stop. The planner decides whether to re-spawn `coder.default` with
-the failure feedback. Do NOT use `content_write` or `content_patch` to
-modify artifact files — that is the coder's job, not yours.
+**Do NOT iterate on gate failures** — you are the orchestrator, not the
+debugger: report the findings to the planner and stop (see Error Handling).
 
 **Gate and install the SAME artifact identity.** Promotion verdicts bind to the artifact's content digest. If the coder rebuilt after gating, the verdicts are stale — **restart from Step 4a** with the new artifact. Do NOT rebuild the artifact yourself; the planner re-spawns coder. Passing a stale-digest artifact to Step 5 wastes LLM cycles and creates an orphan candidate.
 
@@ -429,13 +423,11 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 
 Then end your turn. On resume, if `specialized_builder` reports `status: "promoted"` / `installed: true`, the agent is now active. Report success to the planner.
 
-**Do not create a new candidate if one already exists.** If `workflow_state.reuse_guards.has_builder_candidate` is true, use that `revision_id` for promotion rather than returning to Step 5.
-
 ## Error Handling
 
 If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT fix errors yourself.
 
-**Gate failures are NOT your problem to fix.** Relay findings to the planner and stop — the planner re-spawns `coder.default`. Do NOT `content_patch`, rewrite scripts, or `artifact_build` (creates a new digest, invalidates gate records, traps you in a rebuild-re-gate loop).
+**Gate failures are NOT your problem to fix.** Relay findings to the planner and stop — the planner re-spawns `coder.default`. Do NOT `content_patch`, rewrite scripts, or `artifact_build` (a rebuild creates a new digest — stale verdicts; see "Gate and install the SAME artifact identity" in Step 4).
 
 | Failure | Action |
 |---|---|
@@ -465,12 +457,6 @@ Parse each gate agent's final reply `status` field:
 
 When forwarding failures, always include the gate's `findings` and `summary` so
 the planner can feed them back to coder.default on re-spawn.
-
-**Do NOT patch code on gate failure.** You are the orchestrator, not the
-debugger. When unit tests fail, when the auditor finds issues, or when the
-static evaluator flags problems, your job is to relay the findings to the
-planner — not to `content_patch` the test file, rewrite `main.py`, or
-`artifact_build` a new version. Code fixes are coder.default's job.
 
 ## Resumption
 
