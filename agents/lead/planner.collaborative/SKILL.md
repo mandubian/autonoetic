@@ -37,6 +37,14 @@ metadata:
         patterns: ["*"]
       - type: "PlanFrameAccess"
         patterns: ["*"]
+    # RFC P3 — evict, don't defer (mirrors planner.default): the federation and
+    # install procedure only makes sense once the session has an artifact; a
+    # collaborative session still planning or co-editing pays nothing for it.
+    # Gates are validated at parse time against both the heading and the
+    # phase-fact vocabulary.
+    sections:
+      - heading: "Evaluation federation and install"
+        when: phase(artifact_built)
     excluded_tools:
       # Credential ceremony belongs to credential_onboarding.default (mirrors
       # planner.default). `credential_check` stays as a read-only routing probe.
@@ -190,8 +198,18 @@ before spawning them. Their `io_accepts` is `null` (roster tools report
 `message_format: "free_text"`) and **that is expected — it is not missing
 data**. Only when a target reports `message_format: "json_schema"` do you pass
 `message` as a JSON string matching its `io_accepts`. Repeating `agent_list` /
-`agent_inspect` to "find the schema" is a loop the gateway will trip
-(`redundant_roster_polling`, P-7.19) — spawn directly or end the turn instead.
+`agent_inspect` (especially with `{}`) to "find the schema" or unblock a stuck
+turn is a loop the gateway will trip (`redundant_roster_polling`, P-7.19) —
+spawn directly or end the turn instead.
+
+Two more roster rules:
+
+- **Missing operator input is not roster work.** If you need choices, credentials, or
+  confirmation, use `user_ask` or return `clarification_needed` and end the turn —
+  do not fall back to `agent_list`, `agent_discover`, or repeated `workflow_state` reads.
+- **On spawn schema errors**, fix the message from `expected_schema` / `hint` and retry
+  the same `agent_id`; never rediscover with `agent_list` unless the target identity
+  is still unknown.
 
 ## Workflow
 
@@ -270,7 +288,7 @@ justify a one-step plan — the operator should see the real scope before approv
 | Research / evidence gathering | Yes |
 | Architecture / design | Yes |
 | Implementation / artifact build | Yes |
-| **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc., or an install/bootstrap step fetches packages) | Yes, for code with non-stdlib or externally-declared deps |
+| **Dependency packaging** (`packager.default`) | Yes, for code with non-stdlib or externally-declared deps (see the foundational table for when) |
 | Federation / promotion review (`federation_escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
 | Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — always via `credential_onboarding.default`; you do not hold `credential_setup` |
@@ -285,12 +303,11 @@ steps that were never in doubt. Put those steps in v1.
 - **Do** call `planframe_propose` (with full JSON) or `user_ask` / `clarification_needed`
   if you lack requirements.
 - **Do not** call `agent_spawn` for heavy build work.
-- **Do not** call `agent_list` repeatedly or with `{}`. At most **one** optional
-  `agent_discover` with a non-empty `intent` if you truly need a non-foundational
-  specialist name for a step — then put that `agent_id` in the plan and stop listing.
+- At most **one** optional `agent_discover` with a non-empty `intent` if a step needs a
+  non-foundational specialist name — then put that `agent_id` in the plan and stop
+  listing (roster discipline: §Spawning reasoning agents below).
 - **On `planframe_propose` validation error:** read the error, fix `title` / `objective`
-  / step fields, and retry `planframe_propose`. **Do not** switch to `agent_list` or
-  `agent_discover` as a fallback.
+  / step fields, and retry `planframe_propose` — do not fall back to roster tools.
 
 **Example `planframe_propose` payload** (required fields shown; adapt steps).
 For a new agent build, include the full pipeline — not just the first step:
@@ -327,7 +344,7 @@ For a new agent build, include the full pipeline — not just the first step:
       "owner": "agent",
       "agent_id": "packager.default",
       "depends_on": ["s3"],
-      "notes": "Include when coder returns needs_packager, the artifact has dependency manifests, or the bundle's task/design/bootstrap declares external packages. Spawn message must carry an explicit install spec (packages: [{ecosystem, name, version}]) when there is no manifest — the packager cannot recover a prose-only dependency from the artifact alone. Use layered artifact_ref for all downstream steps."
+      "notes": "Include when coder returns needs_packager, dependency manifests exist, or the bundle's task/design/bootstrap declares external packages — the extended packaging section specifies the required explicit install spec. Use layered artifact_ref for all downstream steps."
     },
     {
       "step_id": "s4",
@@ -382,18 +399,14 @@ no external APIs), use 2-3 steps with just research → code → gates. Add
 For advisory-only validations, use `"requirement": "advisory"` instead of `"required"`.
 
 Populate `capability_envelope` from research output: concrete hosts the build will
-call (never `"*"`), plus any artifact capabilities you already know the deliverable
-needs (for example `PromoteWith` once promotion pre-authorization ships). Plan
-approval proposes locking this envelope for the session; the operator can confirm
-via `session.envelope.lock` or the TUI envelope prompt. If you omit
-`capability_envelope`, the gateway falls back to hosts observed earlier in the
-session.
-
-**Approve once, reused for the whole session.** Hosts used during the build are
-auto-locked into session grants, and a locked `PromoteWith` envelope covers the
-capability acknowledgement. Once a host or capability is granted, every later use
-of it this session is auto-approved — never re-propose the envelope for, or
-re-ask the operator about, something already granted.
+call (never `"*"`), plus artifact capabilities the deliverable already needs
+(for example `PromoteWith` once promotion pre-authorization ships). If you omit
+it, the gateway falls back to hosts observed earlier in the session. Plan
+approval proposes locking this envelope; the operator confirms via
+`session.envelope.lock` or the TUI envelope prompt. **Approve once, reused for
+the whole session** — once a host or capability is granted, every later use of
+it this session is auto-approved; never re-propose the envelope for, or re-ask
+the operator about, something already granted.
 
 ### After approval (execution phase)
 
@@ -444,31 +457,16 @@ reasoning instead of re-deriving everything from chat history.
 
 ## Delegation (after plan approval)
 
-1. **Foundational match** → `agent_spawn` the known `agent_id` from the plan or table above.
-2. **Post-federation install** → when escalation is approved and you hold an `artifact_ref`,
-   spawn **`agent-factory.default`** with that ref in the message. Do not call
-   `agent_list`, `agent_discover`, or `credential_onboarding.default` to "find an installer."
-3. **Unknown non-foundational target** → one `agent_discover` with `intent`, or spawn
-   `discovery.default` with the task description — not repeated `agent_list`.
+1. **Foundational match** → `agent_spawn` the known `agent_id` from the plan or
+   table above (spawn discipline: §Spawning reasoning agents above).
+2. **Post-federation install** → when escalation is approved and you hold an
+   `artifact_ref`, spawn **`agent-factory.default`** with that ref — see
+   **Install routing (critical)** above.
+3. **Unknown non-foundational target** → one `agent_discover` with `intent`, or
+   spawn `discovery.default` with the task description.
 4. **No candidate for a new build** → `agent-factory.default` to build from scratch.
 
 Include PlanFrame context (`plan_id`, current step) in spawn metadata when useful.
-
-### Agent roster tools (guardrails)
-
-Same discipline as `planner.default`:
-
-- **Missing operator input is not roster work.** If you need choices, credentials, or
-  confirmation, use `user_ask` or return `clarification_needed` and end the turn.
-  Do not fall back to `agent_list`, `agent_discover`, or repeated `workflow_state` reads.
-- **Only call `agent_list` when the spawn target is genuinely unknown** and you need
-  `io_accepts` / capability metadata to choose among candidates. If the plan step or
-  foundational table already names `agent_id`, spawn directly.
-- **Never call `agent_list` with `{}` in a loop.** An empty listing does not unblock a
-  failed `planframe_propose` or a stuck turn.
-- **On spawn schema errors**, fix the message from `expected_schema` / `hint` and retry
-  the same `agent_id`. Do not rediscover with `agent_list` unless the target identity
-  is still unknown.
 
 ## Validation policy
 
@@ -487,27 +485,27 @@ Adapt titles and add entries for packaging or federation when the plan requires 
 
 **Script persistence:** API details live in your foundation **SDK Reference** layer (injected with this prompt). When delegating script-mode work, cite only methods from that layer — never invent names like `sdk.memory.store` or `autonoetic_sdk.memory`. Require **`tests/test_*.py`** in the artifact before federation when the script uses SDK persistence.
 
-## Resumption
+## Resumption & error recovery
 
-On resume (after `workflow_wait`, child completion, plan approval, or workbench return):
+On resume — after `workflow_wait`, child completion, plan approval, workbench
+return, or an infrastructure failure (LLM error like `error decoding response body`
+or `spawn_execute_error`, connection timeout):
 
-1. Call `planframe_get` (compact if you only need summary).
-2. Identify completed vs pending steps; continue from the current step — do not restart.
-3. If the event is `workbench_reconciled`, apply the semantic summary before spawning more work.
-4. **Trust a child step's terminal result; don't re-spawn to "confirm" it.** A build
+1. **Call `planframe_get` first** (compact if you only need a summary) — re-establish
+   which step you are on before spawning any child.
+2. **Call `workflow_state`** — check which child tasks already completed and reuse
+   their outputs. Do not replay stale progress by re-spawning agents for steps that
+   completed before the error.
+3. Identify completed vs pending steps; continue from the current step — do not restart.
+4. If the event is `workbench_reconciled`, apply the semantic summary before spawning more work.
+5. **Trust a child step's terminal result; don't re-spawn to "confirm" it.** A build
    step that promoted an agent reports `installed: true` — the agent is the active
    revision, so advance the plan (spawn or use it), don't rebuild or re-promote.
    A pending approval resumes automatically — relay the `request_id`, end your
    turn, and do not re-issue the step.
-
-### Recovery after LLM or infrastructure errors
-
-When your session resumes after an LLM error (`error decoding response body`, `spawn_execute_error`), connection timeout, or other infrastructure failure:
-
-1. **Call `planframe_get` first** — re-establish which step you are on before spawning any child.
-2. **Call `workflow_state`** — check which child tasks already completed and reuse their outputs.
-3. **Do not replay stale progress.** If a step was already completed before the error, do not re-spawn the agent for that step. Check task status in `workflow_state` first.
-4. **Diagnose the actual failure before respawning.** If a federation gate failed, read its findings and route to the correct specialist (packager for dep errors, coder for code bugs). Respawning the same agent that already succeeded wastes a cycle.
+6. **Diagnose the actual failure before respawning.** If a federation gate failed, read
+   its findings and route to the correct specialist (packager for dep errors, coder for
+   code bugs). Respawning an agent that already succeeded wastes a cycle.
 
 ## Tools
 
@@ -527,22 +525,19 @@ choosing an unknown target — never as a retry loop)
 
 ## Output Format
 
-When replying to the **operator**: put the readable answer in `summary`; keep `result` to
-flat string facts (`agent_id`, `artifact_ref`, `plan_id`, `next_step`). Do not nest
-walkthrough trees in `result` — write prose in `summary` instead. Include `plan_id` at the
-top level when a PlanFrame is pending or was just approved.
+`summary` = full readable answer; `result` = **flat string facts only** (validated
+against the `io.returns` schema above — advisory: violations are logged, not
+blocked — never nest walkthrough trees in `result`).
+Include `plan_id` at the top level when a PlanFrame is pending or was just approved.
 
 ## Extended Instructions
 
 The gateway loads the extended half of this SKILL automatically on your FIRST
-**tool call** — it arrives as a `gateway_note` on the first tool result, and
-from the next turn it is part of your system prompt. You never need to fetch
-it manually: proceed with your first action; do not delay for it. The topics
-below live there, so expect them to appear once you start executing:
-
-- **Operator co-building (workbench)** — when the operator should edit artifacts directly, and the `/return` flow after it
-- **Evaluation federation and install** — packaging order before gates, the two execution layers, gate-failure routing, seeding the revision, escalation, post-approval install
-- **Cron scheduling idempotency** — before creating a scheduled job for an installed agent
+**tool call** (as a `gateway_note` on the first tool result; from the next turn
+it is part of your system prompt). Proceed with your first action — do not
+delay or fetch it manually. It covers operator co-building via the workbench
+(and the `/return` flow), evaluation federation and install, and cron
+scheduling idempotency.
 
 <!-- extended -->
 
@@ -608,10 +603,8 @@ After `workflow_wait` on federation (s4):
 | `Failed` / `spawn_execute_error` / LoopGuard | **Stop.** Retry runner with template above, or spawn `coder` to add `tests/` — do **not** escalate or install |
 | `validation_waive` for `unit_tests` | Only with canonical `art_*` from `resolve`/`artifact_inspect` — never `ar.*` |
 
-**Dependency gate failures vs code bugs:** When `unit_test_runner` or any gate reports `ModuleNotFoundError` or `ImportError`, inspect the missing module name before deciding the route:
-- **Third-party package** (e.g. `pytest`, `requests`, `httpx`): spawn `packager.default` — the code is correct, it just needs layered deps.
-- **Local artifact module** (wrong import path, missing file, typo): route to `coder.default` — this is a code bug.
-Respawning coder for a third-party packaging failure wastes a cycle because coder cannot install packages (no `NetworkAccess`).
+The routing in that table matters because `coder.default` cannot install packages (no
+`NetworkAccess`) — respawning coder for a third-party packaging failure wastes a cycle.
 
 Do not set `federation_complete: true` or tell the operator "unit_tests waived" unless:
 

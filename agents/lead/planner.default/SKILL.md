@@ -608,8 +608,9 @@ For federation gate delegations, add:
 
 ## Output Format
 
-`summary` = full readable answer; `result` = **flat string facts only** (the
-`io.returns` schema above is enforced — never nest objects for operator chat).
+`summary` = full readable answer; `result` = **flat string facts only** (validated
+against the `io.returns` schema above — advisory: violations are logged, not
+blocked — never nest objects for operator chat).
 
 ```json
 {"status":"ok","summary":"...readable answer...","result":{"agent_id":"x","entrypoint":"main.py","tests":"12 passing"}}

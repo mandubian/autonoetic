@@ -350,7 +350,13 @@ const CODER_CEILINGS: (usize, usize, usize) = (62_100, 71_800, 71_800);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_800, 104_900, 106_700);
+///
+/// Lowered 2026-09-12 with cause: same trim pass as #42602e9b applied to
+/// planner.default — roster/install doctrine deduplicated to single canonical
+/// sections, and RFC P3 phase gating added so "Evaluation federation and
+/// install" (~9.1k ch) is evicted until `phase(artifact_built)`. Measured
+/// 93259/93889/104806; re-encoded at ~1% headroom, tight-ratchet.
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_200, 94_900, 105_900);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
