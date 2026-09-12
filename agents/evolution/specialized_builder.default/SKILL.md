@@ -308,7 +308,7 @@ audits also installs from the same bundle.
 | `WriteAccess` | `scopes` (array) | `{"type": "WriteAccess", "scopes": ["self.*"]}` |
 | `SandboxFunctions` | none | `{"type": "SandboxFunctions"}` |
 
-**NetworkAccess hosts MUST be specific** — a bare `{"type": "NetworkAccess"}` without `"hosts"` fails validation outright, and the gateway rejects revisions whose code contacts hosts not listed in the capability.
+**NetworkAccess hosts MUST be specific.** Omitting `hosts` is not a missing-field error — it deserializes as an **empty host list**, which grants no network reach and guarantees a capability-mismatch rejection if the artifact's code contacts any host. The gateway rejects revisions whose code contacts hosts not listed in the capability.
 
 - Scan the artifact source for URL literals (`https://...`, `http://...`) and extract hostnames.
 - Declare each hostname without path or scheme: `api.open-meteo.com`, not `https://api.open-meteo.com/v1/forecast`.
