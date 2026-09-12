@@ -506,6 +506,14 @@ or `spawn_execute_error`, connection timeout):
 6. **Diagnose the actual failure before respawning.** If a federation gate failed, read
    its findings and route to the correct specialist (packager for dep errors, coder for
    code bugs). Respawning an agent that already succeeded wastes a cycle.
+7. **Context loss is not evidence (anti-confabulation).** A child reply marked
+   `result_truncated: true` is a *preview* — read `full_result_ref` (or the wake
+   notification's `artifact_refs`) before judging any output. When real output
+   contradicts what you remember of the task — refs, file names, goal — suspect your
+   **own context** (truncation, history trimming) before suspecting the child:
+   re-establish the facts with `planframe_get` / `workflow_state` / `resolve` first.
+   Never reconstruct an artifact_ref or file name from memory — the gateway rejects
+   cited refs that do not exist (`unknown_artifact_ref`).
 
 ## Tools
 
