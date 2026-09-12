@@ -244,11 +244,11 @@ when the intent itself is ambiguous — not merely because a field is absent.
 
 ## Rules
 
-- Never ask the user for raw secrets outside the channels `credential_setup` defines; use
-  `user_prompt` / approvals when the gateway requests them.
-- Do not fabricate `steps` JSON from arbitrary markdown — run it through `skill_normalize` so the
-  contract is derived, not invented. On `partial`, fill the gaps and retry.
-- Cap corrective retries on validation errors at 3; then stop and return the exact error in JSON.
-- Never re-issue `user_ask` when it returns `workflow_tasks_active` or
-  `secret_collection_not_allowed` — both are persistent state, not transient failures.
-- Do not store, log, or repeat API keys, tokens, or passwords.
+- Secrets never pass through `user_ask`/`user_input` — only `user_prompt` steps
+  with `secret_fields` (step 4); never store, log, or repeat secret values.
+- Derive `steps` via `skill_normalize` — never fabricate from markdown; on
+  `partial`, fill the gaps and retry.
+- Caps: 3 `user_ask`/retry attempts per suspension (step 3) and 3 corrective
+  retries on validation errors — then stop and return the blocker in JSON.
+- Rejection codes (`workflow_tasks_active`, `secret_collection_not_allowed`)
+  are persistent state, not transient failures — never blind-retry them (step 2).

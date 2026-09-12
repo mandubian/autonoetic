@@ -193,8 +193,10 @@ output-schema check (`io.returns` in the frontmatter) and the
 You MUST emit one entry for every *action* judgment (drop, promote_to_skill,
 flag_for_evolution). Skipping entries defeats the audit: an operator querying
 "why was memory X dropped" must get a direct answer from the causal chain.
-You MAY optionally emit `keep` entries to document *why* a target was retained,
-but they are not required — only emit entries for decisions that change state.
+Entries missing `target`, `action`, or `reason_code` are skipped by the
+gateway with a warning log. You MAY optionally emit `keep` entries to document
+*why* a target was retained, but they are not required — only emit entries for
+decisions that change state.
 
 ### `reason_code` vocabulary
 
@@ -295,18 +297,11 @@ For each systemic gap, create a structured entry with title, category, evidence,
 
 ### Step 6: Return structured result
 
-Return the complete JSON as your response. The orchestrator processes
-`agent_scores` and `systemic_gaps`; the gateway parses `decision_journal`
-and persists one `curator.decision` causal event per entry (issue #30).
-An operator can later query the journal by `target` to ask "why was
-this memory dropped" and get a direct answer without re-reading raw
-session traces.
-
-Every positive action you took — a drop, a promotion, a flag-for-
-evolution, or an explicit retain decision tied to a threshold — must
-have a corresponding `decision_journal` entry. Entries with missing
-`target`, `action`, or `reason_code` will be skipped by the gateway
-with a warning log.
+Return the complete JSON as your response (shape and the one-
+`curator.decision`-event-per-entry audit trail: see Output and the
+`decision_journal` obligation above). The orchestrator processes
+`agent_scores` and `systemic_gaps`; an operator can later query the journal
+by `target` to ask "why was this memory dropped".
 
 ## Important Notes
 
