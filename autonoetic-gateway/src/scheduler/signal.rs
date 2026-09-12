@@ -446,6 +446,7 @@ mod tests {
                     side_effect_state: Some(SideEffectState::NoSideEffect),
                     agent_outcome: None,
                     summary: Some("awaiting approval apr-123".to_string()),
+                    artifact_refs: Vec::new(),
                 },
                 message: "child waiting".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
