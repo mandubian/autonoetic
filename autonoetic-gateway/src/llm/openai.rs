@@ -457,12 +457,16 @@ impl OpenAiDriver {
                     // `chat_template_kwargs.enable_thinking` (Qwen family) and
                     // accept an OpenAI-style top-level `reasoning_effort`
                     // alongside. Servers understanding neither ignore both.
-                    // XHigh collapses to "high" — no local template maps it.
+                    // Effort passes through literally: local templates define
+                    // their own tiers (ninfer's Qwen templates accept
+                    // low|medium|xhigh and reject "high"), so the OpenAI
+                    // collapse would land on an unsupported value.
                     body["chat_template_kwargs"] = json!({ "enable_thinking": true });
                     let effort_str = match thinking.effort {
                         ThinkingEffort::Low => "low",
                         ThinkingEffort::Medium => "medium",
-                        ThinkingEffort::High | ThinkingEffort::XHigh => "high",
+                        ThinkingEffort::High => "high",
+                        ThinkingEffort::XHigh => "xhigh",
                     };
                     body["reasoning_effort"] = json!(effort_str);
                 }
@@ -1384,13 +1388,16 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_local_chat_template_xhigh_collapses_to_high() {
+    fn reasoning_local_chat_template_xhigh_passes_through_literally() {
+        // Local templates define their own effort tiers — ninfer's Qwen
+        // templates accept low|medium|xhigh and reject "high", so XHigh must
+        // not collapse to the OpenAI-only value.
         let driver = driver_with("qwen3.8-27b", ReasoningStyle::LocalChatTemplate);
         let body = driver.build_body(
             &req_with_thinking("qwen3.8-27b", ThinkingEffort::XHigh, None),
             false,
         );
-        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["reasoning_effort"], "xhigh");
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
     }
 
