@@ -239,5 +239,6 @@ The context window for budget calculations is resolved with this priority:
 
 ## Related Docs
 
+- [`context-map.md`](context-map.md) — what each context layer holds, its measured size, and how `trim_history` interacts with it
 - [Session budgets](../../reference/budgets.md) — per-session token/round/time/USD limits, enforcement flow, and the OpenRouter catalog
 - [Agent Capabilities](../../AGENTS.md#capabilities-system) — capability system for tool access control
