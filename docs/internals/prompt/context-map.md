@@ -49,6 +49,27 @@ assistant turn fused with its tool results — a call is never split from its
 result) **from the front**, down to a floor of the 2 most recent groups; if
 even that does not fit, it errors loudly instead of over-trimming.
 
+#### The volatile-tail notice — standing facts in the trim-proof position
+
+Each turn, the gateway appends a **trailing gateway state notice** after the
+history (`append_volatile_state_message`): rebuilt fresh, stale copies
+dropped, so it always sits in the newest — trim-proof — position, outside the
+cache-stable system prefix. The blocks that ride in it:
+
+| Block | Contents | Since |
+|---|---|---|
+| Memory-context snippet | Relevant post-session-digest memories, task-scored | — |
+| **Session facts** | Task preview (first 200 chars of the spawn/initial message), the workflow's artifact refs (session-visible, minus the global universe), the 8 most recent child tasks with statuses — all store reads, ≤900 chars, `None` when there is nothing to say | #1336 (anti-confabulation) |
+| Degradation notice (Ri-0.5) | Degraded mode + trigger evidence, re-queried while degraded | — |
+| Constitution drift notice (#821) | One-shot, `.take()`n after the wake it is detected | — |
+| State attestation (Ri-0.1) | Signed per-turn authoritative block: turn counter, pending approvals/interactions/escalations/proposals/flags, budget meters + burn-rate forecast | — |
+
+The session-facts block exists because pull-based truth requires knowing what
+to pull: after trimming evicts the early turns, the model does not know there
+was ever a task summary to fetch. The goal, the artifact identity, and the
+child-task picture are therefore re-presented every turn as gateway-observed
+store reads — never parsed from the model's own prose.
+
 Consequences worth internalizing:
 
 - **The newest messages are the only trim-proof location.** Wake
