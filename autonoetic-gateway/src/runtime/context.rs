@@ -1017,6 +1017,113 @@ impl AgentExecutor {
         )?))
     }
 
+    /// Hard cap for the session-facts tail. A bounded block keeps the
+    /// volatile-tail layer ratchet-shaped: the facts grow with the workflow,
+    /// the context cost must not.
+    pub(crate) const SESSION_FACTS_MAX_CHARS: usize = 900;
+
+    /// Anti-confabulation session-facts tail (session-76a8d5c6 postmortem):
+    /// the task, the workflow's artifact refs, and child-task statuses,
+    /// re-presented every turn in the trim-proof trailing notice.
+    ///
+    /// Why this exists: pull-based truth (`workflow_state`, `reuse_guards`)
+    /// requires knowing what to pull. After `trim_history` evicts the early
+    /// turns, the model does not know there was ever a task summary to fetch —
+    /// it fills the gap with plausible content (the incident: a confabulated
+    /// weather-agent identity judged against real output). Everything here is
+    /// a gateway-observed store read, never parsed from the model's own
+    /// prose, so it cannot drift from what actually exists — same discipline
+    /// as the Ri-0.1 state attestation it sits beside.
+    ///
+    /// Bounded by [`Self::SESSION_FACTS_MAX_CHARS`] with whole-line
+    /// truncation, and `None` when there is nothing to say — a fresh session
+    /// with no workflow and no artifacts pays nothing beyond the task line.
+    pub(crate) fn build_session_facts_tail(&self) -> Option<String> {
+        let session_id = self.session_id.as_deref()?;
+        let mut lines: Vec<String> = Vec::new();
+
+        // 1. The task — the spawn/first message, previewed. The fact most
+        //    often lost to trimming: it exists only in the oldest prose.
+        let task = self.initial_user_message.trim();
+        if !task.is_empty() {
+            let preview: String = task.chars().take(200).collect();
+            lines.push(format!("Task: {preview}"));
+        }
+
+        if let Some(store) = self.gateway_store.as_deref() {
+            // 2. Artifact refs visible from this session, minus the global
+            //    installed-agent universe (same semantics as the wake
+            //    notification's `artifact_refs`). New refs land in the
+            //    workflow or root-session scope, so visibility-based listing
+            //    is the correct query.
+            let mut refs = store
+                .list_artifact_refs_for_session(session_id)
+                .ok()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| {
+                    r.scope_type != autonoetic_types::artifact::ArtifactRefScopeType::Global
+                })
+                .map(|r| r.ref_id)
+                .collect::<Vec<_>>();
+            refs.sort();
+            refs.dedup();
+            if !refs.is_empty() {
+                lines.push(format!("Artifact refs: {}", refs.join(", ")));
+            }
+
+            // 3. Child tasks of this session's workflow, most recent first.
+            if let Some(cfg) = self.config.as_ref() {
+                let root = crate::runtime::content_store::root_session_id(session_id);
+                let workflow_id = crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                    cfg, root,
+                )
+                .ok()
+                .flatten();
+                if let Some(wf) = workflow_id {
+                    if let Ok(mut tasks) = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                        cfg,
+                        Some(store),
+                        &wf,
+                    ) {
+                        tasks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                        let rows: Vec<String> = tasks
+                            .iter()
+                            .take(8)
+                            .map(|t| {
+                                format!("{} {} {}", t.task_id, t.agent_id, t.status.as_str())
+                            })
+                            .collect();
+                        if !rows.is_empty() {
+                            lines.push(format!(
+                                "Workflow tasks (most recent first): {}",
+                                rows.join("; ")
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if lines.is_empty() {
+            return None;
+        }
+        let mut block = String::from(
+            "[session facts — gateway-observed; authoritative over memory; \
+             do not reply to this block directly]\n",
+        );
+        for line in lines {
+            if block.chars().count() + line.chars().count() + 1
+                > Self::SESSION_FACTS_MAX_CHARS
+            {
+                break;
+            }
+            block.push_str(&line);
+            block.push('\n');
+        }
+        Some(block)
+    }
+
     /// Build Ri-0.5 degraded-mode notice text injected into the system prompt
     /// before the next turn executes.
     ///
@@ -1941,5 +2048,216 @@ mod section_gate_tests {
         let out = join_phase_tail("G", &["S1".to_string(), "".to_string(), "S2".to_string()]);
         assert_eq!(out, "G\n\nS1\n\nS2");
         assert_eq!(join_phase_tail("", &[]), "");
+    }
+}
+
+#[cfg(test)]
+mod session_facts_tests {
+    use super::*;
+    use std::sync::Arc as StdArc;
+
+    fn test_config(temp: &tempfile::TempDir) -> autonoetic_types::config::GatewayConfig {
+        autonoetic_types::config::GatewayConfig {
+            runtime_dir: temp.path().to_path_buf().join(".gateway"),
+            agents_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    fn noop_executor(
+        temp: &tempfile::TempDir,
+        config: &autonoetic_types::config::GatewayConfig,
+        store: Option<StdArc<crate::scheduler::gateway_store::GatewayStore>>,
+        session_id: &str,
+        initial_message: &str,
+    ) -> AgentExecutor {
+        struct NoopDriver;
+        #[async_trait::async_trait]
+        impl crate::llm::LlmDriver for NoopDriver {
+            async fn complete(
+                &self,
+                _req: &crate::llm::CompletionRequest,
+            ) -> anyhow::Result<crate::llm::CompletionResponse> {
+                anyhow::bail!("noop driver should never be called in these tests")
+            }
+        }
+        let manifest = AgentManifest {
+            remote_access: None,
+            messaging: None,
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                mounts: Vec::new(),
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test-agent".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+                resident_idle_ttl_secs: None,
+            },
+            capabilities: vec![],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            adapter: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            sections: Vec::new(),
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
+        };
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            StdArc::new(NoopDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            store,
+        );
+        runtime.config = Some(StdArc::new(config.clone()));
+        runtime.session_id = Some(session_id.to_string());
+        runtime.initial_user_message = initial_message.to_string();
+        runtime
+    }
+
+    fn artifact_ref_record(
+        ref_id: &str,
+        scope_type: autonoetic_types::artifact::ArtifactRefScopeType,
+        scope_id: &str,
+    ) -> autonoetic_types::artifact::ArtifactRefRecord {
+        autonoetic_types::artifact::ArtifactRefRecord {
+            ref_id: ref_id.into(),
+            scope_type,
+            scope_id: scope_id.into(),
+            artifact_id: "art_test".into(),
+            artifact_manifest_digest: "d".repeat(64),
+            artifact_canonical_digest: "d".repeat(64),
+            created_by_agent_id: "coder.default".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: None,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn session_facts_none_without_task_or_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let runtime = noop_executor(&temp, &config, None, "sess-1", "");
+        assert!(runtime.build_session_facts_tail().is_none());
+    }
+
+    #[test]
+    fn session_facts_task_line_is_previewed_and_block_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let long_task = "Build the thing. ".repeat(60); // ~1020 chars
+        let runtime = noop_executor(&temp, &config, None, "sess-1", &long_task);
+        let tail = runtime.build_session_facts_tail().unwrap();
+        assert!(tail.contains("[session facts"));
+        assert!(tail.contains("Task: Build the thing."));
+        // Preview, not the whole 1020-char message.
+        assert!(tail.chars().count() < long_task.chars().count());
+        assert!(tail.chars().count() <= AgentExecutor::SESSION_FACTS_MAX_CHARS);
+    }
+
+    #[test]
+    fn session_facts_lists_session_refs_excludes_global() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let store = StdArc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(config.runtime_dir.as_path())
+                .unwrap(),
+        );
+        use autonoetic_types::artifact::ArtifactRefScopeType;
+        store
+            .create_artifact_ref(&artifact_ref_record(
+                "ar.session01",
+                ArtifactRefScopeType::Session,
+                "sess-1",
+            ))
+            .unwrap();
+        store
+            .create_artifact_ref(&artifact_ref_record(
+                "ar.global001",
+                ArtifactRefScopeType::Global,
+                "__global__",
+            ))
+            .unwrap();
+
+        let runtime = noop_executor(
+            &temp,
+            &config,
+            Some(store),
+            "sess-1",
+            "Build a thing with deps.",
+        );
+        let tail = runtime.build_session_facts_tail().unwrap();
+        assert!(tail.contains("Artifact refs: ar.session01"));
+        assert!(!tail.contains("ar.global001"));
+    }
+
+    #[test]
+    fn session_facts_lists_workflow_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let store = StdArc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(config.runtime_dir.as_path())
+                .unwrap(),
+        );
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+        let workflow = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            "sess-1",
+            Some("planner.default"),
+        )
+        .unwrap();
+        let task = TaskRun {
+            task_id: "task-1".to_string(),
+            workflow_id: workflow.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-1/coder.default-abc123".to_string(),
+            parent_session_id: "sess-1".to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            metadata: None,
+            last_failure_class: None,
+            join_group: None,
+            message: Some(String::new()),
+            retry_count: 0,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        crate::scheduler::workflow_store::save_task_run(&config, Some(store.as_ref()), &task)
+            .unwrap();
+
+        let runtime = noop_executor(&temp, &config, Some(store), "sess-1", "Build the thing.");
+        let tail = runtime.build_session_facts_tail().unwrap();
+        assert!(tail.contains("Workflow tasks"));
+        assert!(tail.contains("task-1 coder.default succeeded"));
     }
 }
