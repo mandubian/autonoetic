@@ -295,6 +295,14 @@ pub struct ChildStateNotification {
     pub agent_outcome: Option<AgentOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Artifact refs visible from the child's session, excluding the global
+    /// installed-agent universe (gateway-observed from the artifact-ref
+    /// store, not parsed from the child's prose). New refs land in the
+    /// workflow or root-session scope. These are the canonical refs for the
+    /// parent to hand downstream — a truncated `summary` may have cut the
+    /// real ref out, so the parent must never reconstruct one from memory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<String>,
 }
 
 /// Join policy for a group of tasks.

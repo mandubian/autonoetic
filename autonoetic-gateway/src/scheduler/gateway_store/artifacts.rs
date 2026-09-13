@@ -303,6 +303,26 @@ impl GatewayStore {
         Self::list_refs_for_scope_with_conn(&conn, scope_type, scope_id)
     }
 
+    /// Whether any non-revoked short ref points at the given canonical
+    /// artifact ID (`art_*`), in any scope. Used by claim verification: an
+    /// `art_*` string cited as a structured fact is checkable against the
+    /// ref table even though `resolve_artifact_ref_any_scope` only matches
+    /// short `ar.*` ref_ids. Every artifact that went through
+    /// `artifact_build` has at least one ref row, so "no row" means "never
+    /// built (or fully revoked)". Expiry is not considered — presence of the
+    /// build record is the truth being verified.
+    pub fn artifact_id_has_active_ref(&self, artifact_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM artifact_refs WHERE artifact_id = ?1 AND revoked_at IS NULL LIMIT 1",
+                params![artifact_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     fn list_refs_for_scope_with_conn(
         conn: &Connection,
         scope_type: ArtifactRefScopeType,

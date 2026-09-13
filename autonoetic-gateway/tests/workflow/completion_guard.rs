@@ -394,6 +394,7 @@ fn try_complete_workflow_suppresses_pending_notifications() -> anyhow::Result<()
             side_effect_state: None,
             agent_outcome: None,
             summary: Some("done".to_string()),
+            artifact_refs: Vec::new(),
         },
         timestamp: chrono::Utc::now().to_rfc3339(),
     };

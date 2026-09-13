@@ -1150,12 +1150,30 @@ pub fn update_task_run_status(
 
     let retry_decision = evaluate_stage_retry(&task, status, result_summary.as_deref());
     let task_failure = retry_decision.failure.clone();
-    let child_state_notification = build_child_state_notification(
+    let mut child_state_notification = build_child_state_notification(
         &task,
         status,
         result_summary.as_deref(),
         task_failure.as_ref(),
     );
+    // Anti-confabulation: the parent must never reconstruct the child's
+    // artifact refs from memory (a truncated summary can cut the real ref
+    // out). Surface the refs visible from the child's session, minus the
+    // global installed-agent universe. New refs land in the workflow scope
+    // or the *root* session scope (see artifact.rs scope derivation), never
+    // the child's own session id — so visibility-based listing is the
+    // correct query; a Session(task.session_id) lookup would come back empty
+    // for every child. Lookup failure leaves the field empty rather than
+    // blocking the wake.
+    child_state_notification.artifact_refs = store
+        .and_then(|s| s.list_artifact_refs_for_session(&task.session_id).ok())
+        .map(|refs| {
+            refs.into_iter()
+                .filter(|r| r.scope_type != autonoetic_types::artifact::ArtifactRefScopeType::Global)
+                .map(|r| r.ref_id)
+                .collect()
+        })
+        .unwrap_or_default();
 
     task.status = status;
     task.updated_at = now_rfc3339();
@@ -2087,12 +2105,29 @@ fn gather_join_child_summaries(
         let failure_meta = task
             .last_failure_class
             .map(crate::runtime::failure_classification::metadata_for_failure_class);
-        summaries.push(build_child_state_notification(
+        let mut notification = build_child_state_notification(
             task,
             task.status,
             task.result_summary.as_deref(),
             failure_meta.as_ref(),
-        ));
+        );
+        // Same anti-confabulation surface as the per-child notification: the
+        // join payload carries each child's visible artifact refs (minus the
+        // global universe — new refs land in workflow/root-session scope, not
+        // the child's own session id) so the parent never has to reconstruct
+        // one from a truncated summary.
+        notification.artifact_refs = store
+            .and_then(|s| s.list_artifact_refs_for_session(&task.session_id).ok())
+            .map(|refs| {
+                refs.into_iter()
+                    .filter(|r| {
+                        r.scope_type != autonoetic_types::artifact::ArtifactRefScopeType::Global
+                    })
+                    .map(|r| r.ref_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        summaries.push(notification);
     }
     summaries
 }
@@ -2283,6 +2318,9 @@ fn build_child_state_notification(
             .or(gave_up_side_effect),
         agent_outcome,
         summary: result_summary.map(ToString::to_string),
+        // Populated by the callers that hold store access (update_task_run_status,
+        // gather_join_child_summaries); the pure builder starts empty.
+        artifact_refs: Vec::new(),
     }
 }
 
