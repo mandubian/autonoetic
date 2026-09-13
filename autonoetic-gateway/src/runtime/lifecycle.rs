@@ -2485,6 +2485,9 @@ impl AgentExecutor {
         if let Some(ref snippet) = memory_context {
             volatile_tails.push(snippet.clone());
         }
+        if let Some(tail) = self.build_session_facts_tail() {
+            volatile_tails.push(tail);
+        }
         if let Some(tail) = self.build_state_attestation_tail()? {
             volatile_tails.push(tail);
         }
@@ -3466,6 +3469,14 @@ impl AgentExecutor {
             let mut volatile_tails: Vec<String> = Vec::new();
             if let Some(ref snippet) = memory_context {
                 volatile_tails.push(snippet.clone());
+            }
+            // Anti-confabulation (session-76a8d5c6 postmortem): re-present the
+            // task, workflow artifact refs and child-task statuses every turn.
+            // Unlike the drift notice below, this is ongoing standing state —
+            // it must survive history trimming, which is exactly what the
+            // trailing notice position guarantees.
+            if let Some(tail) = self.build_session_facts_tail() {
+                volatile_tails.push(tail);
             }
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
                 volatile_tails.push(notice);
