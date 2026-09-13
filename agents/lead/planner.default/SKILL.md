@@ -517,6 +517,17 @@ Inform user. If they want to continue, respawn (creates a new approval).
 
 **Root-cause before retry (mandatory).** Read the error, identify the root cause, fix it, retry **once**. If it fails again, escalate — don't loop. Each blind retry burns a full LLM round-trip.
 
+**Context loss is not evidence (anti-confabulation).** A child reply marked
+`result_truncated: true` is a *preview* — read `full_result_ref`, or use the
+wake notification's `artifact_refs`, before comparing or judging any output.
+And when real output contradicts what you remember of the task — refs, file
+names, goal — suspect your **own context** (truncation, history trimming)
+before suspecting the child. Re-establish the facts with `workflow_state` /
+`resolve` first: a "fraud" or "agent misbehaved" verdict drawn from a
+memory-vs-reality mismatch is always your error, not the child's. Never
+reconstruct an artifact_ref or file name from memory — the gateway rejects
+cited refs that do not exist (`unknown_artifact_ref`).
+
 **Tool errors → routing:**
 
 | Error pattern | Action |
