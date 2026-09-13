@@ -9,9 +9,10 @@ cargo nextest run -p autonoetic-gateway -E 'test(prompt_composition_report)' \
   --success-output=immediate
 ```
 
-The harness (`tests/prompt/prompt_composition_budget.rs`) measures the same
-layers the gateway composes; its ceilings are the ratchet that keeps this map
-honest. Authoring rules live in
+The harness
+(`autonoetic-gateway/tests/prompt/prompt_composition_budget.rs`) measures the
+same layers the gateway composes; its ceilings are the ratchet that keeps this
+map honest. Authoring rules live in
 [`composition.md`](composition.md); budget strategies in
 [`budget.md`](budget.md); the evidence behind the layer ordering in
 [`burden-study.md`](burden-study.md).
@@ -34,7 +35,7 @@ governs.
 |---|---|---|
 | Tool schemas | JSON definition of every advertised tool (name, description, full input schema), tier-filtered per manifest | Never — the largest single layer on every agent |
 | SKILL.md core | Doctrine before the `<!-- extended -->` marker: identity, principles, decision flows, foundational-agent tables | Never — turn 1 onward |
-| SKILL.md extended | Doctrine after the marker (procedures, routing tables); announced by a `gateway_note` on the first tool result, inlined permanently from turn 2 | Never once loaded |
+| SKILL.md extended | Doctrine after the marker (procedures, routing tables); announced by a `gateway_note` on the first tool result, inlined permanently from turn 2 | Permanent once loaded |
 | Phase-earned sections | SKILL sections gated on phase facts (`phase(artifact_built)`, `phase(child_spawned)`, …) — evicted until the session earns them | Enters at the phase, then permanent |
 | Foundation layers | Shared cross-agent doctrine (SDK reference, workflow/artifact/digest/script conventions) from `foundation_*.md`, manifest-selected | Never |
 | Guidance | Gateway-authored standing blocks (yield discipline, spawn coordination, federation procedure), the procedure ones phase-gated | Never; phase-gated blocks enter at the phase |
@@ -55,8 +56,7 @@ Consequences worth internalizing:
 - **Early turns are the first casualties.** On a small-context model the
   fixed Zone 1 consumes a large share of the window, so the task framing from
   turn 1 is evicted early (this is the mechanism behind the
-  session-76a8d5c6 confabulation — see
-  `docs/reports/postmortems/session-76a8d5c6-confabulated-weather-agent.md`).
+  session-76a8d5c6 confabulation; postmortem lands with #1333).
 - **Anything the agent needs long-term must not live only in early prose.**
   Gateway-observed truth is re-presented where possible (wake notifications
   carry `artifact_refs`; `reuse_guards` are re-derivable on demand) and
