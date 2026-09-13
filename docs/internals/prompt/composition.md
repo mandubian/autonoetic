@@ -319,6 +319,9 @@ fences"`, `"never restart from scratch"`).
 
 ## See also
 
+- [`context-map.md`](context-map.md) — the measured per-layer, per-agent size
+  map (standing vs conversation zones, trim behavior, where the phase gates
+  bite), with the harness command to regenerate it.
 - `docs/archived/agent-prompt-factorization.md` — the roadmap/history and the
   rationale for what was migrated, what was intentionally left role-specific
   (e.g. unittest policy, no-network, single-pass discovery), and why foundation
