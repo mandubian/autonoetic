@@ -435,30 +435,30 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. When a task entry carries 'result_summary_truncated': true, its 'result_summary' is a shortened copy and 'full_result_ref' holds the complete reply — read that ref instead of acting on the summary or re-running the work. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
+            description: "Check whether watched task_ids reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is unsatisfied the gateway suspends the session and re-checks automatically on the next child wake — no blocking, no LLM round consumed. Join/poll discipline (when to wait vs yield) is in your SKILL's delegation sections. Succeeded tasks carry 'output' with 'implicit_artifact_id' plus 'named_outputs'/'artifacts' — read payloads via content.read on named_outputs[*].ref (preferred) or the implicit id. When a task entry has 'result_summary_truncated': true, its 'result_summary' is a shortened copy: read 'full_result_ref' instead of acting on it or re-running the work. timeout_secs=0 probes once without suspending.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of task IDs to wait for. Omit or pass [] to wait for all tasks in the workflow."
+                        "description": "Task IDs to wait for. Omit or [] to wait for all tasks in the workflow."
                     },
                     "workflow_id": {
                         "type": "string",
-                        "description": "Optional workflow ID. If omitted, resolved from the current session's root."
+                        "description": "Optional. Resolved from the current session's root when omitted."
                     },
                     "timeout_secs": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 300,
-                        "description": "Legacy: only 0 is meaningful. 0 = probe once and return immediately (no suspension). Non-zero values are ignored; the session hibernates until the children finish."
+                        "description": "Only 0 is meaningful: probe once, return immediately. Other values are ignored (the session hibernates until children finish)."
                     },
                     "max_wait_secs": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 1800,
-                        "description": "Legacy: ignored. The gateway suspends and resumes automatically instead of blocking for a fixed budget."
+                        "description": "Ignored. The gateway suspends and resumes automatically."
                     }
                 },
                 "additionalProperties": false

@@ -158,14 +158,14 @@ impl NativeTool for ArtifactBuildTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Build an immutable artifact bundle from session content. Returns an artifact ID for review/install/closed-boundary execution. Artifacts are specialist-boundary objects: use them for evaluation, installation, and reproducible execution. For ordinary parent-child output handoff, prefer the implicit output from workflow_wait instead.".to_string(),
+            description: "Build an immutable artifact bundle from session content. Returns an artifact ID for review/install/closed-boundary execution. For ordinary parent-child output handoff, prefer the implicit output from workflow_wait instead — when to build vs hand off is your SKILL's call.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. IMPORTANT: the filename recorded in the artifact is exactly the input string you provide. Two builds with the same file contents but different input names (e.g. 'SKILL.md' vs 'cnt_3fc9d2bb') will collide and be rejected as an identity mismatch. Prefer stable, human-readable names like 'main.py', 'SKILL.md', and 'test_main.py'. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
+                        "description": "Session content names/handles or whole artifact refs (`ar.*`/`art_*`). The recorded filename is exactly the input string you provide — different input names over the same contents collide as an identity mismatch, so prefer stable names ('main.py'). To include one file of an artifact, resolve it with file=… and write it to content first."
                     },
                     "entrypoints": {
                         "type": "array",

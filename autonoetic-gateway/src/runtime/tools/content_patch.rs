@@ -47,7 +47,7 @@ impl NativeTool for ContentPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Edit an existing content-store entry in place by sending ONLY the changed region — not the whole file. Prefer this over `content_write` for edits: it saves tokens and preserves the rest of the entry verbatim. `mode=\"replace\"` (default) does a fuzzy find-and-replace of `old_string`→`new_string` (tolerant of whitespace/indentation drift); the match must be unique unless `replace_all` is set. `mode=\"v4a\"` applies a multi-entry diff for edits spanning several entries. Returns the same `name`/`ref`/`sandbox_path` as `content_write`. Reach for `content_write` only to author a NEW entry or when the changed region can't be uniquely anchored.".to_string(),
+            description: "Edit an existing content-store entry in place by sending ONLY the changed region — not the whole file. `mode=\"replace\"` (default) does a fuzzy find-and-replace of `old_string`→`new_string` (tolerant of whitespace/indentation drift); the match must be unique unless `replace_all` is set. `mode=\"v4a\"` applies a multi-entry diff for edits spanning several entries. Returns the same `name`/`ref`/`sandbox_path` as `content_write`.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

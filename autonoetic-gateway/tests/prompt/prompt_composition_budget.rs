@@ -351,14 +351,24 @@ impl Report {
 /// NO way to recover the id (live: `artifact_build` retries on `layer_56:`
 /// fragments). The recovery surface is paid by every ReadAccess agent by
 /// design; ceilings re-encoded at the new measured baseline, tight-ratchet.
-const PLANNER_CEILINGS: (usize, usize, usize) = (77_400, 93_900, 106_300);
+///
+/// ALL ceilings lowered 2026-09-12 with cause: P2 tool-schema pass — the top
+/// duplicated schemas (agent_spawn, content_patch, agent_list, artifact_build,
+/// knowledge_store, workflow_wait, digest_query) had their description prose
+/// slimmed to call-site mechanics with a pointer to SKILL doctrine for
+/// orchestration rules (the doctrine copy stays canonical). Measured
+/// (turn-1/working/steady): planner 73636/87916/101506, coder 59986/66528/
+/// 69693, collab 91292/91922/102839, factory 77389/77389/81663, utr
+/// 49590/49590/50417, builder 83260/83260/84608, onboarding 56642/56642/56642;
+/// re-encoded at ~1% headroom, tight-ratchet.
+const PLANNER_CEILINGS: (usize, usize, usize) = (74_400, 88_800, 102_600);
 /// Lowered 2026-09-12 with cause: same trim pass as #42602e9b/#1328 —
 /// extended-intro compressed, mock/needs_packager restatements deduplicated,
 /// and the three post-artifact sections (evaluator findings, exec failure,
 /// permission denied) phase-gated on `phase(artifact_built)` (~3.2k ch
 /// deferred). Measured 61489/68031/71196; working ceiling re-encoded,
 /// turn-1/steady unchanged (still ~1% headroom).
-const CODER_CEILINGS: (usize, usize, usize) = (62_100, 68_800, 71_800);
+const CODER_CEILINGS: (usize, usize, usize) = (60_600, 67_200, 70_400);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
@@ -368,14 +378,14 @@ const CODER_CEILINGS: (usize, usize, usize) = (62_100, 68_800, 71_800);
 /// sections, and RFC P3 phase gating added so "Evaluation federation and
 /// install" (~9.1k ch) is evicted until `phase(artifact_built)`. Measured
 /// 93259/93889/104806; re-encoded at ~1% headroom, tight-ratchet.
-const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (94_200, 94_900, 105_900);
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_200, 92_900, 103_900);
 /// `agent-factory.default` is the largest specialist skill (36k ch) and the
 /// only non-lead orchestrator whose pipeline rivals a planner's — previously
 /// unmeasured. Added 2026-09-12 at the measured baseline after a trim pass
 /// (gate-failure/digest doctrine deduplicated to the Error Handling canon;
 /// Error Handling + Resumption phase-gated on `child_spawned`) with ~1%
 /// headroom, tight-ratchet. Measured 79411/79411/83685.
-const AGENT_FACTORY_CEILINGS: (usize, usize, usize) = (80_200, 80_200, 84_600);
+const AGENT_FACTORY_CEILINGS: (usize, usize, usize) = (78_200, 78_200, 82_500);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -392,16 +402,16 @@ const AGENT_FACTORY_CEILINGS: (usize, usize, usize) = (80_200, 80_200, 84_600);
 /// Lowered 2026-09-12 with cause: Status Field Mapping section deleted
 /// (restated Key Rules), artifact_exec-vs-sandbox_exec and network-stop
 /// doctrine deduplicated to pointers. Measured 49656/49656/50483.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_200, 50_200, 51_000);
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (50_100, 50_100, 50_900);
 /// Lowered 2026-09-12 with cause: privilege-boundary restatement, Key Rule #1,
 /// capability-detection prose list (restated the table), and STOP-duplication
 /// in the promote-gate subsection removed. Measured 85091/85091/86439;
 /// working ceiling re-encoded, turn-1/steady unchanged.
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_900, 86_000, 87_200);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (84_100, 84_100, 85_500);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.
-const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (57_400, 57_400, 57_400);
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (57_200, 57_200, 57_200);
 
 #[test]
 fn prompt_composition_report() {
