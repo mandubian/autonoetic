@@ -170,7 +170,7 @@ impl NativeTool for KnowledgeStoreTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Store a durable fact in the knowledge base with provenance. Default visibility is global: all agents across sessions can read it; use session to restrict to the same session, or private to restrict to yourself. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge_store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
+            description: "Store a durable fact in the knowledge base with provenance. Visibility/retention semantics are on the params below. Re-store with the same `id` to widen visibility or update — it is an update, not a duplicate insert.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -630,7 +630,7 @@ impl NativeTool for DigestQueryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search digest-scoped Tier-2 memories by scope and tags, and optionally load the post-session narrative: either as `post_session_narrative.md` for the session root, or by explicit content handle/alias via `narrative_handle` (uses the same resolution rules as `content.read`).".to_string(),
+            description: "Search digest-scoped Tier-2 memories by scope and tags; optionally load the post-session narrative (`post_session_narrative.md` for the session root, or via `narrative_handle` — resolved like content.read).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

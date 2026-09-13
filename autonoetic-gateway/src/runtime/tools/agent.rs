@@ -207,12 +207,12 @@ the single join already does that."
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Delegate a task to a specialist agent. With async=false (default), blocks until the child completes and returns its reply. With async=true, returns immediately with a task_id — use workflow_wait to check status. Spawn multiple children in parallel with async=true, then wait for all of them. The `message` is free-form natural language for reasoning agents (researcher/architect/coder/etc. — the common case); you do NOT need to look up an input schema before spawning them. Only when the target declares an object `io.accepts` schema (agent.list reports `message_format: \"json_schema\"`) must `message` be a JSON string matching it.".to_string(),
+            description: "Delegate a task to a specialist agent. async=false (default) blocks until the child completes and returns its reply; async=true returns immediately with a task_id. Orchestration rules — when to yield vs join, parallel fan-out, wake semantics — are in your SKILL's delegation sections; follow those over any summary here. `message` is free-form natural language unless the target reports `message_format: \"json_schema\"` (then it must be a JSON string matching the target's `io.accepts`).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "message": { "type": "string", "description": "The task to delegate, as free-form natural language. Should be self-contained; avoid dumping full conversation history. Pass a JSON string only if the target declares an object io.accepts schema (message_format: json_schema)." },
+                    "message": { "type": "string", "description": "The task to delegate. Self-contained; do not dump conversation history. JSON string only when the target's message_format is json_schema." },
                     "context": { "type": "string", "description": "Optional bounded context summary. Include only what the child needs (goals, decisions, key facts, open items). The parent's full conversation history is NOT automatically shared." },
                     "metadata": { "type": "object" },
                     "session_id": { "type": "string" },
@@ -1286,7 +1286,7 @@ impl NativeTool for AgentListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), io_accepts / io_returns JSON schemas when declared, a `message_format` hint, and — for wrapper agents derived from a base agent — `adapter` composition provenance with a computed `stale_base` flag (`true`: the base was re-promoted since the wrapper was generated or is gone — regenerate via agent-adapter.default; `null`: unknown — the provenance claims no digest or the base could not be resolved; never treat `null` as current). Use `message_format` to shape the `message` you pass to agent.spawn: `\"free_text\"` means the target is a reasoning agent that takes a plain natural-language task — spawn it directly, no schema needed (`io_accepts` is null for these and that is expected, not missing data); `\"json_schema\"` means emit `message` as a JSON string whose parsed value matches `io_accepts`. Returns a plain directory — no semantic scoring. This is a read-only directory: one call gives you everything; calling it repeatedly will not surface new fields. If you already know the agent_id (e.g. a foundational specialist or a plan step's agent_id), skip this and spawn directly.".to_string(),
+            description: "Enumerate installed agents with metadata: agent_id, description, capabilities, execution_mode, script_input_mode, io_accepts/io_returns when declared, a `message_format` hint (`free_text` = reasoning agent, spawn directly with natural language; `json_schema` = `message` must match `io_accepts`), and `adapter` provenance with a computed `stale_base` flag for wrappers (`true` = base was re-promoted or is gone — regenerate via agent-adapter.default; never treat the flag as current when provenance is missing). Read-only directory: one call returns everything; repeated calls surface nothing new. If you already know the agent_id, skip this and spawn directly.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
