@@ -287,9 +287,22 @@ fn verify_artifact_built_claim(ctx: &ClaimCtx) -> ClaimVerdict {
         return ClaimVerdict::Unverified;
     };
     for artifact_ref in cited {
-        match store.resolve_artifact_ref_any_scope(&artifact_ref, ctx.session_id) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+        // Two ID shapes, two lookup paths: `ar.*` is a short ref resolved
+        // through the ref table (scope-aware); `art_*` is the canonical
+        // artifact ID, which the ref table only carries as a *column* — so
+        // verify it by the existence of any non-revoked ref row pointing at
+        // it. Resolving an `art_*` through the ref-id lookup would flag every
+        // valid canonical ID as fabricated.
+        let verdict = if artifact_ref.starts_with("art_") {
+            store.artifact_id_has_active_ref(&artifact_ref)
+        } else {
+            store
+                .resolve_artifact_ref_any_scope(&artifact_ref, ctx.session_id)
+                .map(|resolved| resolved.is_some())
+        };
+        match verdict {
+            Ok(true) => {}
+            Ok(false) => {
                 return ClaimVerdict::Fabricated(artifact_ref);
             }
             Err(e) => {
@@ -3386,6 +3399,52 @@ mod tests {
     fn fabricated_artifact_ref_violation_sanitizes_injected_content() {
         let v = fabricated_artifact_ref_violation("ar.x\nSHOULD_NOT_APPEAR_AS_NEWLINE");
         assert!(!v.message.contains('\n'));
+    }
+
+    #[test]
+    fn claim_artifact_ref_art_ids_checked_against_artifact_column() {
+        // `art_*` is a canonical artifact ID, not a short ref: the ref-table
+        // lookup by ref_id would miss it and flag a valid ID as fabricated.
+        // It must be verified by the existence of any ref row pointing at it.
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let record = autonoetic_types::artifact::ArtifactRefRecord {
+            ref_id: "ar.shortref01".into(),
+            scope_type: autonoetic_types::artifact::ArtifactRefScopeType::Session,
+            scope_id: "sess".into(),
+            artifact_id: "art_canonical01".into(),
+            artifact_manifest_digest: "d".repeat(64),
+            artifact_canonical_digest: "d".repeat(64),
+            created_by_agent_id: "coder.default".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: None,
+            revoked_at: None,
+        };
+        store.create_artifact_ref(&record).unwrap();
+
+        let ctx = |reply: &'static str| ClaimCtx {
+            assistant_reply: Some(reply),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "planner.default",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(
+            ClaimKind::ArtifactBuilt.verify(&ctx(
+                r#"{"status":"ok","result":{"artifact_ref":"art_canonical01"}}"#
+            )),
+            ClaimVerdict::Ok
+        );
+        assert_eq!(
+            ClaimKind::ArtifactBuilt.verify(&ctx(
+                r#"{"status":"ok","result":{"artifact_ref":"art_unknown000"}}"#
+            )),
+            ClaimVerdict::Fabricated("art_unknown000".into())
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────

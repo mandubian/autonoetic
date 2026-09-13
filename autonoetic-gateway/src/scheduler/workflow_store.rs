@@ -1158,18 +1158,21 @@ pub fn update_task_run_status(
     );
     // Anti-confabulation: the parent must never reconstruct the child's
     // artifact refs from memory (a truncated summary can cut the real ref
-    // out). Surface the refs the artifact-ref store actually holds for the
-    // child's session — gateway-observed truth, immune to summarization.
-    // Lookup failure leaves the field empty rather than blocking the wake.
+    // out). Surface the refs visible from the child's session, minus the
+    // global installed-agent universe. New refs land in the workflow scope
+    // or the *root* session scope (see artifact.rs scope derivation), never
+    // the child's own session id — so visibility-based listing is the
+    // correct query; a Session(task.session_id) lookup would come back empty
+    // for every child. Lookup failure leaves the field empty rather than
+    // blocking the wake.
     child_state_notification.artifact_refs = store
-        .and_then(|s| {
-            s.list_artifact_refs_for_scope(
-                autonoetic_types::artifact::ArtifactRefScopeType::Session,
-                &task.session_id,
-            )
-            .ok()
+        .and_then(|s| s.list_artifact_refs_for_session(&task.session_id).ok())
+        .map(|refs| {
+            refs.into_iter()
+                .filter(|r| r.scope_type != autonoetic_types::artifact::ArtifactRefScopeType::Global)
+                .map(|r| r.ref_id)
+                .collect()
         })
-        .map(|refs| refs.into_iter().map(|r| r.ref_id).collect())
         .unwrap_or_default();
 
     task.status = status;
@@ -2109,17 +2112,20 @@ fn gather_join_child_summaries(
             failure_meta.as_ref(),
         );
         // Same anti-confabulation surface as the per-child notification: the
-        // join payload carries each child's session-scoped artifact refs so
-        // the parent never has to reconstruct one from a truncated summary.
+        // join payload carries each child's visible artifact refs (minus the
+        // global universe — new refs land in workflow/root-session scope, not
+        // the child's own session id) so the parent never has to reconstruct
+        // one from a truncated summary.
         notification.artifact_refs = store
-            .and_then(|s| {
-                s.list_artifact_refs_for_scope(
-                    autonoetic_types::artifact::ArtifactRefScopeType::Session,
-                    &task.session_id,
-                )
-                .ok()
+            .and_then(|s| s.list_artifact_refs_for_session(&task.session_id).ok())
+            .map(|refs| {
+                refs.into_iter()
+                    .filter(|r| {
+                        r.scope_type != autonoetic_types::artifact::ArtifactRefScopeType::Global
+                    })
+                    .map(|r| r.ref_id)
+                    .collect()
             })
-            .map(|refs| refs.into_iter().map(|r| r.ref_id).collect())
             .unwrap_or_default();
         summaries.push(notification);
     }
